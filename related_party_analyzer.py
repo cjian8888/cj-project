@@ -72,33 +72,32 @@ def _analyze_direct_flows(
     all_transactions: Dict[str, pd.DataFrame],
     core_persons: List[str]
 ) -> List[Dict]:
-    """分析核心人员之间的直接资金往来"""
+    """分析核心人员之间的直接资金往来 (性能优化版)"""
     direct_flows = []
     
-    for person in core_persons:
-        # 找到该人员的交易数据
-        person_df = None
-        person_key = None
-        for key, df in all_transactions.items():
-            if person in key and '公司' not in key:  # 只匹配个人
-                person_df = df
-                person_key = key
-                break
+    # 预先筛选出所有属于个人的交易并重构结构，提高访问速度
+    person_dfs = {}
+    for key, df in all_transactions.items():
+        if '公司' not in key:
+            entity_name = key.split('_')[0] if '_' in key else key
+            if any(p in entity_name for p in core_persons):
+                # 规范化列名
+                if df.empty or 'counterparty' not in df.columns:
+                    continue
+                person_dfs[entity_name] = df
+    
+    for person, df in person_dfs.items():
+        counterparty_series = df['counterparty'].astype(str).fillna('')
         
-        if person_df is None or person_df.empty:
-            continue
-        
-        if 'counterparty' not in person_df.columns:
-            continue
-            
-        # 检查对手方是否为其他核心人员
         for other_person in core_persons:
             if other_person == person:
                 continue
             
-            for _, row in person_df.iterrows():
-                counterparty = str(row.get('counterparty', ''))
-                if other_person in counterparty:
+            # 向量化匹配
+            mask = counterparty_series.str.contains(other_person, na=False)
+            if mask.any():
+                subset = df[mask]
+                for _, row in subset.iterrows():
                     flow = {
                         'from': person,
                         'to': other_person,
@@ -106,7 +105,7 @@ def _analyze_direct_flows(
                         'amount': max(row.get('income', 0), row.get('expense', 0)),
                         'direction': 'receive' if row.get('income', 0) > 0 else 'pay',
                         'description': row.get('description', ''),
-                        'counterparty_raw': counterparty
+                        'counterparty_raw': str(row.get('counterparty', ''))
                     }
                     direct_flows.append(flow)
     
@@ -157,45 +156,53 @@ def _detect_third_party_relay(
         cp_upper = counterparty.upper()
         return any(kw.upper() in cp_upper for kw in EXCLUDED_RELAY_KEYWORDS)
     
-    # 收集所有关联人的支出和收入记录（仅保留大额）
+    # 收集所有关联人的支出和收入记录（向量化筛选）
     person_outflows = defaultdict(list)
     person_inflows = defaultdict(list)
     
-    for person in core_persons:
+    for person_name in core_persons:
+        # 查找该人员的所有交易
+        person_dfs_to_process = []
         for key, df in all_transactions.items():
-            if person in key and '公司' not in key:
-                if df.empty or 'counterparty' not in df.columns:
-                    continue
-                    
-                for _, row in df.iterrows():
-                    counterparty = str(row.get('counterparty', ''))
-                    date = row.get('date')
-                    desc = str(row.get('description', ''))
-                    
-                    # 排除核心人员之间的直接转账（已在直接往来中统计）
-                    is_direct = any(p in counterparty for p in core_persons if p != person)
-                    if is_direct:
-                        continue
-                    
-                    # 排除公共支付平台
-                    if is_excluded_relay(counterparty):
-                        continue
-                    
-                    # 仅收集大额交易
-                    if row.get('expense', 0) >= min_amount:
-                        person_outflows[person].append({
-                            'date': date,
-                            'amount': row['expense'],
-                            'counterparty': counterparty,
-                            'description': desc
-                        })
-                    if row.get('income', 0) >= min_amount:
-                        person_inflows[person].append({
-                            'date': date,
-                            'amount': row['income'],
-                            'counterparty': counterparty,
-                            'description': desc
-                        })
+            if person_name in key and '公司' not in key:
+                person_dfs_to_process.append(df)
+        
+        if not person_dfs_to_process:
+            continue
+            
+        full_df = pd.concat(person_dfs_to_process)
+        if full_df.empty or 'counterparty' not in full_df.columns:
+            continue
+            
+        # 预先过滤核心人员之间的直接转账
+        counterparty_series = full_df['counterparty'].astype(str).fillna('')
+        core_person_pattern = '|'.join([p for p in core_persons if p != person_name])
+        is_direct = counterparty_series.str.contains(core_person_pattern, na=False)
+        
+        # 预先过滤排除平台
+        is_excluded = counterparty_series.map(is_excluded_relay)
+        
+        # 筛选支出
+        out_mask = (~is_direct) & (~is_excluded) & (full_df['expense'] >= min_amount)
+        if out_mask.any():
+            for _, row in full_df[out_mask].iterrows():
+                person_outflows[person_name].append({
+                    'date': row.get('date'),
+                    'amount': row['expense'],
+                    'counterparty': str(row.get('counterparty', '')),
+                    'description': str(row.get('description', ''))
+                })
+        
+        # 筛选收入
+        in_mask = (~is_direct) & (~is_excluded) & (full_df['income'] >= min_amount)
+        if in_mask.any():
+            for _, row in full_df[in_mask].iterrows():
+                person_inflows[person_name].append({
+                    'date': row.get('date'),
+                    'amount': row['income'],
+                    'counterparty': str(row.get('counterparty', '')),
+                    'description': str(row.get('description', ''))
+                })
     
     # 寻找 A→C→B 模式
     time_delta = timedelta(hours=time_window_hours)
@@ -303,16 +310,19 @@ def _detect_fund_loops(
         if not entity:
             entity = entity_name.split('_')[0] if '_' in entity_name else entity_name
         
-        for _, row in df.iterrows():
-            if row.get('expense', 0) > 0:
-                counterparty = str(row.get('counterparty', ''))
-                # 简化对手方名称
-                cp_name = counterparty[:4] if len(counterparty) > 4 else counterparty
-                edges[entity].append({
-                    'to': counterparty,
-                    'amount': row['expense'],
-                    'date': row.get('date')
-                })
+        # 只处理有支出的行
+        expense_mask = df['expense'] > 0
+        if not expense_mask.any():
+            continue
+            
+        subset = df[expense_mask]
+        for _, row in subset.iterrows():
+            counterparty = str(row.get('counterparty', ''))
+            edges[entity].append({
+                'to': counterparty,
+                'amount': row['expense'],
+                'date': row.get('date')
+            })
     
     # 从每个核心人员开始DFS查找环路
     for start_person in core_persons:

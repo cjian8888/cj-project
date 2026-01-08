@@ -26,14 +26,38 @@ def classify_accounts(df: pd.DataFrame) -> Dict:
             'mapping': {} # 账号 -> 类型的映射
         }
     """
+    # 创建副本避免修改原始数据
+    df = df.copy()
+    
+    # 列名映射：兼容中英文列名
+    column_mapping = {
+        '交易摘要': 'description',
+        '收入(元)': 'income',
+        '支出(元)': 'expense',
+        '余额(元)': 'balance',
+        '交易对手': 'counterparty',
+        '交易时间': 'date',
+        '本方账号': 'account_id',
+        'account_number': 'account_id'  # 英文列名也映射
+    }
+    
+    # 根据存在的列进行重命名
+    for source, target in column_mapping.items():
+        if source in df.columns and target not in df.columns:
+            df[target] = df[source]
+    
     if 'account_id' not in df.columns:
         # 尝试使用可能的列名
-        for col in ['本方账号', '账号', '卡号']:
+        for col in ['账号', '卡号', 'account']:
             if col in df.columns:
                 df['account_id'] = df[col]
                 break
         else:
-            return {'error': 'No account column found'}
+            return {'error': 'No account column found', 'physical_cards': [], 'virtual_accounts': [], 'wealth_accounts': [], 'mapping': {}}
+    
+    # 确保description列存在
+    if 'description' not in df.columns:
+        df['description'] = ''
 
     accounts = df['account_id'].dropna().unique()
     classification = {
@@ -45,6 +69,9 @@ def classify_accounts(df: pd.DataFrame) -> Dict:
     
     for acct in accounts:
         acct_str = str(acct).strip()
+        if not acct_str or acct_str.lower() == 'nan':
+            continue
+            
         account_type = 'virtual' # 默认为虚拟
         
         # 规则1: 标准银联卡/Visa/Master (位数+前缀)
@@ -87,22 +114,29 @@ def analyze_internal_transfers(df: pd.DataFrame, account_map: Dict) -> Dict:
     """
     internal_graph = []
     
-    # 填充account_id列
-    if 'account_id' not in df.columns and '本方账号' in df.columns:
-        df['account_id'] = df['本方账号']
-        
-    # 需要对摘要进行清洗，提取出对方账号信息(如果存在)
-    # 这里主要依靠近似的金额匹配和时间匹配，或者显式的转账记录
+    # 创建副本并统一列名
+    df = df.copy()
+    column_mapping = {
+        '交易摘要': 'description',
+        '收入(元)': 'income',
+        '支出(元)': 'expense',
+        '余额(元)': 'balance',
+        '交易对手': 'counterparty',
+        '交易时间': 'date',
+        '本方账号': 'account_id',
+        'account_number': 'account_id'  # 英文列名也映射
+    }
+    for source, target in column_mapping.items():
+        if source in df.columns and target not in df.columns:
+            df[target] = df[source]
     
-    # 方法：按时间排序，寻找同一持有人名下不同账号的"流出-流入"配对
-    df_sorted = df.sort_values('date')
-    
-    # 窗口匹配：时间差在60秒内，金额相同，一进一出
-    # 这需要两行数据
-    # 为简化计算，我们遍历所有"内部转账"特征的交易
-    
-    # 1. 识别内部转账交易
-    # 很多银行流水里，对方账号如果是自己的其他卡，会在对手方字段显示，或者摘要显示"卡卡转账"
+    # 确保必要列存在
+    for col in ['income', 'expense', 'description', 'account_id']:
+        if col not in df.columns:
+            if col in ['income', 'expense']:
+                df[col] = 0
+            else:
+                df[col] = ''
     
     # 简化版：仅统计各账户的角色
     account_roles = {}

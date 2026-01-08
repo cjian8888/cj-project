@@ -189,7 +189,7 @@ def read_excel_transactions(excel_path: str) -> pd.DataFrame:
 
 def load_all_transactions(directory: str, target_names: List[str] = None) -> Dict[str, pd.DataFrame]:
     """
-    加载目录下所有Excel流水文件
+    加载目录下所有Excel流水文件(支持递归扫描)
     
     Args:
         directory: 目录路径
@@ -198,26 +198,32 @@ def load_all_transactions(directory: str, target_names: List[str] = None) -> Dic
     Returns:
         字典: {文件名: 交易DataFrame}
     """
-    logger.info(f'正在扫描目录: {directory}')
+    logger.info(f'正在扫描目录(递归): {directory}')
     
     all_transactions = {}
     
-    for filename in os.listdir(directory):
-        if filename.endswith(('.xlsx', '.xls')) and not filename.startswith('~'):
-            # 检查是否为线索文件或输出文件
-            if any(keyword in filename for keyword in config.CLUE_FILE_KEYWORDS):
-                continue
-            if filename == config.OUTPUT_EXCEL_FILE:
-                continue
-            
-            file_path = os.path.join(directory, filename)
-            df = read_excel_transactions(file_path)
-            
-            if not df.empty:
-                # 提取文件名作为标识(去除扩展名)
-                file_key = os.path.splitext(filename)[0]
-                all_transactions[file_key] = df
-                logger.info(f'已加载: {filename}, 记录数: {len(df)}')
+    for root, dirs, files in os.walk(directory):
+        for filename in files:
+            if filename.endswith(('.xlsx', '.xls')) and not filename.startswith('~'):
+                # 检查是否为线索文件或输出文件
+                if any(keyword in filename for keyword in config.CLUE_FILE_KEYWORDS):
+                    continue
+                if filename == config.OUTPUT_EXCEL_FILE:
+                    continue
+                
+                file_path = os.path.join(root, filename)
+                df = read_excel_transactions(file_path)
+                
+                if not df.empty:
+                    # 提取文件名作为标识(去除扩展名)
+                    file_key = os.path.splitext(filename)[0]
+                    # 如果有重复文件名，添加前缀区分
+                    if file_key in all_transactions:
+                        parent_dir = os.path.basename(root)
+                        file_key = f"{parent_dir}_{file_key}"
+                        
+                    all_transactions[file_key] = df
+                    logger.info(f'已加载: {file_path}, 记录数: {len(df)}')
     
     logger.info(f'共加载 {len(all_transactions)} 个流水文件')
     
@@ -226,7 +232,7 @@ def load_all_transactions(directory: str, target_names: List[str] = None) -> Dic
 
 def find_clue_files(directory: str) -> List[str]:
     """
-    查找目录下的线索PDF文件
+    递归查找目录下的线索PDF文件
     
     Args:
         directory: 目录路径
@@ -234,24 +240,28 @@ def find_clue_files(directory: str) -> List[str]:
     Returns:
         PDF文件路径列表
     """
-    logger.info(f'正在查找线索文件: {directory}')
+    logger.info(f'正在递归查找线索文件: {directory}')
     
     clue_files = []
+    all_pdfs = []
     
-    for filename in os.listdir(directory):
-        if filename.endswith('.pdf'):
-            # 检查是否包含线索关键词
-            if any(keyword in filename for keyword in config.CLUE_FILE_KEYWORDS):
-                file_path = os.path.join(directory, filename)
-                clue_files.append(file_path)
-                logger.info(f'找到线索文件: {filename}')
+    for root, dirs, files in os.walk(directory):
+        for filename in files:
+            if filename.endswith('.pdf'):
+                file_path = os.path.join(root, filename)
+                all_pdfs.append(file_path)
+                # 检查是否包含线索关键词
+                if any(keyword in filename for keyword in config.CLUE_FILE_KEYWORDS):
+                    clue_files.append(file_path)
+                    logger.info(f'找到线索文件: {file_path}')
     
     if not clue_files:
-        # 如果没有找到,则将所有PDF都视为线索文件
-        for filename in os.listdir(directory):
-            if filename.endswith('.pdf'):
-                file_path = os.path.join(directory, filename)
-                clue_files.append(file_path)
+        # 【重要修复】不再将所有PDF当作线索文件。
+        # 原逻辑会把征信报告等非线索PDF作为人员名单来源，
+        # 导致提取出大量无效"人员"（如"贸易融资"、"银行股"等片段）。
+        # 现在仅依赖文件名中的人员识别。
+        logger.info('未找到带特定关键词的线索PDF，跳过PDF人名提取环节')
+        clue_files = []
     
     logger.info(f'共找到 {len(clue_files)} 个线索文件')
     

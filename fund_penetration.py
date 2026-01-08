@@ -22,19 +22,10 @@ def analyze_fund_penetration(
     companies: List[str]
 ) -> Dict:
     """
-    资金穿透分析：检测核心人员与涉案公司之间的资金往来
-    
-    Args:
-        personal_data: 个人交易数据 {姓名: DataFrame}
-        company_data: 公司交易数据 {公司名: DataFrame}
-        core_persons: 核心人员列表
-        companies: 涉案公司列表
-        
-    Returns:
-        分析结果字典
+    资金穿透分析：检测核心人员与涉案公司之间的资金往来 (性能优化版)
     """
     logger.info('='*60)
-    logger.info('开始资金穿透分析')
+    logger.info('开始资金穿透分析 (性能优化版)')
     logger.info('='*60)
     
     results = {
@@ -45,29 +36,41 @@ def analyze_fund_penetration(
         'summary': {}
     }
     
+    # 预处理公司关键词
+    company_patterns = {c: _extract_company_keywords(c) for c in companies}
+    
+    # helper function to convert DF subset to results list
+    def _df_to_results(subset: pd.DataFrame,发起方: str,接收方: str,方向: str) -> List[Dict]:
+        if subset.empty:
+            return []
+        res = []
+        for _, row in subset.iterrows(): # 这里的 iterrows 是在过滤后的极少数行上运行的
+            res.append({
+                '发起方': 发起方,
+                '接收方': 接收方,
+                '交易对方原文': str(row.get('counterparty', '')),
+                '日期': row.get('date'),
+                '收入': row.get('income', 0),
+                '支出': row.get('expense', 0),
+                '摘要': row.get('description', ''),
+                '方向': 方向
+            })
+        return res
+
     # 1. 检测个人→公司的资金往来
     logger.info('【阶段1】检测个人→涉案公司的资金往来')
     for person_name, df in personal_data.items():
         if df.empty or 'counterparty' not in df.columns:
             continue
-            
-        for company in companies:
-            # 模糊匹配公司名（可能简写）
-            company_keywords = _extract_company_keywords(company)
-            
-            for idx, row in df.iterrows():
-                counterparty = str(row.get('counterparty', ''))
-                if _match_company(counterparty, company_keywords):
-                    results['person_to_company'].append({
-                        '发起方': person_name,
-                        '接收方': company,
-                        '交易对方原文': counterparty,
-                        '日期': row.get('date'),
-                        '收入': row.get('income', 0),
-                        '支出': row.get('expense', 0),
-                        '摘要': row.get('description', ''),
-                        '方向': '个人→公司'
-                    })
+        
+        # 确保对手方是字符串且填充空值
+        counterparty_series = df['counterparty'].astype(str).fillna('')
+        
+        for company, keywords in company_patterns.items():
+            # 使用向量化匹配
+            mask = counterparty_series.str.contains('|'.join(keywords), na=False, regex=True)
+            if mask.any():
+                results['person_to_company'].extend(_df_to_results(df[mask], person_name, company, '个人→公司'))
     
     logger.info(f'  发现 {len(results["person_to_company"])} 笔个人→公司交易')
     
@@ -77,21 +80,12 @@ def analyze_fund_penetration(
         if df.empty or 'counterparty' not in df.columns:
             continue
             
+        counterparty_series = df['counterparty'].astype(str).fillna('')
+        
         for person in core_persons:
-            for idx, row in df.iterrows():
-                counterparty = str(row.get('counterparty', ''))
-                # 精确匹配人名
-                if person in counterparty:
-                    results['company_to_person'].append({
-                        '发起方': company_name,
-                        '接收方': person,
-                        '交易对方原文': counterparty,
-                        '日期': row.get('date'),
-                        '收入': row.get('income', 0),
-                        '支出': row.get('expense', 0),
-                        '摘要': row.get('description', ''),
-                        '方向': '公司→个人'
-                    })
+            mask = counterparty_series.str.contains(person, na=False)
+            if mask.any():
+                results['company_to_person'].extend(_df_to_results(df[mask], company_name, person, '公司→个人'))
     
     logger.info(f'  发现 {len(results["company_to_person"])} 笔公司→个人交易')
     
@@ -101,23 +95,15 @@ def analyze_fund_penetration(
         if df.empty or 'counterparty' not in df.columns:
             continue
             
+        counterparty_series = df['counterparty'].astype(str).fillna('')
+        
         for other_person in core_persons:
             if other_person == person_name:
                 continue
-                
-            for idx, row in df.iterrows():
-                counterparty = str(row.get('counterparty', ''))
-                if other_person in counterparty:
-                    results['person_to_person'].append({
-                        '发起方': person_name,
-                        '接收方': other_person,
-                        '交易对方原文': counterparty,
-                        '日期': row.get('date'),
-                        '收入': row.get('income', 0),
-                        '支出': row.get('expense', 0),
-                        '摘要': row.get('description', ''),
-                        '方向': '个人→个人'
-                    })
+            
+            mask = counterparty_series.str.contains(other_person, na=False)
+            if mask.any():
+                results['person_to_person'].extend(_df_to_results(df[mask], person_name, other_person, '个人→个人'))
     
     logger.info(f'  发现 {len(results["person_to_person"])} 笔核心人员间交易')
     
@@ -127,27 +113,29 @@ def analyze_fund_penetration(
         if df.empty or 'counterparty' not in df.columns:
             continue
             
-        for other_company in companies:
+        counterparty_series = df['counterparty'].astype(str).fillna('')
+        
+        for other_company, keywords in company_patterns.items():
             if other_company == company_name:
                 continue
                 
-            other_keywords = _extract_company_keywords(other_company)
-            
-            for idx, row in df.iterrows():
-                counterparty = str(row.get('counterparty', ''))
-                if _match_company(counterparty, other_keywords):
-                    results['company_to_company'].append({
-                        '发起方': company_name,
-                        '接收方': other_company,
-                        '交易对方原文': counterparty,
-                        '日期': row.get('date'),
-                        '收入': row.get('income', 0),
-                        '支出': row.get('expense', 0),
-                        '摘要': row.get('description', ''),
-                        '方向': '公司→公司'
-                    })
+            mask = counterparty_series.str.contains('|'.join(keywords), na=False, regex=True)
+            if mask.any():
+                results['company_to_company'].extend(_df_to_results(df[mask], company_name, other_company, '公司→公司'))
     
     logger.info(f'  发现 {len(results["company_to_company"])} 笔涉案公司间交易')
+    
+    # 5. 生成汇总统计
+    results['summary'] = _generate_summary(results)
+    
+    logger.info('')
+    logger.info('资金穿透分析完成')
+    logger.info(f'  个人→公司: {len(results["person_to_company"])} 笔')
+    logger.info(f'  公司→个人: {len(results["company_to_person"])} 笔')
+    logger.info(f'  个人→个人: {len(results["person_to_person"])} 笔')
+    logger.info(f'  公司→公司: {len(results["company_to_company"])} 笔')
+    
+    return results
     
     # 5. 生成汇总统计
     results['summary'] = _generate_summary(results)

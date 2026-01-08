@@ -579,6 +579,16 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
                  is_wealth = True
                  wealth_type = '疑似理财'
                  confidence = 'medium'
+        
+        # E. 【新增】纯数字摘要 (银行内部理财产品代码，如 "69", "71")
+        # 这类摘要通常是银行内部系统使用的产品代码，代表理财操作
+        if not is_wealth:
+            desc_stripped = description.strip()
+            if desc_stripped.isdigit() and len(desc_stripped) <= 4:
+                # 1-4位纯数字摘要，几乎必定是银行内部代码
+                is_wealth = True
+                wealth_type = '银行理财'
+                confidence = 'medium'
                     
         if not is_wealth:
             continue
@@ -714,20 +724,54 @@ def generate_profile_report(df: pd.DataFrame, entity_name: str) -> Dict:
     # 交易分类
     categories = categorize_transactions(df)
     
-    # 计算真实收入/支出
-    # 真实收入 = 总收入 - 自我转账 - 理财赎回 - 理财收益 - 贷款发放 - 退款
-    # 注意：理财收益虽然是赚的，但为了反映“非投资性”的真实经济来源（如工资、受贿等），通常也单列。
-    # 用户之前的定义似乎是把理财收益也排除了，这里保持一致。
+    # 计算真实收入/支出（改进版 - 2026-01-08）
+    # 
+    # 核心原则：
+    # 1. 自我转账理论上应该收支平衡（没数据完整时可能有差额）
+    # 2. 理财买入/赎回也应该基本平衡（赎回包含本金，除非购买记录缺失）
+    # 3. 为保守起见，我们使用"对冲"原则来剔除这些内部循环资金
+    #
+    # 改进策略：
+    # - 自我转账：用min(收入,支出)来对冲，差额视为可能的外流/外来资金
+    # - 理财：用min(购买,赎回)来对冲本金循环，剩余差额保守处理
+    
+    self_in = wealth_management['self_transfer_income']
+    self_out = wealth_management['self_transfer_expense']
+    wealth_buy = wealth_management['wealth_purchase']
+    wealth_redeem = wealth_management['wealth_redemption']
+    wealth_yield = wealth_management['wealth_income']
+    loan_in = wealth_management['loan_inflow']
+    refund_in = wealth_management['refund_inflow']
+    
+    # 自我转账对冲：取min值对冲，差额不自动排除（可能是外来资金）
+    self_transfer_offset = min(self_in, self_out)
+    
+    # 理财本金对冲：假设买入和赎回中较小的部分是完整闭环
+    # 超出部分可能是：购买>赎回(存量增加)，赎回>购买(历史存量释放)
+    wealth_principal_offset = min(wealth_buy, wealth_redeem)
+    
+    # 计算真实收入
+    # = 总收入 - 自我转入对冲 - 理财本金对冲 - 贷款发放 - 退款
+    # 【注】理财收益(利息/分红)保留，因为它是真正的价值增量
     real_income = (income_structure['total_income'] 
-                  - wealth_management['self_transfer_income'] 
-                  - wealth_management['wealth_redemption'] 
-                  - wealth_management['wealth_income']
-                  - wealth_management['loan_inflow']
-                  - wealth_management['refund_inflow'])
+                  - self_transfer_offset  # 自我转入对冲
+                  - wealth_principal_offset  # 理财赎回中的本金部分
+                  - loan_in  # 贷款发放(借的钱，不是收入)
+                  - refund_in)  # 退款(原来的支出返还)
                   
+    # 计算真实支出
+    # = 总支出 - 自我转出对冲 - 理财购买对冲
     real_expense = (income_structure['total_expense'] 
-                   - wealth_management['self_transfer_expense'] 
-                   - wealth_management['wealth_purchase'])
+                   - self_transfer_offset  # 自我转出对冲
+                   - wealth_principal_offset)  # 理财购买中能匹配赎回的部分
+    
+    # 安全检查：真实收入/支出不应为负
+    real_income = max(0, real_income)
+    real_expense = max(0, real_expense)
+    
+    # 日志输出对冲详情
+    logger.info(f'资金对冲: 自我转账对冲{self_transfer_offset/10000:.2f}万, 理财本金对冲{wealth_principal_offset/10000:.2f}万')
+    logger.info(f'真实收入: {real_income/10000:.2f}万, 真实支出: {real_expense/10000:.2f}万, 净额: {(real_income-real_expense)/10000:.2f}万')
     
     profile = {
         'entity_name': entity_name,
@@ -859,64 +903,3 @@ def categorize_transactions(df: pd.DataFrame) -> Dict[str, List[Dict]]:
     return categories
 
 
-def generate_profile_report(df: pd.DataFrame, entity_name: str) -> Dict:
-    """
-    生成资金画像报告
-    
-    Args:
-        df: 交易DataFrame
-        entity_name: 实体名称(人员或公司)
-        
-    Returns:
-        完整的资金画像报告
-    """
-    logger.info(f'正在为 {entity_name} 生成资金画像...')
-    
-    if df.empty:
-        logger.warning(f'{entity_name} 无交易数据')
-        return {
-            'entity_name': entity_name,
-            'has_data': False
-        }
-    
-    # 收支结构
-    income_structure = calculate_income_structure(df, entity_name=entity_name)
-    
-    # 资金去向
-    fund_flow = analyze_fund_flow(df)
-    
-    # 理财产品分析（传入entity_name以识别自我转账）
-    wealth_management = analyze_wealth_management(df, entity_name=entity_name)
-    
-    # 大额现金
-    large_cash = extract_large_cash(df)
-    
-    # 交易分类
-    categories = categorize_transactions(df)
-    
-    profile = {
-        'entity_name': entity_name,
-        'has_data': True,
-        'income_structure': income_structure,
-        'fund_flow': fund_flow,
-        'wealth_management': wealth_management,  # 新增
-        'large_cash': large_cash,
-        'categories': categories,
-        'summary': {
-            'total_income': income_structure['total_income'],
-            'total_expense': income_structure['total_expense'],
-            'net_flow': income_structure['net_flow'],
-            'real_income': income_structure['total_income'] - wealth_management['self_transfer_income'] - wealth_management['wealth_redemption'] - wealth_management['wealth_income'],
-            'real_expense': income_structure['total_expense'] - wealth_management['self_transfer_expense'] - wealth_management['wealth_purchase'],
-            'salary_ratio': income_structure['salary_ratio'],
-            'third_party_ratio': fund_flow['third_party_ratio'],
-            'large_cash_count': len(large_cash),
-            'wealth_transactions': wealth_management['total_transactions'],
-            'transaction_count': len(df),
-            'date_range': income_structure['date_range']
-        }
-    }
-    
-    logger.info(f'{entity_name} 资金画像生成完成')
-    
-    return profile

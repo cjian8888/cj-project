@@ -470,7 +470,7 @@ def clean_and_merge_files(file_list: List[str], entity_name: str) -> Tuple[pd.Da
     
     for filepath in file_list:
         file_start = datetime.now()
-        filename = filepath.split('/')[-1]
+        filename = os.path.basename(filepath)  # 跨平台：使用os.path.basename替代split('/')
         
         # 提取银行名称
         bank_name = utils.extract_bank_name(filename)

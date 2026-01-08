@@ -604,7 +604,8 @@ def generate_official_report(profiles: Dict,
                             involved_companies: List[str],
                             output_path: str = None,
                             family_summary: Dict = None,
-                            family_assets: Dict = None) -> str:
+                            family_assets: Dict = None,
+                            cleaned_data: Dict = None) -> str:
     """
     生成公文格式的核查结果分析报告
     """
@@ -743,15 +744,42 @@ def generate_official_report(profiles: Dict,
                 active_cats = [k for k, v in cats.items() if v['笔数'] > 0]
                 if active_cats:
                     report_lines.append(f"     主要涉足理财类型: {', '.join(active_cats)}")
-            
-            # 2. 大额资产与信贷线索
-            asset_trails = _analyze_person_asset_trails(person)
+            # 资产分析
+            # 从 output_path 推导基础输出目录
+            base_output_dir = os.path.dirname(os.path.dirname(output_path)) if output_path else 'output'
+            asset_trails = _analyze_person_asset_trails(person, base_output_dir)
             if asset_trails:
                 report_lines.append("\n  3. 大额资产购值及信贷线索")
                 report_lines.extend(asset_trails)
             else:
                 report_lines.append("\n  3. 大额资产线索")
                 report_lines.append("     (流水中未发现明显的房产/车辆大额支出或规律性还贷记录)")
+            
+            # 4. 家庭财务汇总 (新增)
+            if cleaned_data and person in cleaned_data:
+                try:
+                    import family_finance
+                    person_df = cleaned_data[person]
+                    
+                    # 获取该人员的房产和车辆数据
+                    person_properties = []
+                    person_vehicles = []
+                    if family_assets and person in family_assets:
+                        person_properties = family_assets[person].get('房产', [])
+                        person_vehicles = family_assets[person].get('车辆', [])
+                    
+                    # 生成家庭财务汇总
+                    finance_report = family_finance.generate_family_finance_report(
+                        entity_name=person,
+                        df=person_df,
+                        profile=person_profile,
+                        family_members=core_persons,
+                        properties=person_properties,
+                        vehicles=person_vehicles
+                    )
+                    report_lines.append(finance_report)
+                except Exception as e:
+                    logger.warning(f'生成{person}家庭财务汇总失败: {e}')
                 
         else:
             report_lines.append("  (暂无该人员银行流水数据)")
@@ -897,7 +925,7 @@ def generate_official_report(profiles: Dict,
     logger.info(f'公文报告生成完成: {output_path}')
     return output_path
 
-def _analyze_person_asset_trails(person_name: str) -> List[str]:
+def _analyze_person_asset_trails(person_name: str, output_dir: str = 'output') -> List[str]:
     """
     针对单个核心人员的资产线索分析 (车/房)
     读取该人员的清洗后Excel进行深度挖掘
@@ -905,7 +933,7 @@ def _analyze_person_asset_trails(person_name: str) -> List[str]:
     import os
     text_lines = []
     
-    file_path = f'output/cleaned_data/个人/{person_name}_合并流水.xlsx'
+    file_path = os.path.join(output_dir, 'cleaned_data', '个人', f'{person_name}_合并流水.xlsx')
     if not os.path.exists(file_path):
         return []
         

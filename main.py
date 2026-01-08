@@ -433,7 +433,8 @@ def main(data_directory: str = '.', output_directory: str = './output'):
             os.path.join(output_dirs['analysis_results'], 
                         config.OUTPUT_REPORT_FILE.replace('.docx', '.txt')),
             family_summary=family_summary,
-            family_assets=family_assets
+            family_assets=family_assets,
+            cleaned_data=cleaned_data
         )
         logger.info(f'✓ 公文报告已生成: {report_path}')
         

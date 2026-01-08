@@ -46,16 +46,14 @@ def correlate_travel_companions(
     }
     
     # 1. 读取航班同行人数据
-    flight_dir = os.path.join(data_directory, '纪检材料（公开）', '中航信航班同行人信息（定向查询）')
-    if os.path.exists(flight_dir):
-        results['flight_companions'] = _read_flight_companions(flight_dir, core_persons)
-        logger.info(f'  读取到航班同行记录 {len(results["flight_companions"])} 条')
+    flight_pattern = os.path.join(data_directory, '**', '中航信航班同行人信息（定向查询）', '*.xlsx')
+    results['flight_companions'] = _read_flight_companions(flight_pattern, core_persons)
+    logger.info(f'  读取到航班同行记录 {len(results["flight_companions"])} 条')
     
     # 2. 读取铁路同行人数据
-    rail_dir = os.path.join(data_directory, '纪检材料（公开）', '铁路总公司同行人信息（定向查询）')
-    if os.path.exists(rail_dir):
-        results['rail_companions'] = _read_rail_companions(rail_dir, core_persons)
-        logger.info(f'  读取到铁路同行记录 {len(results["rail_companions"])} 条')
+    rail_pattern = os.path.join(data_directory, '**', '铁路总公司同行人信息（定向查询）', '*.xlsx')
+    results['rail_companions'] = _read_rail_companions(rail_pattern, core_persons)
+    logger.info(f'  读取到铁路同行记录 {len(results["rail_companions"])} 条')
     
     # 3. 提取所有同行人名单
     all_companions = set()
@@ -83,11 +81,11 @@ def correlate_travel_companions(
     return results
 
 
-def _read_flight_companions(flight_dir: str, core_persons: List[str]) -> List[Dict]:
+def _read_flight_companions(flight_pattern: str, core_persons: List[str]) -> List[Dict]:
     """读取航班同行人数据"""
     companions = []
     
-    for file in glob.glob(os.path.join(flight_dir, '*.xlsx')):
+    for file in glob.glob(flight_pattern, recursive=True):
         try:
             df = pd.read_excel(file, engine='openpyxl')
             
@@ -132,11 +130,11 @@ def _read_flight_companions(flight_dir: str, core_persons: List[str]) -> List[Di
     return companions
 
 
-def _read_rail_companions(rail_dir: str, core_persons: List[str]) -> List[Dict]:
+def _read_rail_companions(rail_pattern: str, core_persons: List[str]) -> List[Dict]:
     """读取铁路同行人数据"""
     companions = []
     
-    for file in glob.glob(os.path.join(rail_dir, '*.xlsx')):
+    for file in glob.glob(rail_pattern, recursive=True):
         try:
             df = pd.read_excel(file, engine='openpyxl')
             
@@ -342,13 +340,10 @@ def correlate_hotel_cohabitants(
         'fund_correlations': []
     }
     
-    hotel_dir = os.path.join(data_directory, '纪检材料（公开）', '公安部同住宿（定向查询）')
-    if not os.path.exists(hotel_dir):
-        logger.info('  未找到同住宿数据目录')
-        return results
+    hotel_pattern = os.path.join(data_directory, '**', '公安部同住宿（定向查询）', '*.xlsx')
     
     # 读取同住宿数据
-    for file in glob.glob(os.path.join(hotel_dir, '*.xlsx')):
+    for file in glob.glob(hotel_pattern, recursive=True):
         try:
             df = pd.read_excel(file, engine='openpyxl')
             
@@ -445,15 +440,12 @@ def correlate_express_contacts(
         'fund_correlations': []
     }
     
-    express_dir = os.path.join(data_directory, '纪检材料（公开）', '国家邮政局快递信息（定向查询）')
-    if not os.path.exists(express_dir):
-        logger.info('  未找到快递信息数据目录')
-        return results
+    express_pattern = os.path.join(data_directory, '**', '国家邮政局快递信息（定向查询）', '*.xlsx')
     
     # 收集快递联系人
     contact_counter = defaultdict(lambda: {'count': 0, 'persons': set()})
     
-    for file in glob.glob(os.path.join(express_dir, '*.xlsx')):
+    for file in glob.glob(express_pattern, recursive=True):
         try:
             df = pd.read_excel(file, engine='openpyxl')
             
