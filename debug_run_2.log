@@ -1,0 +1,557 @@
+2026-01-05 23:51:54 - __main__ - INFO - ================================================================================
+2026-01-05 23:51:54 - __main__ - INFO - 资金穿透与关联排查系统(优化版) - 启动
+2026-01-05 23:51:54 - __main__ - INFO - ================================================================================
+2026-01-05 23:51:54 - __main__ - INFO - 数据目录: /Volumes/MediaData/project/data
+2026-01-05 23:51:54 - __main__ - INFO - 输出目录: /Volumes/MediaData/project/output
+2026-01-05 23:51:54 - __main__ - INFO - 
+2026-01-05 23:51:54 - __main__ - INFO - 输出目录已创建: output
+2026-01-05 23:51:54 - __main__ - INFO - 【阶段0】文件扫描与分类
+2026-01-05 23:51:54 - __main__ - INFO - --------------------------------------------------------------------------------
+2026-01-05 23:51:54 - file_categorizer - INFO - 开始分类文件: data
+2026-01-05 23:51:54 - file_categorizer - INFO - 文件分类完成:
+2026-01-05 23:51:54 - file_categorizer - INFO -   核心人员: 4 人
+2026-01-05 23:51:54 - file_categorizer - INFO -     - 陈斌: 6 个流水文件
+2026-01-05 23:51:54 - file_categorizer - INFO -     - 朱永平: 4 个流水文件
+2026-01-05 23:51:54 - file_categorizer - INFO -     - 朱明: 2 个流水文件
+2026-01-05 23:51:54 - file_categorizer - INFO -     - 马尚德: 9 个流水文件
+2026-01-05 23:51:54 - file_categorizer - INFO -   涉案公司: 3 家
+2026-01-05 23:51:54 - file_categorizer - INFO -     - 北京鑫兴航科技有限公司: 1 个流水文件
+2026-01-05 23:51:54 - file_categorizer - INFO -     - 贵州锐晶科技有限公司: 1 个流水文件
+2026-01-05 23:51:54 - file_categorizer - INFO -     - 北京智晟睿科技有限公司: 1 个流水文件
+2026-01-05 23:51:54 - file_categorizer - INFO -   流水文件总计: 24
+2026-01-05 23:51:54 - file_categorizer - INFO -   账户文件总计: 27
+2026-01-05 23:51:54 - file_categorizer - INFO -   其他文件: 89
+2026-01-05 23:51:54 - __main__ - INFO - ✓ 识别核心人员: 4 人 - ['陈斌', '朱永平', '朱明', '马尚德']
+2026-01-05 23:51:54 - __main__ - INFO - ✓ 识别涉案公司: 3 家 - ['北京鑫兴航科技有限公司', '贵州锐晶科技有限公司', '北京智晟睿科技有限公司']
+2026-01-05 23:51:54 - __main__ - INFO - 
+2026-01-05 23:51:54 - __main__ - INFO - 【阶段1】数据清洗与合并
+2026-01-05 23:51:54 - __main__ - INFO - --------------------------------------------------------------------------------
+2026-01-05 23:51:54 - __main__ - INFO - 
+处理个人: 陈斌
+2026-01-05 23:51:54 - __main__ - INFO - ============================================================
+2026-01-05 23:51:54 - data_cleaner - INFO - 开始清洗合并 陈斌 的数据,共6个文件
+2026-01-05 23:51:54 - data_cleaner - INFO - 处理文件: 陈斌_340825200107190410_国监查【2025】第030696号_中国工商银行交易流水.xlsx, 银行: 工商银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:54 - data_cleaner - INFO - 标准化银行字段,银行: 工商银行
+2026-01-05 23:51:54 - data_cleaner - INFO - 字段标准化完成,有效记录: 1007条
+2026-01-05 23:51:54 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:54 - data_cleaner - INFO - 数据验证完成: 总计1007条, 有效1007条, 移除0条
+2026-01-05 23:51:54 - data_cleaner - INFO - 处理文件: 陈斌_340825200107190410_国监查【2025】第030696号_招商银行股份有限公司交易流水.xlsx, 银行: 招商银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:54 - data_cleaner - INFO - 标准化银行字段,银行: 招商银行
+2026-01-05 23:51:54 - data_cleaner - INFO - 字段标准化完成,有效记录: 55条
+2026-01-05 23:51:54 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:54 - data_cleaner - INFO - 数据验证完成: 总计55条, 有效55条, 移除0条
+2026-01-05 23:51:54 - data_cleaner - WARNING - 发现1条零金额记录
+2026-01-05 23:51:54 - data_cleaner - INFO - 处理文件: 陈斌_340825200107190410_国监查【2025】第030696号_中国建设银行交易流水.xlsx, 银行: 建设银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:56 - data_cleaner - INFO - 标准化银行字段,银行: 建设银行
+2026-01-05 23:51:56 - data_cleaner - INFO - 字段标准化完成,有效记录: 11572条
+2026-01-05 23:51:56 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:56 - data_cleaner - INFO - 数据验证完成: 总计11572条, 有效11572条, 移除0条
+2026-01-05 23:51:56 - data_cleaner - INFO - 处理文件: 陈斌_340825200107190410_国监查【2025】第030696号_中国农业银行交易流水.xlsx, 银行: 农业银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:56 - data_cleaner - INFO - 标准化银行字段,银行: 农业银行
+2026-01-05 23:51:56 - data_cleaner - INFO - 字段标准化完成,有效记录: 42条
+2026-01-05 23:51:56 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:56 - data_cleaner - INFO - 数据验证完成: 总计42条, 有效42条, 移除0条
+2026-01-05 23:51:56 - data_cleaner - WARNING - 发现29条零金额记录
+2026-01-05 23:51:56 - data_cleaner - INFO - 处理文件: 陈斌_340825200107190410_国监查【2025】第030696号_交通银行股份有限公司交易流水.xlsx, 银行: 交通银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:56 - data_cleaner - INFO - 标准化银行字段,银行: 交通银行
+2026-01-05 23:51:56 - data_cleaner - INFO - 字段标准化完成,有效记录: 63条
+2026-01-05 23:51:56 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:56 - data_cleaner - INFO - 数据验证完成: 总计63条, 有效63条, 移除0条
+2026-01-05 23:51:56 - data_cleaner - INFO - 处理文件: 陈斌_340825200107190410_国监查【2025】第030696号_中国邮政储蓄银行有限责任公司交易流水.xlsx, 银行: 邮储银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:56 - data_cleaner - INFO - 标准化银行字段,银行: 邮储银行
+2026-01-05 23:51:56 - data_cleaner - INFO - 字段标准化完成,有效记录: 25条
+2026-01-05 23:51:56 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:56 - data_cleaner - INFO - 数据验证完成: 总计25条, 有效25条, 移除0条
+2026-01-05 23:51:56 - data_cleaner - INFO - 开始去重,原始记录数: 12764
+2026-01-05 23:51:56 - data_cleaner - INFO - DEBUG: 去重前数据采样 (Top 5):
+2026-01-05 23:51:56 - data_cleaner - INFO -   Row 0: ID=405, Time=1641047346, Amt=10.0
+2026-01-05 23:51:56 - data_cleaner - INFO -   Row 1: ID=406, Time=1641051858, Amt=31.0
+2026-01-05 23:51:56 - data_cleaner - INFO -   Row 2: ID=407, Time=1641053981, Amt=32.0
+2026-01-05 23:51:56 - data_cleaner - INFO -   Row 3: ID=408, Time=1641054771, Amt=58.0
+2026-01-05 23:51:56 - data_cleaner - INFO -   Row 4: ID=409, Time=1641058475, Amt=1000.0
+2026-01-05 23:51:56 - data_cleaner - INFO - 基于流水号发现 8641 条重复记录
+2026-01-05 23:51:56 - data_cleaner - INFO - 去重完成: 原始12764条, 去重12723条, 保留41条 (去重率: 99.68%)
+2026-01-05 23:51:56 - data_cleaner - INFO - 陈斌 清洗合并完成: 6个文件, 12764行 → 41行
+2026-01-05 23:51:56 - __main__ - INFO - ✓ 中间数据已保存: output/cleaned_data/个人/陈斌_合并流水.xlsx
+2026-01-05 23:51:56 - __main__ - INFO - 
+处理个人: 朱永平
+2026-01-05 23:51:56 - __main__ - INFO - ============================================================
+2026-01-05 23:51:56 - data_cleaner - INFO - 开始清洗合并 朱永平 的数据,共4个文件
+2026-01-05 23:51:56 - data_cleaner - INFO - 处理文件: 朱永平_110108196510022533_国监查【2025】第030696号_中国工商银行交易流水.xlsx, 银行: 工商银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:57 - data_cleaner - INFO - 标准化银行字段,银行: 工商银行
+2026-01-05 23:51:57 - data_cleaner - INFO - 字段标准化完成,有效记录: 3811条
+2026-01-05 23:51:57 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:57 - data_cleaner - INFO - 数据验证完成: 总计3811条, 有效3811条, 移除0条
+2026-01-05 23:51:57 - data_cleaner - WARNING - 发现3条零金额记录
+2026-01-05 23:51:57 - data_cleaner - INFO - 处理文件: 朱永平_110108196510022533_国监查【2025】第030696号_中国建设银行交易流水.xlsx, 银行: 建设银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:57 - data_cleaner - INFO - 标准化银行字段,银行: 建设银行
+2026-01-05 23:51:57 - data_cleaner - INFO - 字段标准化完成,有效记录: 38条
+2026-01-05 23:51:57 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:57 - data_cleaner - INFO - 数据验证完成: 总计38条, 有效38条, 移除0条
+2026-01-05 23:51:57 - data_cleaner - INFO - 处理文件: 朱永平_110108196510022533_国监查【2025】第030696号_中国农业银行交易流水.xlsx, 银行: 农业银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:57 - data_cleaner - INFO - 标准化银行字段,银行: 农业银行
+2026-01-05 23:51:57 - data_cleaner - INFO - 字段标准化完成,有效记录: 102条
+2026-01-05 23:51:57 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:57 - data_cleaner - INFO - 数据验证完成: 总计102条, 有效102条, 移除0条
+2026-01-05 23:51:57 - data_cleaner - WARNING - 发现15条零金额记录
+2026-01-05 23:51:57 - data_cleaner - INFO - 处理文件: 朱永平_110108196510022533_国监查【2025】第030696号_广东发展银行股份有限公司交易流水.xlsx, 银行: 广发银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:57 - data_cleaner - INFO - 标准化银行字段,银行: 广发银行
+2026-01-05 23:51:57 - data_cleaner - INFO - 字段标准化完成,有效记录: 15条
+2026-01-05 23:51:57 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:57 - data_cleaner - INFO - 数据验证完成: 总计15条, 有效15条, 移除0条
+2026-01-05 23:51:57 - data_cleaner - INFO - 开始去重,原始记录数: 3966
+2026-01-05 23:51:57 - data_cleaner - INFO - DEBUG: 去重前数据采样 (Top 5):
+2026-01-05 23:51:57 - data_cleaner - INFO -   Row 0: ID=00000001394, Time=1641282119, Amt=7.5
+2026-01-05 23:51:57 - data_cleaner - INFO -   Row 1: ID=00000001395, Time=1641286360, Amt=99.48
+2026-01-05 23:51:57 - data_cleaner - INFO -   Row 2: ID=00000001396, Time=1641293094, Amt=7.0
+2026-01-05 23:51:57 - data_cleaner - INFO -   Row 3: ID=00000001397, Time=1641296777, Amt=14.5
+2026-01-05 23:51:57 - data_cleaner - INFO -   Row 4: ID=040402002004003751637788501, Time=1641306011, Amt=1940.0
+2026-01-05 23:51:57 - data_cleaner - INFO - 基于流水号发现 1 条重复记录
+2026-01-05 23:51:57 - data_cleaner - INFO - 去重完成: 原始3966条, 去重3826条, 保留140条 (去重率: 96.47%)
+2026-01-05 23:51:57 - data_cleaner - INFO - 朱永平 清洗合并完成: 4个文件, 3966行 → 140行
+2026-01-05 23:51:57 - __main__ - INFO - ✓ 中间数据已保存: output/cleaned_data/个人/朱永平_合并流水.xlsx
+2026-01-05 23:51:57 - __main__ - INFO - 
+处理个人: 朱明
+2026-01-05 23:51:57 - __main__ - INFO - ============================================================
+2026-01-05 23:51:57 - data_cleaner - INFO - 开始清洗合并 朱明 的数据,共2个文件
+2026-01-05 23:51:57 - data_cleaner - INFO - 处理文件: 朱明_640381199012140639_国监查【2025】第030696号_交通银行股份有限公司交易流水.xlsx, 银行: 交通银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:57 - data_cleaner - INFO - 标准化银行字段,银行: 交通银行
+2026-01-05 23:51:57 - data_cleaner - INFO - 字段标准化完成,有效记录: 617条
+2026-01-05 23:51:57 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:57 - data_cleaner - INFO - 数据验证完成: 总计617条, 有效617条, 移除0条
+2026-01-05 23:51:57 - data_cleaner - INFO - 处理文件: 朱明_640381199012140639_国监查【2025】第030696号_中国工商银行交易流水.xlsx, 银行: 工商银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:57 - data_cleaner - INFO - 标准化银行字段,银行: 工商银行
+2026-01-05 23:51:57 - data_cleaner - INFO - 字段标准化完成,有效记录: 98条
+2026-01-05 23:51:57 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:57 - data_cleaner - INFO - 数据验证完成: 总计98条, 有效98条, 移除0条
+2026-01-05 23:51:57 - data_cleaner - INFO - 开始去重,原始记录数: 715
+2026-01-05 23:51:57 - data_cleaner - INFO - DEBUG: 去重前数据采样 (Top 5):
+2026-01-05 23:51:57 - data_cleaner - INFO -   Row 0: ID=EER0012805082985, Time=1641038033, Amt=132.29
+2026-01-05 23:51:57 - data_cleaner - INFO -   Row 1: ID=EER0022822211263, Time=1642881474, Amt=483.0
+2026-01-05 23:51:57 - data_cleaner - INFO -   Row 2: ID=EBB0001818075408, Time=1643127853, Amt=40.0
+2026-01-05 23:51:57 - data_cleaner - INFO -   Row 3: ID=EBB0001818792184, Time=1643128691, Amt=7297.69
+2026-01-05 23:51:57 - data_cleaner - INFO -   Row 4: ID=EBB0001821136495, Time=1643305273, Amt=67122.0
+2026-01-05 23:51:58 - data_cleaner - INFO - 去重完成: 原始715条, 去重0条, 保留715条 (去重率: 0.00%)
+2026-01-05 23:51:58 - data_cleaner - INFO - 朱明 清洗合并完成: 2个文件, 715行 → 715行
+2026-01-05 23:51:58 - __main__ - INFO - ✓ 中间数据已保存: output/cleaned_data/个人/朱明_合并流水.xlsx
+2026-01-05 23:51:58 - __main__ - INFO - 
+处理个人: 马尚德
+2026-01-05 23:51:58 - __main__ - INFO - ============================================================
+2026-01-05 23:51:58 - data_cleaner - INFO - 开始清洗合并 马尚德 的数据,共9个文件
+2026-01-05 23:51:58 - data_cleaner - INFO - 处理文件: 马尚德_372922197910112912_国监查【2025】第030696号_中国民生银行股份有限公司交易流水.xlsx, 银行: 民生银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:58 - data_cleaner - INFO - 标准化银行字段,银行: 民生银行
+2026-01-05 23:51:58 - data_cleaner - INFO - 字段标准化完成,有效记录: 3条
+2026-01-05 23:51:58 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:58 - data_cleaner - INFO - 数据验证完成: 总计3条, 有效3条, 移除0条
+2026-01-05 23:51:58 - data_cleaner - INFO - 处理文件: 马尚德_372922197910112912_国监查【2025】第030696号_上海浦东发展银行股份有限公司交易流水.xlsx, 银行: 浦发银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:58 - data_cleaner - INFO - 标准化银行字段,银行: 浦发银行
+2026-01-05 23:51:58 - data_cleaner - INFO - 字段标准化完成,有效记录: 2条
+2026-01-05 23:51:58 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:58 - data_cleaner - ERROR - 缺少日期字段
+2026-01-05 23:51:58 - data_cleaner - INFO - 处理文件: 马尚德_372922197910112912_国监查【2025】第030696号_上海银行股份有限公司交易流水.xlsx, 银行: 未知银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:58 - data_cleaner - INFO - 标准化银行字段,银行: 未知银行
+2026-01-05 23:51:58 - data_cleaner - INFO - 字段标准化完成,有效记录: 63条
+2026-01-05 23:51:58 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:58 - data_cleaner - INFO - 数据验证完成: 总计63条, 有效63条, 移除0条
+2026-01-05 23:51:58 - data_cleaner - INFO - 处理文件: 马尚德_372922197910112912_国监查【2025】第030696号_交通银行股份有限公司交易流水.xlsx, 银行: 交通银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:58 - data_cleaner - INFO - 标准化银行字段,银行: 交通银行
+2026-01-05 23:51:58 - data_cleaner - INFO - 字段标准化完成,有效记录: 1384条
+2026-01-05 23:51:58 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:58 - data_cleaner - INFO - 数据验证完成: 总计1384条, 有效1384条, 移除0条
+2026-01-05 23:51:58 - data_cleaner - INFO - 处理文件: 马尚德_372922197910112912_国监查【2025】第030696号_中国工商银行交易流水.xlsx, 银行: 工商银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:58 - data_cleaner - INFO - 标准化银行字段,银行: 工商银行
+2026-01-05 23:51:58 - data_cleaner - INFO - 字段标准化完成,有效记录: 78条
+2026-01-05 23:51:58 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:58 - data_cleaner - INFO - 数据验证完成: 总计78条, 有效78条, 移除0条
+2026-01-05 23:51:58 - data_cleaner - INFO - 处理文件: 马尚德_372922197910112912_国监查【2025】第030696号_中国邮政储蓄银行有限责任公司交易流水.xlsx, 银行: 邮储银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:58 - data_cleaner - INFO - 标准化银行字段,银行: 邮储银行
+2026-01-05 23:51:58 - data_cleaner - INFO - 字段标准化完成,有效记录: 2条
+2026-01-05 23:51:58 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:58 - data_cleaner - INFO - 数据验证完成: 总计2条, 有效2条, 移除0条
+2026-01-05 23:51:58 - data_cleaner - INFO - 处理文件: 马尚德_372922197910112912_国监查【2025】第030696号_中国银行交易流水.xlsx, 银行: 中国银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:58 - data_cleaner - INFO - 标准化银行字段,银行: 中国银行
+2026-01-05 23:51:58 - data_cleaner - INFO - 字段标准化完成,有效记录: 1条
+2026-01-05 23:51:58 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:58 - data_cleaner - INFO - 数据验证完成: 总计1条, 有效1条, 移除0条
+2026-01-05 23:51:58 - data_cleaner - INFO - 处理文件: 马尚德_372922197910112912_国监查【2025】第030696号_上海农村商业银行股份有限公司交易流水.xlsx, 银行: 上海农村商业银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:58 - data_cleaner - INFO - 标准化银行字段,银行: 上海农村商业银行
+2026-01-05 23:51:58 - data_cleaner - INFO - 字段标准化完成,有效记录: 15条
+2026-01-05 23:51:58 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:58 - data_cleaner - INFO - 数据验证完成: 总计15条, 有效15条, 移除0条
+2026-01-05 23:51:58 - data_cleaner - INFO - 处理文件: 马尚德_372922197910112912_国监查【2025】第030696号_中国建设银行交易流水.xlsx, 银行: 建设银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:58 - data_cleaner - INFO - 标准化银行字段,银行: 建设银行
+2026-01-05 23:51:58 - data_cleaner - INFO - 字段标准化完成,有效记录: 153条
+2026-01-05 23:51:58 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:58 - data_cleaner - INFO - 数据验证完成: 总计153条, 有效153条, 移除0条
+2026-01-05 23:51:58 - data_cleaner - INFO - 开始去重,原始记录数: 1701
+2026-01-05 23:51:58 - data_cleaner - INFO - DEBUG: 去重前数据采样 (Top 5):
+2026-01-05 23:51:58 - data_cleaner - INFO -   Row 0: ID=nan, Time=1639008000, Amt=7873.42
+2026-01-05 23:51:58 - data_cleaner - INFO -   Row 1: ID=EBB0001009942789, Time=1641027187, Amt=30000.0
+2026-01-05 23:51:58 - data_cleaner - INFO -   Row 2: ID=1050110021640998388496866, Time=1641027188, Amt=30000.0
+2026-01-05 23:51:58 - data_cleaner - INFO -   Row 3: ID=000100120F97C33011816, Time=1641029787, Amt=6.0
+2026-01-05 23:51:58 - data_cleaner - INFO -   Row 4: ID=000100120F97C33011817, Time=1641030293, Amt=65.7
+2026-01-05 23:51:59 - data_cleaner - INFO - 去重完成: 原始1701条, 去重2条, 保留1699条 (去重率: 0.12%)
+2026-01-05 23:51:59 - data_cleaner - INFO - 马尚德 清洗合并完成: 9个文件, 1701行 → 1699行
+2026-01-05 23:51:59 - __main__ - INFO - ✓ 中间数据已保存: output/cleaned_data/个人/马尚德_合并流水.xlsx
+2026-01-05 23:51:59 - __main__ - INFO - 
+处理公司: 北京鑫兴航科技有限公司
+2026-01-05 23:51:59 - __main__ - INFO - ============================================================
+2026-01-05 23:51:59 - data_cleaner - INFO - 开始清洗合并 北京鑫兴航科技有限公司 的数据,共1个文件
+2026-01-05 23:51:59 - data_cleaner - INFO - 处理文件: 北京鑫兴航科技有限公司_91110111MABX4F7F7U_国监查【2025】第030696号_中国工商银行交易流水.xlsx, 银行: 工商银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:59 - data_cleaner - INFO - 标准化银行字段,银行: 工商银行
+2026-01-05 23:51:59 - data_cleaner - INFO - 字段标准化完成,有效记录: 172条
+2026-01-05 23:51:59 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:59 - data_cleaner - INFO - 数据验证完成: 总计172条, 有效172条, 移除0条
+2026-01-05 23:51:59 - data_cleaner - INFO - 开始去重,原始记录数: 172
+2026-01-05 23:51:59 - data_cleaner - INFO - DEBUG: 去重前数据采样 (Top 5):
+2026-01-05 23:51:59 - data_cleaner - INFO -   Row 0: ID=23087000001, Time=1680024360, Amt=10000.0
+2026-01-05 23:51:59 - data_cleaner - INFO -   Row 1: ID=23087000002, Time=1680034874, Amt=100.0
+2026-01-05 23:51:59 - data_cleaner - INFO -   Row 2: ID=23087000003, Time=1680034874, Amt=180.0
+2026-01-05 23:51:59 - data_cleaner - INFO -   Row 3: ID=23087000004, Time=1680035160, Amt=300.0
+2026-01-05 23:51:59 - data_cleaner - INFO -   Row 4: ID=23087000005, Time=1680035160, Amt=2.0
+2026-01-05 23:51:59 - data_cleaner - INFO - 去重完成: 原始172条, 去重0条, 保留172条 (去重率: 0.00%)
+2026-01-05 23:51:59 - data_cleaner - INFO - 北京鑫兴航科技有限公司 清洗合并完成: 1个文件, 172行 → 172行
+2026-01-05 23:51:59 - __main__ - INFO - ✓ 中间数据已保存: output/cleaned_data/公司/北京鑫兴航科技有限公司_合并流水.xlsx
+2026-01-05 23:51:59 - __main__ - INFO - 
+处理公司: 贵州锐晶科技有限公司
+2026-01-05 23:51:59 - __main__ - INFO - ============================================================
+2026-01-05 23:51:59 - data_cleaner - INFO - 开始清洗合并 贵州锐晶科技有限公司 的数据,共1个文件
+2026-01-05 23:51:59 - data_cleaner - INFO - 处理文件: 贵州锐晶科技有限公司_91520303MAAK4M2U3H_国监查【2025】第030696号_中国银行交易流水.xlsx, 银行: 中国银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:51:59 - data_cleaner - INFO - 标准化银行字段,银行: 中国银行
+2026-01-05 23:51:59 - data_cleaner - INFO - 字段标准化完成,有效记录: 1289条
+2026-01-05 23:51:59 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:51:59 - data_cleaner - INFO - 数据验证完成: 总计1289条, 有效1289条, 移除0条
+2026-01-05 23:51:59 - data_cleaner - INFO - 开始去重,原始记录数: 1289
+2026-01-05 23:51:59 - data_cleaner - INFO - DEBUG: 去重前数据采样 (Top 5):
+2026-01-05 23:51:59 - data_cleaner - INFO -   Row 0: ID=147937960, Time=1607342519, Amt=500000.0
+2026-01-05 23:51:59 - data_cleaner - INFO -   Row 1: ID=148408251, Time=1607342654, Amt=100000.0
+2026-01-05 23:51:59 - data_cleaner - INFO -   Row 2: ID=184107019, Time=1607440526, Amt=150000.0
+2026-01-05 23:51:59 - data_cleaner - INFO -   Row 3: ID=124791996, Time=1607941775, Amt=10.0
+2026-01-05 23:51:59 - data_cleaner - INFO -   Row 4: ID=124791996, Time=1607941775, Amt=25000.0
+2026-01-05 23:51:59 - data_cleaner - WARNING - 流水号相同(但进入启发式检查): 124791996 vs 124791996
+2026-01-05 23:51:59 - data_cleaner - INFO - 去重完成: 原始1289条, 去重0条, 保留1289条 (去重率: 0.00%)
+2026-01-05 23:51:59 - data_cleaner - INFO - 贵州锐晶科技有限公司 清洗合并完成: 1个文件, 1289行 → 1289行
+2026-01-05 23:51:59 - __main__ - INFO - ✓ 中间数据已保存: output/cleaned_data/公司/贵州锐晶科技有限公司_合并流水.xlsx
+2026-01-05 23:51:59 - __main__ - INFO - 
+处理公司: 北京智晟睿科技有限公司
+2026-01-05 23:51:59 - __main__ - INFO - ============================================================
+2026-01-05 23:51:59 - data_cleaner - INFO - 开始清洗合并 北京智晟睿科技有限公司 的数据,共1个文件
+2026-01-05 23:51:59 - data_cleaner - INFO - 处理文件: 北京智晟睿科技有限公司_91110111MA00BAEQ6W_国监查【2025】第030696号_中国工商银行交易流水.xlsx, 银行: 工商银行
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:52:00 - data_cleaner - INFO - 标准化银行字段,银行: 工商银行
+2026-01-05 23:52:00 - data_cleaner - INFO - 字段标准化完成,有效记录: 388条
+2026-01-05 23:52:00 - data_cleaner - INFO - 开始数据质量验证...
+2026-01-05 23:52:00 - data_cleaner - INFO - 数据验证完成: 总计388条, 有效388条, 移除0条
+2026-01-05 23:52:00 - data_cleaner - INFO - 开始去重,原始记录数: 388
+2026-01-05 23:52:00 - data_cleaner - INFO - DEBUG: 去重前数据采样 (Top 5):
+2026-01-05 23:52:00 - data_cleaner - INFO -   Row 0: ID=17086000001, Time=1490606904, Amt=20000.0
+2026-01-05 23:52:00 - data_cleaner - INFO -   Row 1: ID=17088000003, Time=1490746430, Amt=360.0
+2026-01-05 23:52:00 - data_cleaner - INFO -   Row 2: ID=17088000002, Time=1490746430, Amt=150.0
+2026-01-05 23:52:00 - data_cleaner - INFO -   Row 3: ID=17088000001, Time=1490746430, Amt=200.0
+2026-01-05 23:52:00 - data_cleaner - INFO -   Row 4: ID=17088000004, Time=1490746440, Amt=80.0
+2026-01-05 23:52:00 - data_cleaner - INFO - 去重完成: 原始388条, 去重0条, 保留388条 (去重率: 0.00%)
+2026-01-05 23:52:00 - data_cleaner - INFO - 北京智晟睿科技有限公司 清洗合并完成: 1个文件, 388行 → 388行
+2026-01-05 23:52:00 - __main__ - INFO - ✓ 中间数据已保存: output/cleaned_data/公司/北京智晟睿科技有限公司_合并流水.xlsx
+2026-01-05 23:52:00 - __main__ - INFO - 
+✓ 清洗日志已保存: output/cleaned_data/cleaning_log.xlsx
+2026-01-05 23:52:00 - __main__ - INFO - 
+2026-01-05 23:52:00 - __main__ - INFO - 【阶段2】线索提取
+2026-01-05 23:52:00 - __main__ - INFO - --------------------------------------------------------------------------------
+2026-01-05 23:52:00 - data_extractor - INFO - 正在查找线索文件: data
+2026-01-05 23:52:00 - data_extractor - INFO - 共找到 0 个线索文件
+2026-01-05 23:52:00 - data_extractor - INFO - 汇总提取: 0 个人名, 0 个公司名
+2026-01-05 23:52:00 - __main__ - INFO - ✓ 最终核心人员: 4 人 - ['朱明', '朱永平', '马尚德', '陈斌']
+2026-01-05 23:52:00 - __main__ - INFO - ✓ 最终涉案公司: 3 家 - ['北京智晟睿科技有限公司', '北京鑫兴航科技有限公司', '贵州锐晶科技有限公司']
+2026-01-05 23:52:00 - __main__ - INFO - 
+2026-01-05 23:52:00 - __main__ - INFO - 【阶段2.5】家族关系识别
+2026-01-05 23:52:00 - __main__ - INFO - --------------------------------------------------------------------------------
+2026-01-05 23:52:00 - family_analyzer - INFO - ============================================================
+2026-01-05 23:52:00 - family_analyzer - INFO - 开始构建家族关系图谱
+2026-01-05 23:52:00 - family_analyzer - INFO - ============================================================
+2026-01-05 23:52:00 - family_analyzer - INFO - 
+正在分析 朱明 的家族关系...
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:52:00 - family_analyzer - INFO - 朱明 从同户人数据提取 3 名家族成员
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:52:00 - family_analyzer - INFO - 朱明 从户籍人口数据提取 3 名家族成员
+2026-01-05 23:52:00 - family_analyzer - INFO - ✓ 朱明 的家族成员: 3 人
+2026-01-05 23:52:00 - family_analyzer - INFO -   - 朱明 (户主)
+2026-01-05 23:52:00 - family_analyzer - INFO -   - 朱莳一 (女)
+2026-01-05 23:52:00 - family_analyzer - INFO -   - 吴嘉欣 (妻)
+2026-01-05 23:52:00 - family_analyzer - INFO - 
+正在分析 朱永平 的家族关系...
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:52:00 - family_analyzer - INFO - 朱永平 从户籍人口数据提取 1 名家族成员
+2026-01-05 23:52:00 - family_analyzer - INFO - ✓ 朱永平 的家族成员: 1 人
+2026-01-05 23:52:00 - family_analyzer - INFO -   - 朱永平 ()
+2026-01-05 23:52:00 - family_analyzer - INFO - 
+正在分析 马尚德 的家族关系...
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:52:00 - family_analyzer - INFO - 马尚德 从同户人数据提取 3 名家族成员
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:52:00 - family_analyzer - INFO - 马尚德 从户籍人口数据提取 3 名家族成员
+2026-01-05 23:52:00 - family_analyzer - INFO - ✓ 马尚德 的家族成员: 3 人
+2026-01-05 23:52:00 - family_analyzer - INFO -   - 金琳 (户主)
+2026-01-05 23:52:00 - family_analyzer - INFO -   - 马尚德 (夫)
+2026-01-05 23:52:00 - family_analyzer - INFO -   - 马稼轩 (子)
+2026-01-05 23:52:00 - family_analyzer - INFO - 
+正在分析 陈斌 的家族关系...
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:52:00 - family_analyzer - INFO - 陈斌 从同户人数据提取 4 名家族成员
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:52:00 - family_analyzer - INFO - 陈斌 从户籍人口数据提取 1 名家族成员
+2026-01-05 23:52:00 - family_analyzer - INFO - ✓ 陈斌 的家族成员: 4 人
+2026-01-05 23:52:00 - family_analyzer - INFO -   - 陈志中 (户主)
+2026-01-05 23:52:00 - family_analyzer - INFO -   - 陈斌 (子)
+2026-01-05 23:52:00 - family_analyzer - INFO -   - 陈慧 (女)
+2026-01-05 23:52:00 - family_analyzer - INFO -   - 阳四妹 (妻)
+2026-01-05 23:52:00 - family_analyzer - INFO - 
+家族关系图谱构建完成，共识别 11 名家族成员
+2026-01-05 23:52:00 - __main__ - INFO - ✓ 识别家族成员: 11 人
+2026-01-05 23:52:00 - __main__ - INFO - 
+2026-01-05 23:52:00 - __main__ - INFO - 【阶段3】资金画像分析
+2026-01-05 23:52:00 - __main__ - INFO - --------------------------------------------------------------------------------
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在为 陈斌 生成资金画像...
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在计算收支结构...
+2026-01-05 23:52:00 - financial_profiler - INFO - 总收入: ¥736.09, 总支出: ¥696.71, 工资性收入占比: 0.0%
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在分析资金去向...
+2026-01-05 23:52:00 - financial_profiler - INFO - 第三方支付流出: ¥96.88, 占总支出: 13.9%
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在筛查大额现金(阈值: ¥5.00万)...
+2026-01-05 23:52:00 - financial_profiler - INFO - 发现 0 笔大额现金交易
+2026-01-05 23:52:00 - financial_profiler - INFO - 陈斌 资金画像生成完成
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在为 朱永平 生成资金画像...
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在计算收支结构...
+2026-01-05 23:52:00 - financial_profiler - INFO - 总收入: ¥7.78万, 总支出: ¥8.94万, 工资性收入占比: 0.0%
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在分析资金去向...
+2026-01-05 23:52:00 - financial_profiler - INFO - 第三方支付流出: ¥0.00, 占总支出: 0.0%
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在筛查大额现金(阈值: ¥5.00万)...
+2026-01-05 23:52:00 - financial_profiler - INFO - 发现 0 笔大额现金交易
+2026-01-05 23:52:00 - financial_profiler - INFO - 朱永平 资金画像生成完成
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在为 朱明 生成资金画像...
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在计算收支结构...
+2026-01-05 23:52:00 - financial_profiler - INFO - 总收入: ¥228.46万, 总支出: ¥224.82万, 工资性收入占比: 58.9%
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在分析资金去向...
+2026-01-05 23:52:00 - financial_profiler - INFO - 第三方支付流出: ¥24.14万, 占总支出: 10.7%
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在筛查大额现金(阈值: ¥5.00万)...
+2026-01-05 23:52:00 - financial_profiler - INFO - 发现 0 笔大额现金交易
+2026-01-05 23:52:00 - financial_profiler - INFO - 朱明 资金画像生成完成
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在为 马尚德 生成资金画像...
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在计算收支结构...
+2026-01-05 23:52:00 - financial_profiler - INFO - 总收入: ¥231.70万, 总支出: ¥165.21万, 工资性收入占比: 42.7%
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在分析资金去向...
+2026-01-05 23:52:00 - financial_profiler - INFO - 第三方支付流出: ¥17.55万, 占总支出: 10.6%
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在筛查大额现金(阈值: ¥5.00万)...
+2026-01-05 23:52:00 - financial_profiler - INFO - 发现 0 笔大额现金交易
+2026-01-05 23:52:00 - financial_profiler - INFO - 马尚德 资金画像生成完成
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在为 北京鑫兴航科技有限公司 生成资金画像...
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在计算收支结构...
+2026-01-05 23:52:00 - financial_profiler - INFO - 总收入: ¥416.26万, 总支出: ¥393.61万, 工资性收入占比: 0.0%
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在分析资金去向...
+2026-01-05 23:52:00 - financial_profiler - INFO - 第三方支付流出: ¥0.00, 占总支出: 0.0%
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在筛查大额现金(阈值: ¥5.00万)...
+2026-01-05 23:52:00 - financial_profiler - INFO - 发现 0 笔大额现金交易
+2026-01-05 23:52:00 - financial_profiler - INFO - 北京鑫兴航科技有限公司 资金画像生成完成
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在为 贵州锐晶科技有限公司 生成资金画像...
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在计算收支结构...
+2026-01-05 23:52:00 - financial_profiler - INFO - 总收入: ¥3521.85万, 总支出: ¥2899.93万, 工资性收入占比: 0.0%
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在分析资金去向...
+2026-01-05 23:52:00 - financial_profiler - INFO - 第三方支付流出: ¥0.00, 占总支出: 0.0%
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在筛查大额现金(阈值: ¥5.00万)...
+2026-01-05 23:52:00 - financial_profiler - INFO - 发现 0 笔大额现金交易
+2026-01-05 23:52:00 - financial_profiler - INFO - 贵州锐晶科技有限公司 资金画像生成完成
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在为 北京智晟睿科技有限公司 生成资金画像...
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在计算收支结构...
+2026-01-05 23:52:00 - financial_profiler - INFO - 总收入: ¥2985.29万, 总支出: ¥2436.68万, 工资性收入占比: 1.0%
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在分析资金去向...
+2026-01-05 23:52:00 - financial_profiler - INFO - 第三方支付流出: ¥0.00, 占总支出: 0.0%
+2026-01-05 23:52:00 - financial_profiler - INFO - 正在筛查大额现金(阈值: ¥5.00万)...
+2026-01-05 23:52:00 - financial_profiler - INFO - 发现 0 笔大额现金交易
+2026-01-05 23:52:00 - financial_profiler - INFO - 北京智晟睿科技有限公司 资金画像生成完成
+2026-01-05 23:52:00 - __main__ - INFO - ✓ 已生成 7 份资金画像
+2026-01-05 23:52:00 - __main__ - INFO - 
+2026-01-05 23:52:00 - __main__ - INFO - 【阶段4】疑点碰撞检测
+2026-01-05 23:52:00 - __main__ - INFO - --------------------------------------------------------------------------------
+2026-01-05 23:52:00 - suspicion_detector - INFO - ============================================================
+2026-01-05 23:52:00 - suspicion_detector - INFO - 开始执行全面疑点检测
+2026-01-05 23:52:00 - suspicion_detector - INFO - ============================================================
+2026-01-05 23:52:00 - suspicion_detector - INFO - 正在检测直接资金往来...
+2026-01-05 23:52:00 - suspicion_detector - INFO - 发现 0 笔直接资金往来
+2026-01-05 23:52:00 - suspicion_detector - INFO - 正在执行现金时空伴随分析...
+2026-01-05 23:52:00 - suspicion_detector - INFO - 发现 0 对现金时空伴随记录
+2026-01-05 23:52:00 - suspicion_detector - INFO - 正在检测隐形资产...
+2026-01-05 23:52:00 - suspicion_detector - INFO - 发现 2 笔疑似资产购置
+2026-01-05 23:52:00 - suspicion_detector - INFO - 正在检测固定频率异常进账...
+2026-01-05 23:52:00 - suspicion_detector - INFO - 发现 27 个固定频率异常进账模式
+2026-01-05 23:52:00 - suspicion_detector - INFO - ============================================================
+2026-01-05 23:52:00 - suspicion_detector - INFO - 疑点检测完成,共发现 29 个疑点
+2026-01-05 23:52:00 - suspicion_detector - INFO - ============================================================
+2026-01-05 23:52:00 - __main__ - INFO - 
+2026-01-05 23:52:00 - __main__ - INFO - 【阶段5】资产提取与分析
+2026-01-05 23:52:00 - __main__ - INFO - --------------------------------------------------------------------------------
+2026-01-05 23:52:00 - asset_analyzer - INFO - ============================================================
+2026-01-05 23:52:00 - asset_analyzer - INFO - 开始提取房产信息
+2026-01-05 23:52:00 - asset_analyzer - INFO - ============================================================
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:52:00 - asset_analyzer - WARNING - 检测到异常房产金额 3471808.0万元，自动修正为 347.18万元
+2026-01-05 23:52:00 - asset_analyzer - INFO - ✓ 朱明 提取房产 1 套
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:52:00 - asset_analyzer - INFO - ✓ 朱永平 提取房产 2 套
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:52:00 - asset_analyzer - WARNING - 检测到异常房产金额 804623.69万元，自动修正为 80.46万元
+2026-01-05 23:52:00 - asset_analyzer - WARNING - 检测到异常房产金额 925000.0万元，自动修正为 92.50万元
+2026-01-05 23:52:00 - asset_analyzer - WARNING - 检测到异常房产金额 818000.0万元，自动修正为 81.80万元
+2026-01-05 23:52:00 - asset_analyzer - INFO - ✓ 马尚德 提取房产 3 套
+2026-01-05 23:52:00 - asset_analyzer - INFO - 
+房产信息提取完成，共 6 套
+2026-01-05 23:52:00 - asset_analyzer - INFO - ============================================================
+2026-01-05 23:52:00 - asset_analyzer - INFO - 开始提取车辆信息
+2026-01-05 23:52:00 - asset_analyzer - INFO - ============================================================
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:52:00 - asset_analyzer - INFO - ✓ 朱永平 提取车辆 1 辆
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:52:00 - asset_analyzer - INFO - ✓ 马尚德 提取车辆 1 辆
+/Volumes/MediaData/project/venv/lib/python3.13/site-packages/openpyxl/styles/stylesheet.py:237: UserWarning: Workbook contains no default style, apply openpyxl's default
+  warn("Workbook contains no default style, apply openpyxl's default")
+2026-01-05 23:52:00 - asset_analyzer - INFO - ✓ 陈斌 提取车辆 1 辆
+2026-01-05 23:52:00 - asset_analyzer - INFO - 
+车辆信息提取完成，共 3 辆
+2026-01-05 23:52:00 - asset_analyzer - INFO - ============================================================
+2026-01-05 23:52:00 - asset_analyzer - INFO - 开始计算家族资产
+2026-01-05 23:52:00 - asset_analyzer - INFO - ============================================================
+2026-01-05 23:52:00 - asset_analyzer - INFO - 
+【朱明】家族资产:
+2026-01-05 23:52:00 - asset_analyzer - INFO -   成员: 3 人 - 朱明, 朱莳一, 吴嘉欣
+2026-01-05 23:52:00 - asset_analyzer - INFO -   房产: 1 套，总价值 347.18 万元
+2026-01-05 23:52:00 - asset_analyzer - INFO -   车辆: 0 辆
+2026-01-05 23:52:00 - asset_analyzer - INFO - 
+【朱永平】家族资产:
+2026-01-05 23:52:00 - asset_analyzer - INFO -   成员: 1 人 - 朱永平
+2026-01-05 23:52:00 - asset_analyzer - INFO -   房产: 2 套，总价值 1.00 万元
+2026-01-05 23:52:00 - asset_analyzer - INFO -   车辆: 1 辆
+2026-01-05 23:52:00 - asset_analyzer - INFO - 
+【马尚德】家族资产:
+2026-01-05 23:52:00 - asset_analyzer - INFO -   成员: 3 人 - 马尚德, 金琳, 马稼轩
+2026-01-05 23:52:00 - asset_analyzer - INFO -   房产: 3 套，总价值 254.76 万元
+2026-01-05 23:52:00 - asset_analyzer - INFO -   车辆: 1 辆
+2026-01-05 23:52:00 - asset_analyzer - INFO - 
+【陈斌】家族资产:
+2026-01-05 23:52:00 - asset_analyzer - INFO -   成员: 4 人 - 陈斌, 陈志中, 陈慧, 阳四妹
+2026-01-05 23:52:00 - asset_analyzer - INFO -   房产: 0 套，总价值 0.00 万元
+2026-01-05 23:52:00 - asset_analyzer - INFO -   车辆: 1 辆
+2026-01-05 23:52:00 - asset_analyzer - INFO - 
+家族资产计算完成
+2026-01-05 23:52:00 - __main__ - INFO - ✓ 提取资产: 6 套房产, 3 辆车
+2026-01-05 23:52:00 - __main__ - INFO - 
+2026-01-05 23:52:00 - __main__ - INFO - 【阶段5.5】数据验证
+2026-01-05 23:52:00 - __main__ - INFO - --------------------------------------------------------------------------------
+2026-01-05 23:52:00 - __main__ - INFO - 陈斌: PASSED
+2026-01-05 23:52:00 - __main__ - INFO - 朱永平: PASSED
+2026-01-05 23:52:00 - __main__ - INFO - 朱明: PASSED
+2026-01-05 23:52:00 - __main__ - INFO - 马尚德: PASSED
+2026-01-05 23:52:00 - __main__ - INFO - 北京鑫兴航科技有限公司: PASSED
+2026-01-05 23:52:00 - __main__ - INFO - 贵州锐晶科技有限公司: PASSED
+2026-01-05 23:52:00 - __main__ - INFO - 北京智晟睿科技有限公司: PASSED
+2026-01-05 23:52:00 - data_validator - INFO - ============================================================
+2026-01-05 23:52:00 - data_validator - INFO - 开始交叉验证房产购置与银行流水
+2026-01-05 23:52:00 - data_validator - INFO - ============================================================
+2026-01-05 23:52:00 - data_validator - WARNING - ✗ 朱明 的房产 奉贤区吴塘路988弄32号1604 未找到匹配交易
+2026-01-05 23:52:00 - data_validator - WARNING - ✗ 朱永平 的房产 朝阳区科学园南里六区601号楼3层304 未找到匹配交易
+2026-01-05 23:52:00 - data_validator - WARNING - ✗ 朱永平 的房产 昌平区东小口镇天通北苑一区16号楼1单元12层1单元1206 未找到匹配交易
+2026-01-05 23:52:00 - data_validator - WARNING - ✗ 马尚德 的房产 奉贤区南行路378弄12号1404 未找到匹配交易
+2026-01-05 23:52:00 - data_validator - WARNING - ✗ 马尚德 的房产 平利路41弄10号502 未找到匹配交易
+2026-01-05 23:52:00 - data_validator - WARNING - ✗ 马尚德 的房产 灵石路1123弄23号604 未找到匹配交易
+2026-01-05 23:52:00 - data_validator - INFO - 
+房产交易验证完成: 0/6 找到匹配
+2026-01-05 23:52:00 - __main__ - INFO - ✓ 数据验证报告已生成: output/analysis_results/数据验证报告.txt
+2026-01-05 23:52:00 - __main__ - INFO - 
+2026-01-05 23:52:00 - __main__ - INFO - 【阶段6】生成分析报告
+2026-01-05 23:52:00 - __main__ - INFO - --------------------------------------------------------------------------------
+2026-01-05 23:52:00 - report_generator - INFO - 正在生成Excel底稿: output/analysis_results/资金核查底稿.xlsx
+2026-01-05 23:52:00 - report_generator - INFO - Excel底稿生成完成: output/analysis_results/资金核查底稿.xlsx
+2026-01-05 23:52:00 - __main__ - INFO - ✓ Excel底稿已生成: output/analysis_results/资金核查底稿.xlsx
+2026-01-05 23:52:00 - report_generator - INFO - 正在生成公文报告: output/analysis_results/核查结果分析报告.txt
+2026-01-05 23:52:00 - report_generator - INFO - 公文报告生成完成: output/analysis_results/核查结果分析报告.txt
+2026-01-05 23:52:00 - __main__ - INFO - ✓ 公文报告已生成: output/analysis_results/核查结果分析报告.txt
+2026-01-05 23:52:00 - __main__ - INFO - 
+2026-01-05 23:52:00 - __main__ - INFO - ================================================================================
+2026-01-05 23:52:00 - __main__ - INFO - 执行摘要
+2026-01-05 23:52:00 - __main__ - INFO - ================================================================================
+2026-01-05 23:52:00 - __main__ - INFO - ✓ 核查对象: 4 人, 3 家公司
+2026-01-05 23:52:00 - __main__ - INFO - ✓ 原始文件: 24 个
+2026-01-05 23:52:00 - __main__ - INFO - ✓ 清洗后交易: 4444 笔
+2026-01-05 23:52:00 - __main__ - INFO - ✓ 发现疑点: 29 个
+2026-01-05 23:52:00 - __main__ - INFO -   - 直接资金往来: 0 笔
+2026-01-05 23:52:00 - __main__ - INFO -   - 现金时空伴随: 0 对
+2026-01-05 23:52:00 - __main__ - INFO -   - 隐形资产: 2 笔
+2026-01-05 23:52:00 - __main__ - INFO -   - 固定频率异常: 27 个
+2026-01-05 23:52:00 - __main__ - INFO - ✓ 执行时间: 6.54秒
+2026-01-05 23:52:00 - __main__ - INFO - 
+2026-01-05 23:52:00 - __main__ - INFO - ✓ 输出目录: output
+2026-01-05 23:52:00 - __main__ - INFO -   ├─ cleaned_data/个人/ - 4 个合并流水文件
+2026-01-05 23:52:00 - __main__ - INFO -   ├─ cleaned_data/公司/ - 3 个合并流水文件
+2026-01-05 23:52:00 - __main__ - INFO -   ├─ cleaned_data/cleaning_log.xlsx - 清洗日志
+2026-01-05 23:52:00 - __main__ - INFO -   ├─ analysis_results/资金核查底稿.xlsx
+2026-01-05 23:52:00 - __main__ - INFO -   └─ analysis_results/核查结果分析报告.txt
+2026-01-05 23:52:00 - __main__ - INFO - 
+2026-01-05 23:52:00 - __main__ - INFO - ================================================================================
+2026-01-05 23:52:00 - __main__ - INFO - 系统执行完成!
+2026-01-05 23:52:00 - __main__ - INFO - ================================================================================

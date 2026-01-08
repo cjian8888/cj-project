@@ -1,0 +1,6 @@
+pandas
+openpyxl
+numpy
+pdfplumber
+python-docx
+jinja2
