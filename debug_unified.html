@@ -1,0 +1,420 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>资金流向可视化 - 纪检审计系统</title>
+    <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <style>
+        /* ========== 基础重置 ========== */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        /* ========== 主体样式 ========== */
+        body {
+            font-family: 'Microsoft YaHei', Arial, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+        }
+
+        /* ========== 顶部标题栏 ========== */
+        .header {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            padding: 20px;
+            text-align: center;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, #00d2ff, #3a7bd5);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .header p {
+            color: #aaa;
+            font-size: 14px;
+        }
+
+        /* ========== 主容器 ========== */
+        .container {
+            display: flex;
+            height: calc(100vh - 100px);
+        }
+
+        /* ========== 左侧边栏 ========== */
+        .sidebar {
+            width: 300px;
+            background: rgba(255, 255, 255, 0.05);
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .sidebar h3 {
+            color: #00d2ff;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        /* ========== 统计卡片 ========== */
+        .stat-card {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 15px;
+            transition: transform 0.2s;
+        }
+
+        .stat-card:hover {
+            transform: translateX(5px);
+        }
+
+        .stat-card h4 {
+            color: #fff;
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+
+        .stat-card .value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #00d2ff;
+        }
+
+        .stat-card .desc {
+            font-size: 12px;
+            color: #888;
+            margin-top: 5px;
+        }
+
+        /* ========== 风险等级卡片 ========== */
+        .risk-high {
+            border-left: 4px solid #ff4757;
+        }
+
+        .risk-medium {
+            border-left: 4px solid #ffa502;
+        }
+
+        .risk-low {
+            border-left: 4px solid #2ed573;
+        }
+
+        /* ========== 图例 ========== */
+        .legend {
+            margin-top: 20px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            margin-right: 10px;
+        }
+
+        .legend-color.box {
+            border-radius: 3px;
+        }
+
+        /* ========== 网络图容器 ========== */
+        .network-container {
+            flex: 1;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            margin: 10px;
+        }
+
+        #network {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* ========== 工具提示 ========== */
+        .tooltip {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.9);
+            color: #fff;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 12px;
+            pointer-events: none;
+            z-index: 1000;
+        }
+
+        /* ========== 操作按钮 ========== */
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+        }
+
+        .btn {
+            background: linear-gradient(90deg, #00d2ff, #3a7bd5);
+            border: none;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: opacity 0.2s;
+        }
+
+        .btn:hover {
+            opacity: 0.8;
+        }
+
+        /* ========== 加载动画 ========== */
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+        }
+
+        .loading-spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(255, 255, 255, 0.1);
+            border-top-color: #00d2ff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="header">
+        <h1>💰 资金流向可视化分析</h1>
+        <p>生成时间: 2026-01-09 15:53 | 共 47 个节点, 62 条资金流向</p>
+    </div>
+
+    <div class="container">
+        <div class="sidebar">
+            <h3>📊 数据概览</h3>
+
+            <div class="stat-card">
+                <h4>核心人员</h4>
+                <div class="value">4</div>
+                <div class="desc">施承天, 滕雳, 施灵, 施育</div>
+            </div>
+
+            <div class="stat-card risk-high">
+                <h4>🔴 高风险项目</h4>
+                <div class="value">0</div>
+                <div class="desc">建议优先核查</div>
+            </div>
+
+            <div class="stat-card risk-medium">
+                <h4>🟡 中风险项目</h4>
+                <div class="value">0</div>
+                <div class="desc">需酌情关注</div>
+            </div>
+
+            <div class="stat-card">
+                <h4>借贷配对</h4>
+                <div class="value">0</div>
+            </div>
+
+            <div class="stat-card">
+                <h4>无还款借贷</h4>
+                <div class="value">0</div>
+                <div class="desc">疑似利益输送</div>
+            </div>
+
+            <h3>🎨 图例说明</h3>
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #ff6b6b;"></div>
+                    <span>🔴 核心人员</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color box" style="background: #ff9800;"></div>
+                    <span>🏢 涉案公司（重点）</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #4ecdc4;"></div>
+                    <span>🔵 其他关联方</span>
+                </div>
+            </div>
+
+            <h3 style="margin-top: 20px;">📊 资金流向统计</h3>
+            <p style="font-size: 12px; color: #888; line-height: 1.8;">
+                • 核心人员间: 12笔<br>
+                • 公司间交易: 20笔<br>
+                • 核心-外部: 30笔<br>
+                • 线条越粗金额越大
+            </p>
+
+            <h3 style="margin-top: 20px;">💡 操作提示</h3>
+            <p style="font-size: 12px; color: #888; line-height: 1.8;">
+                • 拖拽节点可调整位置<br>
+                • 滚轮缩放视图<br>
+                • 悬停查看交易详情<br>
+                • 导航按钮在右下角
+            </p>
+        </div>
+
+        <div class="network-container">
+            <div id="network"></div>
+        </div>
+    </div>
+
+    <script>
+        // 节点数据
+        var nodes = new vis.DataSet([{"id": "施承天", "label": "施承天", "group": "core", "size": 35, "font": {"color": "#fff", "size": 14}}, {"id": "滕雳", "label": "滕雳", "group": "core", "size": 35, "font": {"color": "#fff", "size": 14}}, {"id": "施灵", "label": "施灵", "group": "core", "size": 35, "font": {"color": "#fff", "size": 14}}, {"id": "施育", "label": "施育", "group": "core", "size": 35, "font": {"color": "#fff", "size": 14}}, {"id": "上海通耀机械有限公司", "label": "🏢 上海通耀机械有限公司", "group": "involved_company", "size": 40, "font": {"color": "#fff", "size": 14}}, {"id": "上海派尼科技实业股份有限公司", "label": "🏢 上海派尼科技实业...", "group": "involved_company", "size": 40, "font": {"color": "#fff", "size": 14}}, {"id": "上海派尼斯机电技术有限公司", "label": "🏢 上海派尼斯机电技...", "group": "involved_company", "size": 40, "font": {"color": "#fff", "size": 14}}, {"id": "上海烟草机械有限责任公司", "label": "上海烟草机械...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "安徽派尼精密机械制造有限公司", "label": "安徽派尼精密...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "上海升翕光电科技有限公司", "label": "上海升翕光电...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "ZH072011004000Y01产品实时赎回户", "label": "ZH0720...", "group": "other", "size": 18, "font": {"color": "#fff", "size": 14}}, {"id": "ZH072011004000Y01产品实时申购户", "label": "ZH0720...", "group": "other", "size": 18, "font": {"color": "#fff", "size": 14}}, {"id": "上海派尼科技实业有限公司", "label": "上海派尼科技...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "上海罗肯仕贸易发展有限公司", "label": "上海罗肯仕贸...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "利乐食品机械（上海）有限公司", "label": "利乐食品机械...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "无锡威可楷发斯宁科技有限公司", "label": "无锡威可楷发...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "上海晟奕国际贸易有限公司", "label": "上海晟奕国际...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "待报解预算收入（财库联网集中户）", "label": "待报解预算收...", "group": "other", "size": 18, "font": {"color": "#fff", "size": 14}}, {"id": "利乐食品设备（昆山）有限公司", "label": "利乐食品设备...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "上海轮旸机械有限公司", "label": "上海轮旸机械...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "上海航柒机械设备有限公司", "label": "上海航柒机械...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "上海钊巨机械设备厂", "label": "上海钊巨机械...", "group": "other", "size": 18, "font": {"color": "#fff", "size": 14}}, {"id": "上海凡鹰机械设备合伙企业(有限合伙)", "label": "上海凡鹰机械...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "-", "label": "-", "group": "other", "size": 18, "font": {"color": "#fff", "size": 14}}, {"id": "上海航天化工应用研究所", "label": "上海航天化工...", "group": "other", "size": 18, "font": {"color": "#fff", "size": 14}}, {"id": "万联证券股份有限公司（客户）", "label": "万联证券股份...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "上海市浦东新区财政局", "label": "上海市浦东新...", "group": "other", "size": 18, "font": {"color": "#fff", "size": 14}}, {"id": "施文蕾", "label": "施文蕾", "group": "other", "size": 18, "font": {"color": "#fff", "size": 14}}, {"id": "钱国良", "label": "钱国良", "group": "other", "size": 18, "font": {"color": "#fff", "size": 14}}, {"id": "万联证券股份有限公司（客户）－广东", "label": "万联证券股份...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "上海裕达实业有限公司", "label": "上海裕达实业...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "申万宏源证券有限公司（信用客户）", "label": "申万宏源证券...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "上海卫星装备研究所", "label": "上海卫星装备...", "group": "other", "size": 18, "font": {"color": "#fff", "size": 14}}, {"id": "支付宝（中国）网络技术有限公司", "label": "支付宝（中国...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "上海闵星汽车服务有限公司", "label": "上海闵星汽车...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "上海市公积金管理中心(房改资金)", "label": "上海市公积金...", "group": "other", "size": 18, "font": {"color": "#fff", "size": 14}}, {"id": "深圳市财付通支付科技有限公司", "label": "深圳市财付通...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "财付通支付科技有限公司", "label": "财付通支付科...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "李玉川", "label": "李玉川", "group": "other", "size": 18, "font": {"color": "#fff", "size": 14}}, {"id": "东方证券股份有限公司(客户)", "label": "东方证券股份...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "滕云", "label": "滕云", "group": "other", "size": 18, "font": {"color": "#fff", "size": 14}}, {"id": "李卓慧", "label": "李卓慧", "group": "other", "size": 18, "font": {"color": "#fff", "size": 14}}, {"id": "吴富贵", "label": "吴富贵", "group": "other", "size": 18, "font": {"color": "#fff", "size": 14}}, {"id": "嘉兴市演润商贸有限公司", "label": "嘉兴市演润商...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "上海闵锐劳务服务有限公司", "label": "上海闵锐劳务...", "group": "company", "size": 25, "font": {"color": "#fff", "size": 14}}, {"id": "现金", "label": "现金", "group": "other", "size": 18, "font": {"color": "#fff", "size": 14}}, {"id": "上海市浦泾中学", "label": "上海市浦泾中学", "group": "other", "size": 18, "font": {"color": "#fff", "size": 14}}]);
+
+        // 边数据
+        var edges = new vis.DataSet([{"from": "施灵", "to": "施灵", "value": 4846.053013000013, "title": "施灵 → 施灵\\n金额: 4846.1万元 (1537笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "滕雳", "to": "滕雳", "value": 495.1850840000001, "title": "滕雳 → 滕雳\\n金额: 495.2万元 (169笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "施承天", "to": "施灵", "value": 112.0, "title": "施承天 → 施灵\\n金额: 112.0万元 (10笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "滕雳", "to": "施灵", "value": 102.5, "title": "滕雳 → 施灵\\n金额: 102.5万元 (11笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "施育", "to": "施育", "value": 59.93788000000001, "title": "施育 → 施育\\n金额: 59.9万元 (31笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "施灵", "to": "施承天", "value": 55.884, "title": "施灵 → 施承天\\n金额: 55.9万元 (14笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "施育", "to": "施灵", "value": 20.0, "title": "施育 → 施灵\\n金额: 20.0万元 (4笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "施育", "to": "滕雳", "value": 20.0, "title": "施育 → 滕雳\\n金额: 20.0万元 (2笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "施灵", "to": "滕雳", "value": 19.440815, "title": "施灵 → 滕雳\\n金额: 19.4万元 (22笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "滕雳", "to": "施承天", "value": 11.905812, "title": "滕雳 → 施承天\\n金额: 11.9万元 (30笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "施灵", "to": "施育", "value": 6.8, "title": "施灵 → 施育\\n金额: 6.8万元 (4笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "施承天", "to": "施承天", "value": 5.443886999999999, "title": "施承天 → 施承天\\n金额: 5.4万元 (18笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海派尼科技实业股份有限公司", "to": "上海派尼科技实业股份有限公司", "value": 197038.2856930002, "title": "上海派尼科技实业股份有限公司 → 上海派尼科技实业股份有限公司\\n金额: 197038.3万元 (2037笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海烟草机械有限责任公司", "to": "上海派尼科技实业股份有限公司", "value": 20811.678809999998, "title": "上海烟草机械有限责任公司 → 上海派尼科技实业股份有限公司\\n金额: 20811.7万元 (171笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海派尼科技实业股份有限公司", "to": "安徽派尼精密机械制造有限公司", "value": 19991.002868, "title": "上海派尼科技实业股份有限公司 → 安徽派尼精密机械制造有限公司\\n金额: 19991.0万元 (291笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海升翕光电科技有限公司", "to": "上海派尼科技实业股份有限公司", "value": 13112.987323000001, "title": "上海升翕光电科技有限公司 → 上海派尼科技实业股份有限公司\\n金额: 13113.0万元 (88笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "ZH072011004000Y01产品实时赎回户", "to": "上海派尼科技实业股份有限公司", "value": 8639.530252999997, "title": "ZH072011004000Y01产品实时赎回户 → 上海派尼科技实业股份有限公司\\n金额: 8639.5万元 (48笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海派尼科技实业股份有限公司", "to": "ZH072011004000Y01产品实时申购户", "value": 8613.33, "title": "上海派尼科技实业股份有限公司 → ZH072011004000Y01产品实时申购户\\n金额: 8613.3万元 (34笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海派尼科技实业股份有限公司", "to": "上海派尼科技实业有限公司", "value": 6669.667096000001, "title": "上海派尼科技实业股份有限公司 → 上海派尼科技实业有限公司\\n金额: 6669.7万元 (304笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海派尼科技实业股份有限公司", "to": "上海罗肯仕贸易发展有限公司", "value": 6081.901565000001, "title": "上海派尼科技实业股份有限公司 → 上海罗肯仕贸易发展有限公司\\n金额: 6081.9万元 (391笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "利乐食品机械（上海）有限公司", "to": "上海派尼科技实业股份有限公司", "value": 5960.386279, "title": "利乐食品机械（上海）有限公司 → 上海派尼科技实业股份有限公司\\n金额: 5960.4万元 (111笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海派尼科技实业有限公司", "to": "上海派尼科技实业股份有限公司", "value": 5436.886325, "title": "上海派尼科技实业有限公司 → 上海派尼科技实业股份有限公司\\n金额: 5436.9万元 (489笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "安徽派尼精密机械制造有限公司", "to": "上海派尼科技实业股份有限公司", "value": 5373.372425, "title": "安徽派尼精密机械制造有限公司 → 上海派尼科技实业股份有限公司\\n金额: 5373.4万元 (21笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "无锡威可楷发斯宁科技有限公司", "to": "上海派尼科技实业股份有限公司", "value": 3768.100813000001, "title": "无锡威可楷发斯宁科技有限公司 → 上海派尼科技实业股份有限公司\\n金额: 3768.1万元 (278笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海晟奕国际贸易有限公司", "to": "上海派尼科技实业股份有限公司", "value": 3675.6809580000004, "title": "上海晟奕国际贸易有限公司 → 上海派尼科技实业股份有限公司\\n金额: 3675.7万元 (93笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海派尼科技实业股份有限公司", "to": "待报解预算收入（财库联网集中户）", "value": 3216.9464710000007, "title": "上海派尼科技实业股份有限公司 → 待报解预算收入（财库联网集中户）\\n金额: 3216.9万元 (215笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "利乐食品设备（昆山）有限公司", "to": "上海派尼科技实业股份有限公司", "value": 2922.0543239999997, "title": "利乐食品设备（昆山）有限公司 → 上海派尼科技实业股份有限公司\\n金额: 2922.1万元 (51笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海派尼科技实业股份有限公司", "to": "上海轮旸机械有限公司", "value": 2628.9932540000004, "title": "上海派尼科技实业股份有限公司 → 上海轮旸机械有限公司\\n金额: 2629.0万元 (67笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海派尼科技实业股份有限公司", "to": "上海航柒机械设备有限公司", "value": 2311.7951219999995, "title": "上海派尼科技实业股份有限公司 → 上海航柒机械设备有限公司\\n金额: 2311.8万元 (62笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海派尼斯机电技术有限公司", "to": "上海派尼斯机电技术有限公司", "value": 2251.888561999999, "title": "上海派尼斯机电技术有限公司 → 上海派尼斯机电技术有限公司\\n金额: 2251.9万元 (320笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海派尼科技实业股份有限公司", "to": "上海钊巨机械设备厂", "value": 2250.1540250000003, "title": "上海派尼科技实业股份有限公司 → 上海钊巨机械设备厂\\n金额: 2250.2万元 (55笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海派尼科技实业股份有限公司", "to": "上海凡鹰机械设备合伙企业(有限合伙)", "value": 2161.377893999999, "title": "上海派尼科技实业股份有限公司 → 上海凡鹰机械设备合伙企业(有限合伙)\\n金额: 2161.4万元 (113笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "-", "to": "施灵", "value": 1200.7758859999994, "title": "- → 施灵\\n金额: 1200.8万元 (312笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "施灵", "to": "-", "value": 1164.15, "title": "施灵 → -\\n金额: 1164.2万元 (61笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海航天化工应用研究所", "to": "施灵", "value": 518.0827310000002, "title": "上海航天化工应用研究所 → 施灵\\n金额: 518.1万元 (134笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "滕雳", "to": "万联证券股份有限公司（客户）", "value": 130.186, "title": "滕雳 → 万联证券股份有限公司（客户）\\n金额: 130.2万元 (11笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海市浦东新区财政局", "to": "滕雳", "value": 88.05891300000002, "title": "上海市浦东新区财政局 → 滕雳\\n金额: 88.1万元 (71笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "施文蕾", "to": "施育", "value": 85.0, "title": "施文蕾 → 施育\\n金额: 85.0万元 (1笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "施育", "to": "钱国良", "value": 85.0, "title": "施育 → 钱国良\\n金额: 85.0万元 (1笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "万联证券股份有限公司（客户）－广东", "to": "滕雳", "value": 81.586062, "title": "万联证券股份有限公司（客户）－广东 → 滕雳\\n金额: 81.6万元 (3笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "滕雳", "to": "万联证券股份有限公司（客户）－广东", "value": 80.1, "title": "滕雳 → 万联证券股份有限公司（客户）－广东\\n金额: 80.1万元 (10笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海裕达实业有限公司", "to": "施承天", "value": 71.50961000000005, "title": "上海裕达实业有限公司 → 施承天\\n金额: 71.5万元 (152笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "申万宏源证券有限公司（信用客户）", "to": "滕雳", "value": 63.191933, "title": "申万宏源证券有限公司（信用客户） → 滕雳\\n金额: 63.2万元 (12笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海卫星装备研究所", "to": "施承天", "value": 55.393912, "title": "上海卫星装备研究所 → 施承天\\n金额: 55.4万元 (101笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "施承天", "to": "支付宝（中国）网络技术有限公司", "value": 45.2461, "title": "施承天 → 支付宝（中国）网络技术有限公司\\n金额: 45.2万元 (57笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "施灵", "to": "上海闵星汽车服务有限公司", "value": 44.039513, "title": "施灵 → 上海闵星汽车服务有限公司\\n金额: 44.0万元 (1笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "支付宝（中国）网络技术有限公司", "to": "施承天", "value": 40.635242, "title": "支付宝（中国）网络技术有限公司 → 施承天\\n金额: 40.6万元 (17笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "滕雳", "to": "支付宝（中国）网络技术有限公司", "value": 38.54283500000004, "title": "滕雳 → 支付宝（中国）网络技术有限公司\\n金额: 38.5万元 (394笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海市公积金管理中心(房改资金)", "to": "滕雳", "value": 32.260946999999994, "title": "上海市公积金管理中心(房改资金) → 滕雳\\n金额: 32.3万元 (1笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "施灵", "to": "深圳市财付通支付科技有限公司", "value": 24.676932999999995, "title": "施灵 → 深圳市财付通支付科技有限公司\\n金额: 24.7万元 (389笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "财付通支付科技有限公司", "to": "施承天", "value": 24.498745999999997, "title": "财付通支付科技有限公司 → 施承天\\n金额: 24.5万元 (9笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "李玉川", "to": "施承天", "value": 24.0088, "title": "李玉川 → 施承天\\n金额: 24.0万元 (13笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "滕雳", "to": "东方证券股份有限公司(客户)", "value": 22.43, "title": "滕雳 → 东方证券股份有限公司(客户)\\n金额: 22.4万元 (27笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "滕云", "to": "滕雳", "value": 20.5, "title": "滕云 → 滕雳\\n金额: 20.5万元 (2笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "施承天", "to": "李卓慧", "value": 20.0, "title": "施承天 → 李卓慧\\n金额: 20.0万元 (5笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "施灵", "to": "施文蕾", "value": 20.0, "title": "施灵 → 施文蕾\\n金额: 20.0万元 (4笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "施文蕾", "to": "施灵", "value": 20.0, "title": "施文蕾 → 施灵\\n金额: 20.0万元 (1笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "施灵", "to": "吴富贵", "value": 18.523526999999998, "title": "施灵 → 吴富贵\\n金额: 18.5万元 (4笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "嘉兴市演润商贸有限公司", "to": "施灵", "value": 18.356234, "title": "嘉兴市演润商贸有限公司 → 施灵\\n金额: 18.4万元 (1笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海闵锐劳务服务有限公司", "to": "施育", "value": 16.729212000000004, "title": "上海闵锐劳务服务有限公司 → 施育\\n金额: 16.7万元 (42笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "施灵", "to": "现金", "value": 16.4264, "title": "施灵 → 现金\\n金额: 16.4万元 (4笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}, {"from": "上海市浦泾中学", "to": "滕雳", "value": 16.057716999999997, "title": "上海市浦泾中学 → 滕雳\\n金额: 16.1万元 (41笔)", "arrows": "to", "color": {"color": "#00d2ff", "opacity": 0.8}, "smooth": {"type": "curvedCW", "roundness": 0.2}}]);
+
+        // 网络配置
+        var container = document.getElementById('network');
+        var data = {
+            nodes: nodes,
+            edges: edges
+        };
+        var options = {
+            nodes: {
+                shape: 'dot',
+                borderWidth: 2,
+                shadow: true,
+                font: {
+                    color: '#fff',
+                    size: 14,
+                    face: 'Microsoft YaHei'
+                }
+            },
+            edges: {
+                width: 2,
+                shadow: true,
+                smooth: {
+                    type: 'curvedCW',
+                    roundness: 0.2
+                }
+            },
+            groups: {
+                core: {
+                    color: {
+                        background: '#ff6b6b',
+                        border: '#c0392b',
+                        highlight: {
+                            background: '#e74c3c',
+                            border: '#c0392b'
+                        }
+                    },
+                    font: { color: '#ffffff' }
+                },
+                company: {
+                    color: {
+                        background: '#9b59b6',
+                        border: '#8e44ad',
+                        highlight: {
+                            background: '#8e44ad',
+                            border: '#7d3c98'
+                        }
+                    },
+                    font: { color: '#ffffff' },
+                    shape: 'box'
+                },
+                involved_company: {
+                    color: {
+                        background: '#ff9800',
+                        border: '#e65100',
+                        highlight: {
+                            background: '#ffa726',
+                            border: '#fb8c00'
+                        }
+                    },
+                    font: { color: '#ffffff', size: 14 },
+                    shape: 'box',
+                    shadow: {
+                        enabled: true,
+                        color: 'rgba(255,152,0,0.5)',
+                        size: 10
+                    },
+                    borderWidth: 3
+                },
+                other: {
+                    color: {
+                        background: '#4ecdc4',
+                        border: '#1abc9c',
+                        highlight: {
+                            background: '#1abc9c',
+                            border: '#16a085'
+                        }
+                    }
+                }
+            },
+            physics: {
+                stabilization: {
+                    iterations: 300,
+                    fit: true
+                },
+                barnesHut: {
+                    gravitationalConstant: -5000,
+                    springLength: 200,
+                    springConstant: 0.01,
+                    centralGravity: 0.3
+                }
+            },
+            interaction: {
+                hover: true,
+                tooltipDelay: 100,
+                navigationButtons: true,
+                keyboard: true
+            }
+        };
+
+        var network = new vis.Network(container, data, options);
+
+        // 点击事件
+        network.on('click', function (params) {
+            if (params.nodes.length > 0) {
+                var nodeId = params.nodes[0];
+                console.log('点击节点:', nodeId);
+            }
+        });
+    </script>
+
+    <div style="max-width: 1000px; margin: 40px auto; padding: 40px; background: #fff; border-radius: 8px; color: #333;">
+        <h2 style="text-align:center; margin-bottom:30px; border-bottom:2px solid #eee; padding-bottom:10px;">📄 详细核查报告内容</h2>
+        <style>
+            .page { padding: 0; box-shadow: none; margin-bottom: 30px; }
+            .section-title { color: #2c3e50; border-bottom: 2px solid #3498db; margin-top: 40px; }
+            table { width: 100%; border-collapse: collapse; margin: 15px 0; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+            th { background-color: #f8f9fa; }
+        </style>
+        
+    <div class="page">
+        <h1>关于施承天、滕雳、施灵等4人等信息查询结果分析报告</h1>
+        <div class="section-title">一、前言</div>
+        <p>本次核查工作针对 施承天, 滕雳, 施灵, 施育 等 4 名核心人员及 上海通耀机械有限公司, 上海派尼科技实业股份有限公司, 上海派尼斯机电技术有限公司 等 3 家涉案公司的资金流向进行了全面分析。</p>
+        <p>核查内容涵盖银行账户流水、关联资产信息及外部查询结果。共清洗分析交易记录 55988 条，发现重要疑点 5 个。</p>
+    </div><div class="page"><div class="section-title">二、家庭资产收入情况及数据分析</div><div class="subsection-title">【施承天、施灵、滕雳 家庭情况】</div><p style="font-weight:bold; margin-top:10px;">[成员: 施承天]</p><p><strong>1. 基础收支</strong>: 总流入 ¥505.20万 (工资性收入: ¥172.51万)，总流出 ¥509.24万。</p><p style="text-indent: 4em;">(分年度工资: 2015年: ¥2.96万; 2016年: ¥9.80万; 2017年: ¥14.65万; 2018年: ¥16.35万; 2019年: ¥18.81万; 2020年: ¥20.32万; 2021年: ¥20.75万; 2022年: ¥27.03万; 2023年: ¥31.29万; 2024年: ¥10.55万)</p><p><strong>2. 名下资产</strong>: 房产 4 套，车辆 0 辆。</p><p><strong>3. 金融资产</strong>: 持有实际主力银行卡 <strong>2</strong> 张。理财购买总额 ¥141.42万。</p><table><thead><tr><th>序号</th><th>银行</th><th>卡号</th><th>状态</th><th>余额</th></tr></thead><tbody><tr><td>1</td><td>列名缺失</td><td>6222620110021733499</td><td>正常</td><td>¥0.00</td></tr><tr><td>2</td><td>列名缺失</td><td>1075881018000001</td><td>正常</td><td>¥0.00</td></tr></tbody></table><p><strong>4. 主要交易对手</strong>:<br>来源: 未知/内部户(¥112.50万), 上海裕达实业有限公司(¥71.51万), 上海卫星装备研究所(¥55.39万), 支付宝（中国）网络技术有限公司(¥40.64万), 应付代收业务款项 - 代付业务专户(¥38.80万)<br>去向: 未知/内部户(¥105.68万), 暂收结算款项－代销理财资金归集户(¥66.00万), 施灵(¥56.00万), 支付宝（中国）网络技术有限公司(¥45.25万), 蚂蚁（杭州）基金销售有限公司(¥25.00万)</p><p style="font-weight:bold; margin-top:10px;">[成员: 施灵]</p><p><strong>1. 基础收支</strong>: 总流入 ¥8700.66万 (工资性收入: ¥669.01万)，总流出 ¥8724.30万。</p><p style="text-indent: 4em;">(分年度工资: 2006年: ¥3.00万; 2007年: ¥1.00万; 2010年: ¥11.52万; 2011年: ¥23.52万; 2012年: ¥39.48万; 2014年: ¥5,585.30; 2015年: ¥29.63万; 2016年: ¥55.66万; 2017年: ¥83.75万; 2018年: ¥63.83万; 2019年: ¥77.38万; 2020年: ¥91.01万; 2021年: ¥51.25万; 2022年: ¥49.96万; 2023年: ¥48.46万; 2024年: ¥39.00万)</p><p><strong>2. 名下资产</strong>: 房产 0 套，车辆 1 辆。</p><p><strong>3. 金融资产</strong>: 持有实际主力银行卡 <strong>12</strong> 张。理财购买总额 ¥3269.62万。</p><table><thead><tr><th>序号</th><th>银行</th><th>卡号</th><th>状态</th><th>余额</th></tr></thead><tbody><tr><td>1</td><td>列名缺失</td><td>62225801103498408</td><td>正常</td><td>¥0.00</td></tr><tr><td>2</td><td>列名缺失</td><td>121307412800001</td><td>正常</td><td>¥0.00</td></tr><tr><td>3</td><td>列名缺失</td><td>6222600110030674381</td><td>正常</td><td>¥0.00</td></tr><tr><td>4</td><td>列名缺失</td><td>0202014432688584</td><td>正常</td><td>¥0.00</td></tr><tr><td>5</td><td>列名缺失</td><td>3568570031209877</td><td>正常</td><td>¥0.00</td></tr><tr><td>6</td><td>列名缺失</td><td>6222530110973315</td><td>正常</td><td>¥0.00</td></tr><tr><td>7</td><td>列名缺失</td><td>6226660605526827</td><td>正常</td><td>¥0.00</td></tr><tr><td>8</td><td>列名缺失</td><td>6226720648327292</td><td>正常</td><td>¥0.00</td></tr><tr><td>9</td><td>列名缺失</td><td>6217680203254821</td><td>正常</td><td>¥0.00</td></tr><tr><td>10</td><td>列名缺失</td><td>6222600110033766184</td><td>正常</td><td>¥0.00</td></tr></tbody></table><p><strong>4. 主要交易对手</strong>:<br>来源: 未知/内部户(¥3702.02万), -(¥1200.78万), 上海航天化工应用研究所(¥518.08万), 长信基金管理有限责任公司(¥119.25万), 代发工资内部户(¥78.52万)<br>去向: 未知/内部户(¥3584.36万), -(¥1164.15万), 暂收结算款项－代销理财资金归集户(¥236.54万), 长信基金管理有限责任公司(¥119.18万), 理财/结构性存款认/申购款待上划户(¥79.10万)</p><p style="font-weight:bold; margin-top:10px;">[成员: 滕雳]</p><p><strong>1. 基础收支</strong>: 总流入 ¥1204.36万 (工资性收入: ¥316.47万)，总流出 ¥1252.76万。</p><p style="text-indent: 4em;">(分年度工资: 2003年: ¥3.75万; 2004年: ¥4.43万; 2005年: ¥4.96万; 2006年: ¥5.89万; 2007年: ¥6.64万; 2008年: ¥14.88万; 2009年: ¥7.71万; 2013年: ¥4,500.00; 2014年: ¥6,000.00; 2015年: ¥97.13万; 2016年: ¥26.23万; 2017年: ¥15.50万; 2018年: ¥15.35万; 2019年: ¥13.53万; 2020年: ¥16.29万; 2021年: ¥18.31万; 2022年: ¥22.12万; 2023年: ¥28.80万; 2024年: ¥13.90万)</p><p><strong>2. 名下资产</strong>: 房产 1 套，车辆 1 辆。</p><p><strong>3. 金融资产</strong>: 持有实际主力银行卡 <strong>3</strong> 张。理财购买总额 ¥428.06万。</p><table><thead><tr><th>序号</th><th>银行</th><th>卡号</th><th>状态</th><th>余额</th></tr></thead><tbody><tr><td>1</td><td>列名缺失</td><td>62225801127469708</td><td>正常</td><td>¥0.00</td></tr><tr><td>2</td><td>列名缺失</td><td>43515309406800101</td><td>正常</td><td>¥0.00</td></tr><tr><td>3</td><td>列名缺失</td><td>4218705559173467</td><td>正常</td><td>¥0.00</td></tr></tbody></table><p><strong>4. 主要交易对手</strong>:<br>来源: 未知/内部户(¥421.76万), 待清算存管业务资金户(¥98.82万), 上海市浦东新区财政局(¥88.06万), 万联证券股份有限公司（客户）－广东(¥81.59万), 申万宏源证券有限公司（信用客户）(¥63.19万)<br>去向: 未知/内部户(¥407.85万), 万联证券股份有限公司（客户）(¥130.19万), 待清算存管业务资金户(¥127.61万), 万联证券股份有限公司（客户）－广东(¥80.10万), 施灵(¥51.00万)</p><div class="subsection-title">【施育 个人情况】</div><p><strong>1. 基础收支</strong>: 总流入 ¥358.26万 (工资性收入: ¥55.69万)，总流出 ¥329.67万。</p><p style="text-indent: 4em;">(分年度工资: 2011年: ¥344.00; 2012年: ¥4,562.00; 2013年: ¥6,811.10; 2014年: ¥9,335.15; 2015年: ¥3.70万; 2016年: ¥4.22万; 2017年: ¥4,922.50; 2018年: ¥1.53万; 2019年: ¥6.82万; 2020年: ¥7.31万; 2021年: ¥8.27万; 2022年: ¥9.25万; 2023年: ¥10.16万; 2024年: ¥1.83万)</p><p><strong>2. 名下资产</strong>: 房产 1 套，车辆 0 辆。</p><p><strong>3. 金融资产</strong>: 持有实际主力银行卡 <strong>2</strong> 张。理财购买总额 ¥3.66万。</p><table><thead><tr><th>序号</th><th>银行</th><th>卡号</th><th>状态</th><th>余额</th></tr></thead><tbody><tr><td>1</td><td>列名缺失</td><td>6222600110044699036</td><td>正常</td><td>¥0.00</td></tr><tr><td>2</td><td>列名缺失</td><td>6228410030001786211</td><td>正常</td><td>¥0.00</td></tr></tbody></table><p><strong>4. 主要交易对手</strong>:<br>来源: 未知/内部户(¥153.53万), 施文蕾(¥85.00万), 上海闵锐劳务服务有限公司(¥16.73万), 上海市公积金管理中心(房改资金)(¥10.84万), 上海支点人力资源有限公司闵行分公司(¥9.35万)<br>去向: 未知/内部户(¥161.66万), 钱国良(¥85.00万), 施文蕾(¥15.60万), 滕雳(¥10.00万), 施灵(¥10.00万)</p><div class="subsection-title">【家庭数据汇总分析】</div><p><strong>家庭总真实收入(估算)</strong>: ¥4493.41万。</p></div><div class="page"><div class="section-title">三、公司资金分析</div><div class="subsection-title">【上海通耀机械有限公司】</div><p><strong>1. 资金概况</strong>: 累计进账 ¥1.47万，累计支出 ¥799.00。</p><p><strong>2. 与核查人员往来</strong>: 未发现直接资金往来。</p><p><strong>3. 主要资金去向</strong>: 未知/内部户(¥598.00), 上海交隽企业管理咨询中心(¥100.00), 上海派尼斯机电技术有限公司(¥100.00)</p><div class="subsection-title">【上海派尼科技实业股份有限公司】</div><p><strong>1. 资金概况</strong>: 累计进账 ¥24.38亿，累计支出 ¥23.60亿。</p><p><strong>2. 与核查人员往来</strong>: 未发现直接资金往来。</p><p><strong>3. 主要资金去向</strong>: 安徽派尼精密机械制造有限公司(¥2.00亿), 未知/内部户(¥1.80亿), ZH072011004000Y01产品实时申购户(¥8613.33万)</p><div class="subsection-title">【上海派尼斯机电技术有限公司】</div><p><strong>1. 资金概况</strong>: 累计进账 ¥7347.40万，累计支出 ¥7179.45万。</p><p><strong>2. 与核查人员往来</strong>: 未发现直接资金往来。</p><p><strong>3. 主要资金去向</strong>: 未知/内部户(¥1367.62万), 上海罗肯仕贸易发展有限公司(¥1134.92万), 上海派尼科技实业有限公司(¥808.42万)</p></div><div class="page"><div class="section-title">四、结论与主要疑点</div><p><strong>1. 隐形资产嫌疑</strong>: 发现相关交易。</p><ul><li>施灵: 2022-06-26 支出 ¥44.04万 (对手方: 上海闵星汽车服务有限公司)</li><li>上海派尼科技实业股份有限公司: 2015-07-30 支出 ¥24.36万 (对手方: 上海东昌汽车服务有限公司)</li><li>上海派尼科技实业股份有限公司: 2015-08-05 支出 ¥10.10万 (对手方: 上海华星鸿和汽车销售服务有限公司)</li><li>上海派尼科技实业股份有限公司: 2017-08-07 支出 ¥24.50万 (对手方: 上海绿地徐捷汽车销售服务有限公司)</li><li>上海派尼科技实业股份有限公司: 2018-09-17 支出 ¥21.10万 (对手方: 上海浦江九隆汽车销售服务有限公司)</li></ul></div>
+    </div>
+    </body>
+
+</html>

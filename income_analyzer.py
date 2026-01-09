@@ -100,7 +100,7 @@ def _detect_regular_non_salary(
     all_transactions: Dict[str, pd.DataFrame],
     core_persons: List[str],
     min_occurrences: int = 3,
-    min_amount: float = 3000
+    min_amount: float = config.INCOME_REGULAR_MIN
 ) -> List[Dict]:
     """
     检测规律性非工资收入
@@ -201,7 +201,7 @@ def _detect_regular_non_salary(
                                 'cv': cv,
                                 'date_range': (min(dates), max(dates)),
                                 'possible_type': _guess_income_type(cp_str, mean_amt),
-                                'risk_level': 'high' if mean_amt >= 20000 else 'medium' # 调高阈值
+                                'risk_level': 'high' if mean_amt >= config.INCOME_LARGE_PERSONAL_MIN else 'medium' # 调高阈值
                             })
     
     # 按金额排序
@@ -217,7 +217,7 @@ def _guess_income_type(counterparty: str, amount: float) -> str:
     
     # 个人转账（2-4个汉字）
     if re.match(r'^[\u4e00-\u9fa5]{2,4}$', counterparty):
-        if amount >= 5000:
+        if amount >= config.LOAN_MIN_AMOUNT:
             return '个人大额转入（需关注）'
         else:
             return '个人转入'
@@ -236,7 +236,7 @@ def _guess_income_type(counterparty: str, amount: float) -> str:
 def _detect_individual_income(
     all_transactions: Dict[str, pd.DataFrame],
     core_persons: List[str],
-    min_amount: float = 10000
+    min_amount: float = config.INCOME_UNKNOWN_SOURCE_MIN
 ) -> List[Dict]:
     """
     检测来自个人的大额收入
@@ -275,7 +275,7 @@ def _detect_individual_income(
                     'date': row['date'],
                     'amount': row['income'],
                     'description': row.get('description', ''),
-                    'risk_level': 'high' if row['income'] >= 50000 else 'medium'
+                    'risk_level': 'high' if row['income'] >= config.INCOME_HIGH_RISK_MIN else 'medium'
                 })
     
     # 按金额排序
@@ -288,7 +288,7 @@ def _detect_individual_income(
 def _detect_unknown_income(
     all_transactions: Dict[str, pd.DataFrame],
     core_persons: List[str],
-    min_amount: float = 50000
+    min_amount: float = config.INCOME_HIGH_RISK_MIN
 ) -> List[Dict]:
     """
     检测来源不明的大额收入（增强版）
@@ -483,7 +483,7 @@ def _identify_periodic_deposit_patterns(
 def _detect_large_single_income(
     all_transactions: Dict[str, pd.DataFrame],
     core_persons: List[str],
-    threshold: float = 100000
+    threshold: float = config.INCOME_VERY_LARGE_MIN
 ) -> List[Dict]:
     """
     检测大额单笔收入（≥10万元）
@@ -562,7 +562,7 @@ def _detect_same_source_multi(
     all_transactions: Dict[str, pd.DataFrame],
     core_persons: List[str],
     min_count: int = 5,
-    min_total: float = 50000
+    min_total: float = config.INCOME_HIGH_RISK_MIN
 ) -> List[Dict]:
     """
     检测同源多次收入
@@ -627,7 +627,7 @@ def _detect_same_source_multi(
             for cp, stats in cp_stats.items():
                 if stats['count'] >= min_count and stats['total'] >= min_total:
                     # 判断风险等级
-                    risk_level = 'high' if stats['total'] >= 100000 else 'medium'
+                    risk_level = 'high' if stats['total'] >= config.INCOME_VERY_LARGE_MIN else 'medium'
                     
                     # 推测类型
                     import re

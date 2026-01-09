@@ -7,7 +7,7 @@
 
 import os
 import pandas as pd
-from typing import Dict, List, Tuple
+from typing import Dict, List
 from datetime import datetime
 
 import utils
@@ -136,18 +136,6 @@ def analyze_fund_penetration(
     logger.info(f'  公司→公司: {len(results["company_to_company"])} 笔')
     
     return results
-    
-    # 5. 生成汇总统计
-    results['summary'] = _generate_summary(results)
-    
-    logger.info('')
-    logger.info('资金穿透分析完成')
-    logger.info(f'  个人→公司: {len(results["person_to_company"])} 笔')
-    logger.info(f'  公司→个人: {len(results["company_to_person"])} 笔')
-    logger.info(f'  个人→个人: {len(results["person_to_person"])} 笔')
-    logger.info(f'  公司→公司: {len(results["company_to_company"])} 笔')
-    
-    return results
 
 
 def _extract_company_keywords(company_name: str) -> List[str]:
@@ -250,7 +238,8 @@ def generate_penetration_report(results: Dict, output_dir: str) -> str:
                 date_str = item['日期'].strftime('%Y-%m-%d') if hasattr(item['日期'], 'strftime') else str(item['日期'])[:10]
                 amount = item['收入'] if item['收入'] > 0 else item['支出']
                 direction = '收入' if item['收入'] > 0 else '支出'
-                f.write(f'{i}. [{date_str}] {item["发起方"]} → {item["接收方"]}: {utils.format_currency(amount)}({direction}), 摘要:{item["摘要"][:20]}\n')
+                desc = utils.safe_str(item['摘要'], default='转账')[:20]
+                f.write(f'{i}. [{date_str}] {item["发起方"]} → {item["接收方"]}: {utils.format_currency(amount)}({direction}), 摘要:{desc}\n')
             if len(results['person_to_company']) > 20:
                 f.write(f'... 共 {len(results["person_to_company"])} 笔，仅显示前20笔\n')
             f.write('\n')
@@ -262,7 +251,8 @@ def generate_penetration_report(results: Dict, output_dir: str) -> str:
                 date_str = item['日期'].strftime('%Y-%m-%d') if hasattr(item['日期'], 'strftime') else str(item['日期'])[:10]
                 amount = item['收入'] if item['收入'] > 0 else item['支出']
                 direction = '收入' if item['收入'] > 0 else '支出'
-                f.write(f'{i}. [{date_str}] {item["发起方"]} → {item["接收方"]}: {utils.format_currency(amount)}({direction}), 摘要:{item["摘要"][:20]}\n')
+                desc = utils.safe_str(item['摘要'], default='转账')[:20]
+                f.write(f'{i}. [{date_str}] {item["发起方"]} → {item["接收方"]}: {utils.format_currency(amount)}({direction}), 摘要:{desc}\n')
             if len(results['company_to_person']) > 20:
                 f.write(f'... 共 {len(results["company_to_person"])} 笔，仅显示前20笔\n')
             f.write('\n')
@@ -274,7 +264,8 @@ def generate_penetration_report(results: Dict, output_dir: str) -> str:
                 date_str = item['日期'].strftime('%Y-%m-%d') if hasattr(item['日期'], 'strftime') else str(item['日期'])[:10]
                 amount = item['收入'] if item['收入'] > 0 else item['支出']
                 direction = '收入' if item['收入'] > 0 else '支出'
-                f.write(f'{i}. [{date_str}] {item["发起方"]} → {item["接收方"]}: {utils.format_currency(amount)}({direction}), 摘要:{item["摘要"][:20]}\n')
+                desc = utils.safe_str(item['摘要'], default='转账')[:20]
+                f.write(f'{i}. [{date_str}] {item["发起方"]} → {item["接收方"]}: {utils.format_currency(amount)}({direction}), 摘要:{desc}\n')
             if len(results['person_to_person']) > 20:
                 f.write(f'... 共 {len(results["person_to_person"])} 笔，仅显示前20笔\n')
             f.write('\n')
@@ -286,7 +277,8 @@ def generate_penetration_report(results: Dict, output_dir: str) -> str:
                 date_str = item['日期'].strftime('%Y-%m-%d') if hasattr(item['日期'], 'strftime') else str(item['日期'])[:10]
                 amount = item['收入'] if item['收入'] > 0 else item['支出']
                 direction = '收入' if item['收入'] > 0 else '支出'
-                f.write(f'{i}. [{date_str}] {item["发起方"]} → {item["接收方"]}: {utils.format_currency(amount)}({direction}), 摘要:{item["摘要"][:20]}\n')
+                desc = utils.safe_str(item['摘要'], default='转账')[:20]
+                f.write(f'{i}. [{date_str}] {item["发起方"]} → {item["接收方"]}: {utils.format_currency(amount)}({direction}), 摘要:{desc}\n')
             if len(results['company_to_company']) > 20:
                 f.write(f'... 共 {len(results["company_to_company"])} 笔，仅显示前20笔\n')
     

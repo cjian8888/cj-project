@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-资金流向可视化模块
+资金流向可视化模块 (重构版)
 生成Mermaid格式和HTML格式的资金流向图
 让审计人员更直观地看到资金流向
+
+重构说明 (2026-01-09):
+- 将HTML模板提取到外部文件 templates/flow_visualization.html
+- 添加 _prepare_graph_data 函数分离数据准备逻辑
+- 代码更清晰，模板修改更方便
 """
 
 import os
+import json
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from collections import defaultdict
 import pandas as pd
+import config
 import utils
 
 logger = utils.setup_logger(__name__)
@@ -112,8 +119,8 @@ def _generate_mermaid_flow(
             amount = stats['total']
             count = stats['count']
             
-            if amount >= 10000:  # 只显示大于1万的
-                amount_str = f"{amount/10000:.1f}万" if amount >= 10000 else f"{amount:.0f}元"
+            if amount >= config.DISPLAY_AMOUNT_THRESHOLD:  # 只显示大于阈值的
+                amount_str = f"{amount/config.UNIT_WAN:.1f}万" if amount >= config.UNIT_WAN else f"{amount:.0f}元"
                 f.write(f'    {from_id} -->|"{amount_str} ({count}笔)"| {to_id}\n')
                 edge_count += 1
         
@@ -150,7 +157,6 @@ def _generate_mermaid_flow(
                 cp = pair['counterparty']
                 loan_amt = pair['loan_amount']
                 repay_amt = pair['repay_amount']
-                rate = pair.get('annual_rate', 0)
                 
                 person_id = _safe_node_id(person)
                 cp_id = _safe_node_id(f"借_{cp}")
@@ -201,7 +207,6 @@ def _generate_mermaid_flow(
                 person = item['person']
                 cp = item['counterparty']
                 amount = item['amount']
-                inc_type = item['type']
                 
                 person_id = _safe_node_id(person)
                 cp_id = _safe_node_id(f"风险_{cp}_{i}")
@@ -254,14 +259,18 @@ def _generate_html_visualization(
     income_results: Dict,
     output_dir: str
 ) -> str:
-    """生成HTML交互式可视化"""
+    """
+    生成HTML交互式可视化（重构版）
+    使用外部模板文件，逻辑与样式分离
+    """
+    from template_engine import render_template
     
     html_path = os.path.join(output_dir, '资金流向可视化.html')
     
     # 计算资金流向统计
     flow_stats = _calculate_flow_stats(all_transactions, core_persons)
     
-    # 获取涉案公司列表（从main.py传入，这里通过loan_results获取）
+    # 获取涉案公司列表
     involved_companies = []
     for key in all_transactions.keys():
         base_name = os.path.basename(key).replace('_合并流水', '').replace('.xlsx', '')
@@ -269,39 +278,77 @@ def _generate_html_visualization(
             involved_companies.append(base_name)
     
     # 准备节点和边的数据
+    nodes, edges, edge_stats = _prepare_graph_data(
+        flow_stats, core_persons, involved_companies
+    )
+    
+    # 准备节点JSON
+    nodes_json = json.dumps([
+        {
+            'id': n['id'],
+            'label': n['label'],
+            'group': n['group'],
+            'size': n['size'],
+            'font': {'color': '#fff', 'size': 14}
+        } for n in nodes
+    ], ensure_ascii=False)
+    
+    # 准备边JSON
+    edges_json = json.dumps([
+        {
+            'from': e['from'],
+            'to': e['to'],
+            'value': e['value'],
+            'title': e['title'],
+            'arrows': 'to',
+            'color': {'color': '#00d2ff', 'opacity': 0.8},
+            'smooth': {'type': 'curvedCW', 'roundness': 0.2}
+        } for e in edges
+    ], ensure_ascii=False)
+    
+    # 渲染模板
+    try:
+        html_content = render_template('flow_visualization.html', {
+            'GENERATE_TIME': datetime.now().strftime("%Y年%m月%d日 %H:%M:%S"),
+            'NODE_COUNT': len(nodes),
+            'EDGE_COUNT': len(edges),
+            'CORE_PERSON_COUNT': len(core_persons),
+            'CORE_PERSON_NAMES': ', '.join(core_persons),
+            'HIGH_RISK_COUNT': len(income_results.get('high_risk', [])),
+            'MEDIUM_RISK_COUNT': len(income_results.get('medium_risk', [])),
+            'LOAN_PAIR_COUNT': len(loan_results.get('loan_pairs', [])),
+            'NO_REPAY_COUNT': len(loan_results.get('no_repayment_loans', [])),
+            'CORE_EDGE_COUNT': edge_stats['core'],
+            'COMPANY_EDGE_COUNT': edge_stats['company'],
+            'OTHER_EDGE_COUNT': edge_stats['other'],
+            'NODES_JSON': nodes_json,
+            'EDGES_JSON': edges_json
+        })
+    except FileNotFoundError:
+        # 如果模板文件不存在，使用内置简化版
+        logger.warning('模板文件不存在，使用内置简化版')
+        html_content = _generate_fallback_html(nodes_json, edges_json, core_persons)
+    
+    with open(html_path, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    
+    logger.info(f'  HTML可视化已生成: {html_path}')
+    return html_path
+
+
+def _prepare_graph_data(flow_stats: Dict, core_persons: List[str], 
+                        involved_companies: List[str]) -> Tuple[List, List, Dict]:
+    """
+    准备图形数据（节点和边）
+    
+    Returns:
+        (nodes, edges, edge_stats)
+    """
     nodes = []
     edges = []
     node_set = set()
     
-    # === 1. 添加核心人员节点（红色大节点）===
-    for person in core_persons:
-        nodes.append({
-            'id': person,
-            'label': person,
-            'group': 'core',
-            'size': 35,
-            'font': {'size': 16, 'color': '#ffffff'}
-        })
-        node_set.add(person)
-    
-    # === 2. 添加涉案公司节点（橙色方形大节点 - 突出显示）===
-    for company in involved_companies:
-        if company not in node_set:
-            # 公司名称截取显示
-            display_name = company[:8] + '...' if len(company) > 10 else company
-            nodes.append({
-                'id': company,
-                'label': f'🏢 {display_name}',  # 添加建筑物图标
-                'group': 'involved_company',     # 使用专门的涉案公司组
-                'size': 40,                      # 更大尺寸
-                'shape': 'box',                  # 方形
-                'font': {'size': 14, 'color': '#ffffff', 'bold': True},
-                'borderWidth': 3,
-                'shadow': True
-            })
-            node_set.add(company)
-    
-    # === 噪音过滤列表 ===
+    # 噪音过滤关键词
     NOISE_KEYWORDS = [
         '理财', '基金', '资产管理', '增利', '存管', '清算', '头寸', '备付',
         '代销', '保证金', '划转', '过渡', '暂挂', '待处理', '结息',
@@ -309,89 +356,90 @@ def _generate_html_visualization(
     ]
     
     def is_noise_node(name):
-        """判断是否为噪音节点（理财产品、银行内部账户等）"""
-        for kw in NOISE_KEYWORDS:
-            if kw in name:
-                return True
-        return False
+        return any(kw in name for kw in NOISE_KEYWORDS)
     
-    # === 3. 筛选边：分层策略 ===
+    # 1. 添加核心人员节点
+    for person in core_persons:
+        nodes.append({
+            'id': person,
+            'label': person,
+            'group': 'core',
+            'size': 35
+        })
+        node_set.add(person)
+    
+    # 2. 添加涉案公司节点
+    for company in involved_companies:
+        if company not in node_set:
+            display_name = company[:8] + '...' if len(company) > 10 else company
+            nodes.append({
+                'id': company,
+                'label': f'🏢 {display_name}',
+                'group': 'involved_company',
+                'size': 40
+            })
+            node_set.add(company)
+    
+    # 3. 筛选并分类边
     all_sorted_flows = sorted(flow_stats.items(), key=lambda x: -x[1]['total'])
     
-    # 3.1 核心人员之间的交易（最重要，全部保留）
-    core_to_core_edges = []
+    edge_data = []
     for (u, v), stats in all_sorted_flows:
-        if u in core_persons and v in core_persons:
-            core_to_core_edges.append(((u, v), stats))
-    
-    # 3.2 核心人员与涉案公司的交易（重要）
-    core_to_company_edges = []
-    for (u, v), stats in all_sorted_flows:
-        u_is_core = u in core_persons
-        v_is_core = v in core_persons
-        u_is_company = u in involved_companies
-        v_is_company = v in involved_companies
+        if is_noise_node(u) or is_noise_node(v):
+            continue
+            
+        # Determine node types
+        u_core = u in core_persons
+        v_core = v in core_persons
+        u_company = u in involved_companies
+        v_company = v in involved_companies
         
-        if (u_is_core and v_is_company) or (u_is_company and v_is_core):
-            core_to_company_edges.append(((u, v), stats))
-    
-    # 3.3 核心人员与外部个人/机构的交易（过滤噪音，保留大额）
-    core_to_other_edges = []
-    for (u, v), stats in all_sorted_flows:
-        u_is_core = u in core_persons
-        v_is_core = v in core_persons
+        # Check if it is an interaction between core entities (Person-Person, Person-Company, Company-Company)
+        is_core_interaction = (u_core or u_company) and (v_core or v_company)
         
-        # 只要一方是核心人员，另一方不是
-        if (u_is_core or v_is_core) and not (u_is_core and v_is_core):
-            other_party = v if u_is_core else u
-            # 跳过涉案公司（已在上面处理）
-            if other_party in involved_companies:
+        # Only filter by threshold if it is NOT a core interaction
+        # This ensures all connections between key entities are shown regardless of amount
+        if not is_core_interaction:
+            if stats['total'] < config.DISPLAY_AMOUNT_THRESHOLD:
                 continue
-            # 跳过噪音节点
-            if is_noise_node(other_party):
-                continue
-            # 金额阈值：5万以上
-            if stats['total'] >= 50000:
-                core_to_other_edges.append(((u, v), stats))
+        
+        if u_core and v_core:
+            edge_type = 'core'
+        elif u_company and v_company:
+            edge_type = 'company_inner'
+        elif u_company or v_company:
+            edge_type = 'company'
+        else:
+            edge_type = 'other'
+        
+        edge_data.append(((u, v), stats, edge_type))
     
-    # 3.4 涉案公司之间的交易
-    company_to_company_edges = []
-    for (u, v), stats in all_sorted_flows:
-        if u in involved_companies and v in involved_companies:
-            company_to_company_edges.append(((u, v), stats))
+    # 4. 限制边数量
+    # 核心人员间、涉案公司间的交易全部保留
+    core_edges = [e for e in edge_data if e[2] == 'core']
+    company_inner_edges = [e for e in edge_data if e[2] == 'company_inner']
     
-    # === 4. 合并边（按优先级，控制总数）===
-    final_edges_data = (
-        core_to_core_edges[:20] +           # 核心人员间：最多20条
-        core_to_company_edges[:20] +        # 核心-公司：最多20条
-        core_to_other_edges[:30] +          # 核心-外部：最多30条（已过滤噪音）
-        company_to_company_edges[:10]       # 公司间：最多10条
-    )
+    # 其他交易按金额排名限制数量
+    company_edges = [e for e in edge_data if e[2] == 'company'][:30]
+    other_edges = [e for e in edge_data if e[2] == 'other'][:30]
     
-    logger.info(f'  边统计: 核心间{len(core_to_core_edges)}, 核心-公司{len(core_to_company_edges)}, '
-                f'核心-外部{len(core_to_other_edges)}, 公司间{len(company_to_company_edges)}')
+    final_edges = core_edges + company_inner_edges + company_edges + other_edges
     
-    # === 5. 添加边和对手方节点 ===
-    for (from_node, to_node), stats in final_edges_data:
-        # 添加新节点
+    # 统计
+    edge_stats = {
+        'core': len(core_edges),
+        'company': len(company_inner_edges) + len(company_edges),
+        'other': len(other_edges)
+    }
+    
+    # 5. 添加边和新节点
+    for (from_node, to_node), stats, edge_type in final_edges:
         for node in [from_node, to_node]:
             if node not in node_set:
-                is_core = node in core_persons
-                is_company = node in involved_companies or '公司' in node or '有限' in node
-                
-                # 节点标签截取
+                is_company = '公司' in node or '有限' in node
                 label = node[:6] + '...' if len(node) > 8 else node
-                
-                # 确定节点类型
-                if is_core:
-                    group = 'core'
-                    size = 30
-                elif is_company:
-                    group = 'company'
-                    size = 25
-                else:
-                    group = 'other'
-                    size = 18
+                group = 'company' if is_company else 'other'
+                size = 25 if is_company else 18
                 
                 nodes.append({
                     'id': node,
@@ -401,361 +449,40 @@ def _generate_html_visualization(
                 })
                 node_set.add(node)
         
-        # 添加边（根据金额设置线条粗细）
         amount_wan = stats['total'] / 10000
-        width = min(1 + amount_wan / 10, 10)  # 1-10之间
-        
         edges.append({
             'from': from_node,
             'to': to_node,
             'value': amount_wan,
-            'width': width,
-            'title': f"{from_node} → {to_node}\\n金额: {amount_wan:.1f}万元 ({stats['count']}笔)",
-            'arrows': 'to'
+            'title': f"{from_node} → {to_node}\\n金额: {amount_wan:.1f}万元 ({stats['count']}笔)"
         })
     
-    # 生成HTML
-    html_content = f'''<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>资金流向可视化 - 纪检审计系统</title>
-    <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
-    <style>
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }}
-        body {{
-            font-family: 'Microsoft YaHei', Arial, sans-serif;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-            min-height: 100vh;
-            color: #fff;
-        }}
-        .header {{
-            background: rgba(255,255,255,0.1);
-            backdrop-filter: blur(10px);
-            padding: 20px;
-            text-align: center;
-            border-bottom: 1px solid rgba(255,255,255,0.1);
-        }}
-        .header h1 {{
-            font-size: 28px;
-            margin-bottom: 10px;
-            background: linear-gradient(90deg, #00d2ff, #3a7bd5);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }}
-        .header p {{
-            color: #aaa;
-            font-size: 14px;
-        }}
-        .container {{
-            display: flex;
-            height: calc(100vh - 100px);
-        }}
-        .sidebar {{
-            width: 300px;
-            background: rgba(255,255,255,0.05);
-            padding: 20px;
-            overflow-y: auto;
-        }}
-        .sidebar h3 {{
-            color: #00d2ff;
-            margin-bottom: 15px;
-            padding-bottom: 10px;
-            border-bottom: 1px solid rgba(255,255,255,0.1);
-        }}
-        .stat-card {{
-            background: rgba(255,255,255,0.1);
-            border-radius: 10px;
-            padding: 15px;
-            margin-bottom: 15px;
-        }}
-        .stat-card h4 {{
-            color: #fff;
-            font-size: 14px;
-            margin-bottom: 8px;
-        }}
-        .stat-card .value {{
-            font-size: 24px;
-            font-weight: bold;
-            color: #00d2ff;
-        }}
-        .stat-card .desc {{
-            font-size: 12px;
-            color: #888;
-            margin-top: 5px;
-        }}
-        .risk-high {{
-            border-left: 4px solid #ff4757;
-        }}
-        .risk-medium {{
-            border-left: 4px solid #ffa502;
-        }}
-        .legend {{
-            margin-top: 20px;
-        }}
-        .legend-item {{
-            display: flex;
-            align-items: center;
-            margin-bottom: 8px;
-        }}
-        .legend-color {{
-            width: 20px;
-            height: 20px;
-            border-radius: 50%;
-            margin-right: 10px;
-        }}
-        .network-container {{
-            flex: 1;
-            background: rgba(0,0,0,0.3);
-            border-radius: 10px;
-            margin: 10px;
-        }}
-        #network {{
-            width: 100%;
-            height: 100%;
-        }}
-        .tooltip {{
-            position: absolute;
-            background: rgba(0,0,0,0.9);
-            color: #fff;
-            padding: 10px;
-            border-radius: 5px;
-            font-size: 12px;
-            pointer-events: none;
-        }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>💰 资金流向可视化分析</h1>
-        <p>生成时间: {datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")} | 共 {len(nodes)} 个节点, {len(edges)} 条资金流向</p>
-    </div>
-    
-    <div class="container">
-        <div class="sidebar">
-            <h3>📊 数据概览</h3>
-            
-            <div class="stat-card">
-                <h4>核心人员</h4>
-                <div class="value">{len(core_persons)}</div>
-                <div class="desc">{', '.join(core_persons)}</div>
-            </div>
-            
-            <div class="stat-card risk-high">
-                <h4>🔴 高风险项目</h4>
-                <div class="value">{len(income_results.get('high_risk', []))}</div>
-                <div class="desc">建议优先核查</div>
-            </div>
-            
-            <div class="stat-card risk-medium">
-                <h4>🟡 中风险项目</h4>
-                <div class="value">{len(income_results.get('medium_risk', []))}</div>
-                <div class="desc">需酌情关注</div>
-            </div>
-            
-            <div class="stat-card">
-                <h4>借贷配对</h4>
-                <div class="value">{len(loan_results.get('loan_pairs', []))}</div>
-            </div>
-            
-            <div class="stat-card">
-                <h4>无还款借贷</h4>
-                <div class="value">{len(loan_results.get('no_repayment_loans', []))}</div>
-                <div class="desc">疑似利益输送</div>
-            </div>
-            
-            <h3>🎨 图例说明</h3>
-            <div class="legend">
-                <div class="legend-item">
-                    <div class="legend-color" style="background: #ff6b6b;"></div>
-                    <span>🔴 核心人员</span>
-                </div>
-                <div class="legend-item">
-                    <div class="legend-color" style="background: #ff9800; border-radius: 3px;"></div>
-                    <span>🏢 涉案公司（重点）</span>
-                </div>
-                <div class="legend-item">
-                    <div class="legend-color" style="background: #4ecdc4;"></div>
-                    <span>🔵 其他关联方</span>
-                </div>
-            </div>
-            
-            <h3 style="margin-top: 20px;">📊 资金流向统计</h3>
-            <p style="font-size: 12px; color: #888; line-height: 1.8;">
-                • 核心人员间: {len(core_to_core_edges)}笔<br>
-                • 公司间交易: {len(company_to_company_edges)}笔<br>
-                • 核心-外部: {len(core_to_other_edges)}笔<br>
-                • 线条越粗金额越大
-            </p>
-            
-            <h3 style="margin-top: 20px;">💡 操作提示</h3>
-            <p style="font-size: 12px; color: #888; line-height: 1.8;">
-                • 拖拽节点可调整位置<br>
-                • 滚轮缩放视图<br>
-                • 悬停查看交易详情<br>
-                • 导航按钮在右下角
-            </p>
-        </div>
-        
-        <div class="network-container">
-            <div id="network"></div>
-        </div>
-    </div>
-    
-    <script>
-        // 节点数据
-        var nodes = new vis.DataSet({json.dumps([
-            {
-                'id': n['id'],
-                'label': n['label'],
-                'group': n['group'],
-                'size': n['size'],
-                'font': {'color': '#fff', 'size': 14}
-            } for n in nodes
-        ], ensure_ascii=False)});
-        
-        // 边数据
-        var edges = new vis.DataSet({json.dumps([
-            {
-                'from': e['from'],
-                'to': e['to'],
-                'value': e['value'],
-                'title': e['title'],
-                'arrows': 'to',
-                'color': {'color': '#00d2ff', 'opacity': 0.8},
-                'smooth': {'type': 'curvedCW', 'roundness': 0.2}
-            } for e in edges
-        ], ensure_ascii=False)});
-        
-        // 网络配置
-        var container = document.getElementById('network');
-        var data = {{
-            nodes: nodes,
-            edges: edges
-        }};
-        var options = {{
-            nodes: {{
-                shape: 'dot',
-                borderWidth: 2,
-                shadow: true,
-                font: {{
-                    color: '#fff',
-                    size: 14,
-                    face: 'Microsoft YaHei'
-                }}
-            }},
-            edges: {{
-                width: 2,
-                shadow: true,
-                smooth: {{
-                    type: 'curvedCW',
-                    roundness: 0.2
-                }}
-            }},
-            groups: {{
-                core: {{
-                    color: {{
-                        background: '#ff6b6b',
-                        border: '#c0392b',
-                        highlight: {{
-                            background: '#e74c3c',
-                            border: '#c0392b'
-                        }}
-                    }},
-                    font: {{ color: '#ffffff' }}
-                }},
-                company: {{
-                    color: {{
-                        background: '#9b59b6',
-                        border: '#8e44ad',
-                        highlight: {{
-                            background: '#8e44ad',
-                            border: '#7d3c98'
-                        }}
-                    }},
-                    font: {{ color: '#ffffff' }},
-                    shape: 'box'
-                }},
-                involved_company: {{
-                    color: {{
-                        background: '#ff9800',
-                        border: '#e65100',
-                        highlight: {{
-                            background: '#ffa726',
-                            border: '#fb8c00'
-                        }}
-                    }},
-                    font: {{ color: '#ffffff', size: 14 }},
-                    shape: 'box',
-                    shadow: {{
-                        enabled: true,
-                        color: 'rgba(255,152,0,0.5)',
-                        size: 10
-                    }},
-                    borderWidth: 3
-                }},
-                other: {{
-                    color: {{
-                        background: '#4ecdc4',
-                        border: '#1abc9c',
-                        highlight: {{
-                            background: '#1abc9c',
-                            border: '#16a085'
-                        }}
-                    }}
-                }}
-            }},
-            physics: {{
-                stabilization: {{
-                    iterations: 300,
-                    fit: true
-                }},
-                barnesHut: {{
-                    gravitationalConstant: -5000,
-                    springLength: 200,
-                    springConstant: 0.01,
-                    centralGravity: 0.3
-                }}
-            }},
-            interaction: {{
-                hover: true,
-                tooltipDelay: 100,
-                navigationButtons: true,
-                keyboard: true
-            }}
-        }};
-        
-        var network = new vis.Network(container, data, options);
-        
-        // 点击事件
-        network.on('click', function(params) {{
-            if (params.nodes.length > 0) {{
-                var nodeId = params.nodes[0];
-                console.log('点击节点:', nodeId);
-            }}
-        }});
-    </script>
-</body>
-</html>
-'''
-    
-    with open(html_path, 'w', encoding='utf-8') as f:
-        f.write(html_content)
-    
-    logger.info(f'  HTML可视化已生成: {html_path}')
-    return html_path
+    return nodes, edges, edge_stats
+
+
+def _generate_fallback_html(nodes_json: str, edges_json: str, 
+                            core_persons: List[str]) -> str:
+    """生成备用HTML（当模板文件不存在时使用）"""
+    return f'''<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>资金流向</title>
+<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+<style>body{{margin:0;padding:0;}}#network{{width:100vw;height:100vh;}}</style>
+</head><body>
+<div id="network"></div>
+<script>
+var nodes = new vis.DataSet({nodes_json});
+var edges = new vis.DataSet({edges_json});
+var network = new vis.Network(document.getElementById('network'), 
+    {{nodes:nodes,edges:edges}}, {{physics:{{stabilization:{{iterations:200}}}}}});
+</script>
+</body></html>'''
 
 
 def _calculate_flow_stats(
     all_transactions: Dict[str, pd.DataFrame],
     core_persons: List[str]
 ) -> Dict:
-    """计算资金流向统计（修复版 - 支持中英文列名）"""
+    """计算资金流向统计（支持中英文列名）"""
     
     flow_stats = defaultdict(lambda: {'count': 0, 'total': 0})
     
@@ -766,78 +493,78 @@ def _calculate_flow_stats(
         'expense': ['expense', '支出(元)', '支出', '借方金额']
     }
     
-    def get_column_value(row, standard_name, columns_list):
+    def get_column_value(row, columns_list):
         """获取列值，支持多种列名"""
         for col_name in columns_list:
             if col_name in row.index:
                 return row.get(col_name, '')
         return ''
     
-    def has_column(df, standard_name, columns_list):
+    def has_column(df, columns_list):
         """检查是否存在某类列"""
         for col_name in columns_list:
             if col_name in df.columns:
                 return True
         return False
     
-    # 遍历所有实体的交易数据（包括个人和公司）
+    # 遍历所有实体的交易数据
     for entity_name, df in all_transactions.items():
         if df.empty:
             continue
         
-        # 检查是否有对手方列（中英文均可）
-        if not has_column(df, 'counterparty', COLUMN_MAP['counterparty']):
+        # 检查是否有对手方列
+        if not has_column(df, COLUMN_MAP['counterparty']):
             logger.debug(f'跳过 {entity_name}: 无对手方列')
             continue
         
-        # 1. 规范化源节点名称 (修复路径前缀导致无法匹配核心人员的问题)
-        # 从完整路径中提取文件名
+        # 规范化源节点名称
         base_name = os.path.basename(entity_name)
-        # 去除后缀和标识
         source_node = base_name.replace('_合并流水', '').replace('.xlsx', '')
         
         for _, row in df.iterrows():
-            # 获取对手方（支持中英文列名）
-            cp = str(get_column_value(row, 'counterparty', COLUMN_MAP['counterparty']))
-            
-            # 过滤无效对手方
-            if not cp or cp == 'nan' or len(cp) < 2:
+            # 获取对手方
+            counterparty = str(get_column_value(row, COLUMN_MAP['counterparty']))
+            if not counterparty or counterparty == 'nan':
                 continue
             
-            # 排除自己转自己
-            if cp in source_node or source_node in cp:
-                continue
+            # 获取金额
+            income = 0
+            expense = 0
             
-            # 获取收入（支持中英文列名）
-            income_val = get_column_value(row, 'income', COLUMN_MAP['income'])
-            income = float(income_val) if income_val and income_val != '' else 0
+            income_val = get_column_value(row, COLUMN_MAP['income'])
+            if income_val and str(income_val) != 'nan':
+                try:
+                    income = float(income_val)
+                except (ValueError, TypeError):
+                    income = 0
             
-            # 获取支出（支持中英文列名）
-            expense_val = get_column_value(row, 'expense', COLUMN_MAP['expense'])
-            expense = float(expense_val) if expense_val and expense_val != '' else 0
+            expense_val = get_column_value(row, COLUMN_MAP['expense'])
+            if expense_val and str(expense_val) != 'nan':
+                try:
+                    expense = float(expense_val)
+                except (ValueError, TypeError):
+                    expense = 0
             
-            # 收入：对手方 -> 当前实体
+            # 记录资金流向
             if income > 0:
-                flow_stats[(cp, source_node)]['count'] += 1
-                flow_stats[(cp, source_node)]['total'] += income
+                # 收入：对手方 -> 本人
+                flow_stats[(counterparty, source_node)]['count'] += 1
+                flow_stats[(counterparty, source_node)]['total'] += income
             
-            # 支出：当前实体 -> 对手方
             if expense > 0:
-                flow_stats[(source_node, cp)]['count'] += 1
-                flow_stats[(source_node, cp)]['total'] += expense
+                # 支出：本人 -> 对手方
+                flow_stats[(source_node, counterparty)]['count'] += 1
+                flow_stats[(source_node, counterparty)]['total'] += expense
     
-    logger.info(f'  资金流向统计: 共{len(flow_stats)}条边')
-    return flow_stats
+    return dict(flow_stats)
 
 
 def _safe_node_id(name: str) -> str:
     """生成安全的Mermaid节点ID"""
+    # 移除特殊字符，只保留字母、数字、中文
     import re
-    # 只保留字母、数字和中文
-    safe = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', name)
-    if not safe:
-        safe = 'node'
-    return safe[:20]  # 限制长度
-
-
-import json
+    safe_id = re.sub(r'[^\w\u4e00-\u9fa5]', '_', str(name))
+    # 确保不以数字开头
+    if safe_id and safe_id[0].isdigit():
+        safe_id = 'N_' + safe_id
+    return safe_id or 'unknown'

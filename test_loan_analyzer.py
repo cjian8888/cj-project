@@ -6,7 +6,7 @@
 """
 
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 import sys
 import os
 
@@ -14,7 +14,6 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import loan_analyzer
-import utils
 
 def create_test_data():
     """创建测试数据"""

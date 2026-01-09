@@ -7,7 +7,7 @@
 
 import os
 import glob
-from typing import Dict, List, Tuple
+from typing import Dict, List
 import pandas as pd
 
 import utils
@@ -220,6 +220,9 @@ def get_family_summary(family_tree: Dict[str, List[Dict]]) -> Dict[str, Dict]:
     """
     生成家族关系摘要统计
     
+    注意：同户人数据中的"与户主关系"是相对于户主的关系，
+    如果核心人员不是户主，需要进行关系推导。
+    
     Args:
         family_tree: 家族关系图谱
     
@@ -237,27 +240,125 @@ def get_family_summary(family_tree: Dict[str, List[Dict]]) -> Dict[str, Dict]:
             '其他': []
         }
         
+        # 首先找出户主是谁，以及核心人员与户主的关系
+        householder = None
+        person_relation_to_householder = None
+        
         for member in members:
             name = member.get('姓名', '')
             relation = member.get('与户主关系', '')
             
-            if relation in ['妻', '夫', '配偶']:
-                person_summary['配偶'].append(name)
-            elif relation in ['女', '子', '儿子', '女儿']:
-                person_summary['子女'].append(name)
-            elif relation in ['父', '母', '父亲', '母亲']:
-                person_summary['父母'].append(name)
-            elif relation in ['兄', '弟', '姐', '妹', '兄弟', '姐妹']:
-                person_summary['兄弟姐妹'].append(name)
-            elif relation == '户主':
-                # 户主就是本人，跳过
+            if relation == '户主':
+                householder = name
+            if name == person:
+                person_relation_to_householder = relation
+        
+        # 如果核心人员就是户主，直接使用原有关系
+        is_householder = (householder == person) or (person_relation_to_householder == '户主')
+        
+        for member in members:
+            name = member.get('姓名', '')
+            relation_to_householder = member.get('与户主关系', '')
+            
+            # 跳过空姓名
+            if not name or not name.strip():
                 continue
+            
+            # 排除本人
+            if name.strip() == person.strip():
+                continue
+            
+            # 确定该成员与核心人员的关系
+            if is_householder:
+                # 核心人员是户主，直接使用"与户主关系"
+                actual_relation = relation_to_householder
             else:
-                person_summary['其他'].append(f'{name}({relation})')
+                # 核心人员不是户主，需要推导关系
+                actual_relation = _infer_relation_to_person(
+                    person_relation_to_householder, 
+                    relation_to_householder,
+                    name,
+                    householder
+                )
+            
+            # 根据实际关系分类
+            if actual_relation in ['妻', '夫', '配偶']:
+                person_summary['配偶'].append(name)
+            elif actual_relation in ['女', '子', '儿子', '女儿', '子女']:
+                person_summary['子女'].append(name)
+            elif actual_relation in ['父', '母', '父亲', '母亲']:
+                person_summary['父母'].append(name)
+            elif actual_relation in ['兄', '弟', '姐', '妹', '兄弟', '姐妹']:
+                person_summary['兄弟姐妹'].append(name)
+            elif actual_relation in ['户主', '本人', '本户']:
+                # 跳过户主/本人
+                continue
+            elif actual_relation:
+                person_summary['其他'].append(f'{name}({actual_relation})')
+        
+        # 去重
+        for key in person_summary:
+            person_summary[key] = list(set(person_summary[key]))
         
         summary[person] = person_summary
     
     return summary
+
+
+def _infer_relation_to_person(person_to_householder: str, member_to_householder: str, 
+                               member_name: str, householder_name: str) -> str:
+    """
+    根据核心人员与户主关系、成员与户主关系，推导成员与核心人员的关系
+    
+    例如：
+    - 如果核心人员是户主的"子"，成员是户主的"妻"，则成员是核心人员的"母"
+    - 如果核心人员是户主的"子"，成员也是户主的"子"，则成员是核心人员的"兄弟姐妹"
+    
+    Args:
+        person_to_householder: 核心人员与户主的关系
+        member_to_householder: 成员与户主的关系
+        member_name: 成员姓名
+        householder_name: 户主姓名
+        
+    Returns:
+        成员与核心人员的推导关系
+    """
+    # 如果成员就是户主
+    if member_to_householder == '户主' or member_name == householder_name:
+        # 核心人员是户主的子女 -> 成员(户主)是核心人员的父母
+        if person_to_householder in ['子', '女', '儿子', '女儿']:
+            return '父'  # 户主是父亲（默认）
+        # 核心人员是户主的妻/夫 -> 成员(户主)是核心人员的配偶
+        if person_to_householder in ['妻', '夫', '配偶']:
+            return '配偶'
+        return person_to_householder  # 其他情况返回原关系
+    
+    # 核心人员是户主的子女
+    if person_to_householder in ['子', '女', '儿子', '女儿']:
+        # 成员是户主的妻 -> 成员是核心人员的母亲
+        if member_to_householder in ['妻']:
+            return '母'
+        # 成员是户主的夫 -> 成员是核心人员的父亲
+        if member_to_householder in ['夫']:
+            return '父'
+        # 成员也是户主的子女 -> 成员是核心人员的兄弟姐妹
+        if member_to_householder in ['子', '女', '儿子', '女儿']:
+            return '兄弟姐妹'
+        # 成员是户主的父母 -> 成员是核心人员的祖父母
+        if member_to_householder in ['父', '母', '父亲', '母亲']:
+            return f'祖{member_to_householder}'
+    
+    # 核心人员是户主的配偶
+    if person_to_householder in ['妻', '夫', '配偶']:
+        # 成员是户主的子女 -> 成员是核心人员的子女
+        if member_to_householder in ['子', '女', '儿子', '女儿']:
+            return '子女'
+        # 成员是户主的父母 -> 成员是核心人员的公婆/岳父母
+        if member_to_householder in ['父', '母', '父亲', '母亲']:
+            return member_to_householder  # 简化处理
+    
+    # 其他情况返回原关系
+    return member_to_householder
 
 
 if __name__ == '__main__':

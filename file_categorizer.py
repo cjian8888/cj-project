@@ -7,7 +7,7 @@
 
 import os
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List
 import utils
 
 logger = utils.setup_logger(__name__)

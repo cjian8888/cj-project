@@ -1,5 +1,26 @@
-/.venv
-/.vscode
-/backup_20260107_1113
-/data
-/output
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# 项目特定
+/data/
+/output/
+/backup_*/
+/scripts/
+
+# 日志
+*.log
+
+# 临时文件
+.DS_Store
+Thumbs.db
+
+# 工作存档（可选择性提交）
+# 工作存档_*.md

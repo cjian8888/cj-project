@@ -5,7 +5,8 @@
 """
 
 import pandas as pd
-from typing import Dict, List, Tuple
+from typing import Dict, List
+import config
 import utils
 
 logger = utils.setup_logger(__name__)
@@ -224,13 +225,13 @@ def calculate_family_total_assets(
         price = prop.get('金额', prop.get('价格', 0))
         if isinstance(price, str):
             try:
-                price = float(price.replace('万元', '').replace('万', '').replace(',', '')) * 10000
-            except:
+                price = float(price.replace('万元', '').replace('万', '').replace(',', '')) * config.UNIT_WAN
+            except (ValueError, TypeError):
                 price = 0
         property_value += float(price) if price else 0
     
     # 车辆价值（简单估算：根据购买记录或默认值）
-    vehicle_value = len(vehicles) * 200000  # 默认每辆车估值20万
+    vehicle_value = len(vehicles) * config.DEFAULT_VEHICLE_VALUE  # 默认每辆车估值
     
     # 理财余额（从银行余额中已包含，避免重复计算）
     # 这里只用于展示明细
@@ -293,7 +294,8 @@ def generate_family_finance_report(
     if balance_summary['accounts']:
         lines.append(f"     主要账户余额:")
         for i, acct in enumerate(balance_summary['accounts'][:5], 1):
-            lines.append(f"       {i}. {acct['account'][-8:]}: {utils.format_currency(acct['balance'])}")
+            acct_display = utils.safe_account_display(acct['account'])
+            lines.append(f"       {i}. {acct_display}: {utils.format_currency(acct['balance'])}")
         if len(balance_summary['accounts']) > 5:
             lines.append(f"       (还有 {len(balance_summary['accounts'])-5} 个账户未显示)")
     

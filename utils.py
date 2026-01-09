@@ -7,7 +7,7 @@
 
 import re
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 import pandas as pd
 from typing import Optional, Union, List
 import config
@@ -491,3 +491,61 @@ def number_to_chinese(n):
         return chars[n//10] + "十" + (chars[n%10] if n%10!=0 else "")
     else:
         return str(n)
+
+
+def safe_str(value, default: str = "-", max_len: int = None) -> str:
+    """
+    安全地将任何值转换为字符串，处理 NaN、None 等特殊值
+    
+    Args:
+        value: 任意值
+        default: NaN/None/空值时的默认替换文本
+        max_len: 可选，最大长度限制
+        
+    Returns:
+        安全的字符串，不会返回 "nan" 或 "None"
+    """
+    if value is None:
+        return default
+    
+    # 处理 pandas 的 NA/NaN
+    if pd.isna(value):
+        return default
+    
+    # 转换为字符串
+    s = str(value).strip()
+    
+    # 检查是否为空或 nan 字符串
+    if not s or s.lower() in ('nan', 'none', 'null', ''):
+        return default
+    
+    # 长度限制
+    if max_len and len(s) > max_len:
+        s = s[:max_len-3] + '...'
+    
+    return s
+
+
+def safe_account_display(account: str, mask: bool = False) -> str:
+    """
+    安全地显示账号，处理 NaN 并可选脱敏
+    
+    Args:
+        account: 账号字符串
+        mask: 是否脱敏（只显示后4位）
+        
+    Returns:
+        安全的账号显示字符串
+    """
+    s = safe_str(account, default="未知账号")
+    if s == "未知账号":
+        return s
+    
+    if mask and len(s) > 4:
+        return f"****{s[-4:]}"
+    
+    # 如果账号较长，显示后8位
+    if len(s) > 8:
+        return s[-8:]
+    
+    return s

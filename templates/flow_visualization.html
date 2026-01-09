@@ -1,0 +1,402 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>资金流向可视化 - 纪检审计系统</title>
+    <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <style>
+        /* ========== 基础重置 ========== */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        /* ========== 主体样式 ========== */
+        body {
+            font-family: 'Microsoft YaHei', Arial, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+        }
+
+        /* ========== 顶部标题栏 ========== */
+        .header {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            padding: 20px;
+            text-align: center;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, #00d2ff, #3a7bd5);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .header p {
+            color: #aaa;
+            font-size: 14px;
+        }
+
+        /* ========== 主容器 ========== */
+        .container {
+            display: flex;
+            height: calc(100vh - 100px);
+        }
+
+        /* ========== 左侧边栏 ========== */
+        .sidebar {
+            width: 300px;
+            background: rgba(255, 255, 255, 0.05);
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .sidebar h3 {
+            color: #00d2ff;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        /* ========== 统计卡片 ========== */
+        .stat-card {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 15px;
+            transition: transform 0.2s;
+        }
+
+        .stat-card:hover {
+            transform: translateX(5px);
+        }
+
+        .stat-card h4 {
+            color: #fff;
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+
+        .stat-card .value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #00d2ff;
+        }
+
+        .stat-card .desc {
+            font-size: 12px;
+            color: #888;
+            margin-top: 5px;
+        }
+
+        /* ========== 风险等级卡片 ========== */
+        .risk-high {
+            border-left: 4px solid #ff4757;
+        }
+
+        .risk-medium {
+            border-left: 4px solid #ffa502;
+        }
+
+        .risk-low {
+            border-left: 4px solid #2ed573;
+        }
+
+        /* ========== 图例 ========== */
+        .legend {
+            margin-top: 20px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            margin-right: 10px;
+        }
+
+        .legend-color.box {
+            border-radius: 3px;
+        }
+
+        /* ========== 网络图容器 ========== */
+        .network-container {
+            flex: 1;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            margin: 10px;
+        }
+
+        #network {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* ========== 工具提示 ========== */
+        .tooltip {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.9);
+            color: #fff;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 12px;
+            pointer-events: none;
+            z-index: 1000;
+        }
+
+        /* ========== 操作按钮 ========== */
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+        }
+
+        .btn {
+            background: linear-gradient(90deg, #00d2ff, #3a7bd5);
+            border: none;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: opacity 0.2s;
+        }
+
+        .btn:hover {
+            opacity: 0.8;
+        }
+
+        /* ========== 加载动画 ========== */
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+        }
+
+        .loading-spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(255, 255, 255, 0.1);
+            border-top-color: #00d2ff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="header">
+        <h1>💰 资金流向可视化分析</h1>
+        <p>生成时间: {{GENERATE_TIME}} | 共 {{NODE_COUNT}} 个节点, {{EDGE_COUNT}} 条资金流向</p>
+    </div>
+
+    <div class="container">
+        <div class="sidebar">
+            <h3>📊 数据概览</h3>
+
+            <div class="stat-card">
+                <h4>核心人员</h4>
+                <div class="value">{{CORE_PERSON_COUNT}}</div>
+                <div class="desc">{{CORE_PERSON_NAMES}}</div>
+            </div>
+
+            <div class="stat-card risk-high">
+                <h4>🔴 高风险项目</h4>
+                <div class="value">{{HIGH_RISK_COUNT}}</div>
+                <div class="desc">建议优先核查</div>
+            </div>
+
+            <div class="stat-card risk-medium">
+                <h4>🟡 中风险项目</h4>
+                <div class="value">{{MEDIUM_RISK_COUNT}}</div>
+                <div class="desc">需酌情关注</div>
+            </div>
+
+            <div class="stat-card">
+                <h4>借贷配对</h4>
+                <div class="value">{{LOAN_PAIR_COUNT}}</div>
+            </div>
+
+            <div class="stat-card">
+                <h4>无还款借贷</h4>
+                <div class="value">{{NO_REPAY_COUNT}}</div>
+                <div class="desc">疑似利益输送</div>
+            </div>
+
+            <h3>🎨 图例说明</h3>
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #ff6b6b;"></div>
+                    <span>🔴 核心人员</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color box" style="background: #ff9800;"></div>
+                    <span>🏢 涉案公司（重点）</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #4ecdc4;"></div>
+                    <span>🔵 其他关联方</span>
+                </div>
+            </div>
+
+            <h3 style="margin-top: 20px;">📊 资金流向统计</h3>
+            <p style="font-size: 12px; color: #888; line-height: 1.8;">
+                • 核心人员间: {{CORE_EDGE_COUNT}}笔<br>
+                • 公司间交易: {{COMPANY_EDGE_COUNT}}笔<br>
+                • 核心-外部: {{OTHER_EDGE_COUNT}}笔<br>
+                • 线条越粗金额越大
+            </p>
+
+            <h3 style="margin-top: 20px;">💡 操作提示</h3>
+            <p style="font-size: 12px; color: #888; line-height: 1.8;">
+                • 拖拽节点可调整位置<br>
+                • 滚轮缩放视图<br>
+                • 悬停查看交易详情<br>
+                • 导航按钮在右下角
+            </p>
+        </div>
+
+        <div class="network-container">
+            <div id="network"></div>
+        </div>
+    </div>
+
+    <script>
+        // 节点数据
+        var nodes = new vis.DataSet({{NODES_JSON}});
+
+        // 边数据
+        var edges = new vis.DataSet({{EDGES_JSON}});
+
+        // 网络配置
+        var container = document.getElementById('network');
+        var data = {
+            nodes: nodes,
+            edges: edges
+        };
+        var options = {
+            nodes: {
+                shape: 'dot',
+                borderWidth: 2,
+                shadow: true,
+                font: {
+                    color: '#fff',
+                    size: 14,
+                    face: 'Microsoft YaHei'
+                }
+            },
+            edges: {
+                width: 2,
+                shadow: true,
+                smooth: {
+                    type: 'curvedCW',
+                    roundness: 0.2
+                }
+            },
+            groups: {
+                core: {
+                    color: {
+                        background: '#ff6b6b',
+                        border: '#c0392b',
+                        highlight: {
+                            background: '#e74c3c',
+                            border: '#c0392b'
+                        }
+                    },
+                    font: { color: '#ffffff' }
+                },
+                company: {
+                    color: {
+                        background: '#9b59b6',
+                        border: '#8e44ad',
+                        highlight: {
+                            background: '#8e44ad',
+                            border: '#7d3c98'
+                        }
+                    },
+                    font: { color: '#ffffff' },
+                    shape: 'box'
+                },
+                involved_company: {
+                    color: {
+                        background: '#ff9800',
+                        border: '#e65100',
+                        highlight: {
+                            background: '#ffa726',
+                            border: '#fb8c00'
+                        }
+                    },
+                    font: { color: '#ffffff', size: 14 },
+                    shape: 'box',
+                    shadow: {
+                        enabled: true,
+                        color: 'rgba(255,152,0,0.5)',
+                        size: 10
+                    },
+                    borderWidth: 3
+                },
+                other: {
+                    color: {
+                        background: '#4ecdc4',
+                        border: '#1abc9c',
+                        highlight: {
+                            background: '#1abc9c',
+                            border: '#16a085'
+                        }
+                    }
+                }
+            },
+            physics: {
+                stabilization: {
+                    iterations: 300,
+                    fit: true
+                },
+                barnesHut: {
+                    gravitationalConstant: -5000,
+                    springLength: 200,
+                    springConstant: 0.01,
+                    centralGravity: 0.3
+                }
+            },
+            interaction: {
+                hover: true,
+                tooltipDelay: 100,
+                navigationButtons: true,
+                keyboard: true
+            }
+        };
+
+        var network = new vis.Network(container, data, options);
+
+        // 点击事件
+        network.on('click', function (params) {
+            if (params.nodes.length > 0) {
+                var nodeId = params.nodes[0];
+                console.log('点击节点:', nodeId);
+            }
+        });
+    </script>
+</body>
+
+</html>

@@ -7,7 +7,7 @@
 
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Set
+from typing import Dict, List, Set
 from collections import defaultdict
 import config
 import utils
@@ -118,7 +118,7 @@ def _detect_third_party_relay(
     core_persons: List[str],
     time_window_hours: int = 72,
     amount_tolerance: float = 0.15,
-    min_amount: float = 10000  # 最低金额门槛：1万元
+    min_amount: float = config.PENETRATION_MIN_AMOUNT  # 最低金额门槛：1万元
 ) -> List[Dict]:
     """
     检测第三方中转模式: A→C→B（A、B为关联人，C为中间人）
@@ -278,7 +278,7 @@ def _assess_relay_risk(time_diff: timedelta, outflow_amount: float, inflow_amoun
     amount_diff_ratio = abs(outflow_amount - inflow_amount) / max(outflow_amount, 1)
     
     # 高风险：24小时内、金额几乎相同、金额较大
-    if hours <= 24 and amount_diff_ratio <= 0.05 and outflow_amount >= 10000:
+    if hours <= 24 and amount_diff_ratio <= 0.05 and outflow_amount >= config.PENETRATION_MIN_AMOUNT:
         return 'high'
     # 中风险：48小时内、金额相近
     elif hours <= 48 and amount_diff_ratio <= 0.10:
@@ -501,8 +501,9 @@ def generate_related_party_report(results: Dict, output_dir: str) -> str:
             for i, flow in enumerate(results['direct_flows'][:30], 1):
                 date_str = flow['date'].strftime('%Y-%m-%d') if hasattr(flow['date'], 'strftime') else str(flow['date'])[:10]
                 direction = '←' if flow['direction'] == 'receive' else '→'
+                desc = utils.safe_str(flow['description'], default='转账')[:30]
                 f.write(f"{i}. [{date_str}] {flow['from']} {direction} {flow['to']}: "
-                       f"{utils.format_currency(flow['amount'])} | {flow['description'][:30]}\n")
+                       f"{utils.format_currency(flow['amount'])} | {desc}\n")
             if len(results['direct_flows']) > 30:
                 f.write(f'... 共 {len(results["direct_flows"])} 笔\n')
             f.write('\n')

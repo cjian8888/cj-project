@@ -6,7 +6,7 @@
 """
 
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Tuple
 from collections import defaultdict
 import config
@@ -108,7 +108,7 @@ def analyze_loan_behaviors(
 def _detect_bidirectional_flows(
     all_transactions: Dict[str, pd.DataFrame],
     core_persons: List[str],
-    min_amount: float = 5000,
+    min_amount: float = config.LOAN_MIN_AMOUNT,
     min_transactions: int = 2
 ) -> List[Dict]:
     """
@@ -220,7 +220,7 @@ def _detect_bidirectional_flows(
                             'loan_type': loan_type,
                             'first_income_date': min(r['date'] for r in stats['income_records']),
                             'last_expense_date': max(r['date'] for r in stats['expense_records']),
-                            'risk_level': 'high' if stats['income_total'] >= 50000 else 'medium'
+                            'risk_level': 'high' if stats['income_total'] >= config.LOAN_BIDIRECTIONAL_HIGH_RISK else 'medium'
                         })
     
     # 按金额排序
@@ -285,7 +285,7 @@ def _detect_online_loans(
                         'amount': amount,
                         'direction': direction,
                         'description': desc,
-                        'risk_level': 'high' if amount >= 10000 else 'medium'
+                        'risk_level': 'high' if amount >= config.LOAN_HIGH_RISK_MIN else 'medium'
                     })
     
     # 按日期排序
@@ -438,6 +438,13 @@ def _detect_loan_pairs(
                 if utils.contains_keywords(cp_str, bank_system_keywords):
                     continue
                 
+                # ===== 修复4: 排除理财产品对手方 =====
+                # 理财产品的买入和赎回会形成双向往来，但不是借贷
+                if utils.contains_keywords(cp_str, config.WEALTH_PRODUCT_COUNTERPARTY_KEYWORDS):
+                    continue
+                if utils.contains_keywords(cp_str, config.WEALTH_MANAGEMENT_KEYWORDS):
+                    continue
+                
                 cp_df = df[df['counterparty'] == cp].copy()
                 
                 # 分离收入和支出
@@ -517,7 +524,7 @@ def _detect_loan_pairs(
 def _detect_no_repayment_loans(
     all_transactions: Dict[str, pd.DataFrame],
     core_persons: List[str],
-    min_amount: float = 20000,
+    min_amount: float = config.INCOME_LARGE_PERSONAL_MIN,
     min_days: int = 180
 ) -> List[Dict]:
     """

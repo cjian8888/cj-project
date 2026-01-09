@@ -6,11 +6,11 @@
 """
 
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List
 from datetime import datetime, timedelta
 import pandas as pd
-import numpy as np
 
+import config
 import utils
 
 logger = utils.setup_logger(__name__)
@@ -54,12 +54,12 @@ def validate_transaction_data(df: pd.DataFrame, entity_name: str) -> Dict:
     # 检查金额合理性
     if 'income' in df.columns:
         max_income = df['income'].max()
-        if max_income > 10000000:  # 单笔收入超过1000万
+        if max_income > config.VALIDATION_MAX_SINGLE_AMOUNT:  # 单笔收入超过阈值
             warnings.append(f'存在异常大额收入: {max_income:.2f}元')
     
     if 'expense' in df.columns:
         max_expense = df['expense'].max()
-        if max_expense > 10000000:  # 单笔支出超过1000万
+        if max_expense > config.VALIDATION_MAX_SINGLE_AMOUNT:  # 单笔支出超过阈值
             warnings.append(f'存在异常大额支出: {max_expense:.2f}元')
     
     # 检查数据时间跨度
@@ -183,7 +183,7 @@ def cross_validate_property_transactions(
                     })
                     continue
                 
-                amount_yuan = amount * 10000  # 转换为元
+                amount_yuan = amount * config.UNIT_WAN  # 转换为元
                 
                 # 方法1：单笔匹配
                 tolerance = amount_yuan * single_tolerance
@@ -213,7 +213,7 @@ def cross_validate_property_transactions(
                 # 方法2：累计匹配（多笔交易合计）
                 if enable_cumulative and amount_yuan > 0:
                     # 筛选大额支出（超过1万元）
-                    large_expenses = period_df[period_df['expense'] >= 10000].copy()
+                    large_expenses = period_df[period_df['expense'] >= config.VALIDATION_PROPERTY_EXPENSE_MIN].copy()
                     if not large_expenses.empty:
                         large_expenses = large_expenses.sort_values('date')
                         

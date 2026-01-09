@@ -12,11 +12,11 @@
 4. 增加交易金额门槛，减少小额交易干扰
 """
 
-import math
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Set
 from datetime import datetime
+import config
 import utils
 
 logger = utils.setup_logger(__name__)
@@ -80,7 +80,7 @@ class GraphCommunityDetector:
     3. 使用更严格的团伙判定条件
     """
     
-    def __init__(self, core_entities: Set[str] = None, min_amount: float = 1000):
+    def __init__(self, core_entities: Set[str] = None, min_amount: float = config.INCOME_MIN_AMOUNT):
         """
         Args:
             core_entities: 核心实体集合（核心人员+涉案公司），只在这些实体之间构建图
@@ -194,7 +194,7 @@ class GraphCommunityDetector:
                 
         return self.sccs
 
-    def detect_communities(self, min_size: int = 2, min_amount: float = 50000) -> List[Dict]:
+    def detect_communities(self, min_size: int = 2, min_amount: float = config.ASSET_LARGE_AMOUNT_THRESHOLD) -> List[Dict]:
         """
         检测资金团伙
         
@@ -450,7 +450,7 @@ def _feature_engineering(
                 if not isinstance(date_val, datetime):
                     try:
                         date = pd.to_datetime(date_val)
-                    except:
+                    except Exception:
                         continue
                 else:
                     date = date_val
@@ -584,7 +584,7 @@ def run_ml_analysis(
                     else:
                         graph_transactions.append({'source': source, 'target': target, 'amount': amt})
                         
-            except:
+            except Exception:
                 continue
 
     # --- Part 2: 统计异常检测 ---

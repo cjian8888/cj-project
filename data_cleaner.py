@@ -7,8 +7,7 @@
 
 import os
 import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Tuple
 import config
 import utils
@@ -42,13 +41,13 @@ def deduplicate_transactions(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
     
     # DEBUG: 打印前几行数据，检查是否有大量重复值
     if len(df) > 0:
-        logger.info(f"DEBUG: 去重前数据采样 (Top 5):")
+        logger.debug(f"去重前数据采样 (Top 5):")
         for i in range(min(5, len(df))):
             row = df.iloc[i]
             tx_id = row.get('transaction_id', 'N/A')
             ts = row.get('_timestamp', 'N/A')
             amt = row.get('_amount_rounded', 'N/A')
-            logger.info(f"  Row {i}: ID={tx_id}, Time={ts}, Amt={amt}")
+            logger.debug(f"  Row {i}: ID={tx_id}, Time={ts}, Amt={amt}")
             
     # 标记潜在重复组
     # 同一账号、相近时间(容差范围内)、相同金额的交易可能是重复

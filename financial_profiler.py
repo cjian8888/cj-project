@@ -6,8 +6,7 @@
 """
 
 import pandas as pd
-from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Dict, List
 import config
 import utils
 
@@ -217,7 +216,7 @@ def calculate_income_structure(df: pd.DataFrame, entity_name: str = None) -> Dic
                 continue
             counterparty = str(row.get('counterparty', ''))
             if utils.contains_keywords(counterparty, config.HR_COMPANY_KEYWORDS):
-                if row['income'] >= 1000:
+                if row['income'] >= config.INCOME_MIN_AMOUNT:
                     income_df.at[idx, 'is_salary'] = True
                     income_df.at[idx, 'salary_reason'] = '人力资源公司'
 
@@ -261,7 +260,7 @@ def calculate_income_structure(df: pd.DataFrame, entity_name: str = None) -> Dic
                     if wealth_count / len(valid_group) > 0.3: # 如果超过30%看起来像理财
                         continue
 
-                    if 2000 <= mean_amount <= 80000 and cv < 2.0: 
+                    if config.INCOME_MEAN_AMOUNT_MIN <= mean_amount <= config.INCOME_MEAN_AMOUNT_MAX and cv < 2.0: 
                          for idx, row in valid_group.iterrows():
                             # 单笔再检查一次
                             if utils.contains_keywords(str(row['description']), wealth_keywords):

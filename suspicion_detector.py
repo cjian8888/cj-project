@@ -7,7 +7,7 @@
 
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple
+from typing import Dict, List
 from collections import defaultdict
 import config
 import utils
@@ -203,18 +203,21 @@ def detect_hidden_assets(all_transactions: Dict[str, pd.DataFrame]) -> Dict[str,
         # 疑似购房
         for _, row in df.iterrows():
             if row['expense'] >= config.PROPERTY_THRESHOLD:
+                # 组合描述和对手方进行检查
+                text_to_check = str(row['description']) + ' ' + str(row['counterparty'])
+                
                 # 排除工业/商业用途
-                if any(k in str(row['description']) for k in exclude_kws):
+                if any(k in text_to_check for k in exclude_kws):
                      continue
                      
-                if utils.contains_keywords(row['description'], config.PROPERTY_KEYWORDS):
+                if utils.contains_keywords(text_to_check, config.PROPERTY_KEYWORDS):
                     asset = {
                         'type': 'property',
                         'date': row['date'],
                         'amount': row['expense'],
                         'description': row['description'],
                         'counterparty': row['counterparty'],
-                        'risk_level': 'high' if row['expense'] >= 1000000 else 'medium',
+                        'risk_level': 'high' if row['expense'] >= config.SUSPICION_PROPERTY_HIGH_RISK else 'medium',
                         'record': row.to_dict()
                     }
                     hidden_assets[entity_name].append(asset)
@@ -222,17 +225,20 @@ def detect_hidden_assets(all_transactions: Dict[str, pd.DataFrame]) -> Dict[str,
         # 疑似购车
         for _, row in df.iterrows():
             if row['expense'] >= config.VEHICLE_THRESHOLD:
-                if any(k in str(row['description']) for k in exclude_kws):
+                # 组合描述和对手方进行检查
+                text_to_check = str(row['description']) + ' ' + str(row['counterparty'])
+                
+                if any(k in text_to_check for k in exclude_kws):
                      continue
 
-                if utils.contains_keywords(row['description'], config.VEHICLE_KEYWORDS):
+                if utils.contains_keywords(text_to_check, config.VEHICLE_KEYWORDS):
                     asset = {
                         'type': 'vehicle',
                         'date': row['date'],
                         'amount': row['expense'],
                         'description': row['description'],
                         'counterparty': row['counterparty'],
-                        'risk_level': 'high' if row['expense'] >= 500000 else 'medium',
+                        'risk_level': 'high' if row['expense'] >= config.SUSPICION_VEHICLE_HIGH_RISK else 'medium',
                         'record': row.to_dict()
                     }
                     hidden_assets[entity_name].append(asset)
@@ -437,12 +443,17 @@ def detect_holiday_transactions(
     amount_threshold: float = None
 ) -> Dict[str, List[Dict]]:
     """
-    节假日/特殊时段交易检测
+    节假日/特殊时段交易检测（升级版）
     
     检测：
-    1. 法定节假日期间的大额交易
+    1. 法定节假日期间及前后的大额交易（支持时间窗口）
     2. 周末频繁大额操作
     3. 非工作时间网银转账
+    
+    核心改进：
+    - 自动根据数据时间范围生成节假日配置
+    - 节前3天、节后2天都纳入检测（送礼/回礼高峰）
+    - 区分"节前"、"节中"、"节后"不同风险等级
     
     Args:
         all_transactions: 所有交易数据
@@ -457,23 +468,42 @@ def detect_holiday_transactions(
         amount_threshold = config.HOLIDAY_LARGE_AMOUNT_THRESHOLD
     
     results = {
-        'holiday': [],    # 节假日大额交易
+        'holiday': [],    # 节假日窗口大额交易
         'weekend': [],    # 周末大额交易
         'night': []       # 非工作时间交易
     }
     
-    # 构建节假日日期集合
-    holiday_dates = set()
-    holiday_names = {}
-    for year, holidays in config.CHINESE_HOLIDAYS.items():
-        for start_str, end_str, name in holidays:
-            start = datetime.strptime(start_str, '%Y-%m-%d')
-            end = datetime.strptime(end_str, '%Y-%m-%d')
-            current = start
-            while current <= end:
-                holiday_dates.add(current.date())
-                holiday_names[current.date()] = name
-                current += timedelta(days=1)
+    # 使用新的节假日检测器（自动识别数据时间范围）
+    try:
+        from holiday_utils import HolidayDetector
+        
+        # 从配置读取窗口参数
+        holiday_config = getattr(config, 'HOLIDAY_DETECTION_CONFIG', {})
+        days_before = holiday_config.get('days_before', 3)
+        days_after = holiday_config.get('days_after', 2)
+        
+        # 创建检测器
+        detector = HolidayDetector.from_transactions(
+            all_transactions, days_before, days_after
+        )
+        
+        logger.info(f'节假日检测窗口: 节前{days_before}天 + 节中 + 节后{days_after}天')
+        
+    except ImportError:
+        logger.warning('holiday_utils模块未找到，使用传统检测方式')
+        detector = None
+        # 回退到传统方式
+        holiday_dates = set()
+        holiday_names = {}
+        for year, holidays in config.CHINESE_HOLIDAYS.items():
+            for start_str, end_str, name in holidays:
+                start = datetime.strptime(start_str, '%Y-%m-%d')
+                end = datetime.strptime(end_str, '%Y-%m-%d')
+                current = start
+                while current <= end:
+                    holiday_dates.add(current.date())
+                    holiday_names[current.date()] = name
+                    current += timedelta(days=1)
     
     for entity_name, df in all_transactions.items():
         for _, row in df.iterrows():
@@ -494,17 +524,49 @@ def detect_holiday_transactions(
                 'counterparty': row.get('counterparty', '')
             }
             
-            # 检查节假日
+            # 获取日期对象
             if hasattr(date, 'date'):
                 date_only = date.date()
             else:
                 date_only = date
             
-            if date_only in holiday_dates:
-                record = record_base.copy()
-                record['holiday_name'] = holiday_names.get(date_only, '节假日')
-                record['risk_level'] = 'high' if amount >= amount_threshold * 2 else 'medium'
-                results['holiday'].append(record)
+            # 检查节假日窗口
+            if detector:
+                is_holiday, holiday_name, period = detector.is_holiday_window(date_only)
+                if is_holiday:
+                    record = record_base.copy()
+                    record['holiday_name'] = holiday_name
+                    record['period'] = period  # 'before', 'during', 'after'
+                    record['period_label'] = {
+                        'before': '节前',
+                        'during': '节中', 
+                        'after': '节后'
+                    }.get(period, period)
+                    
+                    # 风险等级：节前送礼最可疑
+                    if period == 'before' and amount >= amount_threshold:
+                        record['risk_level'] = 'high'
+                        record['risk_reason'] = f'{holiday_name}节前大额交易'
+                    elif period == 'during' and amount >= amount_threshold * 2:
+                        record['risk_level'] = 'high'
+                        record['risk_reason'] = f'{holiday_name}期间特大额交易'
+                    elif period == 'after' and amount >= amount_threshold:
+                        record['risk_level'] = 'medium'
+                        record['risk_reason'] = f'{holiday_name}节后回礼可能'
+                    else:
+                        record['risk_level'] = 'medium'
+                        record['risk_reason'] = f'{holiday_name}期间大额交易'
+                    
+                    results['holiday'].append(record)
+            else:
+                # 传统方式
+                if date_only in holiday_dates:
+                    record = record_base.copy()
+                    record['holiday_name'] = holiday_names.get(date_only, '节假日')
+                    record['period'] = 'during'
+                    record['period_label'] = '节中'
+                    record['risk_level'] = 'high' if amount >= amount_threshold * 2 else 'medium'
+                    results['holiday'].append(record)
             
             # 检查周末
             if config.WEEKEND_DETECTION_ENABLED:
@@ -525,7 +587,14 @@ def detect_holiday_transactions(
                     record['risk_level'] = 'medium'
                     results['night'].append(record)
     
-    logger.info(f'发现节假日交易 {len(results["holiday"])} 笔, '
+    # 统计各时段
+    holiday_by_period = {'before': 0, 'during': 0, 'after': 0}
+    for r in results['holiday']:
+        period = r.get('period', 'during')
+        holiday_by_period[period] = holiday_by_period.get(period, 0) + 1
+    
+    logger.info(f'发现节假日窗口交易 {len(results["holiday"])} 笔 '
+                f'(节前{holiday_by_period["before"]}/节中{holiday_by_period["during"]}/节后{holiday_by_period["after"]}), '
                 f'周末交易 {len(results["weekend"])} 笔, '
                 f'非工作时间 {len(results["night"])} 笔')
     
@@ -589,7 +658,7 @@ def detect_amount_patterns(all_transactions: Dict[str, pd.DataFrame]) -> Dict[st
             # 3. 检测吉利数尾号
             amount_str = str(int(amount))
             for lucky in config.LUCKY_TAIL_NUMBERS:
-                if amount_str.endswith(lucky) and amount >= 1000:
+                if amount_str.endswith(lucky) and amount >= config.SUSPICION_LUCKY_NUMBER_MIN:
                     lucky_count += 1
                     entity_records['lucky'].append({
                         'date': row.get('date'),

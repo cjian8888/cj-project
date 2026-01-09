@@ -8,8 +8,8 @@
 import os
 import glob
 import pandas as pd
-from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Set
+from datetime import datetime
+from typing import Dict, List
 from collections import defaultdict
 import utils
 
@@ -294,9 +294,28 @@ def _summarize_companions(companions: List[Dict]) -> Dict:
     """汇总同行人信息"""
     summary = defaultdict(lambda: {'count': 0, 'persons': set(), 'dates': []})
     
+    def is_valid_name(name: str) -> bool:
+        """检查是否为有效的人名"""
+        if not name or not name.strip():
+            return False
+        name = name.strip()
+        # 排除纯数字
+        if name.isdigit():
+            return False
+        # 排除太短（单字符）
+        if len(name) < 2:
+            return False
+        # 排除 nan/None 等
+        if name.lower() in ('nan', 'none', 'null', '-'):
+            return False
+        # 排除纯符号
+        if all(c in '*_-.' for c in name):
+            return False
+        return True
+    
     for rec in companions:
         name = rec.get('companion_name', '')
-        if not name:
+        if not is_valid_name(name):
             continue
         
         summary[name]['count'] += 1

@@ -7,10 +7,10 @@
 
 import os
 import glob
-from typing import Dict, List, Tuple
+from typing import Dict, List
 import pandas as pd
-import numpy as np
 
+import config
 import utils
 
 logger = utils.setup_logger(__name__)
@@ -33,7 +33,7 @@ def clean_property_amount(amount) -> float:
         amount_float = float(amount)
         
         # 如果金额超过50000万元（5亿），很可能是单位错误，除以10000
-        if amount_float > 50000:
+        if amount_float > config.ASSET_LARGE_AMOUNT_THRESHOLD:
             logger.warning(f'检测到异常房产金额 {amount_float}万元，自动修正为 {amount_float/10000:.2f}万元')
             return amount_float / 10000
         
@@ -128,7 +128,7 @@ def extract_properties(data_directory: str, persons: List[str]) -> List[Dict]:
                     quality_issues = []
                     if pd.isna(raw_amount) or raw_amount == 0:
                         quality_issues.append('金额缺失')
-                    elif float(raw_amount) > 50000:
+                    elif float(raw_amount) > config.ASSET_LARGE_AMOUNT_THRESHOLD:
                         quality_issues.append('金额异常已修正')
                     
                     # 检查日期异常（1899/1900年是Excel默认值）

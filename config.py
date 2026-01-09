@@ -268,6 +268,13 @@ LUCKY_TAIL_NUMBERS = ['88', '66', '88888', '66666', '168', '888', '666']
 # 节假日大额交易阈值（元）
 HOLIDAY_LARGE_AMOUNT_THRESHOLD = 50000  # 节假日期间5万以上视为大额
 
+# 节假日检测时间窗口（新增）
+HOLIDAY_DETECTION_CONFIG = {
+    'days_before': 3,      # 节前3天（送礼高峰期）
+    'days_after': 2,       # 节后2天（回礼/谢礼）
+    'auto_detect_range': True,  # 是否根据数据自动检测时间范围
+}
+
 # 房产购置匹配参数（新增）
 PROPERTY_MATCH_CONFIG = {
     'time_window_months': 12,      # 匹配时间窗口：登记前后12个月
@@ -435,3 +442,53 @@ DATE_FORMATS = [
     '%Y/%m/%d %H:%M:%S',
     '%Y%m%d'
 ]
+
+# ============== 集中式阈值配置（2026-01-09 新增）==============
+# 将分散在各模块中的硬编码数值集中管理，便于调整
+
+# --- 资产分析阈值 ---
+ASSET_LARGE_AMOUNT_THRESHOLD = 50000      # 资产分析中的大额交易阈值（5万元）
+DEFAULT_VEHICLE_VALUE = 200000            # 车辆默认估值（20万元/辆）
+
+# --- 数据验证阈值 ---
+VALIDATION_MAX_SINGLE_AMOUNT = 10000000   # 单笔交易异常阈值（1000万元）
+VALIDATION_PROPERTY_EXPENSE_MIN = 10000   # 房产验证最低支出阈值（1万元）
+
+# --- 收入分析阈值 ---
+INCOME_MIN_AMOUNT = 1000                  # 收入分析最低金额（1000元）
+INCOME_REGULAR_MIN = 3000                 # 规律性非工资收入最低金额（3000元）
+INCOME_MEAN_AMOUNT_MIN = 2000             # 规律收入均值下限（2000元）
+INCOME_MEAN_AMOUNT_MAX = 80000            # 规律收入均值上限（8万元）
+INCOME_UNKNOWN_SOURCE_MIN = 10000         # 来源不明收入最低金额（1万元）
+INCOME_LARGE_PERSONAL_MIN = 20000         # 个人大额转入最低金额（2万元）
+INCOME_HIGH_RISK_MIN = 50000              # 高风险收入最低金额（5万元）
+INCOME_VERY_LARGE_MIN = 100000            # 非常大额收入阈值（10万元）
+
+# --- 可视化显示阈值 ---
+DISPLAY_AMOUNT_THRESHOLD = 10000          # 显示金额阈值（1万元，小于此值不显示）
+
+# --- 借贷分析阈值 ---
+LOAN_MIN_AMOUNT = 5000                    # 借贷分析最低金额（5000元）
+LOAN_HIGH_RISK_MIN = 10000                # 借贷高风险最低金额（1万元）
+LOAN_BIDIRECTIONAL_HIGH_RISK = 50000      # 双向往来高风险阈值（5万元）
+LOAN_INTEREST_FREE_MIN = 50000            # 疑似无息借贷最低金额（5万元）
+LOAN_LARGE_NO_REPAY_MIN = 100000          # 大额无还款最低金额（10万元）
+
+# --- 疑点检测阈值 ---
+SUSPICION_PROPERTY_HIGH_RISK = 1000000    # 房产高风险阈值（100万元）
+SUSPICION_VEHICLE_HIGH_RISK = 500000      # 车辆高风险阈值（50万元）
+SUSPICION_LUCKY_NUMBER_MIN = 1000         # 吉利数检测最低金额（1000元）
+
+# --- 资金穿透阈值 ---
+PENETRATION_MIN_AMOUNT = 10000            # 资金穿透最低金额（1万元）
+
+# --- 报告生成阈值 ---
+REPORT_CAR_PAYMENT_MIN = 10000            # 报告中车辆支付最低金额（1万元）
+REPORT_HOUSE_PAYMENT_MIN = 50000          # 报告中房产支付最低金额（5万元）
+
+# Unit Conversion
+UNIT_WAN = 10000  # 1万
+
+# --- 理财分析阈值 ---
+WEALTH_SIGNIFICANT_PROFIT = 100000        # 理财显著盈利阈值（10万元）
+WEALTH_SIGNIFICANT_REDEMPTION = 100000    # 理财显著赎回阈值（10万元）

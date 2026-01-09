@@ -6,11 +6,9 @@
 """
 
 import pandas as pd
-import numpy as np
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List
 import utils
-import config
 
 logger = utils.setup_logger(__name__)
 
