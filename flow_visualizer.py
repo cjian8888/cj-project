@@ -501,11 +501,8 @@ def _calculate_flow_stats(
         return ''
     
     def has_column(df, columns_list):
-        """检查是否存在某类列"""
-        for col_name in columns_list:
-            if col_name in df.columns:
-                return True
-        return False
+        """检查是否存在某类列（使用集合操作优化性能）"""
+        return not set(columns_list).isdisjoint(df.columns)
     
     # 遍历所有实体的交易数据
     for entity_name, df in all_transactions.items():

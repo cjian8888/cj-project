@@ -237,7 +237,7 @@ class HolidayDetector:
                    f'覆盖 {len(self.holiday_dates)} 个检测日期')
     
     @classmethod
-    def from_transactions(cls, transactions_data: Dict, 
+    def from_transactions(cls, transactions_data: Dict[str, pd.DataFrame], 
                           days_before: int = 3, days_after: int = 2):
         """
         从交易数据自动分析时间范围并初始化
