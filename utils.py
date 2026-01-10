@@ -209,7 +209,7 @@ def normalize_name(name: str) -> str:
     # 移除多余空格
     name = re.sub(r'\s+', '', str(name))
     # 移除特殊字符
-    name = re.sub(r'[^\w\u4e00-\u9fa5]', '', name)
+    name = re.sub(r'[^\w\u4e00-\u9fa5]', '', name)  # 保留中文、字母、数字和下划线
     
     return name.strip()
 
