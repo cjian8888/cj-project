@@ -1,42 +1,89 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-疑点检测模块 - 重构版
+疑点检测模块 - 实现版
 用于检测资金流向中的异常模式和可疑交易
 """
 
 import pandas as pd
+import numpy as np
 from typing import Dict, List, Tuple
+from itertools import combinations
 import config
 import utils
 
 logger = utils.setup_logger(__name__)
 
 
-def detect_cash_time_collision(withdrawals: List[pd.Series], deposits: List[pd.Series]) -> List[Dict]:
+def detect_cash_time_collision(withdrawals: pd.DataFrame, deposits: pd.DataFrame) -> List[Dict]:
     """
-    检测现金时空伴随（存根实现）
+    检测现金时空伴随（Pandas 优化版）
+    
+    使用 Pandas 合并操作代替嵌套循环，大幅提升大数据量下的性能。
     
     Args:
-        withdrawals: 取现交易列表
-        deposits: 存现交易列表
+        withdrawals: 取现交易 DataFrame (必须包含 date, amount 等列)
+        deposits: 存现交易 DataFrame (必须包含 date, amount 等列)
     
     Returns:
         检测到的伴随交易列表
     """
     collisions = []
     
-    # 当前逻辑：嵌套循环 (已修复：变量作为参数传入)
-    # 注意：此逻辑为 O(N*M) 复杂度，大数据量下建议使用滑动窗口优化
-    for withdrawal in withdrawals:
-        for deposit in deposits:
-            # ... 检查时间窗口 ...
-            # TODO: 实现具体的时间窗口和金额容差检测逻辑
-            # 示例逻辑伪代码:
-            # if abs(withdrawal['amount'] - deposit['amount']) < tolerance:
-            #     if is_within_time_window(withdrawal['date'], deposit['date']):
-            #         collisions.append(...)
-            pass
+    if withdrawals.empty or deposits.empty:
+        return collisions
+    
+    # 1. 准备数据：添加辅助列用于交叉连接
+    # 添加临时key用于cross join (笛卡尔积)
+    withdrawals['join_key'] = 1
+    deposits['join_key'] = 1
+    
+    # 2. 执行交叉连接 (寻找所有可能的存取现组合)
+    # 注意：在极大数据量(>10万条)下，这可能消耗内存。但对于通常的审计数据(几千-几万条)是极快的。
+    merged = pd.merge(withdrawals, deposits, on='join_key', suffixes=('_wd', '_dp'))
+    
+    # 3. 计算时间差和金额差
+    # 确保日期列是datetime类型
+    merged['time_diff'] = (merged['date_dp'] - merged['date_wd']).abs()
+    # 将时间差转换为小时
+    merged['hours_diff'] = merged['time_diff'].dt.total_seconds() / 3600
+    
+    merged['amount_wd'] = merged['amount_wd'].fillna(0)
+    merged['amount_dp'] = merged['amount_dp'].fillna(0)
+    merged['amount_diff_abs'] = (merged['amount_wd'] - merged['amount_dp']).abs()
+    
+    # 计算金额差异比率 (相对于取现金额)
+    # 避免除以0
+    merged['amount_ratio'] = np.where(
+        merged['amount_wd'] > 0,
+        merged['amount_diff_abs'] / merged['amount_wd'],
+        1.0
+    )
+    
+    # 4. 应用阈值筛选
+    # 时间窗口：配置的小时数
+    time_mask = merged['hours_diff'] <= config.CASH_TIME_WINDOW_HOURS
+    
+    # 金额容差：配置的比率
+    amount_mask = merged['amount_ratio'] <= config.AMOUNT_TOLERANCE_RATIO
+    
+    # 5. 筛选符合条件的记录
+    valid_collisions = merged[time_mask & amount_mask]
+    
+    # 6. 格式化结果
+    if not valid_collisions.empty:
+        for _, row in valid_collisions.iterrows():
+            collisions.append({
+                'withdrawal_date': row['date_wd'],
+                'withdrawal_amount': row['amount_wd'],
+                'withdrawal_desc': row.get('description_wd', ''),
+                'deposit_date': row['date_dp'],
+                'deposit_amount': row['amount_dp'],
+                'deposit_desc': row.get('description_dp', ''),
+                'time_gap_hours': round(row['hours_diff'], 2),
+                'amount_gap': round(row['amount_diff_abs'], 2),
+                'risk_reason': f"取现{row['amount_wd']}元与存现{row['amount_dp']}元时间间隔{row['hours_diff']:.1f}小时内，金额接近"
+            })
             
     return collisions
 
@@ -55,10 +102,7 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
     """
     logger.info('开始执行疑点检测...')
     
-    # TODO: 在此处补充具体的检测逻辑
-    # 目前返回空结果以维持 main.py 流程正常运行
-    
-    return {
+    results = {
         'direct_transfers': [],          # 直接资金往来
         'cash_collisions': [],            # 现金时空伴随
         'hidden_assets': {},              # 隐形资产
@@ -67,3 +111,84 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
         'holiday_transactions': {},      # 节假日/特殊时段
         'amount_patterns': {}            # 金额模式异常
     }
+    
+    # ============================
+    # 1. 现金时空伴随检测
+    # ============================
+    logger.info('  -> 正在检测现金时空伴随...')
+    
+    # 现金交易关键词匹配函数
+    def is_cash_transaction(row):
+        desc = str(row.get('description', '')).lower()
+        # 简单的关键词匹配，也可以用 utils.contains_keywords
+        for kw in config.CASH_KEYWORDS:
+            if kw in desc:
+                return True
+        return False
+
+    for entity_name, df in cleaned_data.items():
+        if df.empty:
+            continue
+            
+        # 筛选出现金交易
+        # 假设 'income' > 0 代表存现/进账, 'expense' > 0 代表取现/出账
+        # 具体逻辑视 data_cleaner 的标准而定，这里假设有 income/expense 列
+        
+        cash_df = df[df.apply(is_cash_transaction, axis=1)].copy()
+        if cash_df.empty:
+            continue
+        
+        # 拆分为取现和存现
+        # 注意：根据实际列名调整，这里假设 amount 为正数，或者分列 income/expense
+        # 如果是单列 amount，正负表示方向；如果是双列，income表示进，expense表示出
+        
+        # 策略：如果有 income/expense 列
+        if 'income' in cash_df.columns and 'expense' in cash_df.columns:
+            withdrawals = cash_df[cash_df['expense'] > 0].copy()
+            deposits = cash_df[cash_df['income'] > 0].copy()
+            # 标准化金额列为 amount
+            withdrawals['amount'] = withdrawals['expense']
+            deposits['amount'] = deposits['income']
+        else:
+            # 只有单列 amount 的情况（假设负数为支出）
+            withdrawals = cash_df[cash_df['amount'] < 0].copy()
+            deposits = cash_df[cash_df['amount'] > 0].copy()
+            withdrawals['amount'] = withdrawals['amount'].abs()
+            deposits['amount'] = deposits['amount']
+
+        # 执行检测
+        collisions = detect_cash_time_collision(withdrawals, deposits)
+        
+        if collisions:
+            logger.info(f'    [{entity_name}] 发现 {len(collisions)} 处现金时空伴随')
+            results['cash_collisions'].extend([
+                {**c, 'person': entity_name} for c in collisions
+            ])
+            
+    # ============================
+    # 2. 直接资金往来检测 (TODO: 实现逻辑)
+    # ============================
+    logger.info('  -> 正在分析直接资金往来...')
+    for p1, p2 in combinations(all_persons, 2):
+        # 检查 p1 和 p2 之间的直接交易
+        if p1 in cleaned_data and p2 in cleaned_data:
+            df1 = cleaned_data[p1]
+            # 查找对手方包含 p2 的记录
+            transfers = df1[df1['counterparty'].str.contains(p2, na=False)]
+            if not transfers.empty:
+                for _, row in transfers.iterrows():
+                    results['direct_transfers'].append({
+                        'source': p1,
+                        'target': p2,
+                        'date': row['date'],
+                        'amount': row['expense'] if row.get('expense', 0) > 0 else row.get('income', 0),
+                        'desc': row['description']
+                    })
+                    
+    # 其他检测模块 (holiday, fixed_frequency 等) 保持为空/TODO，
+    # 待后续完善或添加具体的 Analyzer 模块。
+    
+    total_found = len(results['cash_collisions']) + len(results['direct_transfers'])
+    logger.info(f'✓ 疑点检测完成，共发现 {total_found} 条有效线索')
+    
+    return results
