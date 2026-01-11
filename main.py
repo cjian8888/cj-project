@@ -32,6 +32,8 @@ import loan_analyzer
 import income_analyzer
 import flow_visualizer
 import ml_analyzer
+import time_series_analyzer
+import clue_aggregator
 
 logger = utils.setup_logger(__name__)
 
@@ -414,6 +416,58 @@ def phase5_12_ml_analysis(cleaned_data: Dict, all_persons: List[str],
     return ml_results
 
 
+def phase5_13_time_series_analysis(cleaned_data: Dict, all_persons: List[str], 
+                                    output_dirs: Dict) -> Dict:
+    """阶段5.13: 时间序列分析（新增）"""
+    logger.info('【阶段5.13】时间序列分析')
+    logger.info('-' * 80)
+    
+    ts_results = time_series_analyzer.analyze_time_series(cleaned_data, all_persons)
+    
+    ts_report_path = time_series_analyzer.generate_time_series_report(
+        ts_results, output_dirs['analysis_results']
+    )
+    logger.info(f'✓ 时序分析报告已生成: {ts_report_path}')
+    logger.info('')
+    
+    return ts_results
+
+
+def phase5_14_clue_aggregation(all_persons: List[str], all_companies: List[str],
+                                penetration_results: Dict, ml_results: Dict,
+                                ts_results: Dict, related_party_results: Dict,
+                                loan_results: Dict, output_dirs: Dict):
+    """阶段5.14: 线索聚合（新增）"""
+    logger.info('【阶段5.14】线索聚合')
+    logger.info('-' * 80)
+    
+    aggregator = clue_aggregator.aggregate_all_results(
+        core_persons=all_persons,
+        companies=all_companies,
+        penetration_results=penetration_results,
+        ml_results=ml_results,
+        ts_results=ts_results,
+        related_party_results=related_party_results,
+        loan_results=loan_results
+    )
+    
+    agg_report_path = clue_aggregator.generate_aggregation_report(
+        aggregator, output_dirs['analysis_results']
+    )
+    logger.info(f'✓ 线索聚合报告已生成: {agg_report_path}')
+    
+    # 输出高风险实体摘要
+    ranked = aggregator.get_ranked_entities()
+    critical = [e for e in ranked if e['risk_level'] == 'critical']
+    high = [e for e in ranked if e['risk_level'] == 'high']
+    
+    logger.info(f'✓ 极高风险实体: {len(critical)} 个')
+    logger.info(f'✓ 高风险实体: {len(high)} 个')
+    logger.info('')
+    
+    return aggregator
+
+
 def phase6_generate_reports(profiles: Dict, suspicions: Dict, all_persons: List[str], 
                              all_companies: List[str], family_tree: Dict, family_summary: Dict,
                              family_assets: Dict, transaction_validations: Dict,
@@ -515,6 +569,8 @@ def print_execution_summary(categorized_files: Dict, cleaned_data: Dict, suspici
     logger.info(f'  ├─ analysis_results/借贷行为分析报告.txt')
     logger.info(f'  ├─ analysis_results/异常收入来源分析报告.txt')
     logger.info(f'  ├─ analysis_results/机器学习风险预测报告.txt')
+    logger.info(f'  ├─ analysis_results/时序分析报告.txt')
+    logger.info(f'  ├─ analysis_results/线索聚合报告.txt')
     logger.info(f'  ├─ analysis_results/资金流向图.md')
     logger.info(f'  └─ analysis_results/资金流向可视化.html')
     logger.info('')
@@ -596,6 +652,18 @@ def main(data_directory: str = '.', output_directory: str = './output'):
         # 阶段5.12: ML分析
         ml_results = phase5_12_ml_analysis(
             cleaned_data, all_persons, all_companies, output_dirs
+        )
+        
+        # 阶段5.13: 时序分析（新增）
+        ts_results = phase5_13_time_series_analysis(
+            cleaned_data, all_persons, output_dirs
+        )
+        
+        # 阶段5.14: 线索聚合（新增）
+        aggregator = phase5_14_clue_aggregation(
+            all_persons, all_companies,
+            penetration_results, ml_results, ts_results,
+            related_party_results, loan_results, output_dirs
         )
         
         # 阶段6: 报告生成

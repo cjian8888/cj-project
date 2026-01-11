@@ -1,0 +1,501 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+资金画像分析模块单元测试
+"""
+
+import pytest
+import pandas as pd
+from datetime import datetime
+import sys
+import os
+
+# 添加项目根目录到路径
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from financial_profiler import (
+    _calculate_stable_cv, calculate_income_structure,
+    analyze_fund_flow, analyze_wealth_management,
+    generate_profile_report, extract_large_cash,
+    categorize_transactions, analyze_wealth_holdings
+)
+
+
+class TestCalculateStableCV:
+    """测试变异系数计算函数"""
+    
+    def test_calculate_cv_empty_list(self):
+        """测试空列表"""
+        result = _calculate_stable_cv([])
+        assert result == 999
+    
+    def test_calculate_cv_single_value(self):
+        """测试单个值"""
+        result = _calculate_stable_cv([1000])
+        assert result == 0  # 标准差为0
+    
+    def test_calculate_cv_stable_values(self):
+        """测试稳定值"""
+        result = _calculate_stable_cv([1000, 1001, 999, 1000, 1001])
+        assert result < 0.01  # 变异系数应该很小
+    
+    def test_calculate_cv_variable_values(self):
+        """测试变化值"""
+        result = _calculate_stable_cv([100, 1000, 5000, 10000])
+        assert result > 0.5  # 变异系数应该较大
+    
+    def test_calculate_cv_with_outliers(self):
+        """测试带异常值"""
+        values = [1000, 1001, 999, 1000, 10000]  # 最后一个是异常值
+        result_with_removal = _calculate_stable_cv(values, remove_outliers=True)
+        result_without_removal = _calculate_stable_cv(values, remove_outliers=False)
+        # 剔除异常值后CV应该更小
+        assert result_with_removal < result_without_removal
+
+
+class TestCalculateIncomeStructure:
+    """测试收支结构计算函数"""
+    
+    def test_calculate_income_empty_dataframe(self):
+        """测试空DataFrame"""
+        df = pd.DataFrame(columns=['date', 'income', 'expense', 'counterparty', 'description'])
+        result = calculate_income_structure(df, '张伟')
+        assert result['total_inflow'] == 0
+        assert result['total_expense'] == 0
+        assert result['salary_income'] == 0
+    
+    def test_calculate_income_basic(self):
+        """测试基础计算"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02']),
+            'income': [10000, 5000],
+            'expense': [0, 2000],
+            'counterparty': ['公司', '超市'],
+            'description': ['工资', '购物']
+        })
+        result = calculate_income_structure(df, '张伟')
+        assert result['total_inflow'] == 15000
+        assert result['total_expense'] == 2000
+        assert result['net_flow'] == 13000
+    
+    def test_calculate_income_self_transfer(self):
+        """测试同名转账识别"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02']),
+            'income': [10000, 5000],
+            'expense': [0, 0],
+            'counterparty': ['公司', '张伟'],
+            'description': ['工资', '本人转入']
+        })
+        result = calculate_income_structure(df, '张伟')
+        assert result['self_transfer_income'] == 5000
+        assert result['external_income'] == 10000
+    
+    def test_calculate_income_salary_detection(self):
+        """测试工资识别"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02']),
+            'income': [10000, 5000],
+            'expense': [0, 0],
+            'counterparty': ['某某公司', '超市'],
+            'description': ['工资', '购物']
+        })
+        result = calculate_income_structure(df, '张伟')
+        assert result['salary_income'] > 0
+        assert len(result['salary_details']) > 0
+    
+    def test_calculate_income_yearly_stats(self):
+        """测试年度统计"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-02-01', '2023-01-01']),
+            'income': [10000, 5000, 8000],
+            'expense': [0, 0, 0],
+            'counterparty': ['公司', '公司', '公司'],
+            'description': ['工资', '工资', '工资']
+        })
+        result = calculate_income_structure(df, '张伟')
+        assert 'yearly_stats' in result
+        assert 'monthly_stats' in result
+    
+    def test_calculate_income_result_structure(self):
+        """测试结果结构"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01']),
+            'income': [10000],
+            'expense': [0],
+            'counterparty': ['公司'],
+            'description': ['工资']
+        })
+        result = calculate_income_structure(df, '张伟')
+        expected_keys = [
+            'date_range', 'total_inflow', 'total_income', 'self_transfer_income',
+            'external_income', 'total_expense', 'net_flow', 'salary_income',
+            'non_salary_income', 'salary_ratio', 'salary_details',
+            'yearly_stats', 'monthly_stats', 'transaction_count'
+        ]
+        for key in expected_keys:
+            assert key in result
+
+
+class TestAnalyzeFundFlow:
+    """测试资金去向分析函数"""
+    
+    def test_analyze_fund_flow_empty_dataframe(self):
+        """测试空DataFrame"""
+        df = pd.DataFrame(columns=['date', 'income', 'expense', 'counterparty', 'description'])
+        result = analyze_fund_flow(df)
+        assert result['third_party_expense'] == 0
+        assert result['third_party_income'] == 0
+    
+    def test_analyze_fund_flow_third_party(self):
+        """测试第三方支付识别"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02']),
+            'income': [0, 1000],
+            'expense': [500, 0],
+            'counterparty': ['支付宝', '微信'],
+            'description': ['支付宝支付', '微信收入']
+        })
+        result = analyze_fund_flow(df)
+        assert result['third_party_expense'] > 0
+        assert result['third_party_income'] > 0
+    
+    def test_analyze_fund_flow_counterparty_stats(self):
+        """测试对手方统计"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03']),
+            'income': [1000, 2000, 3000],
+            'expense': [0, 0, 0],
+            'counterparty': ['公司A', '公司B', '公司A'],
+            'description': ['工资', '奖金', '工资']
+        })
+        result = analyze_fund_flow(df)
+        assert 'counterparty_stats' in result
+        assert 'top_counterparties' in result
+        assert len(result['top_counterparties']) <= 10
+    
+    def test_analyze_fund_flow_result_structure(self):
+        """测试结果结构"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01']),
+            'income': [1000],
+            'expense': [0],
+            'counterparty': ['公司'],
+            'description': ['工资']
+        })
+        result = analyze_fund_flow(df)
+        expected_keys = [
+            'third_party_amount', 'third_party_expense', 'third_party_expense_count',
+            'third_party_expense_transactions', 'third_party_income', 'third_party_income_count',
+            'third_party_income_transactions', 'third_party_transactions', 'third_party_count',
+            'third_party_ratio', 'counterparty_stats', 'top_counterparties'
+        ]
+        for key in expected_keys:
+            assert key in result
+
+
+class TestAnalyzeWealthManagement:
+    """测试理财产品分析函数"""
+    
+    def test_analyze_wealth_empty_dataframe(self):
+        """测试空DataFrame"""
+        df = pd.DataFrame(columns=['date', 'income', 'expense', 'counterparty', 'description'])
+        result = analyze_wealth_management(df, '张伟')
+        assert result['wealth_purchase'] == 0
+        assert result['wealth_redemption'] == 0
+        assert result['wealth_income'] == 0
+    
+    def test_analyze_wealth_self_transfer(self):
+        """测试自我转账识别"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02']),
+            'income': [5000, 0],
+            'expense': [0, 5000],
+            'counterparty': ['张伟', '张伟'],
+            'description': ['本人转入', '本人转出']
+        })
+        result = analyze_wealth_management(df, '张伟')
+        assert result['self_transfer_income'] > 0
+        assert result['self_transfer_expense'] > 0
+    
+    def test_analyze_wealth_loan_detection(self):
+        """测试贷款识别"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01']),
+            'income': [100000],
+            'expense': [0],
+            'counterparty': ['银行'],
+            'description': ['贷款发放']
+        })
+        result = analyze_wealth_management(df, '张伟')
+        assert result['loan_inflow'] > 0
+    
+    def test_analyze_wealth_refund_detection(self):
+        """测试退款识别"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01']),
+            'income': [1000],
+            'expense': [0],
+            'counterparty': ['商家'],
+            'description': ['退款']
+        })
+        result = analyze_wealth_management(df, '张伟')
+        assert result['refund_inflow'] > 0
+    
+    def test_analyze_wealth_product_detection(self):
+        """测试理财产品识别"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02']),
+            'income': [0, 10500],
+            'expense': [10000, 0],
+            'counterparty': ['银行', '银行'],
+            'description': ['理财购买', '理财赎回']
+        })
+        result = analyze_wealth_management(df, '张伟')
+        assert result['wealth_purchase'] > 0
+        assert result['wealth_redemption'] > 0
+    
+    def test_analyze_wealth_category_stats(self):
+        """测试分类统计"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02']),
+            'income': [0, 10500],
+            'expense': [10000, 0],
+            'counterparty': ['银行', '银行'],
+            'description': ['基金申购', '基金赎回']
+        })
+        result = analyze_wealth_management(df, '张伟')
+        assert 'category_stats' in result
+        assert 'yearly_stats' in result
+    
+    def test_analyze_wealth_result_structure(self):
+        """测试结果结构"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01']),
+            'income': [1000],
+            'expense': [0],
+            'counterparty': ['公司'],
+            'description': ['工资']
+        })
+        result = analyze_wealth_management(df, '张伟')
+        expected_keys = [
+            'wealth_purchase', 'wealth_purchase_count', 'wealth_purchase_transactions',
+            'wealth_redemption', 'wealth_redemption_count', 'wealth_redemption_transactions',
+            'wealth_income', 'wealth_income_count', 'wealth_income_transactions',
+            'net_wealth_flow', 'real_wealth_profit', 'self_transfer_income',
+            'self_transfer_expense', 'self_transfer_count', 'self_transfer_transactions',
+            'loan_inflow', 'refund_inflow', 'category_stats', 'yearly_stats',
+            'total_transactions', 'estimated_holding', 'holding_structure'
+        ]
+        for key in expected_keys:
+            assert key in result
+
+
+class TestAnalyzeWealthHoldings:
+    """测试理财产品持有估算函数"""
+    
+    def test_analyze_holdings_empty_lists(self):
+        """测试空列表"""
+        holding, details = analyze_wealth_holdings([], [])
+        assert holding == 0
+        assert details == []
+    
+    def test_analyze_holdings_no_redemptions(self):
+        """测试无赎回记录"""
+        purchases = [
+            {'日期': datetime(2024, 1, 1), '金额': 10000, '摘要': '理财购买'},
+            {'日期': datetime(2024, 2, 1), '金额': 20000, '摘要': '理财购买'}
+        ]
+        holding, details = analyze_wealth_holdings(purchases, [])
+        assert holding == 30000
+        assert len(details) == 2
+    
+    def test_analyze_holdings_with_redemptions(self):
+        """测试有赎回记录"""
+        purchases = [
+            {'日期': datetime(2024, 1, 1), '金额': 10000, '摘要': '理财购买'},
+            {'日期': datetime(2024, 2, 1), '金额': 20000, '摘要': '理财购买'}
+        ]
+        redemptions = [
+            {'日期': datetime(2024, 3, 1), '金额': 10500, '摘要': '理财赎回'}
+        ]
+        holding, details = analyze_wealth_holdings(purchases, redemptions)
+        # 应该匹配一笔购买，剩余一笔未赎回
+        assert holding > 0
+        assert len(details) >= 1
+
+
+class TestGenerateProfileReport:
+    """测试画像报告生成函数"""
+    
+    def test_generate_profile_empty_dataframe(self):
+        """测试空DataFrame"""
+        df = pd.DataFrame(columns=['date', 'income', 'expense', 'counterparty', 'description'])
+        result = generate_profile_report(df, '张伟')
+        assert result['entity_name'] == '张伟'
+        assert result['has_data'] is False
+    
+    def test_generate_profile_basic(self):
+        """测试基础报告生成"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02']),
+            'income': [10000, 5000],
+            'expense': [0, 2000],
+            'counterparty': ['公司', '超市'],
+            'description': ['工资', '购物']
+        })
+        result = generate_profile_report(df, '张伟')
+        assert result['entity_name'] == '张伟'
+        assert result['has_data'] is True
+        assert 'income_structure' in result
+        assert 'fund_flow' in result
+        assert 'wealth_management' in result
+        assert 'summary' in result
+    
+    def test_generate_profile_summary(self):
+        """测试汇总信息"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02']),
+            'income': [10000, 5000],
+            'expense': [0, 2000],
+            'counterparty': ['公司', '超市'],
+            'description': ['工资', '购物']
+        })
+        result = generate_profile_report(df, '张伟')
+        summary = result['summary']
+        assert 'total_income' in summary
+        assert 'total_expense' in summary
+        assert 'net_flow' in summary
+        assert 'real_income' in summary
+        assert 'real_expense' in summary
+        assert 'salary_ratio' in summary
+        assert 'third_party_ratio' in summary
+
+
+class TestExtractLargeCash:
+    """测试大额现金提取函数"""
+    
+    def test_extract_large_cash_empty_dataframe(self):
+        """测试空DataFrame"""
+        df = pd.DataFrame(columns=['date', 'income', 'expense', 'counterparty', 'description'])
+        result = extract_large_cash(df)
+        assert result == []
+    
+    def test_extract_large_cash_with_cash_transactions(self):
+        """测试现金交易"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02']),
+            'income': [50000, 0],
+            'expense': [0, 30000],
+            'counterparty': ['银行', '银行'],
+            'description': ['现金存入', '现金支取']
+        })
+        result = extract_large_cash(df, threshold=20000)
+        assert len(result) == 2
+    
+    def test_extract_large_cash_below_threshold(self):
+        """测试低于阈值"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01']),
+            'income': [10000],
+            'expense': [0],
+            'counterparty': ['银行'],
+            'description': ['现金存入']
+        })
+        result = extract_large_cash(df, threshold=20000)
+        assert len(result) == 0
+    
+    def test_extract_large_cash_risk_level(self):
+        """测试风险等级"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03']),
+            'income': [50000, 100000, 200000],
+            'expense': [0, 0, 0],
+            'counterparty': ['银行', '银行', '银行'],
+            'description': ['现金存入', '现金存入', '现金存入']
+        })
+        result = extract_large_cash(df, threshold=20000)
+        assert len(result) == 3
+        # 检查风险等级
+        risk_levels = [r['risk_level'] for r in result]
+        assert 'low' in risk_levels or 'medium' in risk_levels or 'high' in risk_levels
+
+
+class TestCategorizeTransactions:
+    """测试交易分类函数"""
+    
+    def test_categorize_empty_dataframe(self):
+        """测试空DataFrame"""
+        df = pd.DataFrame(columns=['date', 'income', 'expense', 'counterparty', 'description'])
+        result = categorize_transactions(df)
+        assert result['salary'] == []
+        assert result['non_salary'] == []
+        assert result['third_party'] == []
+    
+    def test_categorize_salary_transactions(self):
+        """测试工资分类"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01']),
+            'income': [10000],
+            'expense': [0],
+            'counterparty': ['公司'],
+            'description': ['工资']
+        })
+        result = categorize_transactions(df)
+        assert len(result['salary']) == 1
+        assert len(result['non_salary']) == 0
+    
+    def test_categorize_third_party_transactions(self):
+        """测试第三方支付分类"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01']),
+            'income': [0],
+            'expense': [500],
+            'counterparty': ['支付宝'],
+            'description': ['支付宝支付']
+        })
+        result = categorize_transactions(df)
+        assert len(result['third_party']) == 1
+    
+    def test_categorize_cash_transactions(self):
+        """测试现金交易分类"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01']),
+            'income': [50000],
+            'expense': [0],
+            'counterparty': ['银行'],
+            'description': ['现金存入']
+        })
+        result = categorize_transactions(df)
+        assert len(result['cash']) == 1
+    
+    def test_categorize_large_amount_transactions(self):
+        """测试大额交易分类"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01']),
+            'income': [100000],
+            'expense': [0],
+            'counterparty': ['公司'],
+            'description': ['转账']
+        })
+        result = categorize_transactions(df)
+        assert len(result['large_amount']) == 1
+    
+    def test_categorize_result_structure(self):
+        """测试结果结构"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01']),
+            'income': [10000],
+            'expense': [0],
+            'counterparty': ['公司'],
+            'description': ['工资']
+        })
+        result = categorize_transactions(df)
+        expected_keys = ['salary', 'non_salary', 'third_party', 'cash', 
+                        'large_amount', 'property', 'vehicle', 'other']
+        for key in expected_keys:
+            assert key in result
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

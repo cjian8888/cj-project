@@ -8,8 +8,8 @@
 import re
 import logging
 from datetime import datetime
+from typing import Optional, Union, List, Tuple, Dict, Any
 import pandas as pd
-from typing import Optional, Union, List
 import config
 
 
@@ -74,7 +74,6 @@ def parse_date(date_str: Union[str, datetime]) -> Optional[datetime]:
     
     # 尝试pandas的通用解析
     try:
-        import pandas as pd
         return pd.to_datetime(date_str)
     except Exception:
         pass
@@ -82,7 +81,7 @@ def parse_date(date_str: Union[str, datetime]) -> Optional[datetime]:
     return None
 
 
-def format_amount(amount: Union[int, float, str]) -> float:
+def format_amount(amount: Union[int, float, str, None]) -> float:
     """
     标准化金额格式
     
@@ -108,7 +107,7 @@ def format_amount(amount: Union[int, float, str]) -> float:
         return 0.0
 
 
-def is_amount_similar(amount1: float, amount2: float, tolerance: float = None) -> bool:
+def is_amount_similar(amount1: float, amount2: float, tolerance: Optional[float] = None) -> bool:
     """
     判断两个金额是否相近
     
@@ -133,7 +132,7 @@ def is_amount_similar(amount1: float, amount2: float, tolerance: float = None) -
     return diff_ratio <= tolerance
 
 
-def is_within_time_window(date1: datetime, date2: datetime, hours: int = None) -> bool:
+def is_within_time_window(date1: datetime, date2: datetime, hours: Optional[int] = None) -> bool:
     """
     判断两个日期是否在指定时间窗口内
     
@@ -152,7 +151,7 @@ def is_within_time_window(date1: datetime, date2: datetime, hours: int = None) -
     return time_diff <= hours
 
 
-def contains_keywords(text: str, keywords: List[str]) -> bool:
+def contains_keywords(text: Optional[str], keywords: List[str]) -> bool:
     """
     检查文本是否包含任意关键词
     
@@ -170,7 +169,7 @@ def contains_keywords(text: str, keywords: List[str]) -> bool:
     return any(keyword.lower() in text for keyword in keywords)
 
 
-def extract_keywords(text: str, keywords: List[str]) -> List[str]:
+def extract_keywords(text: Optional[str], keywords: List[str]) -> List[str]:
     """
     提取文本中出现的关键词
     
@@ -193,7 +192,7 @@ def extract_keywords(text: str, keywords: List[str]) -> List[str]:
     return matched
 
 
-def normalize_name(name: str) -> str:
+def normalize_name(name: Optional[str]) -> str:
     """
     标准化人名/公司名
     
@@ -214,7 +213,7 @@ def normalize_name(name: str) -> str:
     return name.strip()
 
 
-def extract_chinese_name(text: str) -> List[str]:
+def extract_chinese_name(text: Optional[str]) -> List[str]:
     """
     从文本中提取中文姓名(2-4个汉字)
     
@@ -268,7 +267,7 @@ def extract_chinese_name(text: str) -> List[str]:
     return list(set(names))  # 去重
 
 
-def extract_company_name(text: str) -> List[str]:
+def extract_company_name(text: Optional[str]) -> List[str]:
     """
     从文本中提取公司名称
     
@@ -291,7 +290,8 @@ def extract_company_name(text: str) -> List[str]:
     companies = []
     for suffix in company_suffixes:
         # 查找以公司标识结尾的文本
-        pattern = f'[\u4e00-\u9fa5()（）\\w]+{suffix}'
+        # 使用非贪婪匹配，避免匹配过长的文本
+        pattern = f'[\u4e00-\u9fa5()（）\\w]+?{suffix}'
         matches = re.findall(pattern, str(text))
         companies.extend(matches)
     
@@ -319,7 +319,7 @@ def format_currency(amount: float) -> str:
         return f'¥{sign}{abs_amount:,.2f}'
 
 
-def calculate_date_range(dates: List[datetime]) -> tuple:
+def calculate_date_range(dates: List[datetime]) -> Tuple[Optional[datetime], Optional[datetime]]:
     """
     计算日期范围
     
@@ -339,7 +339,7 @@ def calculate_date_range(dates: List[datetime]) -> tuple:
     return min(valid_dates), max(valid_dates)
 
 
-def get_month_key(date: datetime) -> str:
+def get_month_key(date: Optional[datetime]) -> str:
     """
     获取月份键值(用于分组)
     
@@ -355,7 +355,7 @@ def get_month_key(date: datetime) -> str:
     return date.strftime('%Y-%m')
 
 
-def get_day_of_month(date: datetime) -> int:
+def get_day_of_month(date: Optional[datetime]) -> int:
     """
     获取日期在月份中的天数
     
@@ -371,7 +371,7 @@ def get_day_of_month(date: datetime) -> int:
     return date.day
 
 
-def clean_text(text: str) -> str:
+def clean_text(text: Optional[str]) -> str:
     """
     清理文本(移除特殊字符、多余空格等)
     
@@ -450,7 +450,7 @@ def extract_bank_name(filename: str) -> str:
     return '未知银行'
 
 
-def normalize_person_name(name: str) -> str:
+def normalize_person_name(name: Optional[str]) -> str:
     """
     标准化人名(去除身份证号等)
     
@@ -474,9 +474,15 @@ def normalize_person_name(name: str) -> str:
     
     return name.strip()
 
-def number_to_chinese(n):
+def number_to_chinese(n: int) -> str:
     """
     将阿拉伯数字转换为中文数字 (支持1-99)
+    
+    Args:
+        n: 阿拉伯数字
+        
+    Returns:
+        中文数字字符串
     """
     if not isinstance(n, int):
         return str(n)
@@ -493,7 +499,7 @@ def number_to_chinese(n):
         return str(n)
 
 
-def safe_str(value, default: str = "-", max_len: int = None) -> str:
+def safe_str(value: Any, default: str = "-", max_len: Optional[int] = None) -> str:
     """
     安全地将任何值转换为字符串，处理 NaN、None 等特殊值
     

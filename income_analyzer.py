@@ -3,14 +3,24 @@
 """
 异常收入来源检测模块
 识别非工资的规律性大额收入、来源不明收入等
+
+重构说明 (2026-01-11):
+- 使用 counterparty_utils 统一理财产品识别逻辑
+- 使用 config.py 中的阈值替代硬编码
 """
 
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from collections import defaultdict
 import config
 import utils
+from counterparty_utils import (
+    is_wealth_management_transaction,
+    should_exclude_large_income,
+    is_individual_name,
+    ExclusionContext
+)
 
 logger = utils.setup_logger(__name__)
 
@@ -39,6 +49,7 @@ def detect_suspicious_income(
         'unknown_source_income': [],    # 来源不明的大额收入
         'large_single_income': [],      # 大额单笔收入（新增）
         'same_source_multi': [],        # 同源多次收入（新增）
+        'potential_bribe_installment': [],  # 【新增】疑似分期受贿
         'high_risk': [],                # 高风险收入汇总（新增）
         'medium_risk': [],              # 中风险收入汇总（新增）
         'summary': {}
@@ -74,7 +85,13 @@ def detect_suspicious_income(
         all_transactions, core_persons
     )
     
-    # 6. 按风险等级分类汇总（新增）
+    # 6. 【新增】分期受贿风险检测
+    logger.info('【阶段6】检测疑似分期受贿')
+    results['potential_bribe_installment'] = _detect_potential_bribe_installment(
+        all_transactions, core_persons
+    )
+    
+    # 7. 按风险等级分类汇总（新增）
     results['high_risk'], results['medium_risk'] = _classify_by_risk(results)
     
     # 生成汇总
@@ -84,6 +101,7 @@ def detect_suspicious_income(
         '来源不明收入': len(results['unknown_source_income']),
         '大额单笔收入': len(results['large_single_income']),
         '同源多次收入': len(results['same_source_multi']),
+        '疑似分期受贿': len(results['potential_bribe_installment']),
         '高风险项目': len(results['high_risk']),
         '中风险项目': len(results['medium_risk'])
     }
@@ -169,13 +187,17 @@ def _detect_regular_non_salary(
                     intervals = [(dates[i+1] - dates[i]).days for i in range(len(dates)-1)]
                     avg_interval = sum(intervals) / len(intervals)
                     
-                    # 月度规律（25-35天间隔）
-                    if 20 <= avg_interval <= 40:
+                    # 月度规律（使用配置阈值）
+                    interval_min = config.REGULAR_INCOME_INTERVAL_MIN
+                    interval_max = config.REGULAR_INCOME_INTERVAL_MAX
+                    cv_threshold = config.REGULAR_INCOME_CV_THRESHOLD
+                    
+                    if interval_min <= avg_interval <= interval_max:
                         # 金额稳定性
                         mean_amt = sum(amounts) / len(amounts)
                         cv = (sum((x - mean_amt)**2 for x in amounts) / len(amounts))**0.5 / mean_amt if mean_amt > 0 else 999
                         
-                        if cv < 0.5:  # 金额相对稳定
+                        if cv < cv_threshold:  # 金额相对稳定
                             # [FIX] 增加对摘要的二次检查，防止理财赎回被误判为规律性收入
                             # 典型的误判摘要: "约定定期到期本息转活", "活期宝转活期", "定期结息"
                             wealth_keywords = ['赎回', '到期', '本息', '转存', '理财', '结息', '收益', '分红', '活期宝', '转活', '提现', '银证']
@@ -285,6 +307,10 @@ def _detect_individual_income(
     return individual_income
 
 
+# 注意: _is_wealth_management_transaction 已迁移至 counterparty_utils.py
+# 现在使用 from counterparty_utils import is_wealth_management_transaction
+
+
 def _detect_unknown_income(
     all_transactions: Dict[str, pd.DataFrame],
     core_persons: List[str],
@@ -298,7 +324,7 @@ def _detect_unknown_income(
     """
     unknown_income = []
     
-    # === 新增: 先识别可能的定期存款账户 ===
+    # 先识别可能的定期存款账户
     # 定期存款本息特征: 固定间隔、金额递增、同一账户
     periodic_deposit_patterns = _identify_periodic_deposit_patterns(all_transactions, core_persons)
     
@@ -328,32 +354,35 @@ def _detect_unknown_income(
                 elif cp in ['未知', '其他', '个人', '转账']:
                     is_unknown = True
                     reason = '对手方信息模糊'
-                elif utils.contains_keywords(desc, ['现金', '存入', 'ATM']):
+                elif utils.contains_keywords(desc, ['现金', '存入', 'ATM']) and not utils.contains_keywords(desc, ['添利', '理财', '活期宝']):
                     is_unknown = True
                     reason = '现金存入（来源不明）'
                 
-                # === 新增: 检查是否匹配定期存款模式 ===
+                # 理财产品识别 - 多维度判断
+                if is_unknown:
+                    # 理财产品识别 - 使用统一的识别函数
+                    is_wealth_mgmt, wealth_reason = is_wealth_management_transaction(desc, row['income'], cp)
+                    if is_wealth_mgmt:
+                        is_unknown = False
+                        logger.debug(f'  理财识别: {person} {row["income"]/10000:.2f}万 - {wealth_reason}')
+                
+                # 检查是否匹配定期存款模式
                 if is_unknown:
                     pattern_key = f"{person}_{account}" if account else person
                     if pattern_key in periodic_deposit_patterns:
                         pattern = periodic_deposit_patterns[pattern_key]
-                        # 检查日期是否与模式匹配
                         tx_date = row['date']
                         for expected_date in pattern['expected_dates']:
-                            if abs((tx_date - expected_date).days) <= 7:  # 允许7天误差
+                            if abs((tx_date - expected_date).days) <= 7:
                                 is_unknown = False
                                 reason = '疑似定期存款本息（规律性到账）'
                                 break
                 
-                # [FIX] 增加非整数金额的判定
+                # 非整数金额（有小数点）通常是利息，排除
                 if is_unknown and row['income'] % 1 != 0:
                     is_unknown = False
                 
-                # [FIX] 增加对理财赎回特征的排除
-                if is_unknown and utils.contains_keywords(desc, ['赎回', '到期', '本息', '转存', '理财', '结息', '收益', '分红', '活期宝', '转活', '提现', '银证']):
-                    continue
-                
-                # === 新增: 排除政府机关付款 ===
+                # 排除政府机关付款
                 if is_unknown and utils.contains_keywords(cp, config.GOVERNMENT_AGENCY_KEYWORDS):
                     continue
                 
@@ -480,6 +509,43 @@ def _identify_periodic_deposit_patterns(
     return patterns
 
 
+# 注意: _should_exclude_large_income 已迁移至 counterparty_utils.py
+# 现在使用 from counterparty_utils import should_exclude_large_income
+
+
+def _determine_income_type_and_risk(cp: str, desc: str) -> tuple:
+    """
+    判断收入类型和风险等级
+    
+    Args:
+        cp: 对手方
+        desc: 交易摘要
+        
+    Returns:
+        (收入类型, 风险等级)
+    """
+    import re
+    
+    income_type = '待核实'
+    risk_level = 'high'
+    
+    if utils.contains_keywords(cp, ['银行', '证券']):
+        income_type = '银行/证券转入'
+        risk_level = 'medium'
+    elif utils.contains_keywords(desc, ['借款', '借入', '还款']):
+        income_type = '借款收入'
+        risk_level = 'high'
+    elif utils.contains_keywords(desc, ['转让', '股权', '投资']):
+        income_type = '投资收益'
+        risk_level = 'medium'
+    else:
+        if re.match(r'^[\u4e00-\u9fa5]{2,4}$', cp):
+            income_type = '个人大额转入'
+            risk_level = 'high'
+    
+    return income_type, risk_level
+
+
 def _detect_large_single_income(
     all_transactions: Dict[str, pd.DataFrame],
     core_persons: List[str],
@@ -512,34 +578,12 @@ def _detect_large_single_income(
                 if cp == person or cp in core_persons:
                     continue
                 
-                # 排除理财赎回、工资奖金等正常大额收入
-                if utils.contains_keywords(desc, ['理财', '赎回', '到期', '兑付', '基金', '本息', '转存', '结息', '收益', '分红', '活期宝', '转活']):
-                    continue
-                if utils.contains_keywords(desc, config.SALARY_STRONG_KEYWORDS):
-                    continue
-                if utils.contains_keywords(cp, config.KNOWN_SALARY_PAYERS):
-                    continue
-                if utils.contains_keywords(cp, config.USER_DEFINED_SALARY_PAYERS):
+                # 排除理财产品相关交易（使用统一的排除函数）
+                if should_exclude_large_income(desc, cp, income):
                     continue
                 
                 # 判断收入类型和风险
-                income_type = '待核实'
-                risk_level = 'high'
-                
-                if utils.contains_keywords(cp, ['银行', '证券']):
-                    income_type = '银行/证券转入'
-                    risk_level = 'medium'
-                elif utils.contains_keywords(desc, ['借款', '借入', '还款']):
-                    income_type = '借款收入'
-                    risk_level = 'high'
-                elif utils.contains_keywords(desc, ['转让', '股权', '投资']):
-                    income_type = '投资收益'
-                    risk_level = 'medium'
-                else:
-                    import re
-                    if re.match(r'^[\u4e00-\u9fa5]{2,4}$', cp):
-                        income_type = '个人大额转入'
-                        risk_level = 'high'
+                income_type, risk_level = _determine_income_type_and_risk(cp, desc)
                 
                 large_income.append({
                     'person': person,
@@ -654,93 +698,360 @@ def _detect_same_source_multi(
     return same_source
 
 
+def _calculate_confidence_score(item: Dict, item_type: str) -> int:
+    """
+    计算可信度评分（0-100分）
+    
+    评分越高，表示该项越可能是真正的异常收入
+    
+    评分因子：
+    - 金额大小（+10~+30）
+    - 对手方信息完整度（+10~+20）
+    - 交易频次（+5~+15）
+    - 风险等级（+10~+20）
+    - 摘要信息丰富度（+5~+15）
+    """
+    score = 50  # 基础分
+    
+    # 1. 金额因子
+    amount = item.get('amount', item.get('total_amount', item.get('total', 0)))
+    if amount >= 500000:  # 50万以上
+        score += 30
+    elif amount >= 100000:  # 10万以上
+        score += 20
+    elif amount >= 50000:  # 5万以上
+        score += 10
+    
+    # 2. 对手方信息因子
+    cp = item.get('counterparty', item.get('from_individual', ''))
+    if cp and cp != '(无)' and cp != '(未知)' and len(cp) >= 2:
+        # 有对手方信息，但如果是个人名字（2-4字汉字）加分
+        import re
+        if re.match(r'^[\u4e00-\u9fa5]{2,4}$', cp):
+            score += 15  # 个人转账更可疑
+        else:
+            score += 10
+    elif not cp or cp in ['(无)', '(未知)', 'nan']:
+        score += 20  # 无对手方信息更可疑
+    
+    # 3. 交易频次因子（针对规律性收入和同源多次）
+    occurrences = item.get('occurrences', item.get('count', 1))
+    if occurrences >= 10:
+        score += 15
+    elif occurrences >= 5:
+        score += 10
+    elif occurrences >= 3:
+        score += 5
+    
+    # 4. 风险等级因子
+    risk_level = item.get('risk_level', 'medium')
+    if risk_level == 'high':
+        score += 20
+    else:
+        score += 10
+    
+    # 5. 类型特定调整
+    if item_type == '来源不明收入':
+        score += 10  # 来源不明总是更可疑
+    elif item_type == '个人大额转入':
+        score += 5
+    
+    # 限制在 0-100 范围
+    return min(100, max(0, score))
+
+
+def _generate_unique_key(person: str, counterparty: str, date, amount) -> str:
+    """
+    生成交易唯一标识
+    
+    Args:
+        person: 人员名称
+        counterparty: 对手方
+        date: 日期
+        amount: 金额
+        
+    Returns:
+        唯一标识字符串
+    """
+    date_str = str(date)[:10] if date else 'unknown'
+    # 金额四舍五入到百元，避免微小差异导致重复
+    amount_key = int(round(float(amount) / 100) * 100) if amount else 0
+    return f"{person}|{counterparty}|{date_str}|{amount_key}"
+
+
+def _add_risk_entry(item: Dict, entry_type: str, item_type: str,
+                    high_risk: List, medium_risk: List,
+                    seen_transactions: set) -> None:
+    """
+    添加风险条目到对应列表
+    
+    Args:
+        item: 原始条目
+        entry_type: 条目类型（如'规律性非工资收入'）
+        item_type: 项目类型（用于计算可信度）
+        high_risk: 高风险列表
+        medium_risk: 中风险列表
+        seen_transactions: 已见交易集合
+    """
+    # 生成唯一标识
+    if entry_type == '规律性非工资收入':
+        unique_key = f"{item['person']}|{item['counterparty']}|REGULAR|{int(item['total_amount'])}"
+        detail = f"共{item['occurrences']}次, 均额{item['avg_amount']:.0f}元"
+        counterparty = item['counterparty']
+        amount = item['total_amount']
+    elif entry_type == '个人大额转入':
+        unique_key = _generate_unique_key(
+            item['person'], item['from_individual'], item['date'], item['amount']
+        )
+        detail = f"日期: {item['date']}"
+        counterparty = item['from_individual']
+        amount = item['amount']
+    elif entry_type == '来源不明收入':
+        unique_key = _generate_unique_key(
+            item['person'], item['counterparty'], item['date'], item['amount']
+        )
+        detail = item['reason']
+        counterparty = item['counterparty']
+        amount = item['amount']
+    elif entry_type == '大额单笔收入':
+        unique_key = _generate_unique_key(
+            item['person'], item['counterparty'], item['date'], item['amount']
+        )
+        detail = item['income_type']
+        counterparty = item['counterparty']
+        amount = item['amount']
+    elif entry_type == '同源多次收入':
+        unique_key = f"{item['person']}|{item['counterparty']}|MULTI|{int(item['total'])}"
+        detail = f"共{item['count']}次, 均额{item['avg_amount']:.0f}元"
+        counterparty = item['counterparty']
+        amount = item['total']
+    else:
+        return
+    
+    # 去重
+    if unique_key in seen_transactions:
+        return
+    seen_transactions.add(unique_key)
+    
+    # 创建条目
+    entry = {
+        'type': entry_type,
+        'person': item['person'],
+        'counterparty': counterparty,
+        'amount': amount,
+        'detail': detail,
+        'risk_level': item['risk_level'],
+        'confidence': _calculate_confidence_score(item, item_type)
+    }
+    
+    # 添加到对应列表
+    if entry_type == '来源不明收入' or item['risk_level'] == 'high':
+        high_risk.append(entry)
+    else:
+        medium_risk.append(entry)
+
+
 def _classify_by_risk(results: Dict) -> tuple:
     """
-    按风险等级分类汇总所有异常收入
+    按风险等级分类汇总所有异常收入（增强版）
     
-    将所有检测结果按高风险和中风险分类
+    新增功能：
+    1. 去重 - 避免同一笔交易在多个类别中重复出现
+    2. 可信度评分 - 每个项目增加 0-100 的可信度评分
     """
     high_risk = []
     medium_risk = []
+    seen_transactions = set()
     
     # 规律性非工资收入
     for item in results.get('regular_non_salary', []):
-        entry = {
-            'type': '规律性非工资收入',
-            'person': item['person'],
-            'counterparty': item['counterparty'],
-            'amount': item['total_amount'],
-            'detail': f"共{item['occurrences']}次, 均额{item['avg_amount']:.0f}元",
-            'risk_level': item['risk_level']
-        }
-        if item['risk_level'] == 'high':
-            high_risk.append(entry)
-        else:
-            medium_risk.append(entry)
+        _add_risk_entry(item, '规律性非工资收入', '规律性非工资收入',
+                      high_risk, medium_risk, seen_transactions)
     
     # 个人大额转入
     for item in results.get('large_individual_income', []):
-        entry = {
-            'type': '个人大额转入',
-            'person': item['person'],
-            'counterparty': item['from_individual'],
-            'amount': item['amount'],
-            'detail': f"日期: {item['date']}",
-            'risk_level': item['risk_level']
-        }
-        if item['risk_level'] == 'high':
-            high_risk.append(entry)
-        else:
-            medium_risk.append(entry)
+        _add_risk_entry(item, '个人大额转入', '个人大额转入',
+                      high_risk, medium_risk, seen_transactions)
     
     # 来源不明收入
     for item in results.get('unknown_source_income', []):
-        entry = {
-            'type': '来源不明收入',
-            'person': item['person'],
-            'counterparty': item['counterparty'],
-            'amount': item['amount'],
-            'detail': item['reason'],
-            'risk_level': item['risk_level']
-        }
-        high_risk.append(entry)  # 来源不明总是高风险
+        _add_risk_entry(item, '来源不明收入', '来源不明收入',
+                      high_risk, medium_risk, seen_transactions)
     
     # 大额单笔收入
     for item in results.get('large_single_income', []):
-        entry = {
-            'type': '大额单笔收入',
-            'person': item['person'],
-            'counterparty': item['counterparty'],
-            'amount': item['amount'],
-            'detail': item['income_type'],
-            'risk_level': item['risk_level']
-        }
-        if item['risk_level'] == 'high':
-            high_risk.append(entry)
-        else:
-            medium_risk.append(entry)
+        _add_risk_entry(item, '大额单笔收入', '大额单笔收入',
+                      high_risk, medium_risk, seen_transactions)
     
     # 同源多次收入
     for item in results.get('same_source_multi', []):
-        entry = {
-            'type': '同源多次收入',
-            'person': item['person'],
-            'counterparty': item['counterparty'],
-            'amount': item['total'],
-            'detail': f"共{item['count']}次, 均额{item['avg_amount']:.0f}元",
-            'risk_level': item['risk_level']
-        }
-        if item['risk_level'] == 'high':
-            high_risk.append(entry)
-        else:
-            medium_risk.append(entry)
+        _add_risk_entry(item, '同源多次收入', '同源多次收入',
+                      high_risk, medium_risk, seen_transactions)
     
-    # 按金额排序
-    high_risk.sort(key=lambda x: -x['amount'])
-    medium_risk.sort(key=lambda x: -x['amount'])
+    # 按可信度+金额综合排序（可信度优先，金额次之）
+    high_risk.sort(key=lambda x: (-x['confidence'], -x['amount']))
+    medium_risk.sort(key=lambda x: (-x['confidence'], -x['amount']))
     
     logger.info(f'  风险分类: 高风险{len(high_risk)}项, 中风险{len(medium_risk)}项')
+    logger.info(f'  去重效果: 已过滤{len(seen_transactions)}个唯一交易')
     return high_risk, medium_risk
+
+
+def _write_report_header(f) -> None:
+    """
+    写入报告头部
+    
+    Args:
+        f: 文件对象
+    """
+    f.write('异常收入来源分析报告（增强版）\n')
+    f.write('='*60 + '\n')
+    f.write(f'生成时间: {datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")}\n\n')
+
+
+def _write_summary_section(f, summary: Dict) -> None:
+    """
+    写入汇总统计部分
+    
+    Args:
+        f: 文件对象
+        summary: 汇总数据
+    """
+    f.write('一、汇总统计\n')
+    f.write('-'*40 + '\n')
+    for k, v in summary.items():
+        f.write(f'{k}: {v}\n')
+    f.write('\n')
+
+
+def _write_high_risk_section(f, high_risk: List) -> None:
+    """
+    写入高风险项目部分
+    
+    Args:
+        f: 文件对象
+        high_risk: 高风险项目列表
+    """
+    f.write('★★★ 二、高风险项目（优先核查）★★★\n')
+    f.write('='*40 + '\n')
+    f.write('以下项目风险较高，建议优先核实\n')
+    f.write('（可信度评分: 0-100分，分数越高越需关注）\n\n')
+    for i, item in enumerate(high_risk[:20], 1):
+        confidence = item.get('confidence', 50)
+        f.write(f"{i}. 【{item['type']}】{item['person']} ← {item['counterparty']} [可信度:{confidence}分]\n")
+        f.write(f"   金额: {utils.format_currency(item['amount'])}\n")
+        f.write(f"   详情: {item['detail']}\n")
+    f.write('\n')
+
+
+def _write_medium_risk_section(f, medium_risk: List) -> None:
+    """
+    写入中风险项目部分
+    
+    Args:
+        f: 文件对象
+        medium_risk: 中风险项目列表
+    """
+    f.write('三、中风险项目（参考信息）\n')
+    f.write('-'*40 + '\n')
+    f.write('以下项目需酌情关注\n\n')
+    for i, item in enumerate(medium_risk[:15], 1):
+        f.write(f"{i}. 【{item['type']}】{item['person']} ← {item['counterparty']}\n")
+        f.write(f"   金额: {utils.format_currency(item['amount'])}\n")
+    f.write('\n')
+
+
+def _write_regular_non_salary_section(f, regular_non_salary: List) -> None:
+    """
+    写入规律性非工资收入部分
+    
+    Args:
+        f: 文件对象
+        regular_non_salary: 规律性非工资收入列表
+    """
+    f.write('四、规律性非工资收入\n')
+    f.write('-'*40 + '\n')
+    for i, inc in enumerate(regular_non_salary[:15], 1):
+        f.write(f"{i}. 【{inc['risk_level'].upper()}】{inc['person']} ← {inc['counterparty']}\n")
+        f.write(f"   共{inc['occurrences']}次, 均额{utils.format_currency(inc['avg_amount'])}, "
+               f"合计{utils.format_currency(inc['total_amount'])}\n")
+        f.write(f"   推测类型: {inc['possible_type']}\n")
+    f.write('\n')
+
+
+def _write_large_single_income_section(f, large_single_income: List) -> None:
+    """
+    写入大额单笔收入部分
+    
+    Args:
+        f: 文件对象
+        large_single_income: 大额单笔收入列表
+    """
+    f.write('五、大额单笔收入（≥10万元）\n')
+    f.write('-'*40 + '\n')
+    for i, inc in enumerate(large_single_income[:15], 1):
+        date_str = inc['date'].strftime('%Y-%m-%d') if hasattr(inc['date'], 'strftime') else str(inc['date'])[:10]
+        f.write(f"{i}. 【{inc['risk_level'].upper()}】{inc['person']} ← {inc['counterparty']}\n")
+        f.write(f"   金额: {utils.format_currency(inc['amount'])} ({date_str})\n")
+        f.write(f"   类型: {inc['income_type']}\n")
+    f.write('\n')
+
+
+def _write_same_source_multi_section(f, same_source_multi: List) -> None:
+    """
+    写入同源多次收入部分
+    
+    Args:
+        f: 文件对象
+        same_source_multi: 同源多次收入列表
+    """
+    f.write('六、同源多次收入\n')
+    f.write('-'*40 + '\n')
+    for i, inc in enumerate(same_source_multi[:15], 1):
+        f.write(f"{i}. 【{inc['risk_level'].upper()}】{inc['person']} ← {inc['counterparty']}\n")
+        f.write(f"   共{inc['count']}次, 均额{utils.format_currency(inc['avg_amount'])}, "
+               f"合计{utils.format_currency(inc['total'])}\n")
+        f.write(f"   类型: {inc['source_type']}\n")
+    f.write('\n')
+
+
+def _write_large_individual_income_section(f, large_individual_income: List) -> None:
+    """
+    写入个人大额转入部分
+    
+    Args:
+        f: 文件对象
+        large_individual_income: 个人大额转入列表
+    """
+    f.write('七、来自个人的大额收入\n')
+    f.write('-'*40 + '\n')
+    for i, inc in enumerate(large_individual_income[:20], 1):
+        date_str = inc['date'].strftime('%Y-%m-%d') if hasattr(inc['date'], 'strftime') else str(inc['date'])[:10]
+        f.write(f"{i}. {inc['person']} ← {inc['from_individual']}: "
+               f"{utils.format_currency(inc['amount'])} ({date_str})\n")
+    f.write('\n')
+
+
+def _write_unknown_source_income_section(f, unknown_source_income: List) -> None:
+    """
+    写入来源不明收入部分
+    
+    Args:
+        f: 文件对象
+        unknown_source_income: 来源不明收入列表
+    """
+    f.write('八、来源不明的大额收入（重点核查）\n')
+    f.write('-'*40 + '\n')
+    f.write('【说明】这些交易的对手方信息在原始银行数据中缺失，需核实资金来源。\n\n')
+    for i, inc in enumerate(unknown_source_income[:15], 1):
+        date_str = inc['date'].strftime('%Y-%m-%d') if hasattr(inc['date'], 'strftime') else str(inc['date'])[:10]
+        f.write(f"{i}. 【{inc['risk_level'].upper()}】{inc['person']}: "
+               f"{utils.format_currency(inc['amount'])} ({date_str})\n")
+        f.write(f"   原因: {inc['reason']}\n")
+        desc = inc.get('description', '')
+        if desc and desc != 'nan':
+            f.write(f"   摘要: {desc[:50]}\n")
+    f.write('\n')
 
 
 def generate_suspicious_income_report(results: Dict, output_dir: str) -> str:
@@ -749,98 +1060,262 @@ def generate_suspicious_income_report(results: Dict, output_dir: str) -> str:
     report_path = os.path.join(output_dir, '异常收入来源分析报告.txt')
     
     with open(report_path, 'w', encoding='utf-8') as f:
-        f.write('异常收入来源分析报告（增强版）\n')
-        f.write('='*60 + '\n')
-        f.write(f'生成时间: {datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")}\n\n')
+        # 写入报告头部
+        _write_report_header(f)
         
-        # 汇总
-        summary = results['summary']
-        f.write('一、汇总统计\n')
-        f.write('-'*40 + '\n')
-        for k, v in summary.items():
-            f.write(f'{k}: {v}\n')
-        f.write('\n')
+        # 写入汇总统计
+        _write_summary_section(f, results['summary'])
         
-        # ===== 高风险项目（优先处理）=====
+        # 写入高风险项目
         if results.get('high_risk'):
-            f.write('★★★ 二、高风险项目（优先核查）★★★\n')
-            f.write('='*40 + '\n')
-            f.write('以下项目风险较高，建议优先核实\n\n')
-            for i, item in enumerate(results['high_risk'][:20], 1):
-                f.write(f"{i}. 【{item['type']}】{item['person']} ← {item['counterparty']}\n")
-                f.write(f"   金额: {utils.format_currency(item['amount'])}\n")
-                f.write(f"   详情: {item['detail']}\n")
-            f.write('\n')
+            _write_high_risk_section(f, results['high_risk'])
         
-        # ===== 中风险项目（参考信息）=====
+        # 写入中风险项目
         if results.get('medium_risk'):
-            f.write('三、中风险项目（参考信息）\n')
-            f.write('-'*40 + '\n')
-            f.write('以下项目需酌情关注\n\n')
-            for i, item in enumerate(results['medium_risk'][:15], 1):
-                f.write(f"{i}. 【{item['type']}】{item['person']} ← {item['counterparty']}\n")
-                f.write(f"   金额: {utils.format_currency(item['amount'])}\n")
-            f.write('\n')
+            _write_medium_risk_section(f, results['medium_risk'])
         
-        # ===== 详细分类 =====
+        # 写入详细分类
         f.write('='*60 + '\n')
         f.write('以下为各类型异常收入详细明细\n')
         f.write('='*60 + '\n\n')
         
         # 规律性非工资收入
         if results.get('regular_non_salary'):
-            f.write('四、规律性非工资收入\n')
-            f.write('-'*40 + '\n')
-            for i, inc in enumerate(results['regular_non_salary'][:15], 1):
-                f.write(f"{i}. 【{inc['risk_level'].upper()}】{inc['person']} ← {inc['counterparty']}\n")
-                f.write(f"   共{inc['occurrences']}次, 均额{utils.format_currency(inc['avg_amount'])}, "
-                       f"合计{utils.format_currency(inc['total_amount'])}\n")
-                f.write(f"   推测类型: {inc['possible_type']}\n")
-            f.write('\n')
+            _write_regular_non_salary_section(f, results['regular_non_salary'])
         
         # 大额单笔收入
         if results.get('large_single_income'):
-            f.write('五、大额单笔收入（≥10万元）\n')
-            f.write('-'*40 + '\n')
-            for i, inc in enumerate(results['large_single_income'][:15], 1):
-                date_str = inc['date'].strftime('%Y-%m-%d') if hasattr(inc['date'], 'strftime') else str(inc['date'])[:10]
-                f.write(f"{i}. 【{inc['risk_level'].upper()}】{inc['person']} ← {inc['counterparty']}\n")
-                f.write(f"   金额: {utils.format_currency(inc['amount'])} ({date_str})\n")
-                f.write(f"   类型: {inc['income_type']}\n")
-            f.write('\n')
+            _write_large_single_income_section(f, results['large_single_income'])
         
         # 同源多次收入
         if results.get('same_source_multi'):
-            f.write('六、同源多次收入\n')
-            f.write('-'*40 + '\n')
-            for i, inc in enumerate(results['same_source_multi'][:15], 1):
-                f.write(f"{i}. 【{inc['risk_level'].upper()}】{inc['person']} ← {inc['counterparty']}\n")
-                f.write(f"   共{inc['count']}次, 均额{utils.format_currency(inc['avg_amount'])}, "
-                       f"合计{utils.format_currency(inc['total'])}\n")
-                f.write(f"   类型: {inc['source_type']}\n")
-            f.write('\n')
+            _write_same_source_multi_section(f, results['same_source_multi'])
         
         # 个人大额转入
         if results.get('large_individual_income'):
-            f.write('七、来自个人的大额收入\n')
-            f.write('-'*40 + '\n')
-            for i, inc in enumerate(results['large_individual_income'][:20], 1):
-                date_str = inc['date'].strftime('%Y-%m-%d') if hasattr(inc['date'], 'strftime') else str(inc['date'])[:10]
-                f.write(f"{i}. {inc['person']} ← {inc['from_individual']}: "
-                       f"{utils.format_currency(inc['amount'])} ({date_str})\n")
-            f.write('\n')
+            _write_large_individual_income_section(f, results['large_individual_income'])
         
-        # 来源不明
+        # 来源不明收入
         if results.get('unknown_source_income'):
-            f.write('八、来源不明的大额收入（重点核查）\n')
-            f.write('-'*40 + '\n')
-            for i, inc in enumerate(results['unknown_source_income'][:15], 1):
-                date_str = inc['date'].strftime('%Y-%m-%d') if hasattr(inc['date'], 'strftime') else str(inc['date'])[:10]
-                f.write(f"{i}. 【{inc['risk_level'].upper()}】{inc['person']}: "
-                       f"{utils.format_currency(inc['amount'])} ({date_str})\n")
-                f.write(f"   原因: {inc['reason']}\n")
-            f.write('\n')
+            _write_unknown_source_income_section(f, results['unknown_source_income'])
+        
+        # 【新增】疑似分期受贿
+        if results.get('potential_bribe_installment'):
+            _write_potential_bribe_section(f, results['potential_bribe_installment'])
     
     logger.info(f'异常收入分析报告已生成: {report_path}')
     return report_path
 
+
+def _write_potential_bribe_section(f, bribe_items: List[Dict]) -> None:
+    """写入疑似分期受贿部分"""
+    f.write('\n')
+    f.write('★★★ 重点关注：疑似分期受贿（高风险）★★★\n')
+    f.write('-'*60 + '\n')
+    f.write('【特征】从同一个人（非发薪单位）处每月收到固定金额\n')
+    f.write('【风险】此类收入可能是分期受贿、利益输送或掩盖性质的款项\n\n')
+    
+    for i, item in enumerate(bribe_items[:20], 1):
+        f.write(f'{i}. 【{item["risk_level"].upper()}】{item["person"]} ← {item["counterparty"]}\n')
+        f.write(f'   金额: 月均 {item["avg_amount"]/10000:.2f}万 (波动系数: {item["cv"]:.2f})\n')
+        f.write(f'   时间: {item["months"]}个月, 共{item["occurrences"]}笔\n')
+        f.write(f'   总额: {item["total_amount"]/10000:.2f}万\n')
+        f.write(f'   风险因素: {item["risk_factors"]}\n\n')
+    
+    if len(bribe_items) > 20:
+        f.write(f'... 共{len(bribe_items)}项\n')
+
+
+def _detect_potential_bribe_installment(
+    all_transactions: Dict[str, pd.DataFrame],
+    core_persons: List[str],
+    min_occurrences: int = 4,  # 至少4次
+    min_amount: float = 10000,  # 至少1万元/次
+    max_cv: float = 0.5        # 金额波动系数 ≤ 0.5
+) -> List[Dict]:
+    """
+    检测疑似分期受贿
+    
+    【核心逻辑】
+    从同一个人（非发薪单位）处每月收到固定金额，可能是：
+    - 分期受贿
+    - 约定的利益输送
+    - 隐蔽的咨询费/介绍费
+    
+    【排除条件】
+    1. 排除已知发薪单位
+    2. 排除金融机构/政府机关
+    3. 排除对手方是公司（注册组织）
+    4. 只关注对手方是个人姓名（2-4个汉字）
+    
+    【高风险特征】
+    1. 金额稳定（CV < 0.5）
+    2. 频率规律（月度）
+    3. 对手方是个人
+    4. 金额较大（> 1万/月）
+    
+    Args:
+        all_transactions: 所有交易数据
+        core_persons: 核心人员列表
+        min_occurrences: 最少出现次数
+        min_amount: 最低金额阈值
+        max_cv: 最大变异系数
+        
+    Returns:
+        疑似分期受贿列表
+    """
+    import re
+    
+    suspicious_items = []
+    
+    # 排除关键词
+    EXCLUDE_KEYWORDS = (
+        config.SALARY_STRONG_KEYWORDS +
+        config.KNOWN_SALARY_PAYERS +
+        config.USER_DEFINED_SALARY_PAYERS +
+        config.WEALTH_MANAGEMENT_KEYWORDS +
+        config.GOVERNMENT_AGENCY_KEYWORDS +
+        ['银行', '公司', '有限', '集团', '股份', '合伙', '基金', '证券', 
+         '保险', '信托', '投资', '理财', '资产', '管理']
+    )
+    
+    for person in core_persons:
+        for key, df in all_transactions.items():
+            if person not in key or '公司' in key:
+                continue
+            
+            if df.empty or 'counterparty' not in df.columns:
+                continue
+            
+            # 只分析收入
+            income_df = df[df['income'] >= min_amount].copy()
+            if income_df.empty:
+                continue
+            
+            # 按对手方分组
+            for cp in income_df['counterparty'].unique():
+                cp_str = str(cp).strip()
+                
+                # 跳过无效对手方
+                if not cp_str or cp_str == 'nan' or len(cp_str) < 2:
+                    continue
+                
+                # 跳过自己
+                if cp_str == person or cp_str in core_persons:
+                    continue
+                
+                # 【关键】只关注个人姓名（2-4个汉字）
+                if not re.match(r'^[\u4e00-\u9fa5]{2,4}$', cp_str):
+                    continue
+                
+                # 排除已知机构/发薪单位
+                if utils.contains_keywords(cp_str, EXCLUDE_KEYWORDS):
+                    continue
+                
+                cp_df = income_df[income_df['counterparty'] == cp].copy()
+                
+                if len(cp_df) < min_occurrences:
+                    continue
+                
+                # 计算统计特征
+                cp_df = cp_df.sort_values('date')
+                dates = cp_df['date'].tolist()
+                amounts = cp_df['income'].tolist()
+                
+                # 计算月份跨度
+                months = set(d.strftime('%Y-%m') for d in dates)
+                
+                # 需要至少跨4个月
+                if len(months) < 4:
+                    continue
+                
+                # 计算平均间隔
+                if len(dates) >= 2:
+                    intervals = [(dates[i+1] - dates[i]).days for i in range(len(dates)-1)]
+                    avg_interval = sum(intervals) / len(intervals)
+                else:
+                    avg_interval = 0
+                
+                # 计算金额稳定性
+                mean_amount = sum(amounts) / len(amounts)
+                variance = sum((x - mean_amount) ** 2 for x in amounts) / len(amounts)
+                std_amount = variance ** 0.5
+                cv = std_amount / mean_amount if mean_amount > 0 else 999
+                
+                # 【核心判断条件】
+                # 1. 金额稳定（CV < 0.5）
+                # 2. 月度规律（间隔20-40天）
+                # 3. 金额较大（月均 > 1万）
+                is_stable = cv < max_cv
+                is_monthly = 20 <= avg_interval <= 40
+                is_significant = mean_amount >= min_amount
+                
+                if is_stable and is_significant:
+                    # 计算风险等级
+                    risk_factors = []
+                    risk_score = 0
+                    
+                    if cv < 0.2:
+                        risk_factors.append('金额极其稳定')
+                        risk_score += 3
+                    elif cv < 0.3:
+                        risk_factors.append('金额非常稳定')
+                        risk_score += 2
+                    else:
+                        risk_factors.append('金额相对稳定')
+                        risk_score += 1
+                    
+                    if is_monthly:
+                        risk_factors.append('月度规律明显')
+                        risk_score += 2
+                    
+                    if mean_amount >= 50000:
+                        risk_factors.append('金额超过5万/月')
+                        risk_score += 3
+                    elif mean_amount >= 20000:
+                        risk_factors.append('金额超过2万/月')
+                        risk_score += 2
+                    
+                    if len(months) >= 12:
+                        risk_factors.append('持续时间超过1年')
+                        risk_score += 2
+                    elif len(months) >= 6:
+                        risk_factors.append('持续时间超过半年')
+                        risk_score += 1
+                    
+                    # 检查摘要是否有可疑特征
+                    suspicious_desc_keywords = ['咨询', '介绍', '感谢', '借', '还', '费']
+                    for idx in cp_df.index:
+                        desc = str(cp_df.loc[idx, 'description'])
+                        if utils.contains_keywords(desc, suspicious_desc_keywords):
+                            risk_factors.append(f'摘要可疑: {desc[:20]}')
+                            risk_score += 1
+                            break
+                    
+                    risk_level = 'high' if risk_score >= 5 else 'medium'
+                    
+                    suspicious_items.append({
+                        'person': person,
+                        'counterparty': cp_str,
+                        'occurrences': len(cp_df),
+                        'months': len(months),
+                        'avg_amount': mean_amount,
+                        'total_amount': sum(amounts),
+                        'avg_interval_days': avg_interval,
+                        'cv': cv,
+                        'risk_level': risk_level,
+                        'risk_score': risk_score,
+                        'risk_factors': '; '.join(risk_factors),
+                        'first_date': min(dates),
+                        'last_date': max(dates)
+                    })
+    
+    # 按风险分排序
+    suspicious_items.sort(key=lambda x: (-x['risk_score'], -x['total_amount']))
+    
+    logger.info(f'  发现 {len(suspicious_items)} 个疑似分期受贿模式')
+    for item in suspicious_items[:3]:
+        logger.warning(f'    ★ [{item["risk_level"].upper()}] {item["person"]} ← {item["counterparty"]}: '
+                      f'月均{item["avg_amount"]/10000:.2f}万, 持续{item["months"]}个月')
+    
+    return suspicious_items

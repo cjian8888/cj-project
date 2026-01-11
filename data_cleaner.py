@@ -102,6 +102,21 @@ def deduplicate_transactions(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
             
             # 如果时间、金额、对手方、摘要都匹配,标记为重复
             if amount_match and counterparty_match and desc_match:
+                # 【修复】大额交易保护：5万元以上交易需要更严格的验证
+                current_amount = current['_amount_rounded']
+                if current_amount >= config.ASSET_LARGE_AMOUNT_THRESHOLD:  # 5万元
+                    # 大额交易：必须有相同的交易流水号才能去重（如果有流水号）
+                    has_tx_id = ('transaction_id' in df.columns 
+                                and pd.notna(current.get('transaction_id'))
+                                and pd.notna(next_record.get('transaction_id')))
+                    if has_tx_id:
+                        if current.get('transaction_id') != next_record.get('transaction_id'):
+                            continue  # 流水号不同，不去重大额交易
+                    else:
+                        # 无流水号的大额交易：记录警告但不自动去重
+                        logger.warning(f'发现疑似重复大额交易(¥{current_amount:.2f})，需人工复核，暂不自动去重')
+                        continue
+                
                 duplicates_mask[next_idx] = True
                 # 记录被删除的重复记录详情
                 dedup_details.append({
@@ -547,15 +562,16 @@ def clean_and_merge_files(file_list: List[str], entity_name: str) -> Tuple[pd.Da
     return df_final, final_stats
 
 
-def save_formatted_excel(df: pd.DataFrame, output_path: str):
+def _prepare_display_data(df: pd.DataFrame) -> pd.DataFrame:
     """
-    保存为美观的Excel格式（专家级优化版）：
-    1. 智能列宽：根据内容长度自动调整，彻底解决 ######
-    2. 视觉降噪：强制移除“数字存为文本”的绿色小三角
-    3. 会计格式：0值显示为"-"，金额更易读
-    4. 彻底汉化与清洗
+    准备显示数据（清洗、分类、列名映射）
+    
+    Args:
+        df: 原始DataFrame
+    
+    Returns:
+        处理后的显示DataFrame
     """
-    # 1. 创建副本并清洗
     df_disp = df.copy()
     
     # 数据清洗
@@ -563,26 +579,18 @@ def save_formatted_excel(df: pd.DataFrame, output_path: str):
         df_disp['数据来源'] = df_disp['数据来源'].apply(lambda x: str(x).split('/')[-1].split('\\')[-1])
     if 'is_cash' in df_disp.columns:
         df_disp['is_cash'] = df_disp['is_cash'].apply(lambda x: '是' if x is True else '')
-
-    # === 自动化交易分类打标 ===
-    # 依据config规则对每一行进行分类
+    
+    # 自动化交易分类打标
     def refine_category(row):
-        # 能够明确属于理财赎回/购买方向的，优先判定
-        # 这里使用简单关键词匹配逻辑，结合优先级
         text = str(row.get('description', '')) + ' ' + str(row.get('counterparty', ''))
-        
-        # 遍历配置的分类规则
-        # 按优先级排序 (数字越小优先级越高)
         sorted_cats = sorted(config.TRANSACTION_CATEGORIES.items(), key=lambda x: x[1]['priority'])
-        
         for cat_name, conf in sorted_cats:
             if utils.contains_keywords(text, conf['keywords']):
                 return cat_name
-                
         return '其他'
-
+    
     df_disp['category'] = df_disp.apply(refine_category, axis=1)
-
+    
     # 列名映射
     col_mapping = {
         'date': '交易时间',
@@ -591,19 +599,19 @@ def save_formatted_excel(df: pd.DataFrame, output_path: str):
         'balance': '余额(元)',
         'counterparty': '交易对手',
         'description': '交易摘要',
-        'category': '交易分类', # 新增列
+        'category': '交易分类',
         'bank_source': '所属银行',
         '银行来源': '所属银行',
         'account_number': '本方账号',
-        'is_cash': '现金',  # 简化为现金
+        'is_cash': '现金',
         '数据来源': '来源文件',
         'transaction_id': '流水号'
     }
     
     # 期望顺序
     desired_order = [
-        'date', 'income', 'expense', 'balance', 
-        'counterparty', 'description', 'category', # 将分类放在摘要旁边
+        'date', 'income', 'expense', 'balance',
+        'counterparty', 'description', 'category',
         '银行来源', 'account_number', 'is_cash', '数据来源'
     ]
     
@@ -614,7 +622,123 @@ def save_formatted_excel(df: pd.DataFrame, output_path: str):
     df_disp = df_disp[existing_cols + other_cols]
     df_disp = df_disp.rename(columns=col_mapping)
     
-    # 2. 保存并格式化
+    return df_disp
+
+
+def _create_excel_formats(workbook) -> Dict:
+    """
+    创建Excel格式
+    
+    Args:
+        workbook: ExcelWriter workbook对象
+    
+    Returns:
+        格式字典
+    """
+    # 表头样式：浅灰背景，深色字，加粗，边框
+    header_fmt = workbook.add_format({
+        'bold': True,
+        'valign': 'vcenter',
+        'align': 'center',
+        'fg_color': '#EFEFEF',
+        'border': 1,
+        'font_name': '微软雅黑',
+        'font_size': 10
+    })
+    
+    # 会计金额格式：千分位，0显示为"-"，对齐
+    accounting_fmt = workbook.add_format({
+        'num_format': '_ * #,##0.00_ ;_ * -#,##0.00_ ;_ * "-"??_ ;_ @_ ',
+        'font_name': 'Arial',
+        'font_size': 10
+    })
+    
+    # 日期格式：yyyy-mm-dd hh:mm:ss
+    date_fmt = workbook.add_format({
+        'num_format': 'yyyy-mm-dd hh:mm:ss',
+        'font_name': 'Arial',
+        'font_size': 10,
+        'align': 'left'
+    })
+    
+    # 普通文本：微软雅黑
+    text_fmt = workbook.add_format({
+        'font_name': '微软雅黑',
+        'font_size': 10,
+        'valign': 'vcenter'
+    })
+    
+    return {
+        'header': header_fmt,
+        'accounting': accounting_fmt,
+        'date': date_fmt,
+        'text': text_fmt
+    }
+
+
+def _apply_excel_formatting(worksheet, df_disp: pd.DataFrame, formats: Dict):
+    """
+    应用Excel格式化
+    
+    Args:
+        worksheet: Excel工作表对象
+        df_disp: 显示DataFrame
+        formats: 格式字典
+    """
+    # 写入表头（覆盖默认格式）
+    for col_num, value in enumerate(df_disp.columns.values):
+        worksheet.write(0, col_num, value, formats['header'])
+    
+    # 遍历每列及数据，计算最佳宽度
+    for i, col_name in enumerate(df_disp.columns):
+        # 基础列宽：取表头长度
+        max_len = len(str(col_name)) * 2
+        
+        # 采样前100行数据计算长度
+        sample = df_disp[col_name].iloc[:100].astype(str)
+        if not sample.empty:
+            data_max_len = sample.map(lambda x: len(x.encode('gbk'))).max()
+            max_len = max(max_len, data_max_len)
+        
+        # 设置宽度限制和特定格式
+        col_fmt = formats['text']
+        width = max_len + 2
+        
+        if '时间' in col_name:
+            width = 23
+            col_fmt = formats['date']
+        elif any(c in col_name for c in ['收入', '支出', '余额', '金额']):
+            width = max(width, 15)
+            col_fmt = formats['accounting']
+        elif '摘要' in col_name:
+            width = min(width, 50)
+        elif '账号' in col_name:
+            width = max(width, 22)
+        
+        # 应用列宽和格式
+        worksheet.set_column(i, i, width, col_fmt)
+    
+    # 消除绿色小三角 (忽略数字存为文本错误)
+    worksheet.ignore_errors({'number_stored_as_text': 'A1:XFD1048576'})
+    
+    # 冻结首行
+    worksheet.freeze_panes(1, 0)
+    
+    # 开启筛选
+    worksheet.autofilter(0, 0, len(df_disp), len(df_disp.columns) - 1)
+
+
+def save_formatted_excel(df: pd.DataFrame, output_path: str):
+    """
+    保存为美观的Excel格式（专家级优化版）：
+    1. 智能列宽：根据内容长度自动调整，彻底解决 ######
+    2. 视觉降噪：强制移除"数字存为文本"的绿色小三角
+    3. 会计格式：0值显示为"-"，金额更易读
+    4. 彻底汉化与清洗
+    """
+    # 1. 准备显示数据
+    df_disp = _prepare_display_data(df)
+    
     # 2. 保存并格式化
     try:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -626,89 +750,14 @@ def save_formatted_excel(df: pd.DataFrame, output_path: str):
             workbook = writer.book
             worksheet = writer.sheets[sheet_name]
             
-            # --- 样式定义 ---
+            # 创建格式
+            formats = _create_excel_formats(workbook)
             
-            # 1. 表头样样式：浅灰背景，深色字，加粗，边框
-            header_fmt = workbook.add_format({
-                'bold': True,
-                'valign': 'vcenter',
-                'align': 'center',
-                'fg_color': '#EFEFEF', # 更专业的浅灰
-                'border': 1,
-                'font_name': '微软雅黑',
-                'font_size': 10
-            })
-            
-            # 2. 会计金额格式：千分位，0显示为"-"，对齐
-            # 格式串: Positive; Negative; Zero; Text
-            accounting_fmt = workbook.add_format({
-                'num_format': '_ * #,##0.00_ ;_ * -#,##0.00_ ;_ * "-"??_ ;_ @_ ',
-                'font_name': 'Arial', # 数字用Arial更好看
-                'font_size': 10
-            })
-            
-            # 3. 日期格式：yyyy-mm-dd hh:mm:ss
-            date_fmt = workbook.add_format({
-                'num_format': 'yyyy-mm-dd hh:mm:ss',
-                'font_name': 'Arial',
-                'font_size': 10,
-                'align': 'left' # 靠左对齐，防止井号视觉误差
-            })
-            
-            # 4. 普通文本：微软雅黑
-            text_fmt = workbook.add_format({
-                'font_name': '微软雅黑',
-                'font_size': 10,
-                'valign': 'vcenter'
-            })
-            
-            # --- 应用格式与智能列宽 ---
-            
-            # 写入表头（覆盖默认格式）
-            for col_num, value in enumerate(df_disp.columns.values):
-                worksheet.write(0, col_num, value, header_fmt)
-            
-            # 遍历每列及数据，计算最佳宽度
-            for i, col_name in enumerate(df_disp.columns):
-                # 基础列宽：取表头长度
-                max_len = len(str(col_name)) * 2 # 中文约占2宽
-                
-                # 采样前100行数据计算长度
-                sample = df_disp[col_name].iloc[:100].astype(str)
-                if not sample.empty:
-                    data_max_len = sample.map(lambda x: len(x.encode('gbk'))).max() # 使用GBK字节长度更准
-                    max_len = max(max_len, data_max_len)
-                
-                # 设置宽度限制和特定格式
-                col_fmt = text_fmt # 默认格式
-                width = max_len + 2 # 增加一点padding
-                
-                if '时间' in col_name:
-                    width = 23 # 强制足够宽，彻底消灭######
-                    col_fmt = date_fmt
-                elif any(c in col_name for c in ['收入', '支出', '余额', '金额']):
-                    width = max(width, 15) # 金额至少15宽
-                    col_fmt = accounting_fmt
-                elif '摘要' in col_name:
-                    width = min(width, 50) # 摘要最宽50，防止过宽
-                elif '账号' in col_name:
-                    width = max(width, 22) # 账号通常较长
-                
-                # 应用列宽和格式
-                worksheet.set_column(i, i, width, col_fmt)
-            
-            # --- 消除绿色小三角 (忽略数字存为文本错误) ---
-            # 这里的范围是整个工作表
-            worksheet.ignore_errors({'number_stored_as_text': 'A1:XFD1048576'})
-            
-            # 冻结首行
-            worksheet.freeze_panes(1, 0)
-            
-            # 开启筛选
-            worksheet.autofilter(0, 0, len(df_disp), len(df_disp.columns) - 1)
-
+            # 应用格式化
+            _apply_excel_formatting(worksheet, df_disp, formats)
+ 
     except PermissionError:
-        logger.warning(f'无法保存文件 {output_path}: 文件可能被占用，请关闭Excel后重试。')           
+        logger.warning(f'无法保存文件 {output_path}: 文件可能被占用，请关闭Excel后重试。')
     except Exception as e:
         logger.error(f'格式化保存Excel失败: {str(e)}, 回退到普通保存')
         try:

@@ -113,30 +113,16 @@ def _analyze_direct_flows(
     return direct_flows
 
 
-def _detect_third_party_relay(
-    all_transactions: Dict[str, pd.DataFrame],
-    core_persons: List[str],
-    time_window_hours: int = 72,
-    amount_tolerance: float = 0.15,
-    min_amount: float = config.PENETRATION_MIN_AMOUNT  # 最低金额门槛：1万元
-) -> List[Dict]:
+def _get_excluded_relay_keywords() -> List[str]:
     """
-    检测第三方中转模式: A→C→B（A、B为关联人，C为中间人）
+    获取应排除的公共支付平台/常见消费对手方关键词列表
     
-    算法：
-    1. 收集所有关联人的支出记录
-    2. 收集所有关联人的收入记录
-    3. 寻找 A支出→C，C→B收入 的配对（时间窗口内、金额相近）
+    这些是公共通道，不应被视为真正的"中间人"
     
-    过滤规则：
-    - 排除公共支付平台（财付通、支付宝等）作为中间人
-    - 金额必须 >= min_amount（默认1万元）
+    Returns:
+        排除关键词列表
     """
-    relay_chains = []
-    
-    # ========== 排除的公共支付平台/常见消费对手方 ==========
-    # 这些是公共通道，不应被视为真正的"中间人"
-    EXCLUDED_RELAY_KEYWORDS = [
+    return [
         # 第三方支付平台
         '财付通', '支付宝', '微信支付', 'ALIPAY', 'TENPAY', '银联',
         '京东支付', '云闪付', '翼支付', '壹钱包', '网银在线',
@@ -148,15 +134,43 @@ def _detect_third_party_relay(
         '中国移动', '中国联通', '中国电信', '国家电网', '水务', '燃气',
         '保险', '社保', '公积金'
     ]
+
+
+def _is_excluded_relay(counterparty: str, excluded_keywords: List[str]) -> bool:
+    """
+    检查是否为应排除的中间人
     
-    def is_excluded_relay(counterparty: str) -> bool:
-        """检查是否为应排除的中间人"""
-        if not counterparty:
-            return True
-        cp_upper = counterparty.upper()
-        return any(kw.upper() in cp_upper for kw in EXCLUDED_RELAY_KEYWORDS)
+    Args:
+        counterparty: 对手方名称
+        excluded_keywords: 排除关键词列表
     
-    # 收集所有关联人的支出和收入记录（向量化筛选）
+    Returns:
+        是否应排除
+    """
+    if not counterparty:
+        return True
+    cp_upper = counterparty.upper()
+    return any(kw.upper() in cp_upper for kw in excluded_keywords)
+
+
+def _collect_person_flows(
+    all_transactions: Dict[str, pd.DataFrame],
+    core_persons: List[str],
+    excluded_keywords: List[str],
+    min_amount: float
+) -> tuple:
+    """
+    收集所有关联人的支出和收入记录
+    
+    Args:
+        all_transactions: 所有交易数据
+        core_persons: 核心人员列表
+        excluded_keywords: 排除关键词列表
+        min_amount: 最低金额门槛
+    
+    Returns:
+        (person_outflows, person_inflows) 元组
+    """
     person_outflows = defaultdict(list)
     person_inflows = defaultdict(list)
     
@@ -180,7 +194,7 @@ def _detect_third_party_relay(
         is_direct = counterparty_series.str.contains(core_person_pattern, na=False)
         
         # 预先过滤排除平台
-        is_excluded = counterparty_series.map(is_excluded_relay)
+        is_excluded = counterparty_series.map(lambda x: _is_excluded_relay(x, excluded_keywords))
         
         # 筛选支出
         out_mask = (~is_direct) & (~is_excluded) & (full_df['expense'] >= min_amount)
@@ -204,7 +218,30 @@ def _detect_third_party_relay(
                     'description': str(row.get('description', ''))
                 })
     
-    # 寻找 A→C→B 模式
+    return person_outflows, person_inflows
+
+
+def _find_relay_chains(
+    person_outflows: Dict,
+    person_inflows: Dict,
+    core_persons: List[str],
+    time_window_hours: int,
+    amount_tolerance: float
+) -> List[Dict]:
+    """
+    寻找 A→C→B 模式的中转链
+    
+    Args:
+        person_outflows: 人员支出记录
+        person_inflows: 人员收入记录
+        core_persons: 核心人员列表
+        time_window_hours: 时间窗口（小时）
+        amount_tolerance: 金额容差比例
+    
+    Returns:
+        中转链列表
+    """
+    relay_chains = []
     time_delta = timedelta(hours=time_window_hours)
     
     for person_a in core_persons:
@@ -252,11 +289,24 @@ def _detect_third_party_relay(
                     }
                     relay_chains.append(relay)
     
+    return relay_chains
+
+
+def _deduplicate_and_sort_relays(relay_chains: List[Dict]) -> List[Dict]:
+    """
+    去重并排序中转链
+    
+    Args:
+        relay_chains: 原始中转链列表
+    
+    Returns:
+        去重排序后的中转链列表
+    """
     # 去重（同一中转链可能被多次匹配）
     unique_chains = []
     seen_keys = set()
     for relay in relay_chains:
-        key = (relay['from'], relay['relay'], relay['to'], 
+        key = (relay['from'], relay['relay'], relay['to'],
                str(relay['outflow_date'])[:10], str(relay['inflow_date'])[:10])
         if key not in seen_keys:
             seen_keys.add(key)
@@ -267,6 +317,45 @@ def _detect_third_party_relay(
         {'high': 0, 'medium': 1, 'low': 2}.get(x['risk_level'], 3),
         -x['outflow_amount']
     ))
+    
+    return unique_chains
+
+
+def _detect_third_party_relay(
+    all_transactions: Dict[str, pd.DataFrame],
+    core_persons: List[str],
+    time_window_hours: int = 72,
+    amount_tolerance: float = 0.15,
+    min_amount: float = config.PENETRATION_MIN_AMOUNT  # 最低金额门槛：1万元
+) -> List[Dict]:
+    """
+    检测第三方中转模式: A→C→B（A、B为关联人，C为中间人）
+    
+    算法：
+    1. 收集所有关联人的支出记录
+    2. 收集所有关联人的收入记录
+    3. 寻找 A支出→C，C→B收入 的配对（时间窗口内、金额相近）
+    
+    过滤规则：
+    - 排除公共支付平台（财付通、支付宝等）作为中间人
+    - 金额必须 >= min_amount（默认1万元）
+    """
+    # 获取排除关键词
+    excluded_keywords = _get_excluded_relay_keywords()
+    
+    # 收集所有关联人的支出和收入记录
+    person_outflows, person_inflows = _collect_person_flows(
+        all_transactions, core_persons, excluded_keywords, min_amount
+    )
+    
+    # 寻找 A→C→B 模式
+    relay_chains = _find_relay_chains(
+        person_outflows, person_inflows, core_persons,
+        time_window_hours, amount_tolerance
+    )
+    
+    # 去重和排序
+    unique_chains = _deduplicate_and_sort_relays(relay_chains)
     
     logger.info(f'  发现 {len(unique_chains)} 条第三方中转链 (已过滤支付平台和小额交易)')
     return unique_chains

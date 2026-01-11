@@ -75,6 +75,37 @@ def validate_transaction_data(df: pd.DataFrame, entity_name: str) -> Dict:
     if high_null_fields:
         warnings.append(f'以下字段空值比例超过50%: {", ".join(high_null_fields)}')
     
+    # 【新增】检查余额连续性
+    balance_issues = []
+    if 'balance' in df.columns and len(df) > 1:
+        df_sorted = df.sort_values('date')
+        balances = df_sorted['balance'].dropna()
+        if len(balances) > 1:
+            # 检查是否有突变（单笔变动超过100万但无对应收支）
+            balance_diffs = balances.diff().abs()
+            large_jumps = balance_diffs[balance_diffs > 1000000]
+            if len(large_jumps) > 0:
+                warnings.append(f'余额存在{len(large_jumps)}次大幅跳变(>100万)，可能数据不完整')
+    
+    # 【新增】检查收支平衡
+    if 'income' in df.columns and 'expense' in df.columns:
+        total_income = df['income'].sum()
+        total_expense = df['expense'].sum()
+        if 'balance' in df.columns and len(df) > 0:
+            first_balance = df.sort_values('date')['balance'].dropna().iloc[0] if not df['balance'].dropna().empty else 0
+            last_balance = df.sort_values('date')['balance'].dropna().iloc[-1] if not df['balance'].dropna().empty else 0
+            expected_change = total_income - total_expense
+            actual_change = last_balance - first_balance
+            if abs(expected_change - actual_change) > 10000:  # 差异超过1万
+                warnings.append(f'收支与余额变动不一致: 收支差{expected_change/10000:.2f}万, 余额变动{actual_change/10000:.2f}万')
+    
+    # 【新增】计算数据质量评分
+    quality_score = 100
+    quality_score -= len(issues) * 20  # 每个问题扣20分
+    quality_score -= len(warnings) * 5  # 每个警告扣5分
+    quality_score -= len(high_null_fields) * 10  # 高空值字段扣10分
+    quality_score = max(0, min(100, quality_score))
+    
     status = 'PASSED' if not issues else 'FAILED'
     if warnings and status == 'PASSED':
         status = 'WARNING'
@@ -86,7 +117,9 @@ def validate_transaction_data(df: pd.DataFrame, entity_name: str) -> Dict:
         'warnings': warnings,
         'record_count': len(df),
         'date_range_days': date_range if not df.empty else 0,
-        'null_fields': high_null_fields
+        'null_fields': high_null_fields,
+        'quality_score': quality_score,  # 新增
+        'data_quality_label': '优' if quality_score >= 90 else '良' if quality_score >= 70 else '中' if quality_score >= 50 else '差'  # 新增
     }
 
 
@@ -299,7 +332,9 @@ def generate_validation_report(
     report_lines.append('-' * 60)
     
     for entity, result in transaction_validations.items():
-        report_lines.append(f'\n【{entity}】')
+        quality_label = result.get('data_quality_label', '未知')
+        quality_score = result.get('quality_score', 0)
+        report_lines.append(f'\n【{entity}】 数据质量: {quality_label} ({quality_score}分)')
         report_lines.append(f'  状态: {result["status"]}')
         report_lines.append(f'  记录数: {result["record_count"]}')
         report_lines.append(f'  时间跨度: {result.get("date_range_days", 0)}天')

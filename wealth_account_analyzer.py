@@ -115,6 +115,10 @@ class WealthAccountAnalyzer:
         for col in ['income', 'expense', 'description', 'counterparty']:
             if col not in self.df.columns:
                 self.df[col] = 0 if col in ['income', 'expense'] else ''
+        
+        # 确保account_id列存在（即使为空）
+        if 'account_id' not in self.df.columns:
+            self.df['account_id'] = ''
     
     def classify_accounts(self) -> Dict:
         """

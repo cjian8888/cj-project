@@ -16,17 +16,17 @@ logger = utils.setup_logger(__name__)
 def _calculate_stable_cv(amounts: List[float], remove_outliers: bool = True) -> float:
     """
     计算变异系数CV，可选择剔除异常值
-    
+
     Args:
         amounts: 金额列表
         remove_outliers: 是否剔除异常值（使用IQR方法）
-    
+
     Returns:
         变异系数CV
     """
     if len(amounts) == 0:
         return 999
-    
+
     # 如果需要剔除异常值且数据量足够
     if remove_outliers and len(amounts) > 3:
         # 使用IQR方法识别异常值
@@ -37,237 +37,383 @@ def _calculate_stable_cv(amounts: List[float], remove_outliers: bool = True) -> 
         q1 = sorted_amounts[q1_idx]
         q3 = sorted_amounts[q3_idx]
         iqr = q3 - q1
-        
+
         # 定义上下界
         lower_bound = q1 - 1.5 * iqr
         upper_bound = q3 + 1.5 * iqr
-        
+
         # 过滤异常值
         filtered_amounts = [x for x in amounts if lower_bound <= x <= upper_bound]
-        
+
         # 如果剔除后至少还有一半数据，使用过滤后的数据
         if len(filtered_amounts) >= max(3, len(amounts) * 0.5):
             amounts = filtered_amounts
             logger.debug(f'剔除异常值: 原{len(amounts)}笔 -> 保留{len(filtered_amounts)}笔')
-    
+
     # 计算均值和标准差
     mean_amt = sum(amounts) / len(amounts)
     variance = sum((x - mean_amt) ** 2 for x in amounts) / len(amounts)
     std_amt = variance ** 0.5
-    
+
     # 计算CV
     cv = std_amt / mean_amt if mean_amt > 0 else 999
-    
+
     return cv
+
+
+def _identify_reimbursements(income_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    识别报销/差旅/退款（负面清单）
+
+    Args:
+        income_df: 收入DataFrame
+
+    Returns:
+        标记了is_reimbursement的DataFrame
+    """
+    immunity_keywords = ['安家费', '年终奖', '绩效', '奖金', '工资', '薪资', '劳务', '骨干奖', '贡献奖']
+
+    for idx, row in income_df.iterrows():
+        if row['is_self_transfer']: continue
+        description = str(row.get('description', ''))
+
+        # 检查是否包含排除关键词
+        if utils.contains_keywords(description, config.EXCLUDED_REIMBURSEMENT_KEYWORDS):
+            if not utils.contains_keywords(description, immunity_keywords):
+                income_df.at[idx, 'is_reimbursement'] = True
+
+    return income_df
+
+
+def _learn_salary_payers(income_df: pd.DataFrame) -> set:
+    """
+    自动挖掘工资发放单位
+
+    Args:
+        income_df: 收入DataFrame
+
+    Returns:
+        发薪单位白名单集合
+    """
+    learned_salary_payers = set(config.KNOWN_SALARY_PAYERS + config.USER_DEFINED_SALARY_PAYERS)
+
+    # 注意：不要在此处硬编码特定单位名称
+    # 如需添加案件特定单位，请在 config.USER_DEFINED_SALARY_PAYERS 中配置
+
+    # 定义由于理财/投资/基金导致的"假性工资发放者"黑名单关键词
+    WEALTH_ENTITY_BLACKLIST = [
+        '基金', '资产管理', '投资', '信托', '证券', '期货', '保险',
+        '财富', '资本', '经营部', '个体', '直销', '理财',
+        '固收', '定活宝', '增利',
+        'Fund', 'Asset', 'Invest', 'Capital', 'Wealth'
+    ]
+
+    # 2. 扫描数据，寻找那些发过"工资/奖金"的单位
+    if not income_df.empty:
+        for _, row in income_df.iterrows():
+            desc = str(row.get('description', ''))
+            cp = str(row.get('counterparty', '')).strip()
+
+            # 如果是"代发工资内部户"等，直接认可
+            if '代发工资' in cp:
+                learned_salary_payers.add(cp)
+                continue
+
+            if not cp or len(cp) < 4: continue  # 忽略太短的
+
+            # 安全检查：如果单位名字包含投资/基金/理财特征，绝对不能加入所谓"工资白名单"
+            if utils.contains_keywords(cp, WEALTH_ENTITY_BLACKLIST):
+                continue
+
+            # 排除银行分行（往往是理财转出）
+            if '银行' in cp and not '人力' in cp:
+                continue
+
+            # 如果某笔交易摘要明确说是工资/奖金，那么这个对手方就很可能就是发薪单位
+            if utils.contains_keywords(desc, config.SALARY_STRONG_KEYWORDS + ['年终奖', '骨干奖', '绩效', '薪酬', '代发工资']):
+                learned_salary_payers.add(cp)
+
+    logger.info(f"已识别的发薪/收入来源白名单: {list(learned_salary_payers)}")
+    return learned_salary_payers
+
+
+def _identify_salary_by_whitelist(income_df: pd.DataFrame, learned_salary_payers: set) -> pd.DataFrame:
+    """
+    轮次1: 白名单单位的所有打款（除非明确是退款或理财赎回）
+
+    Args:
+        income_df: 收入DataFrame
+        learned_salary_payers: 发薪单位白名单
+
+    Returns:
+        标记了is_salary的DataFrame
+    """
+    for idx, row in income_df.iterrows():
+        if income_df.at[idx, 'is_salary'] or row['is_self_transfer'] or row['is_reimbursement']:
+            continue
+
+        counterparty = str(row.get('counterparty', ''))
+        description = str(row.get('description', ''))
+
+        # 双重保险：即使是白名单，如果摘要包含赎回特征，也不算工资
+        if utils.contains_keywords(description, ['赎回', '卖出', '本金', '退保', '分红']):
+            continue
+
+        # 检查对手方是否在白名单中
+        is_known_payer = False
+        for payer in learned_salary_payers:
+            if payer in counterparty:
+                is_known_payer = True
+                break
+
+        if is_known_payer:
+            income_df.at[idx, 'is_salary'] = True
+            reason = '已知发薪单位'
+            if utils.contains_keywords(description, ['奖', '绩效', '年薪']):
+                reason = f'已知单位-{description}'
+            income_df.at[idx, 'salary_reason'] = reason
+
+    return income_df
+
+
+def _identify_salary_by_keywords(income_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    轮次2: 强关键词匹配 (需严格区分理财分红和奖金分红)
+
+    Args:
+        income_df: 收入DataFrame
+
+    Returns:
+        标记了is_salary的DataFrame
+    """
+    WEALTH_ENTITY_BLACKLIST = [
+        '基金', '资产管理', '投资', '信托', '证券', '期货', '保险',
+        '财富', '资本', '经营部', '个体', '直销', '理财',
+        'Fund', 'Asset', 'Invest', 'Capital', 'Wealth'
+    ]
+
+    for idx, row in income_df.iterrows():
+        if income_df.at[idx, 'is_salary'] or row['is_self_transfer'] or row.get('is_reimbursement'):
+            continue
+        description = str(row.get('description', ''))
+        counterparty = str(row.get('counterparty', ''))
+
+        # 如果是"分红"，必须确认不是基金/证券公司的分红
+        if '分红' in description:
+            if utils.contains_keywords(counterparty, WEALTH_ENTITY_BLACKLIST):
+                continue
+
+        if utils.contains_keywords(description, config.SALARY_STRONG_KEYWORDS):
+            income_df.at[idx, 'is_salary'] = True
+            income_df.at[idx, 'salary_reason'] = '摘要含强工资关键词'
+
+    return income_df
+
+
+def _identify_salary_by_hr_company(income_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    轮次3: 人力资源公司识别
+
+    Args:
+        income_df: 收入DataFrame
+
+    Returns:
+        标记了is_salary的DataFrame
+    """
+    for idx, row in income_df.iterrows():
+        if income_df.at[idx, 'is_salary'] or row['is_self_transfer'] or row['is_reimbursement']:
+            continue
+        counterparty = str(row.get('counterparty', ''))
+        if utils.contains_keywords(counterparty, config.HR_COMPANY_KEYWORDS):
+            if row['income'] >= config.INCOME_MIN_AMOUNT:
+                income_df.at[idx, 'is_salary'] = True
+                income_df.at[idx, 'salary_reason'] = '人力资源公司'
+
+    return income_df
+
+
+def _identify_salary_by_frequency(income_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    轮次4: 高频稳定收入 (严格排除金融机构)
+    
+    【审计风险警告 - 2026-01-11 增强】
+    此轮次可能将"分期受贿"误识别为工资，增加以下防护：
+    1. 金额上限：月均收入超过10万需人工复核（不自动标记为工资）
+    2. 对手方类型：如果对手方是个人姓名（2-4个汉字），需要额外警告
+    3. 政府机关白名单：来自政府机关的规律性收入优先识别为合规
+
+    Args:
+        income_df: 收入DataFrame
+
+    Returns:
+        标记了is_salary的DataFrame
+    """
+    import re
+    
+    # 【新增】高频收入金额上限（超过此金额需人工复核）
+    HIGH_FREQUENCY_AMOUNT_CAP = 100000  # 10万/月
+
+    counterparty_groups = income_df.groupby('counterparty')
+    for counterparty, group in counterparty_groups:
+        if not counterparty or str(counterparty) == 'nan': continue
+        if group['is_salary'].any(): continue
+        if group.iloc[0]['is_self_transfer']: continue
+
+        counterparty_str = str(counterparty).strip()
+        
+        # 排除由于理财和借贷导致的频繁交易
+        if utils.contains_keywords(counterparty_str,
+            config.LOAN_PLATFORM_KEYWORDS +
+            config.THIRD_PARTY_PAYMENT_KEYWORDS +
+            ['银行', '保险', '证券', '基金', '信托', '期货', '资产', '投资', '理财']):
+            continue
+
+        # 排除纯数字对手方（通常是理财账户/内部账户）
+        if re.match(r'^\d{10,}$', counterparty_str):  # 10位以上纯数字
+            continue
+
+        # 【风险检查】对手方是2-4个汉字的个人姓名
+        is_individual_name = bool(re.match(r'^[\u4e00-\u9fa5]{2,4}$', counterparty_str))
+        
+        # 【优化】对2-4个汉字的对手方，需要区分：
+        # - 政府机关/事业单位关键词 → 可能是合规收入
+        # - 纯个人姓名 → 需要警告，不自动识别为工资
+        if is_individual_name:
+            # 检查是否包含政府机关特征
+            is_government_related = utils.contains_keywords(
+                counterparty_str, config.GOVERNMENT_AGENCY_KEYWORDS
+            )
+            if not is_government_related:
+                # 纯个人姓名，不自动识别为工资（可能是分期受贿）
+                logger.debug(f'跳过个人姓名对手方: {counterparty_str} (可能是分期受贿)')
+                continue
+
+        valid_group = group[~group['is_reimbursement'].fillna(False)]
+        if len(valid_group) >= 6:
+            dates = valid_group['date'].tolist()
+            months = set(d.strftime('%Y-%m') for d in dates)
+            # 至少5个月，覆盖率0.6
+            if len(months) >= 5 and len(valid_group)/len(months) > 0.6:
+                amounts = valid_group['income'].tolist()
+                cv = _calculate_stable_cv(amounts, remove_outliers=True)
+                mean_amount = sum(amounts) / len(amounts)
+
+                # 【新增】金额上限检查：超过10万/月需人工复核
+                if mean_amount > HIGH_FREQUENCY_AMOUNT_CAP:
+                    logger.warning(f'高频收入超过阈值，需人工复核: {counterparty_str}, '
+                                   f'月均{mean_amount/10000:.2f}万, 共{len(months)}个月')
+                    continue
+
+                # 进一步检查摘要，排除理财赎回特征
+                wealth_keywords = ['赎回', '到期', '本息', '转存', '理财', '结息', '收益', '分红', '活期宝', '转活', '提现', '银证']
+
+                # 检查组内是否有过多理财特征
+                wealth_count = 0
+                for d in valid_group['description']:
+                    if utils.contains_keywords(str(d), wealth_keywords):
+                        wealth_count += 1
+
+                if wealth_count / len(valid_group) > 0.3:  # 如果超过30%看起来像理财
+                    continue
+
+                if config.INCOME_MEAN_AMOUNT_MIN <= mean_amount <= config.INCOME_MEAN_AMOUNT_MAX and cv < 2.0:
+                    for idx, row in valid_group.iterrows():
+                        # 单笔再检查一次
+                        if utils.contains_keywords(str(row['description']), wealth_keywords):
+                            continue
+
+                        income_df.at[idx, 'is_salary'] = True
+                        income_df.at[idx, 'salary_reason'] = f'高频稳定收入(连续{len(months)}月)'
+
+    return income_df
+
+
+def _calculate_yearly_monthly_stats(df: pd.DataFrame) -> tuple:
+    """
+    计算年度/月度统计
+
+    Args:
+        df: 交易DataFrame
+
+    Returns:
+        (yearly_stats, monthly_stats) 元组
+    """
+    # 检查DataFrame是否为空，避免空DataFrame访问.dt属性时报错
+    if not df.empty and pd.api.types.is_datetime64_any_dtype(df['date']):
+        df['year'] = df['date'].dt.year
+        yearly_stats = df.groupby('year').agg({'income': 'sum', 'expense': 'sum'}).to_dict('index')
+        df['month'] = df['date'].apply(utils.get_month_key)
+        monthly_stats = df.groupby('month').agg({'income': 'sum', 'expense': 'sum'}).to_dict('index')
+    else:
+        yearly_stats = {}
+        monthly_stats = {}
+
+    return yearly_stats, monthly_stats
 
 
 def calculate_income_structure(df: pd.DataFrame, entity_name: str = None) -> Dict:
     """
     计算收支结构（增强版工资识别 - 能够自动识别工资发放单位，并严格剔除理财/投资类回款）
-    
+
     Args:
         df: 交易DataFrame
         entity_name: 核查对象姓名（用于排除同名转账）
-        
+
     Returns:
         收支结构字典
     """
     logger.info('正在计算收支结构...')
-    
+
     # 获取日期范围
     start_date, end_date = utils.calculate_date_range(df['date'].tolist())
-    
+
     # 统计总流入和同名转账
     total_inflow = df['income'].sum()
     total_expense = df['expense'].sum()
-    
+
     # 识别同名转账（本人转入）
     self_transfer_mask = (df['counterparty'] == entity_name) & (df['income'] > 0)
     self_transfer_income = df[self_transfer_mask]['income'].sum()
-    
+
     # 计算外部净收入（排除本人互转）
     external_income = total_inflow - self_transfer_income
-    
+
     # 识别工资性收入（增强版）
     salary_income = 0.0
     non_salary_income = 0.0
     salary_details = []  # 工资明细列表
-    
+
     # 只处理收入记录
     income_df = df[df['income'] > 0].copy()
-    
+
     if not income_df.empty:
         # 为每笔收入标记是否为工资
         income_df['is_salary'] = False
         income_df['salary_reason'] = ''  # 判定依据
-        income_df['is_self_transfer'] = False # 是否为本人互转
-        income_df['is_reimbursement'] = False # 是否为报销/退款
-        
+        income_df['is_self_transfer'] = False  # 是否为本人互转
+        income_df['is_reimbursement'] = False  # 是否为报销/退款
+
         if entity_name:
-             income_df.loc[income_df['counterparty'] == entity_name, 'is_self_transfer'] = True
-        
+            income_df.loc[income_df['counterparty'] == entity_name, 'is_self_transfer'] = True
+
         # 预处理：识别报销/差旅/退款（负面清单）
-        immunity_keywords = ['安家费', '年终奖', '绩效', '奖金', '工资', '薪资', '劳务', '骨干奖', '贡献奖']
-        
-        for idx, row in income_df.iterrows():
-            if row['is_self_transfer']: continue
-            description = str(row.get('description', ''))
-            
-            # 检查是否包含排除关键词
-            if utils.contains_keywords(description, config.EXCLUDED_REIMBURSEMENT_KEYWORDS):
-                if not utils.contains_keywords(description, immunity_keywords):
-                    income_df.at[idx, 'is_reimbursement'] = True
+        income_df = _identify_reimbursements(income_df)
 
-        # -------------------------------------------------------------------------
-        # 步骤 A: 自动挖掘工资发放单位 (最重要的优化)
-        # -------------------------------------------------------------------------
-        learned_salary_payers = set(config.KNOWN_SALARY_PAYERS + config.USER_DEFINED_SALARY_PAYERS)
-        
-        # 1. 强制添加用户指定的红名单单位
-        learned_salary_payers.add("上海航天化工应用研究所") 
-        
-        # 定义由于理财/投资/基金导致的“假性工资发放者”黑名单关键词
-        # 凡是名字里带这些的，绝对不是发工资的单位，而是投资回款
-        WEALTH_ENTITY_BLACKLIST = [
-            '基金', '资产管理', '投资', '信托', '证券', '期货', '保险', 
-            '财富', '资本', '经营部', '个体', '直销', '理财', 
-            '固收', '定活宝', '增利',
-            'Fund', 'Asset', 'Invest', 'Capital', 'Wealth'
-        ]
-        
-        # 2. 扫描数据，寻找那些发过"工资/奖金"的单位
-        if not income_df.empty:
-            for _, row in income_df.iterrows():
-                desc = str(row.get('description', ''))
-                cp = str(row.get('counterparty', '')).strip()
-                
-                # 如果是"代发工资内部户"等，直接认可
-                if '代发工资' in cp:
-                    learned_salary_payers.add(cp)
-                    continue
+        # 步骤 A: 自动挖掘工资发放单位
+        learned_salary_payers = _learn_salary_payers(income_df)
 
-                if not cp or len(cp) < 4: continue # 忽略太短的
-                
-                # 安全检查：如果单位名字包含投资/基金/理财特征，绝对不能加入所谓"工资白名单"
-                if utils.contains_keywords(cp, WEALTH_ENTITY_BLACKLIST):
-                    continue
-                
-                # 排除银行分行（往往是理财转出）
-                if '银行' in cp and not '人力' in cp:
-                    continue
-
-                # 如果某笔交易摘要明确说是工资/奖金，那么这个对手方就很可能就是发薪单位
-                if utils.contains_keywords(desc, config.SALARY_STRONG_KEYWORDS + ['年终奖', '骨干奖', '绩效', '薪酬', '代发工资']):
-                    learned_salary_payers.add(cp)
-        
-        logger.info(f"已识别的发薪/收入来源白名单: {list(learned_salary_payers)}")
-
-
-        # -------------------------------------------------------------------------
         # 步骤 B: 多轮次识别
-        # -------------------------------------------------------------------------
-        
-        # 轮次1: 白名单单位的所有打款（除非明确是退款或理财赎回）
-        for idx, row in income_df.iterrows():
-            if income_df.at[idx, 'is_salary'] or row['is_self_transfer'] or row['is_reimbursement']:
-                continue
-            
-            counterparty = str(row.get('counterparty', ''))
-            description = str(row.get('description', ''))
-            
-            # 双重保险：即使是白名单，如果摘要包含赎回特征，也不算工资
-            if utils.contains_keywords(description, ['赎回', '卖出', '本金', '退保', '分红']):
-                continue
-            
-            # 检查对手方是否在白名单中
-            is_known_payer = False
-            for payer in learned_salary_payers:
-                if payer in counterparty: 
-                    is_known_payer = True
-                    break
-            
-            if is_known_payer:
-                income_df.at[idx, 'is_salary'] = True
-                reason = '已知发薪单位'
-                if utils.contains_keywords(description, ['奖', '绩效', '年薪']):
-                    reason = f'已知单位-{description}'
-                income_df.at[idx, 'salary_reason'] = reason
+        # 轮次1: 白名单单位的所有打款
+        income_df = _identify_salary_by_whitelist(income_df, learned_salary_payers)
 
-                
-        # 轮次2: 强关键词匹配 (需严格区分理财分红和奖金分红)
-        for idx, row in income_df.iterrows():
-            if income_df.at[idx, 'is_salary'] or row['is_self_transfer'] or row.get('is_reimbursement'):
-                continue
-            description = str(row.get('description', ''))
-            counterparty = str(row.get('counterparty', ''))
-            
-            # 如果是"分红"，必须确认不是基金/证券公司的分红
-            if '分红' in description:
-                if utils.contains_keywords(counterparty, WEALTH_ENTITY_BLACKLIST):
-                    continue
-            
-            if utils.contains_keywords(description, config.SALARY_STRONG_KEYWORDS):
-                income_df.at[idx, 'is_salary'] = True
-                income_df.at[idx, 'salary_reason'] = '摘要含强工资关键词'
-                
+        # 轮次2: 强关键词匹配
+        income_df = _identify_salary_by_keywords(income_df)
+
         # 轮次3: 人力资源公司
-        for idx, row in income_df.iterrows():
-            if income_df.at[idx, 'is_salary'] or row['is_self_transfer'] or row['is_reimbursement']:
-                continue
-            counterparty = str(row.get('counterparty', ''))
-            if utils.contains_keywords(counterparty, config.HR_COMPANY_KEYWORDS):
-                if row['income'] >= config.INCOME_MIN_AMOUNT:
-                    income_df.at[idx, 'is_salary'] = True
-                    income_df.at[idx, 'salary_reason'] = '人力资源公司'
+        income_df = _identify_salary_by_hr_company(income_df)
 
-        # 轮次4: 高频稳定收入 (严格排除金融机构)
-        counterparty_groups = income_df.groupby('counterparty')
-        for counterparty, group in counterparty_groups:
-            if not counterparty or str(counterparty) == 'nan': continue
-            if group['is_salary'].any(): continue 
-            if group.iloc[0]['is_self_transfer']: continue
-            
-            # 排除由于理财和借贷导致的频繁交易
-            # 增加对金融机构的排除力度
-            if utils.contains_keywords(str(counterparty), 
-                config.LOAN_PLATFORM_KEYWORDS + 
-                config.THIRD_PARTY_PAYMENT_KEYWORDS + 
-                ['银行', '保险', '证券', '基金', '信托', '期货', '资产', '投资', '理财']):
-                continue
-                
-            import re
-            if re.match(r'^[\u4e00-\u9fa5]{2,4}$', str(counterparty)): continue
-            
-            valid_group = group[~group['is_reimbursement'].fillna(False)]
-            if len(valid_group) >= 6:
-                dates = valid_group['date'].tolist()
-                months = set(d.strftime('%Y-%m') for d in dates)
-                # 至少5个月，覆盖率0.6
-                if len(months) >= 5 and len(valid_group)/len(months) > 0.6:
-                    amounts = valid_group['income'].tolist()
-                    cv = _calculate_stable_cv(amounts, remove_outliers=True)
-                    mean_amount = sum(amounts) / len(amounts)
-                    # 进一步检查摘要，排除理财赎回特征
-                    is_wealth_like = False
-                    wealth_keywords = ['赎回', '到期', '本息', '转存', '理财', '结息', '收益', '分红', '活期宝', '转活', '提现', '银证']
-                    
-                    # 检查组内是否有过多理财特征
-                    wealth_count = 0
-                    for d in valid_group['description']:
-                        if utils.contains_keywords(str(d), wealth_keywords):
-                            wealth_count += 1
-                    
-                    if wealth_count / len(valid_group) > 0.3: # 如果超过30%看起来像理财
-                        continue
-
-                    if config.INCOME_MEAN_AMOUNT_MIN <= mean_amount <= config.INCOME_MEAN_AMOUNT_MAX and cv < 2.0: 
-                         for idx, row in valid_group.iterrows():
-                            # 单笔再检查一次
-                            if utils.contains_keywords(str(row['description']), wealth_keywords):
-                                continue
-                                
-                            income_df.at[idx, 'is_salary'] = True
-                            income_df.at[idx, 'salary_reason'] = f'高频稳定收入(连续{len(months)}月)'
+        # 轮次4: 高频稳定收入
+        income_df = _identify_salary_by_frequency(income_df)
 
         # 统计
         for idx, row in income_df.iterrows():
@@ -281,30 +427,27 @@ def calculate_income_structure(df: pd.DataFrame, entity_name: str = None) -> Dic
                 })
             elif not row['is_self_transfer'] and not row['is_reimbursement']:
                 non_salary_income += row['income']
-    
-    # 按年度/月度统计 (保持原样)
-    df['year'] = df['date'].dt.year
-    yearly_stats = df.groupby('year').agg({'income': 'sum', 'expense': 'sum'}).to_dict('index')
-    df['month'] = df['date'].apply(utils.get_month_key)
-    monthly_stats = df.groupby('month').agg({'income': 'sum', 'expense': 'sum'}).to_dict('index')
-    
+
+    # 按年度/月度统计
+    yearly_stats, monthly_stats = _calculate_yearly_monthly_stats(df)
+
     result = {
         'date_range': (start_date, end_date),
-        'total_inflow': total_inflow, 
-        'total_income': total_inflow, 
-        'self_transfer_income': self_transfer_income, 
-        'external_income': external_income, 
+        'total_inflow': total_inflow,
+        'total_income': total_inflow,
+        'self_transfer_income': self_transfer_income,
+        'external_income': external_income,
         'total_expense': total_expense,
         'net_flow': total_inflow - total_expense,
         'salary_income': salary_income,
         'non_salary_income': non_salary_income,
         'salary_ratio': salary_income / total_inflow if total_inflow > 0 else 0,
-        'salary_details': salary_details, 
+        'salary_details': salary_details,
         'yearly_stats': yearly_stats,
         'monthly_stats': monthly_stats,
         'transaction_count': len(df)
     }
-    
+
     logger.info(f'工资性收入: {utils.format_currency(salary_income)}({len(salary_details)}笔)')
     return result
 
@@ -312,27 +455,27 @@ def calculate_income_structure(df: pd.DataFrame, entity_name: str = None) -> Dic
 def analyze_fund_flow(df: pd.DataFrame) -> Dict:
     """
     分析资金去向
-    
+
     Args:
         df: 交易DataFrame
-        
+
     Returns:
         资金去向分析字典
     """
     logger.info('正在分析资金去向...')
-    
+
     # 流向第三方支付平台的金额（支出）
     third_party_expense = 0.0
     third_party_expense_transactions = []
-    
+
     # 来自第三方支付平台的金额（收入）
     third_party_income = 0.0
     third_party_income_transactions = []
-    
+
     for _, row in df.iterrows():
         is_third_party = utils.contains_keywords(row['description'], config.THIRD_PARTY_PAYMENT_KEYWORDS) or \
                         utils.contains_keywords(row['counterparty'], config.THIRD_PARTY_PAYMENT_KEYWORDS)
-        
+
         if is_third_party:
             if row['expense'] > 0:
                 third_party_expense += row['expense']
@@ -352,7 +495,7 @@ def analyze_fund_flow(df: pd.DataFrame) -> Dict:
                     '对手方': row.get('counterparty', ''),
                     '类型': '收入'
                 })
-    
+
     # 按对手方统计
     counterparty_stats = {}
     for _, row in df.iterrows():
@@ -367,14 +510,14 @@ def analyze_fund_flow(df: pd.DataFrame) -> Dict:
             counterparty_stats[counterparty]['income'] += row['income']
             counterparty_stats[counterparty]['expense'] += row['expense']
             counterparty_stats[counterparty]['count'] += 1
-    
+
     # 排序找出前10大对手方
     top_counterparties = sorted(
         counterparty_stats.items(),
         key=lambda x: x[1]['expense'] + x[1]['income'],
         reverse=True
     )[:10]
-    
+
     result = {
         # 第三方支付支出
         'third_party_amount': third_party_expense,  # 保持兼容
@@ -393,38 +536,91 @@ def analyze_fund_flow(df: pd.DataFrame) -> Dict:
         'counterparty_stats': counterparty_stats,
         'top_counterparties': top_counterparties
     }
-    
+
     logger.info(f'第三方支付: 收入{utils.format_currency(third_party_income)}({len(third_party_income_transactions)}笔), '
                 f'支出{utils.format_currency(third_party_expense)}({len(third_party_expense_transactions)}笔)')
-    
+
     return result
 
 
-def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict:
+
+def analyze_wealth_holdings(purchase_txs, redemption_txs, default_type='理财'):
     """
-    分析理财产品交易（增强版 - 深度清洗空转资金）
+    通过对账逻辑，估算当前持有的理财产品
+    核心思想：
+    1. 尝试按产品代码/描述精确匹配
+    2. 尝试按金额匹配（金额相同或接近）
+    3. 剩余未匹配的购买记录及视为当前持有
+    """
+    import copy
+    unmatched_purchases = copy.deepcopy(purchase_txs)
+    # 按金额降序排序，先匹配大额
+    unmatched_purchases.sort(key=lambda x: x['金额'], reverse=True)
     
-    识别银行卡中的理财产品操作，包括：
-    - 银行理财产品购买/赎回
-    - 基金申购/赎回
-    - 证券转账（银证互转）
-    - 定期存款/大额存单
-    - 自我转账（账户间划转，含隐形关联账户）
-    - 贷款发放/还款（不算作收入/支出）
-    - 退款/冲正（不算作收入）
+    # 剩余赎回池
+    remaining_redemptions = copy.deepcopy(redemption_txs)
+    remaining_redemptions.sort(key=lambda x: x['金额'], reverse=True)
     
+    # 策略1: 尝试匹配相同金额 (Tolerance 1%)
+    # 有些理财有收益，赎回金额 = 本金 + 收益，所以赎回金额通常 >= 本金
+    # 我们假设赎回金额如果在 [本金, 本金*1.1] 范围内，则可能是对应的
+    
+    matched_indices = set()
+    used_redemption_indices = set()
+    
+    for i, buy in enumerate(unmatched_purchases):
+        buy_amt = buy['金额']
+        best_match_idx = -1
+        min_diff = float('inf')
+        
+        for j, sell in enumerate(remaining_redemptions):
+            if j in used_redemption_indices: continue
+            
+            # 时间必须在购买之后
+            if sell['日期'] < buy['日期']: continue
+            
+            sell_amt = sell['金额']
+            
+            # 判定条件: 赎回金额 >= 本金 (允许亏损极小情况) 且 <= 本金 * 1.5 (假设50%收益率上限)
+            # 或者如果是完全精准匹配通过代码，这里暂未实现代码提取后的匹配，主要靠金额
+            if buy_amt * 0.95 <= sell_amt <= buy_amt * 1.5:
+                 # 优先找最接近的
+                 diff = abs(sell_amt - buy_amt)
+                 if diff < min_diff:
+                     min_diff = diff
+                     best_match_idx = j
+        
+        if best_match_idx != -1:
+            matched_indices.add(i)
+            used_redemption_indices.add(best_match_idx)
+            
+    # 计算估算持有
+    current_holding = 0.0
+    holding_details = []
+    
+    for i, buy in enumerate(unmatched_purchases):
+        if i not in matched_indices:
+            # 只有最近3年内的未赎回才计入，太久远的可能漏掉了赎回记录
+            # 不过对于长期投资，保留也无妨。这里为避免误差，可以加一个时间限制，比如5年
+            current_holding += buy['金额']
+            holding_details.append(buy)
+            
+    return current_holding, holding_details
+
+
+def _get_my_accounts(df: pd.DataFrame) -> tuple:
+    """
+    获取该人员名下的所有账号集合（用于识别隐形自我转账）
+
     Args:
         df: 交易DataFrame
-        entity_name: 实体名称（用于识别自我转账）
-        
+
     Returns:
-        理财交易分析字典
+        (my_accounts, acct_info) 元组
     """
-    logger.info('正在分析理财产品交易（增强版 - 深度清洗）...')
-    
-    # 1. 获取该人员名下的所有账号集合（用于识别隐形自我转账）
     import account_analyzer
     my_accounts = set()
+    acct_info = {}
     try:
         acct_info = account_analyzer.classify_accounts(df)
         my_accounts.update(acct_info['physical_cards'])
@@ -433,31 +629,263 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
     except Exception as e:
         logger.warning(f"获取账户列表失败: {e}")
 
-    # 理财购买（支出）
+    return my_accounts, acct_info
+
+
+def _identify_self_transfer(row: pd.Series, entity_name: str, my_accounts: set) -> bool:
+    """
+    深度识别自我转账 (同名 or 账号在名下列表中)
+
+    Args:
+        row: 交易行
+        entity_name: 实体名称
+        my_accounts: 我的账号集合
+
+    Returns:
+        是否为自我转账
+    """
+    import re
+    counterparty = str(row.get('counterparty', '')).strip()
+    description = str(row.get('description', ''))
+    is_self_transfer = False
+
+    # A. 精确同名匹配（完整姓名）
+    if entity_name:
+        # 完全匹配
+        if counterparty == entity_name:
+            is_self_transfer = True
+        # 边界匹配：entity_name后面不能跟汉字（避免"施灵"匹配"施灵玲"）
+        elif entity_name in counterparty:
+            pos = counterparty.find(entity_name)
+            end_pos = pos + len(entity_name)
+            if end_pos < len(counterparty):
+                next_char = counterparty[end_pos]
+                if not re.match(r'[\u4e00-\u9fa5]', next_char):
+                    is_self_transfer = True
+            else:
+                is_self_transfer = True
+
+    # B. 账号匹配
+    if not is_self_transfer and counterparty in my_accounts:
+        is_self_transfer = True
+
+    # C. 模糊特征 "本人", "户主"
+    if not is_self_transfer and utils.contains_keywords(counterparty + description, ['本人', '户主', '卡卡转账', '自行转账']):
+        is_self_transfer = True
+
+    return is_self_transfer
+
+
+def _detect_wealth_transaction(row: pd.Series, product_code_pattern) -> tuple:
+    """
+    深度识别理财/基金 (包含隐蔽赎回)
+
+    Args:
+        row: 交易行
+        product_code_pattern: 理财产品代码正则模式
+
+    Returns:
+        (is_wealth, wealth_type, confidence) 元组
+    """
+    import re
+    description = str(row.get('description', ''))
+    counterparty = str(row.get('counterparty', '')).strip()
+    income = row.get('income', 0) or 0
+    expense = row.get('expense', 0) or 0
+
+    is_wealth = False
+    wealth_type = '其他理财'
+    confidence = 'low'
+
+    # A. 关键词匹配
+    if utils.contains_keywords(description + counterparty, config.WEALTH_MANAGEMENT_KEYWORDS):
+        is_wealth = True
+        confidence = 'high'
+
+    # B. 隐蔽赎回特征
+    if not is_wealth and income > 0:
+        if counterparty in ['', '-', 'nan', 'NaN']:
+            if product_code_pattern.search(description) or \
+               utils.contains_keywords(description, ['到期', '赎回', '结清', '自动', '归还']):
+                is_wealth = True
+                confidence = 'medium'
+                wealth_type = '定期存款' if '定期' in description else '银行理财'
+
+    # C. 纯数字摘要
+    if not is_wealth:
+        desc_stripped = description.strip()
+        if desc_stripped.isdigit() and len(desc_stripped) <= 4:
+            is_wealth = True
+            wealth_type = '银行理财'
+            confidence = 'medium'
+
+    # D. 产品编号格式
+    if not is_wealth and description:
+        if re.match(r'^\d{6,}', description):
+            is_wealth = True
+            wealth_type = '银行理财'
+            confidence = 'high'
+
+    # E. 理财产品代码前缀
+    if not is_wealth and description:
+        if re.match(r'^(WMY|EW|TZ|LCT|YEB)\d+', description, re.IGNORECASE):
+            is_wealth = True
+            wealth_type = '银行理财'
+            confidence = 'high'
+
+    # F. 整万金额+无对手方
+    if not is_wealth and income > 0:
+        if income >= 100000 and income % 10000 == 0:
+            if counterparty in ['', '-', 'nan', 'NaN'] or len(counterparty) < 2:
+                is_wealth = True
+                wealth_type = '银行理财'
+                confidence = 'medium'
+
+    # G. 金额含利息尾数模式
+    if not is_wealth and income >= 100000:
+        if counterparty in ['', '-', 'nan', 'NaN'] or len(counterparty) < 2:
+            remainder = income % 10000
+            if remainder > 0:
+                is_wealth = True
+                wealth_type = '银行理财'
+                confidence = 'medium'
+
+    return is_wealth, wealth_type, confidence
+
+
+def _refine_wealth_type(description: str, counterparty: str, initial_type: str) -> str:
+    """
+    细化理财类型
+
+    Args:
+        description: 交易摘要
+        counterparty: 对手方
+        initial_type: 初始类型
+
+    Returns:
+        细化后的类型
+    """
+    if utils.contains_keywords(description + counterparty, ['基金', '申购', '赎回', '定投']):
+        return '基金'
+    elif utils.contains_keywords(description + counterparty, ['定期', '定存', '大额存单', '通知存款']):
+        return '定期存款'
+    elif utils.contains_keywords(description + counterparty, ['证券', '银证', '股票']):
+        return '证券'
+    elif utils.contains_keywords(description + counterparty, ['理财', '理财产品', '资管', '资产管理', '结构性存款']):
+        return '银行理财'
+    return initial_type
+
+
+def _calculate_real_wealth_profit(wealth_purchase: float, wealth_redemption: float, wealth_income: float) -> float:
+    """
+    计算真实理财收益（修正异常高收益）
+
+    Args:
+        wealth_purchase: 理财购买金额
+        wealth_redemption: 理财赎回金额
+        wealth_income: 理财收益金额
+
+    Returns:
+        修正后的真实收益
+    """
+    real_wealth_profit = wealth_redemption + wealth_income - wealth_purchase
+
+    # 逻辑修正：如果算出巨额正收益，可能是数据缺失导致的"无本之利"
+    if wealth_purchase > 0:
+        yield_rate = real_wealth_profit / wealth_purchase
+        if yield_rate > 0.5 and real_wealth_profit > 100000:
+            logger.warning(f'检测到异常的理财高收益(投入{wealth_purchase}, 产出{wealth_redemption+wealth_income})，可能是理财购买记录(如自我转账)未被识别')
+            # 悲观修正：只计算显式的利息/收益作为盈利
+            real_wealth_profit = wealth_income
+    elif wealth_redemption > 100000:
+        # 如果根本没有购买记录，却有大额赎回，说明购买记录完全缺失
+        real_wealth_profit = wealth_income
+
+    return real_wealth_profit
+
+
+def _estimate_current_holdings(wealth_purchase_transactions: list, wealth_redemption_transactions: list, category_stats: dict) -> tuple:
+    """
+    估算当前持有的理财产品
+
+    Args:
+        wealth_purchase_transactions: 理财购买交易列表
+        wealth_redemption_transactions: 理财赎回交易列表
+        category_stats: 分类统计
+
+    Returns:
+        (total_estimated_holding, detailed_holdings) 元组
+    """
+    total_estimated_holding = 0.0
+    detailed_holdings = {}
+
+    # 将交易按类型分组
+    tx_by_type = {}
+    for cat in category_stats.keys():
+        tx_by_type[cat] = {'buy': [], 'sell': []}
+
+    for t in wealth_purchase_transactions:
+        cat = t.get('类型', '其他理财')
+        if cat in tx_by_type:
+            tx_by_type[cat]['buy'].append(t)
+
+    for t in wealth_redemption_transactions:
+        cat = t.get('类型', '其他理财')
+        if cat in tx_by_type:
+            tx_by_type[cat]['sell'].append(t)
+
+    for cat, txs in tx_by_type.items():
+        holding, details = analyze_wealth_holdings(txs['buy'], txs['sell'], cat)
+        total_estimated_holding += holding
+        if holding > 0:
+            detailed_holdings[cat] = {
+                'amount': holding,
+                'count': len(details)
+            }
+
+    return total_estimated_holding, detailed_holdings
+
+
+def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict:
+    """
+    分析理财产品交易（增强版 - 深度清洗空转资金）
+
+    识别银行卡中的理财产品操作，包括：
+    - 银行理财产品购买/赎回
+    - 基金申购/赎回
+    - 证券转账（银证互转）
+    - 定期存款/大额存单
+    - 自我转账（账户间划转，含隐形关联账户）
+    - 贷款发放/还款（不算作收入/支出）
+    - 退款/冲正（不算作收入）
+
+    Args:
+        df: 交易DataFrame
+        entity_name: 实体名称（用于识别自我转账）
+
+    Returns:
+        理财交易分析字典
+    """
+    logger.info('正在分析理财产品交易（增强版 - 深度清洗）...')
+
+    # 1. 获取该人员名下的所有账号集合
+    my_accounts, acct_info = _get_my_accounts(df)
+
+    # 初始化统计变量
     wealth_purchase = 0.0
     wealth_purchase_transactions = []
-    
-    # 理财赎回（收入）
     wealth_redemption = 0.0
     wealth_redemption_transactions = []
-    
-    # 自我转账统计
     self_transfer_income = 0.0
     self_transfer_expense = 0.0
     self_transfer_transactions = []
-    
-    # 理财收益（利息/分红等，区别于本金赎回）
     wealth_income = 0.0
     wealth_income_transactions = []
-
-    # 贷款发放（资金流入，非收入）
     loan_inflow = 0.0
     loan_transactions = []
-    
-    # 退款/冲正（资金流入，非收入）
     refund_inflow = 0.0
     refund_transactions = []
-    
+
     # 分类统计
     category_stats = {
         '银行理财': {'购入': 0.0, '赎回': 0.0, '笔数': 0},
@@ -467,147 +895,87 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
         '其他理财': {'购入': 0.0, '赎回': 0.0, '笔数': 0},
         '疑似理财': {'购入': 0.0, '赎回': 0.0, '笔数': 0},
     }
-    
+
     # 年度统计
     yearly_stats = {}
-    
+
     import re
-    # 理财产品代码特征 (如 D3109023..., FSG...)
-    product_code_pattern = re.compile(r'[A-Za-z0-9]{8,}') 
-    
+    product_code_pattern = re.compile(r'[A-Za-z0-9]{8,}')
+
     for _, row in df.iterrows():
         description = str(row.get('description', ''))
         counterparty = str(row.get('counterparty', '')).strip()
         income = row.get('income', 0) or 0
         expense = row.get('expense', 0) or 0
         year = row['date'].year if pd.notna(row['date']) else 0
-        
+
         # 初始化年度统计
         if year and year not in yearly_stats:
             yearly_stats[year] = {
                 '购入': 0.0, '赎回': 0.0, '收益': 0.0,
                 '自我转入': 0.0, '自我转出': 0.0
             }
-        
-        # ----------------------------------------------------
-        # 步骤 1: 识别贷款发放和退款 (这些绝对不是收入)
-        # ----------------------------------------------------
+
+        # 步骤 1: 识别贷款发放和退款
         if income > 0:
-            # 贷款
             if utils.contains_keywords(description, ['放款', '贷款发放', '个贷发放']):
                 loan_inflow += income
                 loan_transactions.append(row.to_dict())
                 continue
-            
-            # 退款/冲正
+
             if utils.contains_keywords(description, ['退款', '冲正', '退回', '撤销']):
                 refund_inflow += income
                 refund_transactions.append(row.to_dict())
                 continue
 
-        # ----------------------------------------------------
-        # 步骤 2: 深度识别自我转账 (同名 or 账号在名下列表中)
-        # ----------------------------------------------------
-        is_self_transfer = False
-        
-        # A. 显式同名
-        if entity_name and entity_name in counterparty:
-            is_self_transfer = True
-        
-        # B. 账号匹配 (对手方账号是否在我的账号列表中)
-        # 这里需要从对手方/摘要中提取账号，这比较难，但如果我们直接有counterparty_account列最好
-        # 目前主要看 counterparty 字段本身是否就是账号
-        elif counterparty in my_accounts:
-            is_self_transfer = True
-            
-        # C. 模糊特征 "本人", "户主"
-        elif utils.contains_keywords(counterparty + description, ['本人', '户主', '卡卡转账', '自行转账']):
-            is_self_transfer_likely = True
-            # 二次确认：如果是他人名字叫“本人”... 不太可能，直接算吧
-            is_self_transfer = True
-            
+        # 步骤 2: 识别自我转账
+        is_self_transfer = _identify_self_transfer(row, entity_name, my_accounts)
+
         if is_self_transfer:
             if income > 0:
                 self_transfer_income += income
-                if year: yearly_stats[year]['自我转入'] += income
+                if year:
+                    yearly_stats[year]['自我转入'] += income
             if expense > 0:
                 self_transfer_expense += expense
-                if year: yearly_stats[year]['自我转出'] += expense
-                
+                if year:
+                    yearly_stats[year]['自我转出'] += expense
+
             self_transfer_transactions.append({
                 '日期': row['date'], '收入': income, '支出': expense,
                 '摘要': description, '对手方': counterparty,
                 '备注': '识别为自我转账'
             })
             continue
-        
-        # ----------------------------------------------------
-        # 步骤 3: 深度识别理财/基金 (包含隐蔽赎回)
-        # ----------------------------------------------------
-        is_wealth = False
-        wealth_type = '其他理财'
-        confidence = 'low' # low, high
-        
-        # A. 关键词匹配 (原有逻辑)
-        if utils.contains_keywords(description + counterparty, config.WEALTH_MANAGEMENT_KEYWORDS):
-            is_wealth = True
-            confidence = 'high'
-            
-        # B. 隐蔽赎回特征 (对手方为空/-，且摘要包含代码)
-        if not is_wealth and income > 0:
-            if counterparty in ['', '-', 'nan', 'NaN']:
-                # 检查摘要是否包含长数字/字母代码 (理财产品编号)
-                if product_code_pattern.search(description) or \
-                   utils.contains_keywords(description, ['到期', '赎回', '结清', '自动', '归还']):
-                    is_wealth = True
-                    confidence = 'medium'
-                    wealth_type = '定期存款' if '定期' in description else '银行理财'
-            
-            # C. 账号属性特征 (隐形理财户)
-            # 如果本方账号本身就是理财专属账号，且对手方为空，那么这笔进账一定是理财到期
+
+        # 步骤 3: 识别理财/基金
+        is_wealth, wealth_type, confidence = _detect_wealth_transaction(row, product_code_pattern)
+
+        # 账号属性特征 (隐形理财户)
+        if not is_wealth and income > 0 and counterparty in ['', '-', 'nan', 'NaN']:
             my_account_num = str(row.get('本方账号', row.get('account_number', '')))
-            if not is_wealth and counterparty in ['', '-', 'nan', 'NaN']:
-                 if my_account_num in acct_info.get('wealth_accounts', []):
-                     is_wealth = True
-                     wealth_type = '银行理财'
-                     confidence = 'high'
-            
-            # D. 双空特征 (对手方空 + 摘要空 + 大额) -> 疑似理财
-            # 这种情况通常是银行系统自动入账，非人工转账，大概率是理财/利息
-            if not is_wealth and income > 10000 and counterparty in ['', '-', 'nan', 'NaN'] and description in ['', 'nan', 'NaN']:
-                 is_wealth = True
-                 wealth_type = '疑似理财'
-                 confidence = 'medium'
-        
-        # E. 【新增】纯数字摘要 (银行内部理财产品代码，如 "69", "71")
-        # 这类摘要通常是银行内部系统使用的产品代码，代表理财操作
-        if not is_wealth:
-            desc_stripped = description.strip()
-            if desc_stripped.isdigit() and len(desc_stripped) <= 4:
-                # 1-4位纯数字摘要，几乎必定是银行内部代码
+            if my_account_num in acct_info.get('wealth_accounts', []):
                 is_wealth = True
                 wealth_type = '银行理财'
-                confidence = 'medium'
-                    
+                confidence = 'high'
+
+        # 双空特征 (对手方空 + 摘要空 + 大额)
+        if not is_wealth and income > 10000 and counterparty in ['', '-', 'nan', 'NaN'] and description in ['', 'nan', 'NaN']:
+            is_wealth = True
+            wealth_type = '疑似理财'
+            confidence = 'medium'
+
         if not is_wealth:
             continue
-            
+
         # 细化类型
-        if utils.contains_keywords(description + counterparty, ['基金', '申购', '赎回', '定投']):
-            wealth_type = '基金'
-        elif utils.contains_keywords(description + counterparty, ['定期', '定存', '大额存单', '存款', '通知存款']):
-            wealth_type = '定期存款'
-        elif utils.contains_keywords(description + counterparty, ['证券', '银证', '股票']):
-            wealth_type = '证券'
-        elif utils.contains_keywords(description + counterparty, ['理财', '理财产品', '资管', '资产管理']):
-            wealth_type = '银行理财'
-        
-        # 判断是否为收益（而非本金赎回）
+        wealth_type = _refine_wealth_type(description, counterparty, wealth_type)
+
+        # 判断是否为收益
         is_income_yield = utils.contains_keywords(description, ['利息', '结息', '分红', '收益', '红利'])
-        
+
         # 记录
         if expense > 0:
-            # 购买
             wealth_purchase += expense
             wealth_purchase_transactions.append({
                 '日期': row['date'], '金额': expense,
@@ -616,20 +984,20 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
             })
             category_stats[wealth_type]['购入'] += expense
             category_stats[wealth_type]['笔数'] += 1
-            if year: yearly_stats[year]['购入'] += expense
-                
+            if year:
+                yearly_stats[year]['购入'] += expense
+
         elif income > 0:
             if is_income_yield:
-                # 纯收益
                 wealth_income += income
                 wealth_income_transactions.append({
                     '日期': row['date'], '金额': income,
                     '摘要': description, '对手方': counterparty,
                     '类型': '收益'
                 })
-                if year: yearly_stats[year]['收益'] += income
+                if year:
+                    yearly_stats[year]['收益'] += income
             else:
-                # 赎回本金
                 wealth_redemption += income
                 wealth_redemption_transactions.append({
                     '日期': row['date'], '金额': income,
@@ -638,25 +1006,13 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
                 })
                 category_stats[wealth_type]['赎回'] += income
                 category_stats[wealth_type]['笔数'] += 1
-                if year: yearly_stats[year]['赎回'] += income
-    
-    # 计算理财净额
+                if year:
+                    yearly_stats[year]['赎回'] += income
+
+    # 计算理财净额和真实收益
     net_wealth_flow = wealth_purchase - wealth_redemption
-    real_wealth_profit = wealth_redemption + wealth_income - wealth_purchase
-    
-    # 逻辑修正：如果算出巨额正收益（例如投入1000万，赎回4000万），通常是因为数据缺失导致的“无本之利”
-    # 在这种情况下，我们不能草率地宣称某人赚了3000万，而应该认为“本金投入记录缺失”
-    # 修正策略：如果收益率 > 20% 且 绝对收益 > 10万，则强制修正
-    if wealth_purchase > 0:
-        yield_rate = real_wealth_profit / wealth_purchase
-        if yield_rate > 0.5 and real_wealth_profit > 100000:
-            logger.warning(f'检测到异常的理财高收益(投入{wealth_purchase}, 产出{wealth_redemption+wealth_income})，可能是理财购买记录(如自我转账)未被识别')
-            # 悲观修正：只计算显式的利息/收益作为盈利，本金赎回部分假设收支平衡
-            real_wealth_profit = wealth_income 
-    elif wealth_redemption > 100000:
-        # 如果根本没有购买记录，却有大额赎回，说明购买记录完全缺失
-        real_wealth_profit = wealth_income
-    
+    real_wealth_profit = _calculate_real_wealth_profit(wealth_purchase, wealth_redemption, wealth_income)
+
     result = {
         'wealth_purchase': wealth_purchase,
         'wealth_purchase_count': len(wealth_purchase_transactions),
@@ -673,67 +1029,49 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
         'self_transfer_expense': self_transfer_expense,
         'self_transfer_count': len(self_transfer_transactions),
         'self_transfer_transactions': self_transfer_transactions,
-        # 新增
         'loan_inflow': loan_inflow,
         'refund_inflow': refund_inflow,
-        
         'category_stats': category_stats,
         'yearly_stats': yearly_stats,
         'total_transactions': len(wealth_purchase_transactions) + len(wealth_redemption_transactions) + len(wealth_income_transactions)
     }
-    
+
     if result['total_transactions'] > 0:
         logger.info(f'理财产品: 购买{utils.format_currency(wealth_purchase)}, 赎回{utils.format_currency(wealth_redemption)}')
         logger.info(f'隐性剔除: 自我转账{utils.format_currency(self_transfer_income)}, 贷款{utils.format_currency(loan_inflow)}, 退款{utils.format_currency(refund_inflow)}')
-    
+
+    # 估算当前持有
+    total_estimated_holding, detailed_holdings = _estimate_current_holdings(
+        wealth_purchase_transactions, wealth_redemption_transactions, category_stats
+    )
+
+    result['estimated_holding'] = total_estimated_holding
+    result['holding_structure'] = detailed_holdings
+
+    logger.info(f'理财深度估算: 累计交易{utils.format_currency(wealth_purchase)}, 估算当前持有{utils.format_currency(total_estimated_holding)}')
     return result
 
-def generate_profile_report(df: pd.DataFrame, entity_name: str) -> Dict:
+def _calculate_real_income_expense(income_structure: Dict, wealth_management: Dict, fund_flow: Dict) -> tuple:
     """
-    生成资金画像报告
-    
+    计算真实收入/支出（改进版 - 2026-01-08）
+
+    核心原则：
+    1. 自我转账理论上应该收支平衡（没数据完整时可能有差额）
+    2. 理财买入/赎回也应该基本平衡（赎回包含本金，除非购买记录缺失）
+    3. 为保守起见，我们使用"对冲"原则来剔除这些内部循环资金
+
+    改进策略：
+    - 自我转账：用min(收入,支出)来对冲，差额视为可能的外流/外来资金
+    - 理财：用min(购买,赎回)来对冲本金循环，剩余差额保守处理
+
     Args:
-        df: 交易DataFrame
-        entity_name: 实体名称(人员或公司)
-        
+        income_structure: 收支结构
+        wealth_management: 理财管理分析结果
+        fund_flow: 资金流向分析结果
+
     Returns:
-        完整的资金画像报告
+        (real_income, real_expense) 元组
     """
-    logger.info(f'正在为 {entity_name} 生成资金画像...')
-    
-    if df.empty:
-        logger.warning(f'{entity_name} 无交易数据')
-        return {
-            'entity_name': entity_name,
-            'has_data': False
-        }
-    
-    # 收支结构
-    income_structure = calculate_income_structure(df, entity_name=entity_name)
-    
-    # 资金去向
-    fund_flow = analyze_fund_flow(df)
-    
-    # 理财产品分析（传入entity_name以识别自我转账）
-    wealth_management = analyze_wealth_management(df, entity_name=entity_name)
-    
-    # 大额现金
-    large_cash = extract_large_cash(df)
-    
-    # 交易分类
-    categories = categorize_transactions(df)
-    
-    # 计算真实收入/支出（改进版 - 2026-01-08）
-    # 
-    # 核心原则：
-    # 1. 自我转账理论上应该收支平衡（没数据完整时可能有差额）
-    # 2. 理财买入/赎回也应该基本平衡（赎回包含本金，除非购买记录缺失）
-    # 3. 为保守起见，我们使用"对冲"原则来剔除这些内部循环资金
-    #
-    # 改进策略：
-    # - 自我转账：用min(收入,支出)来对冲，差额视为可能的外流/外来资金
-    # - 理财：用min(购买,赎回)来对冲本金循环，剩余差额保守处理
-    
     self_in = wealth_management['self_transfer_income']
     self_out = wealth_management['self_transfer_expense']
     wealth_buy = wealth_management['wealth_purchase']
@@ -741,93 +1079,157 @@ def generate_profile_report(df: pd.DataFrame, entity_name: str) -> Dict:
     wealth_yield = wealth_management['wealth_income']
     loan_in = wealth_management['loan_inflow']
     refund_in = wealth_management['refund_inflow']
-    
+
     # 自我转账对冲：取min值对冲，差额不自动排除（可能是外来资金）
     self_transfer_offset = min(self_in, self_out)
-    
+
     # 理财本金对冲：假设买入和赎回中较小的部分是完整闭环
     # 超出部分可能是：购买>赎回(存量增加)，赎回>购买(历史存量释放)
     wealth_principal_offset = min(wealth_buy, wealth_redeem)
-    
+
     # 计算真实收入
     # = 总收入 - 自我转入对冲 - 理财本金对冲 - 贷款发放 - 退款
     # 【注】理财收益(利息/分红)保留，因为它是真正的价值增量
-    real_income = (income_structure['total_income'] 
+    real_income = (income_structure['total_income']
                   - self_transfer_offset  # 自我转入对冲
                   - wealth_principal_offset  # 理财赎回中的本金部分
                   - loan_in  # 贷款发放(借的钱，不是收入)
                   - refund_in)  # 退款(原来的支出返还)
-                  
+
     # 计算真实支出
     # = 总支出 - 自我转出对冲 - 理财购买对冲
-    real_expense = (income_structure['total_expense'] 
+    real_expense = (income_structure['total_expense']
                    - self_transfer_offset  # 自我转出对冲
                    - wealth_principal_offset)  # 理财购买中能匹配赎回的部分
-    
+
     # 安全检查：真实收入/支出不应为负
     real_income = max(0, real_income)
     real_expense = max(0, real_expense)
-    
+
     # 日志输出对冲详情
     logger.info(f'资金对冲: 自我转账对冲{self_transfer_offset/10000:.2f}万, 理财本金对冲{wealth_principal_offset/10000:.2f}万')
     logger.info(f'真实收入: {real_income/10000:.2f}万, 真实支出: {real_expense/10000:.2f}万, 净额: {(real_income-real_expense)/10000:.2f}万')
-    
+
+    return real_income, real_expense
+
+
+def _build_profile_summary(income_structure: Dict, fund_flow: Dict, wealth_management: Dict,
+                         large_cash: list, real_income: float, real_expense: float, df: pd.DataFrame) -> Dict:
+    """
+    构建画像摘要
+
+    Args:
+        income_structure: 收支结构
+        fund_flow: 资金流向分析结果
+        wealth_management: 理财管理分析结果
+        large_cash: 大额现金记录
+        real_income: 真实收入
+        real_expense: 真实支出
+        df: 交易DataFrame
+
+    Returns:
+        画像摘要字典
+    """
+    return {
+        'total_income': income_structure['total_income'],
+        'total_expense': income_structure['total_expense'],
+        'net_flow': income_structure['net_flow'],
+        'real_income': real_income,
+        'real_expense': real_expense,
+        'salary_ratio': income_structure['salary_ratio'],
+        'third_party_ratio': fund_flow['third_party_ratio'],
+        'large_cash_count': len(large_cash),
+        'wealth_transactions': wealth_management['total_transactions'],
+        'transaction_count': len(df),
+        'date_range': income_structure['date_range']
+    }
+
+
+def generate_profile_report(df: pd.DataFrame, entity_name: str) -> Dict:
+    """
+    生成资金画像报告
+
+    Args:
+        df: 交易DataFrame
+        entity_name: 实体名称(人员或公司)
+
+    Returns:
+        完整的资金画像报告
+    """
+    logger.info(f'正在为 {entity_name} 生成资金画像...')
+
+    if df.empty:
+        logger.warning(f'{entity_name} 无交易数据')
+        return {
+            'entity_name': entity_name,
+            'has_data': False
+        }
+
+    # 收支结构
+    income_structure = calculate_income_structure(df, entity_name=entity_name)
+
+    # 资金去向
+    fund_flow = analyze_fund_flow(df)
+
+    # 理财产品分析（传入entity_name以识别自我转账）
+    wealth_management = analyze_wealth_management(df, entity_name=entity_name)
+
+    # 大额现金
+    large_cash = extract_large_cash(df)
+
+    # 交易分类
+    categories = categorize_transactions(df)
+
+    # 计算真实收入/支出
+    real_income, real_expense = _calculate_real_income_expense(income_structure, wealth_management, fund_flow)
+
+    # 构建画像摘要
+    summary = _build_profile_summary(income_structure, fund_flow, wealth_management, large_cash, real_income, real_expense, df)
+
     profile = {
         'entity_name': entity_name,
         'has_data': True,
         'income_structure': income_structure,
         'fund_flow': fund_flow,
-        'wealth_management': wealth_management,  # 新增
+        'wealth_management': wealth_management,
         'large_cash': large_cash,
         'categories': categories,
-        'summary': {
-            'total_income': income_structure['total_income'],
-            'total_expense': income_structure['total_expense'],
-            'net_flow': income_structure['net_flow'],
-            'real_income': real_income,
-            'real_expense': real_expense,
-            'salary_ratio': income_structure['salary_ratio'],
-            'third_party_ratio': fund_flow['third_party_ratio'],
-            'large_cash_count': len(large_cash),
-            'wealth_transactions': wealth_management['total_transactions'],
-            'transaction_count': len(df),
-            'date_range': income_structure['date_range']
-        }
+        'summary': summary
     }
-    
+
     logger.info(f'{entity_name} 资金画像生成完成')
-    
+
     return profile
 
 def extract_large_cash(df: pd.DataFrame, threshold: float = None) -> List[Dict]:
     """
     提取大额现金存取记录
-    
+
     Args:
         df: 交易DataFrame
         threshold: 金额阈值,默认使用配置
-        
+
     Returns:
         大额现金记录列表
     """
     if threshold is None:
         threshold = config.LARGE_CASH_THRESHOLD
-    
+
     logger.info(f'正在筛查大额现金(阈值: {utils.format_currency(threshold)})...')
-    
+
     large_cash_records = []
-    
+
     for _, row in df.iterrows():
         # 检查是否为现金交易
         is_cash = utils.contains_keywords(row['description'], config.CASH_KEYWORDS)
-        
+
         if is_cash:
             amount = max(row['income'], row['expense'])
             if amount >= threshold:
                 record = row.to_dict()
                 record['cash_type'] = 'deposit' if row['income'] > 0 else 'withdrawal'
                 record['amount'] = amount
-                
+
                 # 判断风险等级
                 if amount >= config.CASH_THRESHOLDS['level_4']:
                     record['risk_level'] = 'high'
@@ -835,21 +1237,21 @@ def extract_large_cash(df: pd.DataFrame, threshold: float = None) -> List[Dict]:
                     record['risk_level'] = 'medium'
                 else:
                     record['risk_level'] = 'low'
-                
+
                 large_cash_records.append(record)
-    
+
     logger.info(f'发现 {len(large_cash_records)} 笔大额现金交易')
-    
+
     return large_cash_records
 
 
 def categorize_transactions(df: pd.DataFrame) -> Dict[str, List[Dict]]:
     """
     交易分类
-    
+
     Args:
         df: 交易DataFrame
-        
+
     Returns:
         分类后的交易字典
     """
@@ -863,42 +1265,42 @@ def categorize_transactions(df: pd.DataFrame) -> Dict[str, List[Dict]]:
         'vehicle': [],         # 疑似购车
         'other': []            # 其他
     }
-    
+
     for _, row in df.iterrows():
         record = row.to_dict()
-        
+
         # 收入分类
         if row['income'] > 0:
-            if utils.contains_keywords(row['description'], config.SALARY_KEYWORDS):
+            if utils.contains_keywords(row['description'], config.SALARY_STRONG_KEYWORDS):
                 categories['salary'].append(record)
             else:
                 categories['non_salary'].append(record)
-        
+
         # 支出分类
         if row['expense'] > 0:
             # 第三方支付
             if utils.contains_keywords(row['description'], config.THIRD_PARTY_PAYMENT_KEYWORDS):
                 categories['third_party'].append(record)
-            
+
             # 疑似购房
             if utils.contains_keywords(row['description'], config.PROPERTY_KEYWORDS):
                 if row['expense'] >= config.PROPERTY_THRESHOLD:
                     categories['property'].append(record)
-            
+
             # 疑似购车
             if utils.contains_keywords(row['description'], config.VEHICLE_KEYWORDS):
                 if row['expense'] >= config.VEHICLE_THRESHOLD:
                     categories['vehicle'].append(record)
-        
+
         # 现金交易
         if utils.contains_keywords(row['description'], config.CASH_KEYWORDS):
             categories['cash'].append(record)
-        
+
         # 大额交易
         amount = max(row['income'], row['expense'])
         if amount >= config.LARGE_CASH_THRESHOLD:
             categories['large_amount'].append(record)
-    
+
     return categories
 
 

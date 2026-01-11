@@ -3,6 +3,10 @@
 """
 借贷行为分析模块
 检测双向资金往来关系（借入+还款模式）、网贷平台往来等
+
+重构说明 (2026-01-11):
+- 使用 counterparty_utils 统一对手方排除逻辑
+- 使用 config.py 中的阈值替代硬编码
 """
 
 import pandas as pd
@@ -11,6 +15,10 @@ from typing import Dict, List, Tuple
 from collections import defaultdict
 import config
 import utils
+from counterparty_utils import (
+    should_exclude_counterparty,
+    ExclusionContext
+)
 
 logger = utils.setup_logger(__name__)
 
@@ -105,6 +113,40 @@ def analyze_loan_behaviors(
     return results
 
 
+# 注意: _should_exclude_counterparty_for_bidirectional 已迁移至 counterparty_utils.py
+# 使用 should_exclude_counterparty(cp, person, core_persons, ExclusionContext.BIDIRECTIONAL)
+
+
+# 注意: _should_exclude_counterparty_for_loan_pattern 已迁移至 counterparty_utils.py
+# 使用 should_exclude_counterparty(cp, person, core_persons, ExclusionContext.LOAN_PATTERN)
+
+
+def _calculate_loan_pattern(ratio: float) -> Tuple[bool, str]:
+    """
+    计算借贷模式
+    
+    Args:
+        ratio: 支出/收入比例
+        
+    Returns:
+        (是否为借贷模式, 借贷类型)
+    """
+    ratio_min = config.LOAN_PAIR_RATIO_MIN
+    ratio_max = config.LOAN_PAIR_RATIO_MAX
+    
+    if 0.8 <= ratio <= ratio_max:
+        # 还款金额接近借入金额，典型借贷
+        return True, '疑似借贷（还款≈借入）'
+    elif ratio > ratio_max:
+        # 还款远多于借入，可能是分期还款+利息
+        return True, '疑似借贷（分期还款）'
+    elif ratio < 0.8 and ratio > 0:
+        # 借入多于还款，可能是正在还款中
+        return True, '疑似借贷（未还清）'
+    
+    return False, 'unknown'
+
+
 def _detect_bidirectional_flows(
     all_transactions: Dict[str, pd.DataFrame],
     core_persons: List[str],
@@ -137,18 +179,8 @@ def _detect_bidirectional_flows(
                 if not cp or cp == 'nan' or len(cp) < 2:
                     continue
                 
-                # ===== 修复: 排除同名对手方（自己给自己的转账）=====
-                if cp == person or cp in core_persons:
-                    continue
-                
-                # 排除公共支付平台
-                if utils.contains_keywords(cp, config.THIRD_PARTY_PAYMENT_KEYWORDS):
-                    continue
-                
-                # ===== 修复: 排除发薪单位 =====
-                if utils.contains_keywords(cp, config.KNOWN_SALARY_PAYERS):
-                    continue
-                if utils.contains_keywords(cp, config.USER_DEFINED_SALARY_PAYERS):
+                # 排除对手方（使用统一的排除逻辑）
+                if should_exclude_counterparty(cp, person, core_persons, ExclusionContext.BIDIRECTIONAL):
                     continue
                 
                 if row.get('income', 0) >= min_amount:
@@ -172,41 +204,15 @@ def _detect_bidirectional_flows(
             # 筛选双向往来
             for cp, stats in counterparty_stats.items():
                 if stats['income_count'] >= min_transactions and stats['expense_count'] >= min_transactions:
-                    # ===== 新增: 排除理财产品对手方 =====
-                    # 理财产品的买入和赎回会形成双向往来，但不是借贷
-                    if utils.contains_keywords(cp, config.WEALTH_PRODUCT_COUNTERPARTY_KEYWORDS):
-                        continue
-                    if utils.contains_keywords(cp, config.WEALTH_MANAGEMENT_KEYWORDS):
-                        continue
-                    
-                    # ===== 新增: 排除政府机关（工资/补贴不是借贷）=====
-                    if utils.contains_keywords(cp, config.GOVERNMENT_AGENCY_KEYWORDS):
+                    # 排除对手方（使用统一的排除逻辑）
+                    if should_exclude_counterparty(cp, person, core_persons, ExclusionContext.LOAN_PATTERN):
                         continue
                     
                     # 计算借贷特征
                     ratio = stats['expense_total'] / stats['income_total'] if stats['income_total'] > 0 else 0
                     
                     # 判断是否为借贷模式
-                    # 借贷特征：收入（借入）先于支出（还款），且还款略多于借入（含利息）
-                    is_loan_pattern = False
-                    loan_type = 'unknown'
-                    
-                    if 0.8 <= ratio <= 1.5:
-                        # 还款金额接近借入金额，典型借贷
-                        is_loan_pattern = True
-                        loan_type = '疑似借贷（还款≈借入）'
-                    elif ratio > 1.5:
-                        # 还款远多于借入，可能是分期还款+利息
-                        is_loan_pattern = True
-                        loan_type = '疑似借贷（分期还款）'
-                    elif ratio < 0.8 and ratio > 0:
-                        # 借入多于还款，可能是正在还款中
-                        is_loan_pattern = True
-                        loan_type = '疑似借贷（未还清）'
-                    
-                    # 排除正常商业往来（如公司间业务）
-                    if utils.contains_keywords(cp, ['公司', '有限', '集团', '银行']):
-                        is_loan_pattern = False
+                    is_loan_pattern, loan_type = _calculate_loan_pattern(ratio)
                     
                     if is_loan_pattern:
                         bidirectional.append({
@@ -381,11 +387,87 @@ def _detect_regular_repayments(
     return regular_repayments
 
 
+# 注意: _should_exclude_counterparty_for_loan_pairs 已迁移至 counterparty_utils.py
+# 使用 should_exclude_counterparty(cp, person, core_persons, ExclusionContext.LOAN_PAIRS)
+
+
+def _calculate_loan_risk_level(income_amt: float, annual_rate: float) -> Tuple[str, List[str]]:
+    """
+    计算借贷风险等级
+    
+    Args:
+        income_amt: 借入金额
+        annual_rate: 年化利率
+        
+    Returns:
+        (风险等级, 风险原因列表)
+    """
+    risk_level = 'medium'
+    risk_reason = []
+    
+    usury_rate = config.LOAN_USURY_RATE
+    interest_free_min = config.LOAN_INTEREST_FREE_MIN
+    large_threshold = config.LOAN_LARGE_NO_REPAY_MIN
+    
+    if annual_rate > usury_rate:
+        risk_level = 'high'
+        risk_reason.append(f'年化利率{annual_rate:.1f}%超过{usury_rate}%红线')
+    elif annual_rate < 0.1 and income_amt >= interest_free_min:
+        risk_level = 'high'
+        risk_reason.append(f'大额借贷({utils.format_currency(income_amt)})无息或低息')
+    elif income_amt >= large_threshold:
+        risk_level = 'high'
+        risk_reason.append(f'借贷金额超过{large_threshold/10000:.0f}万元')
+    
+    return risk_level, risk_reason
+
+
+def _create_loan_pair_entry(person: str, cp_str: str, income_row, expense_row,
+                           days_diff: int, income_amt: float, expense_amt: float) -> Dict:
+    """
+    创建借贷配对条目
+    
+    Args:
+        person: 人员名称
+        cp_str: 对手方
+        income_row: 收入记录
+        expense_row: 支出记录
+        days_diff: 天数差
+        income_amt: 收入金额
+        expense_amt: 支出金额
+        
+    Returns:
+        借贷配对条目
+    """
+    # 计算隐含利率
+    interest_rate = ((expense_amt - income_amt) / income_amt) * 100 if income_amt > 0 else 0
+    annual_rate = (interest_rate / days_diff * 365) if days_diff > 0 else 0
+    
+    # 判断风险等级
+    risk_level, risk_reason = _calculate_loan_risk_level(income_amt, annual_rate)
+    
+    return {
+        'person': person,
+        'counterparty': cp_str,
+        'loan_date': income_row['date'],
+        'repay_date': expense_row['date'],
+        'loan_amount': income_amt,
+        'repay_amount': expense_amt,
+        'days': days_diff,
+        'interest_rate': interest_rate,
+        'annual_rate': annual_rate,
+        'risk_level': risk_level,
+        'risk_reason': '; '.join(risk_reason) if risk_reason else '正常',
+        'loan_desc': income_row.get('description', ''),
+        'repay_desc': expense_row.get('description', '')
+    }
+
+
 def _detect_loan_pairs(
     all_transactions: Dict[str, pd.DataFrame],
     core_persons: List[str],
-    time_window_days: int = 365,
-    amount_tolerance: float = 0.2
+    time_window_days: int = None,
+    amount_tolerance: float = None
 ) -> List[Dict]:
     """
     借贷配对分析 - 智能匹配借入和还款记录
@@ -393,12 +475,21 @@ def _detect_loan_pairs(
     Args:
         all_transactions: 所有交易数据
         core_persons: 核心人员列表
-        time_window_days: 时间窗口（天）
-        amount_tolerance: 金额容差（±20%）
+        time_window_days: 时间窗口（天），默认使用配置
+        amount_tolerance: 金额容差，默认使用配置
     
     Returns:
         借贷配对列表
     """
+    # 使用配置文件中的阈值
+    if time_window_days is None:
+        time_window_days = config.LOAN_TIME_WINDOW_DAYS
+    if amount_tolerance is None:
+        amount_tolerance = config.LOAN_AMOUNT_TOLERANCE
+    
+    ratio_min = config.LOAN_PAIR_RATIO_MIN
+    ratio_max = config.LOAN_PAIR_RATIO_MAX
+    
     loan_pairs = []
     
     for person in core_persons:
@@ -415,34 +506,8 @@ def _detect_loan_pairs(
                 if not cp_str or cp_str == 'nan' or len(cp_str) < 2:
                     continue
                 
-                # ===== 修复1: 排除同名对手方（自己给自己的转账）=====
-                if cp_str == person or cp_str in core_persons:
-                    continue
-                
-                # 排除公共支付平台和公司
-                if utils.contains_keywords(cp_str, config.THIRD_PARTY_PAYMENT_KEYWORDS):
-                    continue
-                if utils.contains_keywords(cp_str, ['公司', '有限', '集团', '银行']):
-                    continue
-                
-                # ===== 修复2: 排除已知发薪单位 =====
-                if utils.contains_keywords(cp_str, config.SALARY_STRONG_KEYWORDS):
-                    continue
-                if utils.contains_keywords(cp_str, config.KNOWN_SALARY_PAYERS):
-                    continue
-                if utils.contains_keywords(cp_str, config.USER_DEFINED_SALARY_PAYERS):
-                    continue
-                
-                # ===== 修复3: 排除银行系统账户 =====
-                bank_system_keywords = ['代付', '代收', '业务专户', '清算', '头寸', '备付']
-                if utils.contains_keywords(cp_str, bank_system_keywords):
-                    continue
-                
-                # ===== 修复4: 排除理财产品对手方 =====
-                # 理财产品的买入和赎回会形成双向往来，但不是借贷
-                if utils.contains_keywords(cp_str, config.WEALTH_PRODUCT_COUNTERPARTY_KEYWORDS):
-                    continue
-                if utils.contains_keywords(cp_str, config.WEALTH_MANAGEMENT_KEYWORDS):
+                # 排除对手方（使用统一的排除逻辑）
+                if should_exclude_counterparty(cp_str, person, core_persons, ExclusionContext.LOAN_PAIRS):
                     continue
                 
                 cp_df = df[df['counterparty'] == cp].copy()
@@ -476,49 +541,56 @@ def _detect_loan_pairs(
                         # 金额匹配检查（允许利息）
                         ratio = expense_amt / income_amt if income_amt > 0 else 0
                         
-                        # ===== 修复4: 只接受还款≥借入的配对（真正的借贷） =====
-                        # 还款金额应该等于或略高于借入金额（含利息）
-                        # 如果还款<借入，那不是借贷，是普通转账
-                        if 1.0 <= ratio <= 1.5:
-                            # 计算隐含利率（只有正利率才有意义）
-                            interest_rate = ((expense_amt - income_amt) / income_amt) * 100 if income_amt > 0 else 0
-                            annual_rate = (interest_rate / days_diff * 365) if days_diff > 0 else 0
-                            
-                            # 判断风险等级
-                            risk_level = 'medium'
-                            risk_reason = []
-                            
-                            if annual_rate > 36:
-                                risk_level = 'high'
-                                risk_reason.append(f'年化利率{annual_rate:.1f}%超过36%红线')
-                            elif annual_rate < 0.1 and income_amt >= 50000:
-                                risk_level = 'high'
-                                risk_reason.append(f'大额借贷({utils.format_currency(income_amt)})无息或低息')
-                            elif income_amt >= 100000:
-                                risk_level = 'high'
-                                risk_reason.append(f'借贷金额超过10万元')
-                            
-                            loan_pairs.append({
-                                'person': person,
-                                'counterparty': cp_str,
-                                'loan_date': income_date,
-                                'repay_date': expense_date,
-                                'loan_amount': income_amt,
-                                'repay_amount': expense_amt,
-                                'days': days_diff,
-                                'interest_rate': interest_rate,
-                                'annual_rate': annual_rate,
-                                'risk_level': risk_level,
-                                'risk_reason': '; '.join(risk_reason) if risk_reason else '正常',
-                                'loan_desc': income_row.get('description', ''),
-                                'repay_desc': expense_row.get('description', '')
-                            })
+                        # 只接受还款≥借入的配对（真正的借贷）
+                        if ratio_min <= ratio <= ratio_max:
+                            loan_pairs.append(_create_loan_pair_entry(
+                                person, cp_str, income_row, expense_row,
+                                days_diff, income_amt, expense_amt
+                            ))
     
     # 按借贷金额排序
     loan_pairs.sort(key=lambda x: -x['loan_amount'])
     
     logger.info(f'  发现 {len(loan_pairs)} 个借贷配对')
     return loan_pairs
+
+
+# 注意: _should_exclude_counterparty_for_no_repayment 已迁移至 counterparty_utils.py
+# 使用 should_exclude_counterparty(cp, person, core_persons, ExclusionContext.NO_REPAYMENT)
+
+
+def _create_no_repayment_entry(person: str, cp_str: str, income_row,
+                              days_since: int, total_repaid: float,
+                              income_amt: float) -> Dict:
+    """
+    创建无还款借贷条目
+    
+    Args:
+        person: 人员名称
+        cp_str: 对手方
+        income_row: 收入记录
+        days_since: 距今天数
+        total_repaid: 已还款金额
+        income_amt: 收入金额
+        
+    Returns:
+        无还款借贷条目
+    """
+    repay_ratio = total_repaid / income_amt if income_amt > 0 else 0
+    risk_level = 'high' if income_amt >= 50000 else 'medium'
+    
+    return {
+        'person': person,
+        'counterparty': cp_str,
+        'income_date': income_row['date'],
+        'income_amount': income_amt,
+        'days_since': days_since,
+        'total_repaid': total_repaid,
+        'repay_ratio': repay_ratio,
+        'risk_level': risk_level,
+        'description': income_row.get('description', ''),
+        'risk_reason': f'{days_since}天未还款，还款比例仅{repay_ratio*100:.1f}%'
+    }
 
 
 def _detect_no_repayment_loans(
@@ -558,37 +630,8 @@ def _detect_no_repayment_loans(
                 if not cp_str or cp_str == 'nan' or len(cp_str) < 2:
                     continue
                 
-                # ===== 修复: 排除同名对手方（自己给自己的转账）=====
-                if cp_str == person or cp_str in core_persons:
-                    continue
-                
-                # 排除公共支付平台和机构
-                if utils.contains_keywords(cp_str, config.THIRD_PARTY_PAYMENT_KEYWORDS):
-                    continue
-                if utils.contains_keywords(cp_str, ['公司', '有限', '集团', '银行']):
-                    continue
-                
-                # ===== 修复: 排除已知发薪单位（工资不需要"还款"）=====
-                if utils.contains_keywords(cp_str, config.SALARY_STRONG_KEYWORDS):
-                    continue
-                if utils.contains_keywords(cp_str, config.KNOWN_SALARY_PAYERS):
-                    continue
-                if utils.contains_keywords(cp_str, config.USER_DEFINED_SALARY_PAYERS):
-                    continue
-                
-                # ===== 修复: 排除银行系统账户 =====
-                bank_system_keywords = ['代付', '代收', '业务专户', '清算', '头寸', '备付', '研究所', '研究院']
-                if utils.contains_keywords(cp_str, bank_system_keywords):
-                    continue
-                
-                # ===== 新增: 排除理财产品对手方（理财赎回不是借贷）=====
-                if utils.contains_keywords(cp_str, config.WEALTH_PRODUCT_COUNTERPARTY_KEYWORDS):
-                    continue
-                if utils.contains_keywords(cp_str, config.WEALTH_MANAGEMENT_KEYWORDS):
-                    continue
-                
-                # ===== 新增: 排除政府机关（公积金提取等不是借贷）=====
-                if utils.contains_keywords(cp_str, config.GOVERNMENT_AGENCY_KEYWORDS):
+                # 排除对手方（使用统一的排除逻辑）
+                if should_exclude_counterparty(cp_str, person, core_persons, ExclusionContext.NO_REPAYMENT):
                     continue
                 
                 cp_df = df[df['counterparty'] == cp].copy()
@@ -598,10 +641,6 @@ def _detect_no_repayment_loans(
                 
                 if large_incomes.empty:
                     continue
-                
-                # 统计该对手方的总支出
-                total_expense = cp_df['expense'].sum()
-                total_income = cp_df['income'].sum()
                 
                 # 检查每笔大额收入
                 for _, income_row in large_incomes.iterrows():
@@ -616,7 +655,7 @@ def _detect_no_repayment_loans(
                     
                     # 查找该日期之后的还款
                     future_expenses = cp_df[
-                        (cp_df['date'] > income_date) & 
+                        (cp_df['date'] > income_date) &
                         (cp_df['expense'] > 0)
                     ]
                     
@@ -625,20 +664,10 @@ def _detect_no_repayment_loans(
                     
                     # 如果还款比例低于50%，视为无还款
                     if repay_ratio < 0.5:
-                        risk_level = 'high' if income_amt >= 50000 else 'medium'
-                        
-                        no_repayment.append({
-                            'person': person,
-                            'counterparty': cp_str,
-                            'income_date': income_date,
-                            'income_amount': income_amt,
-                            'days_since': days_since,
-                            'total_repaid': total_repaid,
-                            'repay_ratio': repay_ratio,
-                            'risk_level': risk_level,
-                            'description': income_row.get('description', ''),
-                            'risk_reason': f'{days_since}天未还款，还款比例仅{repay_ratio*100:.1f}%'
-                        })
+                        no_repayment.append(_create_no_repayment_entry(
+                            person, cp_str, income_row,
+                            days_since, total_repaid, income_amt
+                        ))
     
     # 按金额排序
     no_repayment.sort(key=lambda x: -x['income_amount'])
@@ -774,115 +803,158 @@ def _analyze_loan_network(
     return network
 
 
+def _write_report_header(f) -> None:
+    """写入报告头部"""
+    f.write('借贷行为分析报告（增强版）\n')
+    f.write('='*60 + '\n')
+    f.write(f'生成时间: {datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")}\n\n')
+
+
+def _write_summary_section(f, summary: Dict) -> None:
+    """写入汇总统计部分"""
+    f.write('一、汇总统计\n')
+    f.write('-'*40 + '\n')
+    for k, v in summary.items():
+        f.write(f'{k}: {v}\n')
+    f.write('\n')
+
+
+def _write_bidirectional_flows_section(f, flows: List[Dict]) -> None:
+    """写入双向资金往来部分"""
+    f.write('二、双向资金往来（疑似借贷）\n')
+    f.write('-'*40 + '\n')
+    for i, flow in enumerate(flows[:20], 1):
+        f.write(f"{i}. 【{flow['risk_level'].upper()}】{flow['person']} ↔ {flow['counterparty']}\n")
+        f.write(f"   收入: {flow['income_count']}笔 {utils.format_currency(flow['income_total'])}\n")
+        f.write(f"   支出: {flow['expense_count']}笔 {utils.format_currency(flow['expense_total'])}\n")
+        f.write(f"   判断: {flow['loan_type']}\n")
+    f.write('\n')
+
+
+def _write_loan_pairs_section(f, pairs: List[Dict]) -> None:
+    """写入借贷配对分析部分"""
+    f.write('三、借贷配对分析（新增）\n')
+    f.write('-'*40 + '\n')
+    f.write('智能匹配借入和还款记录，计算隐含利率\n\n')
+    for i, pair in enumerate(pairs[:15], 1):
+        f.write(f"{i}. 【{pair['risk_level'].upper()}】{pair['person']} ↔ {pair['counterparty']}\n")
+        f.write(f"   借入: {pair['loan_date'].strftime('%Y-%m-%d')} {utils.format_currency(pair['loan_amount'])}\n")
+        f.write(f"   还款: {pair['repay_date'].strftime('%Y-%m-%d')} {utils.format_currency(pair['repay_amount'])}\n")
+        f.write(f"   周期: {pair['days']}天\n")
+        f.write(f"   利率: {pair['interest_rate']:.2f}% (年化{pair['annual_rate']:.1f}%)\n")
+        f.write(f"   风险: {pair['risk_reason']}\n")
+    f.write('\n')
+
+
+def _write_no_repayment_loans_section(f, loans: List[Dict]) -> None:
+    """写入无还款借贷检测部分"""
+    f.write('四、无还款借贷检测（疑似利益输送）\n')
+    f.write('-'*40 + '\n')
+    f.write('大额收入但长期无对应还款的情况\n\n')
+    for i, loan in enumerate(loans[:10], 1):
+        f.write(f"{i}. 【{loan['risk_level'].upper()}】{loan['person']} ← {loan['counterparty']}\n")
+        f.write(f"   收入: {loan['income_date'].strftime('%Y-%m-%d')} {utils.format_currency(loan['income_amount'])}\n")
+        f.write(f"   距今: {loan['days_since']}天\n")
+        f.write(f"   已还: {utils.format_currency(loan['total_repaid'])} ({loan['repay_ratio']*100:.1f}%)\n")
+        f.write(f"   风险: {loan['risk_reason']}\n")
+    f.write('\n')
+
+
+def _write_abnormal_interest_section(f, abnormal: List[Dict]) -> None:
+    """写入异常利息检测部分"""
+    f.write('五、异常利息检测\n')
+    f.write('-'*40 + '\n')
+    f.write('识别高利贷（>24%）和疑似无息借贷（<4%）\n\n')
+    for i, item in enumerate(abnormal[:10], 1):
+        f.write(f"{i}. 【{item['risk_level'].upper()}】{item['person']} ↔ {item['counterparty']}\n")
+        f.write(f"   金额: {utils.format_currency(item['loan_amount'])}\n")
+        f.write(f"   年化利率: {item['annual_rate']:.1f}%\n")
+        f.write(f"   异常类型: {item['abnormal_type']}\n")
+    f.write('\n')
+
+
+def _write_loan_network_section(f, network: Dict) -> None:
+    """写入借贷网络分析部分"""
+    f.write('六、借贷网络分析\n')
+    f.write('-'*40 + '\n')
+    f.write(f"网络规模: {len(network['nodes'])}个节点, {len(network['edges'])}条借贷关系\n\n")
+    
+    if network['hubs']:
+        f.write('借贷中心节点（与多人有借贷关系）:\n')
+        for i, hub in enumerate(network['hubs'][:5], 1):
+            f.write(f"{i}. {hub['person']}: 与{hub['connection_count']}人有借贷往来\n")
+            f.write(f"   关联人: {', '.join(hub['connections'][:5])}")
+            if len(hub['connections']) > 5:
+                f.write(f" 等{len(hub['connections'])}人")
+            f.write('\n')
+    f.write('\n')
+
+
+def _write_online_loans_section(f, online_loans: List[Dict]) -> None:
+    """写入网贷平台往来记录部分"""
+    f.write('七、网贷平台往来记录\n')
+    f.write('-'*40 + '\n')
+    
+    # 按平台汇总
+    platform_stats = defaultdict(lambda: {'count': 0, 'total': 0})
+    for loan in online_loans:
+        platform_stats[loan['platform']]['count'] += 1
+        platform_stats[loan['platform']]['total'] += loan['amount']
+    
+    for platform, stats in sorted(platform_stats.items(), key=lambda x: -x[1]['total']):
+        f.write(f"  {platform}: {stats['count']}笔, 合计{utils.format_currency(stats['total'])}\n")
+    f.write('\n')
+
+
+def _write_regular_repayments_section(f, repayments: List[Dict]) -> None:
+    """写入规律性还款模式部分"""
+    f.write('八、规律性还款模式\n')
+    f.write('-'*40 + '\n')
+    for i, rep in enumerate(repayments[:15], 1):
+        f.write(f"{i}. {rep['person']} → {rep['counterparty']}\n")
+        f.write(f"   每月{rep['day_of_month']}日, 均额{utils.format_currency(rep['avg_amount'])}, "
+               f"共{rep['occurrences']}次, 合计{utils.format_currency(rep['total_amount'])}\n")
+    f.write('\n')
+
+
 def generate_loan_report(results: Dict, output_dir: str) -> str:
     """生成借贷行为分析报告（增强版）"""
     import os
     report_path = os.path.join(output_dir, '借贷行为分析报告.txt')
     
     with open(report_path, 'w', encoding='utf-8') as f:
-        f.write('借贷行为分析报告（增强版）\n')
-        f.write('='*60 + '\n')
-        f.write(f'生成时间: {datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")}\n\n')
+        _write_report_header(f)
         
         # 汇总
-        summary = results['summary']
-        f.write('一、汇总统计\n')
-        f.write('-'*40 + '\n')
-        for k, v in summary.items():
-            f.write(f'{k}: {v}\n')
-        f.write('\n')
+        _write_summary_section(f, results['summary'])
         
         # 双向往来
         if results['bidirectional_flows']:
-            f.write('二、双向资金往来（疑似借贷）\n')
-            f.write('-'*40 + '\n')
-            for i, flow in enumerate(results['bidirectional_flows'][:20], 1):
-                f.write(f"{i}. 【{flow['risk_level'].upper()}】{flow['person']} ↔ {flow['counterparty']}\n")
-                f.write(f"   收入: {flow['income_count']}笔 {utils.format_currency(flow['income_total'])}\n")
-                f.write(f"   支出: {flow['expense_count']}笔 {utils.format_currency(flow['expense_total'])}\n")
-                f.write(f"   判断: {flow['loan_type']}\n")
-            f.write('\n')
+            _write_bidirectional_flows_section(f, results['bidirectional_flows'])
         
         # 借贷配对（新增）
         if results.get('loan_pairs'):
-            f.write('三、借贷配对分析（新增）\n')
-            f.write('-'*40 + '\n')
-            f.write('智能匹配借入和还款记录，计算隐含利率\n\n')
-            for i, pair in enumerate(results['loan_pairs'][:15], 1):
-                f.write(f"{i}. 【{pair['risk_level'].upper()}】{pair['person']} ↔ {pair['counterparty']}\n")
-                f.write(f"   借入: {pair['loan_date'].strftime('%Y-%m-%d')} {utils.format_currency(pair['loan_amount'])}\n")
-                f.write(f"   还款: {pair['repay_date'].strftime('%Y-%m-%d')} {utils.format_currency(pair['repay_amount'])}\n")
-                f.write(f"   周期: {pair['days']}天\n")
-                f.write(f"   利率: {pair['interest_rate']:.2f}% (年化{pair['annual_rate']:.1f}%)\n")
-                f.write(f"   风险: {pair['risk_reason']}\n")
-            f.write('\n')
+            _write_loan_pairs_section(f, results['loan_pairs'])
         
         # 无还款借贷（新增）
         if results.get('no_repayment_loans'):
-            f.write('四、无还款借贷检测（疑似利益输送）\n')
-            f.write('-'*40 + '\n')
-            f.write('大额收入但长期无对应还款的情况\n\n')
-            for i, loan in enumerate(results['no_repayment_loans'][:10], 1):
-                f.write(f"{i}. 【{loan['risk_level'].upper()}】{loan['person']} ← {loan['counterparty']}\n")
-                f.write(f"   收入: {loan['income_date'].strftime('%Y-%m-%d')} {utils.format_currency(loan['income_amount'])}\n")
-                f.write(f"   距今: {loan['days_since']}天\n")
-                f.write(f"   已还: {utils.format_currency(loan['total_repaid'])} ({loan['repay_ratio']*100:.1f}%)\n")
-                f.write(f"   风险: {loan['risk_reason']}\n")
-            f.write('\n')
+            _write_no_repayment_loans_section(f, results['no_repayment_loans'])
         
         # 异常利息（新增）
         if results.get('abnormal_interest'):
-            f.write('五、异常利息检测\n')
-            f.write('-'*40 + '\n')
-            f.write('识别高利贷（>24%）和疑似无息借贷（<4%）\n\n')
-            for i, item in enumerate(results['abnormal_interest'][:10], 1):
-                f.write(f"{i}. 【{item['risk_level'].upper()}】{item['person']} ↔ {item['counterparty']}\n")
-                f.write(f"   金额: {utils.format_currency(item['loan_amount'])}\n")
-                f.write(f"   年化利率: {item['annual_rate']:.1f}%\n")
-                f.write(f"   异常类型: {item['abnormal_type']}\n")
-            f.write('\n')
+            _write_abnormal_interest_section(f, results['abnormal_interest'])
         
         # 借贷网络（新增）
         if results.get('loan_network') and results['loan_network'].get('hubs'):
-            f.write('六、借贷网络分析\n')
-            f.write('-'*40 + '\n')
-            network = results['loan_network']
-            f.write(f"网络规模: {len(network['nodes'])}个节点, {len(network['edges'])}条借贷关系\n\n")
-            
-            if network['hubs']:
-                f.write('借贷中心节点（与多人有借贷关系）:\n')
-                for i, hub in enumerate(network['hubs'][:5], 1):
-                    f.write(f"{i}. {hub['person']}: 与{hub['connection_count']}人有借贷往来\n")
-                    f.write(f"   关联人: {', '.join(hub['connections'][:5])}")
-                    if len(hub['connections']) > 5:
-                        f.write(f" 等{len(hub['connections'])}人")
-                    f.write('\n')
-            f.write('\n')
+            _write_loan_network_section(f, results['loan_network'])
         
         # 网贷平台
         if results['online_loan_platforms']:
-            f.write('七、网贷平台往来记录\n')
-            f.write('-'*40 + '\n')
-            
-            # 按平台汇总
-            platform_stats = defaultdict(lambda: {'count': 0, 'total': 0})
-            for loan in results['online_loan_platforms']:
-                platform_stats[loan['platform']]['count'] += 1
-                platform_stats[loan['platform']]['total'] += loan['amount']
-            
-            for platform, stats in sorted(platform_stats.items(), key=lambda x: -x[1]['total']):
-                f.write(f"  {platform}: {stats['count']}笔, 合计{utils.format_currency(stats['total'])}\n")
-            f.write('\n')
+            _write_online_loans_section(f, results['online_loan_platforms'])
         
         # 规律还款
         if results['regular_repayments']:
-            f.write('八、规律性还款模式\n')
-            f.write('-'*40 + '\n')
-            for i, rep in enumerate(results['regular_repayments'][:15], 1):
-                f.write(f"{i}. {rep['person']} → {rep['counterparty']}\n")
-                f.write(f"   每月{rep['day_of_month']}日, 均额{utils.format_currency(rep['avg_amount'])}, "
-                       f"共{rep['occurrences']}次, 合计{utils.format_currency(rep['total_amount'])}\n")
-            f.write('\n')
+            _write_regular_repayments_section(f, results['regular_repayments'])
     
     logger.info(f'借贷行为分析报告已生成: {report_path}')
     return report_path

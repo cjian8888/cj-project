@@ -502,6 +502,149 @@ def _feature_engineering(
     return pd.DataFrame(features_list), raw_mapping
 
 
+def _build_graph_transactions(all_transactions: Dict[str, pd.DataFrame]) -> List[Dict]:
+    """
+    构建图交易列表
+    
+    Args:
+        all_transactions: 所有交易数据
+        
+    Returns:
+        图交易列表
+    """
+    graph_transactions = []
+    col_map = {
+        'counterparty': ['counterparty', '交易对手', '对方户名', '交易对方名称'],
+        'income': ['income', '收入', '收入(元)', '贷方发生额'],
+        'expense': ['expense', '支出', '支出(元)', '借方发生额'],
+        'amount': ['amount', '交易金额']
+    }
+    
+    def get_row_val(row, col_type):
+        for c in col_map[col_type]:
+            if c in row.index:
+                return row[c]
+        return None
+
+    # 遍历所有数据构建图交易列表
+    for person_key, df in all_transactions.items():
+        if df.empty:
+            continue
+        
+        source = person_key
+        
+        for _, row in df.iterrows():
+            try:
+                target = str(get_row_val(row, 'counterparty') or '')
+                if not target:
+                    continue
+                
+                # 计算金额
+                amt = 0.0
+                val_amt = get_row_val(row, 'amount')
+                if val_amt is not None:
+                    amt = float(val_amt)
+                else:
+                    inc = float(get_row_val(row, 'income') or 0)
+                    exp = float(get_row_val(row, 'expense') or 0)
+                    amt = inc + exp
+                amt = abs(amt)
+                
+                # 确定方向
+                is_income = False
+                val_inc = get_row_val(row, 'income')
+                if val_inc and float(val_inc) > 0:
+                    is_income = True
+                
+                if amt > 0:
+                    if is_income:
+                        graph_transactions.append({'source': target, 'target': source, 'amount': amt})
+                    else:
+                        graph_transactions.append({'source': source, 'target': target, 'amount': amt})
+                        
+            except Exception:
+                continue
+    
+    return graph_transactions
+
+
+def _detect_statistical_anomalies(
+    features_df: pd.DataFrame,
+    raw_mapping: Dict
+) -> Tuple[List[Dict], float]:
+    """
+    统计异常检测
+    
+    Args:
+        features_df: 特征DataFrame
+        raw_mapping: 原始交易映射
+        
+    Returns:
+        (异常列表, 最高分数)
+    """
+    ml_anomalies = []
+    final_scores_max = 0
+    
+    if features_df.empty:
+        return ml_anomalies, final_scores_max
+    
+    detector = LightweightAnomalyDetector()
+    
+    feature_cols = [
+        'amount_log', 'hour_sin', 'hour_cos',
+        'is_round_num', 'desc_len', 'freq_enc'
+    ]
+    
+    scores = detector.fit_predict(features_df, feature_cols, raw_mapping)
+    
+    if scores.max() > 0:
+        final_scores = (scores / scores.max()) * 100
+    else:
+        final_scores = scores
+        
+    final_scores_max = round(final_scores.max(), 1)
+    features_df['anomaly_score'] = final_scores
+    
+    # 提高阈值到85，减少误报
+    threshold = 85
+    anomalies_df = features_df[features_df['anomaly_score'] >= threshold].sort_values('anomaly_score', ascending=False)
+    
+    for idx, row in anomalies_df.iterrows():
+        original_info = raw_mapping.get(idx)
+        if not original_info:
+            continue
+        
+        # 额外过滤：金额至少500元的交易才纳入报告
+        if original_info['amount'] < 500:
+            continue
+        
+        # 过滤自我转账（同名账户间转账是正常的）
+        if original_info['person'] == original_info.get('counterparty', ''):
+            continue
+            
+        reasons = []
+        if row['amount_log'] > detector.stats.get('amount_log', {}).get('q3', 0):
+            reasons.append("金额显著偏离常规")
+        if original_info['hour'] < 6 or original_info['hour'] >= 23:
+            reasons.append("深夜/凌晨交易")
+        if row['is_round_num'] > 0 and original_info['amount'] >= 1000:
+            reasons.append("大额整数交易")
+        if row['desc_len'] < 2:
+            reasons.append("摘要信息缺失")
+            
+        ml_anomalies.append({
+            'person': original_info['person'],
+            'date': original_info['date'],
+            'amount': original_info['amount'],
+            'counterparty': original_info['counterparty'],
+            'description': original_info['description'],
+            'score': round(row['anomaly_score'], 1),
+            'reasons': '、'.join(reasons) if reasons else "综合统计异常"
+        })
+    
+    return ml_anomalies, final_scores_max
+
+
 def run_ml_analysis(
     all_transactions: Dict[str, pd.DataFrame],
     core_persons: List[str],
@@ -534,115 +677,13 @@ def run_ml_analysis(
     features_df, raw_mapping = _feature_engineering(all_transactions, core_persons)
     
     # 提取所有交易用于图分析
-    graph_transactions = []
-    col_map = {
-        'counterparty': ['counterparty', '交易对手', '对方户名', '交易对方名称'],
-        'income': ['income', '收入', '收入(元)', '贷方发生额'],
-        'expense': ['expense', '支出', '支出(元)', '借方发生额'],
-        'amount': ['amount', '交易金额']
-    }
-    
-    def get_row_val(row, col_type):
-        for c in col_map[col_type]:
-            if c in row.index:
-                return row[c]
-        return None
-
-    # 遍历所有数据构建图交易列表
-    for person_key, df in all_transactions.items():
-        if df.empty: 
-            continue
-        
-        source = person_key
-        
-        for _, row in df.iterrows():
-            try:
-                target = str(get_row_val(row, 'counterparty') or '')
-                if not target: 
-                    continue
-                
-                # 计算金额
-                amt = 0.0
-                val_amt = get_row_val(row, 'amount')
-                if val_amt is not None:
-                    amt = float(val_amt)
-                else:
-                    inc = float(get_row_val(row, 'income') or 0)
-                    exp = float(get_row_val(row, 'expense') or 0)
-                    amt = inc + exp
-                amt = abs(amt)
-                
-                # 确定方向
-                is_income = False
-                val_inc = get_row_val(row, 'income')
-                if val_inc and float(val_inc) > 0:
-                    is_income = True
-                
-                if amt > 0:
-                    if is_income:
-                        graph_transactions.append({'source': target, 'target': source, 'amount': amt})
-                    else:
-                        graph_transactions.append({'source': source, 'target': target, 'amount': amt})
-                        
-            except Exception:
-                continue
+    graph_transactions = _build_graph_transactions(all_transactions)
 
     # --- Part 2: 统计异常检测 ---
-    ml_anomalies = []
-    final_scores_max = 0
+    logger.info(f'【阶段2】统计模型分析 (样本数: {len(features_df)})')
+    ml_anomalies, final_scores_max = _detect_statistical_anomalies(features_df, raw_mapping)
     
-    if not features_df.empty:
-        logger.info(f'【阶段2】统计模型分析 (样本数: {len(features_df)})')
-        detector = LightweightAnomalyDetector()
-        
-        feature_cols = [
-            'amount_log', 'hour_sin', 'hour_cos', 
-            'is_round_num', 'desc_len', 'freq_enc'
-        ]
-        
-        scores = detector.fit_predict(features_df, feature_cols, raw_mapping)
-        
-        if scores.max() > 0:
-            final_scores = (scores / scores.max()) * 100
-        else:
-            final_scores = scores
-            
-        final_scores_max = round(final_scores.max(), 1)
-        features_df['anomaly_score'] = final_scores
-        
-        # 提高阈值到85，减少误报
-        threshold = 85
-        anomalies_df = features_df[features_df['anomaly_score'] >= threshold].sort_values('anomaly_score', ascending=False)
-        
-        for idx, row in anomalies_df.iterrows():
-            original_info = raw_mapping.get(idx)
-            if not original_info: 
-                continue
-            
-            # 额外过滤：金额至少500元的交易才纳入报告
-            if original_info['amount'] < 500:
-                continue
-                
-            reasons = []
-            if row['amount_log'] > detector.stats.get('amount_log', {}).get('q3', 0):
-                reasons.append("金额显著偏离常规")
-            if original_info['hour'] < 6 or original_info['hour'] >= 23:
-                reasons.append("深夜/凌晨交易")
-            if row['is_round_num'] > 0 and original_info['amount'] >= 1000:
-                reasons.append("大额整数交易")
-            if row['desc_len'] < 2:
-                reasons.append("摘要信息缺失")
-                
-            ml_anomalies.append({
-                'person': original_info['person'],
-                'date': original_info['date'],
-                'amount': original_info['amount'],
-                'counterparty': original_info['counterparty'],
-                'description': original_info['description'],
-                'score': round(row['anomaly_score'], 1),
-                'reasons': '、'.join(reasons) if reasons else "综合统计异常"
-            })
-            
+    if ml_anomalies:
         logger.info(f'  识别出 {len(ml_anomalies)} 笔高置信度异常交易')
     else:
         logger.warning('没有足够的数据进行统计ML分析')
@@ -652,7 +693,7 @@ def run_ml_analysis(
     
     # 使用优化后的图检测器，只在核心实体之间构建图
     graph_detector = GraphCommunityDetector(
-        core_entities=core_entities, 
+        core_entities=core_entities,
         min_amount=1000  # 最低1000元的交易才纳入
     )
     graph_detector.build_graph(graph_transactions, strict_mode=True)
@@ -663,7 +704,7 @@ def run_ml_analysis(
     
     return {
         'anomalies': ml_anomalies,
-        'communities': communities, 
+        'communities': communities,
         'summary': {
             'total_samples': len(features_df),
             'anomaly_count': len(ml_anomalies),
