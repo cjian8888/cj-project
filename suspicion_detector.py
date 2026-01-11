@@ -15,15 +15,17 @@ import utils
 logger = utils.setup_logger(__name__)
 
 
-def detect_cash_time_collision(withdrawals: pd.DataFrame, deposits: pd.DataFrame) -> List[Dict]:
+def detect_cash_time_collision(withdrawals: pd.DataFrame, deposits: pd.DataFrame, entity_name: str) -> List[Dict]:
     """
     检测现金时空伴随（Pandas 优化版）
     
     使用 Pandas 合并操作代替嵌套循环，大幅提升大数据量下的性能。
+    输出字段已适配 report_generator.py 的需求。
     
     Args:
         withdrawals: 取现交易 DataFrame (必须包含 date, amount 等列)
         deposits: 存现交易 DataFrame (必须包含 date, amount 等列)
+        entity_name: 当前账户持有人名称
     
     Returns:
         检测到的伴随交易列表
@@ -70,18 +72,28 @@ def detect_cash_time_collision(withdrawals: pd.DataFrame, deposits: pd.DataFrame
     # 5. 筛选符合条件的记录
     valid_collisions = merged[time_mask & amount_mask]
     
-    # 6. 格式化结果
+    # 6. 格式化结果 (适配 report_generator.py 字段要求)
     if not valid_collisions.empty:
         for _, row in valid_collisions.iterrows():
+            # 简单的风险等级判定
+            if row['hours_diff'] < 4 and row['amount_ratio'] < 0.01:
+                risk = 'high'
+            elif row['hours_diff'] < 24:
+                risk = 'medium'
+            else:
+                risk = 'low'
+                
             collisions.append({
+                'withdrawal_entity': entity_name,  # 取现方
+                'deposit_entity': entity_name,      # 存现方
                 'withdrawal_date': row['date_wd'],
-                'withdrawal_amount': row['amount_wd'],
-                'withdrawal_desc': row.get('description_wd', ''),
                 'deposit_date': row['date_dp'],
+                'time_diff_hours': round(row['hours_diff'], 2), # 字段名适配
+                'withdrawal_amount': row['amount_wd'],
                 'deposit_amount': row['amount_dp'],
-                'deposit_desc': row.get('description_dp', ''),
-                'time_gap_hours': round(row['hours_diff'], 2),
-                'amount_gap': round(row['amount_diff_abs'], 2),
+                'amount_diff': round(row['amount_diff_abs'], 2), # 字段名适配
+                'amount_diff_ratio': round(row['amount_ratio'], 2),
+                'risk_level': risk,
                 'risk_reason': f"取现{row['amount_wd']}元与存现{row['amount_dp']}元时间间隔{row['hours_diff']:.1f}小时内，金额接近"
             })
             
@@ -157,33 +169,69 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
             deposits['amount'] = deposits['amount']
 
         # 执行检测
-        collisions = detect_cash_time_collision(withdrawals, deposits)
+        collisions = detect_cash_time_collision(withdrawals, deposits, entity_name)
         
         if collisions:
             logger.info(f'    [{entity_name}] 发现 {len(collisions)} 处现金时空伴随')
-            results['cash_collisions'].extend([
-                {**c, 'person': entity_name} for c in collisions
-            ])
+            results['cash_collisions'].extend(collisions)
             
     # ============================
-    # 2. 直接资金往来检测 (TODO: 实现逻辑)
+    # 2. 直接资金往来检测 (修复：适配 report_generator 需求)
     # ============================
     logger.info('  -> 正在分析直接资金往来...')
-    for p1, p2 in combinations(all_persons, 2):
-        # 检查 p1 和 p2 之间的直接交易
-        if p1 in cleaned_data and p2 in cleaned_data:
-            df1 = cleaned_data[p1]
-            # 查找对手方包含 p2 的记录
-            transfers = df1[df1['counterparty'].str.contains(p2, na=False)]
-            if not transfers.empty:
-                for _, row in transfers.iterrows():
-                    results['direct_transfers'].append({
-                        'source': p1,
-                        'target': p2,
-                        'date': row['date'],
-                        'amount': row['expense'] if row.get('expense', 0) > 0 else row.get('income', 0),
-                        'desc': row['description']
-                    })
+    
+    # 检测核心人员与涉案公司之间的直接资金往来
+    for person in all_persons:
+        for company in all_companies:
+            if person in cleaned_data and company in cleaned_data:
+                
+                # 检测：人员 -> 公司 (支出)
+                df_person = cleaned_data[person]
+                transfers_out = df_person[df_person['counterparty'].str.contains(company, na=False)]
+                if not transfers_out.empty:
+                    for _, row in transfers_out.iterrows():
+                        amount = row.get('expense', 0)
+                        # 简单的风险定级
+                        if amount > config.INCOME_HIGH_RISK_MIN:
+                            risk = 'high'
+                        elif amount > 50000:
+                            risk = 'medium'
+                        else:
+                            risk = 'low'
+                            
+                        results['direct_transfers'].append({
+                            'person': person,
+                            'company': company,
+                            'date': row['date'],
+                            'amount': amount,
+                            'direction': 'payment',  # 付款
+                            'description': row.get('description', ''),
+                            'risk_level': risk
+                        })
+                
+                # 检测：公司 -> 人员 (收入)
+                df_company = cleaned_data[company]
+                transfers_in = df_company[df_company['counterparty'].str.contains(person, na=False)]
+                if not transfers_in.empty:
+                    for _, row in transfers_in.iterrows():
+                        amount = row.get('income', 0)
+                        # 简单的风险定级
+                        if amount > config.INCOME_HIGH_RISK_MIN:
+                            risk = 'high'
+                        elif amount > 50000:
+                            risk = 'medium'
+                        else:
+                            risk = 'low'
+                            
+                        results['direct_transfers'].append({
+                            'person': person,
+                            'company': company,
+                            'date': row['date'],
+                            'amount': amount,
+                            'direction': 'receive',  # 收款
+                            'description': row.get('description', ''),
+                            'risk_level': risk
+                        })
                     
     # 其他检测模块 (holiday, fixed_frequency 等) 保持为空/TODO，
     # 待后续完善或添加具体的 Analyzer 模块。
