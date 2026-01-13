@@ -1,13 +1,15 @@
 {
-  "name": "dashboard",
+  "name": "fpas-dashboard",
+  "version": "3.0.0",
+  "description": "资金穿透审计系统 - 专业级金融监控 Dashboard",
   "private": true,
-  "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "type-check": "tsc --noEmit"
   },
   "dependencies": {
     "@tailwindcss/postcss": "^4.1.18",

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
 import type { ReactNode } from 'react';
 import type { AppState, AppConfig, AnalysisState, DataState, LogEntry, UIState, TabType } from '../types';
 
@@ -70,15 +70,14 @@ const defaultData: DataState = {
 
 const defaultUI: UIState = {
     activeTab: 'overview',
-    sidebarCollapsed: false,
+    sidebarCollapsed: true,
 };
 
 const initialLogs: LogEntry[] = [
-    { time: '09:00:01', level: 'INFO', msg: 'System initialized successfully. Version 2.4.0' },
-    { time: '09:00:02', level: 'INFO', msg: 'Connected to secure data warehouse (Node A-7)' },
-    { time: '09:00:05', level: 'INFO', msg: 'Loading entity relationships...' },
-    { time: '09:00:08', level: 'WARN', msg: 'Latency detected in data stream (24ms)' },
-    { time: '09:00:12', level: 'INFO', msg: 'Entity indexing complete. 1,248 nodes active.' },
+    { time: '00:00:01', level: 'INFO', msg: '系统初始化完成，版本 v3.0.0' },
+    { time: '00:00:02', level: 'INFO', msg: '连接安全数据仓库 (节点 A-7)' },
+    { time: '00:00:03', level: 'INFO', msg: '加载实体关系模型...' },
+    { time: '00:00:05', level: 'INFO', msg: '分析引擎就绪，等待指令' },
 ];
 
 // ==================== Context ====================
@@ -153,24 +152,116 @@ export function AppProvider({ children }: AppProviderProps) {
 
     // ==================== Analysis Actions ====================
 
+    const addLog = useCallback((log: LogEntry) => {
+        setLogs(prev => {
+            const newLogs = [...prev, log];
+            // Keep only last 200 logs
+            if (newLogs.length > 200) {
+                return newLogs.slice(-200);
+            }
+            return newLogs;
+        });
+    }, []);
+
     const startAnalysis = useCallback(() => {
+        const now = new Date();
+        const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+
         setAnalysis({
             isRunning: true,
             progress: 0,
-            currentPhase: 'Initializing...',
-            lastRunTime: new Date(),
+            currentPhase: '初始化分析引擎...',
+            lastRunTime: now,
             status: 'running',
         });
 
-        // Add start log
-        const now = new Date();
-        const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-        setLogs(prev => [...prev, { time: timeStr, level: 'INFO', msg: '>>> ENGINE STARTED: Full Analysis Sequence Initiated <<<' }]);
-    }, []);
+        addLog({ time: timeStr, level: 'INFO', msg: '▶ 分析引擎已启动' });
+
+        // Simulate analysis progress
+        const phases = [
+            { progress: 10, phase: '扫描数据目录...' },
+            { progress: 25, phase: '读取银行流水记录...' },
+            { progress: 40, phase: '数据清洗与标准化...' },
+            { progress: 55, phase: '提取关联线索...' },
+            { progress: 70, phase: '执行资金画像分析...' },
+            { progress: 85, phase: '检测可疑交易模式...' },
+            { progress: 95, phase: '生成审计报告...' },
+            { progress: 100, phase: '分析完成' },
+        ];
+
+        phases.forEach((p, i) => {
+            setTimeout(() => {
+                setAnalysis(prev => ({
+                    ...prev,
+                    progress: p.progress,
+                    currentPhase: p.phase,
+                }));
+
+                const t = new Date();
+                const ts = `${t.getHours().toString().padStart(2, '0')}:${t.getMinutes().toString().padStart(2, '0')}:${t.getSeconds().toString().padStart(2, '0')}`;
+                addLog({ time: ts, level: 'INFO', msg: p.phase });
+
+                // Complete analysis
+                if (p.progress === 100) {
+                    setTimeout(() => {
+                        setAnalysis(prev => ({
+                            ...prev,
+                            isRunning: false,
+                            status: 'completed',
+                        }));
+
+                        // Add demo data
+                        setData({
+                            persons: ['张三', '李四', '王五', '赵六'],
+                            companies: ['科技有限公司', '贸易发展公司', '投资咨询公司'],
+                            profiles: {
+                                '张三': { entityName: '张三', totalIncome: 2580000, totalExpense: 1890000, transactionCount: 342 },
+                                '李四': { entityName: '李四', totalIncome: 1850000, totalExpense: 1650000, transactionCount: 256 },
+                                '王五': { entityName: '王五', totalIncome: 980000, totalExpense: 1120000, transactionCount: 189 },
+                                '科技有限公司': { entityName: '科技有限公司', totalIncome: 8500000, totalExpense: 7200000, transactionCount: 892 },
+                                '贸易发展公司': { entityName: '贸易发展公司', totalIncome: 5600000, totalExpense: 4800000, transactionCount: 567 },
+                            },
+                            suspicions: {
+                                directTransfers: [
+                                    { from: '张三', to: '科技有限公司', amount: 500000, date: '2024-01-15' },
+                                    { from: '科技有限公司', to: '李四', amount: 480000, date: '2024-01-16' },
+                                    { from: '李四', to: '贸易发展公司', amount: 450000, date: '2024-01-17' },
+                                    { from: '贸易发展公司', to: '王五', amount: 420000, date: '2024-01-18' },
+                                ],
+                                cashCollisions: [
+                                    { person1: '张三', person2: '李四', time1: '10:15', time2: '10:18', amount1: 50000, amount2: 48000 }
+                                ],
+                                hiddenAssets: {},
+                                fixedFrequency: {},
+                                cashTimingPatterns: [],
+                                holidayTransactions: {},
+                                amountPatterns: {},
+                            },
+                            analysisResults: defaultData.analysisResults,
+                            categorizedFiles: defaultData.categorizedFiles,
+                        });
+
+                        const ft = new Date();
+                        const fts = `${ft.getHours().toString().padStart(2, '0')}:${ft.getMinutes().toString().padStart(2, '0')}:${ft.getSeconds().toString().padStart(2, '0')}`;
+                        addLog({ time: fts, level: 'INFO', msg: '✓ 分析完成，共检测到 4 条可疑交易' });
+                    }, 500);
+                }
+            }, (i + 1) * 800);
+        });
+    }, [addLog]);
 
     const stopAnalysis = useCallback(() => {
-        setAnalysis(prev => ({ ...prev, isRunning: false, status: 'failed' }));
-    }, []);
+        setAnalysis(prev => ({
+            ...prev,
+            isRunning: false,
+            status: 'failed',
+            currentPhase: '分析已终止'
+        }));
+
+        const now = new Date();
+        const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+        addLog({ time: timeStr, level: 'WARN', msg: '■ 分析已被用户终止' });
+    }, [addLog]);
 
     const updateAnalysisProgress = useCallback((progress: number, phase: string) => {
         setAnalysis(prev => ({ ...prev, progress, currentPhase: phase }));
@@ -192,19 +283,11 @@ export function AppProvider({ children }: AppProviderProps) {
 
     // ==================== Log Actions ====================
 
-    const addLog = useCallback((log: LogEntry) => {
-        setLogs(prev => {
-            const newLogs = [...prev, log];
-            // Keep only last 200 logs
-            if (newLogs.length > 200) {
-                return newLogs.slice(-200);
-            }
-            return newLogs;
-        });
-    }, []);
-
     const clearLogs = useCallback(() => {
         setLogs([]);
+        const now = new Date();
+        const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+        setLogs([{ time: timeStr, level: 'INFO', msg: '日志已清除' }]);
     }, []);
 
     // ==================== UI Actions ====================
