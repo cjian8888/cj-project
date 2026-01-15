@@ -66,8 +66,13 @@ htmlcov/
 # Logs & Temp Files
 # ============================================================
 *.log
+*.log.*
 *.tmp
 *.temp
+
+# 临时测试/验证脚本
+verify_*.py
+debug_*.py
 
 # OS generated
 .DS_Store

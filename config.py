@@ -425,6 +425,7 @@ BALANCE_COLUMNS = [
 # ============== 文件路径配置 ==============
 
 # 输出文件名
+DATA_DIR = './data'
 OUTPUT_EXCEL_FILE = '资金核查底稿.xlsx'
 OUTPUT_REPORT_FILE = '核查结果分析报告.docx'
 OUTPUT_LOG_FILE = 'audit_system.log'
@@ -437,6 +438,10 @@ CLUE_FILE_KEYWORDS = ['线索', '举报', '信访', 'clue', 'tip']
 LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 LOG_DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
 LOG_LEVEL = 'INFO'
+
+# 日志轮转配置
+LOG_MAX_BYTES = 10 * 1024 * 1024  # 10MB - 单个日志文件最大大小
+LOG_BACKUP_COUNT = 5               # 保留的备份文件数量 (audit_system.log.1 ~ .5)
 
 # ============== 报告模板配置 ==============
 

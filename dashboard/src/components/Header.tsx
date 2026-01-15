@@ -25,8 +25,8 @@ export function Header() {
                         <h1 className="text-xl font-bold text-white tracking-tight">
                             穿云审计 · 指挥中心
                         </h1>
-                        <p className="text-xs text-gray-500 font-medium tracking-wide">
-                            资金穿透与关联排查系统
+                        <p className="text-xs bg-gradient-to-r from-cyan-400 to-blue-400 bg-clip-text text-transparent font-semibold tracking-wide">
+                            智能资金穿透与风险排查平台
                         </p>
                     </div>
                 </div>

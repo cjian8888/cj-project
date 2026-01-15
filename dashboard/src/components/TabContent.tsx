@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
     Activity,
     AlertTriangle,
@@ -6,15 +6,16 @@ import {
     FileText,
     Download,
     ExternalLink,
-    Filter,
     ChevronRight,
     TrendingUp,
     Wallet,
     ArrowUpRight,
     ArrowDownLeft,
     Clock,
-    MapPin
+    RefreshCw
 } from 'lucide-react';
+import { api } from '../services/api';
+import type { Report } from '../services/api';
 import {
     AreaChart,
     Area,
@@ -23,16 +24,17 @@ import {
     CartesianGrid,
     Tooltip,
     ResponsiveContainer,
-    BarChart,
-    Bar,
     PieChart,
     Pie,
     Cell
 } from 'recharts';
 import { useApp } from '../contexts/AppContext';
+import { formatDate, formatCurrency, formatAmountInWan, formatTimeDifference, truncate, getRiskLevelBadgeStyle, formatFileSize } from '../utils/formatters';
+import { EmptyState } from './common/EmptyState';
+import NetworkGraph from './NetworkGraph';
 
 export function TabContent() {
-    const { data, ui, setActiveTab } = useApp();
+    const { ui, setActiveTab } = useApp();
 
     return (
         <div className="flex-1 flex flex-col min-h-0">
@@ -106,29 +108,71 @@ function TabButton({ label, icon: Icon, active, onClick }: TabButtonProps) {
 // ==================== Overview Tab ====================
 
 function OverviewTab() {
-    const { data } = useApp();
+    const { data, analysis } = useApp();
 
-    // Generate chart data
-    const trendData = Array.from({ length: 30 }, (_, i) => ({
-        date: `${i + 1}日`,
-        收入: Math.floor(Math.random() * 50000) + 20000,
-        支出: Math.floor(Math.random() * 40000) + 15000,
-    }));
+    // 从真实数据生成趋势图数据（如果分析未完成，使用空数组）
+    const hasRealData = analysis.status === 'completed' && Object.keys(data.profiles).length > 0;
+    
+    // 检查是否有足够的数据来显示图表
+    const hasChartData = hasRealData;
+    
+    // 生成趋势图数据（使用真实数据或占位符）
+    const trendData = hasChartData 
+        ? Object.values(data.profiles)
+            .slice(0, 30)
+            .map((profile, index) => ({
+                date: `实体${index + 1}`,
+                收入: profile.totalIncome || 0,
+                支出: profile.totalExpense || 0,
+            }))
+        : [];
+    
+    // 收入来源分布（基于真实数据）
+    const categoryData = hasChartData
+        ? (() => {
+            // 从可疑交易中汇总收入类别
+            const totalSuspicious = (data.suspicions.directTransfers || []).length +
+                (data.suspicions.cashCollisions || []).length +
+                (data.suspicions.cashTimingPatterns || []).length;
+            
+            const categories = [];
+            if (data.suspicions.directTransfers.length > 0) {
+                categories.push({ 
+                    name: '直接转账', 
+                    value: Math.round((data.suspicions.directTransfers.length / totalSuspicious) * 100), 
+                    color: '#3b82f6' 
+                });
+            }
+            if (data.suspicions.cashCollisions.length > 0) {
+                categories.push({ 
+                    name: '现金碰撞', 
+                    value: Math.round((data.suspicions.cashCollisions.length / totalSuspicious) * 100), 
+                    color: '#06b6d4' 
+                });
+            }
+            if (data.suspicions.cashTimingPatterns.length > 0) {
+                categories.push({ 
+                    name: '时序异常', 
+                    value: Math.round((data.suspicions.cashTimingPatterns.length / totalSuspicious) * 100), 
+                    color: '#f59e0b' 
+                });
+            }
+            
+            // 如果没有分类数据，显示提示
+            if (categories.length === 0) {
+                return [{ name: '暂无数据', value: 100, color: '#6b7280' }];
+            }
+            
+            return categories;
+        })()
+        : [{ name: '等待分析', value: 100, color: '#6b7280' }];
 
-    const categoryData = [
-        { name: '转账收入', value: 45, color: '#3b82f6' },
-        { name: '工资薪金', value: 25, color: '#06b6d4' },
-        { name: '理财收益', value: 15, color: '#8b5cf6' },
-        { name: '其他收入', value: 10, color: '#10b981' },
-        { name: '待核实', value: 5, color: '#f59e0b' },
-    ];
-
-    const topEntities = Object.entries(data.profiles)
+    const topEntities = Object.entries(data.profiles || {})
         .map(([name, profile]) => ({
             name,
-            income: profile.totalIncome,
-            expense: profile.totalExpense,
-            transactions: profile.transactionCount,
+            income: profile?.totalIncome || 0,
+            expense: profile?.totalExpense || 0,
+            transactions: profile?.transactionCount || 0,
         }))
         .sort((a, b) => b.income - a.income)
         .slice(0, 5);
@@ -144,7 +188,9 @@ function OverviewTab() {
                         </div>
                         <div>
                             <h3 className="font-semibold text-white">资金流动趋势</h3>
-                            <p className="text-xs text-gray-500">近30日收支情况</p>
+                            <p className="text-xs text-gray-500">
+                                {hasChartData ? '实体收支分布' : '等待分析数据'}
+                            </p>
                         </div>
                     </div>
                     <div className="flex items-center gap-4 text-xs">
@@ -160,6 +206,7 @@ function OverviewTab() {
                 </div>
 
                 <div className="h-64">
+                    {hasChartData && trendData.length > 0 ? (
                     <ResponsiveContainer width="100%" height="100%">
                         <AreaChart data={trendData}>
                             <defs>
@@ -184,7 +231,7 @@ function OverviewTab() {
                                 axisLine={false}
                                 tickLine={false}
                                 tick={{ fill: '#6b7280', fontSize: 11 }}
-                                tickFormatter={(value) => `¥${(value / 10000).toFixed(0)}万`}
+                                tickFormatter={(value) => `¥${formatAmountInWan(value, false)}万`}
                             />
                             <Tooltip
                                 contentStyle={{
@@ -194,7 +241,7 @@ function OverviewTab() {
                                     boxShadow: '0 10px 30px -10px rgba(0,0,0,0.5)'
                                 }}
                                 labelStyle={{ color: '#9ca3af' }}
-                                formatter={(value: number) => [`¥${value.toLocaleString()}`, '']}
+                                formatter={(value: number | undefined) => value !== undefined ? [formatCurrency(value), ''] : ['', '']}
                             />
                             <Area
                                 type="monotone"
@@ -212,6 +259,9 @@ function OverviewTab() {
                             />
                         </AreaChart>
                     </ResponsiveContainer>
+                    ) : (
+                        <EmptyState type="data" message="完成分析后查看资金流动趋势" />
+                    )}
                 </div>
             </div>
 
@@ -308,19 +358,19 @@ function OverviewTab() {
                                             <td className="py-4 text-right">
                                                 <div className="flex items-center justify-end gap-1">
                                                     <ArrowDownLeft className="w-3 h-3 text-green-400" />
-                                                    <span className="text-green-400 font-medium">¥{(entity.income / 10000).toFixed(2)}万</span>
+                                                    <span className="text-green-400 font-medium">{formatAmountInWan(entity.income)}</span>
                                                 </div>
                                             </td>
                                             <td className="py-4 text-right">
                                                 <div className="flex items-center justify-end gap-1">
                                                     <ArrowUpRight className="w-3 h-3 text-red-400" />
-                                                    <span className="text-red-400 font-medium">¥{(entity.expense / 10000).toFixed(2)}万</span>
+                                                    <span className="text-red-400 font-medium">{formatAmountInWan(entity.expense)}</span>
                                                 </div>
                                             </td>
                                             <td className="py-4 text-right text-gray-300">{entity.transactions.toLocaleString()}</td>
                                             <td className="py-4 text-right">
                                                 <span className={`font-medium ${netFlow >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                                                    {netFlow >= 0 ? '+' : ''}¥{(netFlow / 10000).toFixed(2)}万
+                                                    {netFlow >= 0 ? '+' : ''}{formatAmountInWan(netFlow)}
                                                 </span>
                                             </td>
                                         </tr>
@@ -330,13 +380,7 @@ function OverviewTab() {
                         </table>
                     </div>
                 ) : (
-                    <div className="flex flex-col items-center justify-center py-16 text-center">
-                        <div className="w-16 h-16 rounded-2xl bg-gray-800/50 flex items-center justify-center mb-4">
-                            <Activity className="w-8 h-8 text-gray-600" />
-                        </div>
-                        <p className="text-gray-400 font-medium">等待分析数据</p>
-                        <p className="text-gray-500 text-sm mt-1">请点击"启动引擎"开始分析</p>
-                    </div>
+                    <EmptyState type="data" message="等待分析数据" />
                 )}
             </div>
         </div>
@@ -350,11 +394,83 @@ function RiskIntelTab() {
     const [filter, setFilter] = useState<'all' | 'direct' | 'cash' | 'timing'>('all');
 
     const riskFilters = [
-        { id: 'all', label: '全部风险', count: data.suspicions.directTransfers.length + data.suspicions.cashCollisions.length },
+        { id: 'all', label: '全部风险', count: data.suspicions.directTransfers.length + data.suspicions.cashCollisions.length + data.suspicions.cashTimingPatterns.length },
         { id: 'direct', label: '直接转账', count: data.suspicions.directTransfers.length },
         { id: 'cash', label: '现金碰撞', count: data.suspicions.cashCollisions.length },
         { id: 'timing', label: '时序异常', count: data.suspicions.cashTimingPatterns.length },
     ] as const;
+
+// 定义联合类型来处理不同数据类型的属性差异
+type SuspiciousActivity = {
+    type: 'direct' | 'cash' | 'timing';
+    date: string;
+    from: string;
+    to: string;
+    amount: number;
+    description: string;
+    riskLevel: string;
+    timeDiff?: number | null;
+};
+
+// 根据过滤器获取要显示的数据
+    const getFilteredData = () => {
+        const directTransfers = data.suspicions.directTransfers.map((tx: any): SuspiciousActivity => ({
+            type: 'direct' as const,
+            date: tx.date,
+            from: tx.from,
+            to: tx.to,
+            amount: tx.amount,
+            description: tx.description || '直接转账',
+            riskLevel: '高风险',
+        }));
+
+        const cashCollisions = data.suspicions.cashCollisions.map((collision: any): SuspiciousActivity => ({
+            type: 'cash' as const,
+            date: collision.time1,
+            from: collision.person1,
+            to: collision.person2,
+            amount: (collision.amount1 || 0) + (collision.amount2 || 0),
+            timeDiff: collision.timeDiff || null,
+            description: collision.description || '现金碰撞',
+            riskLevel: '高风险',
+        }));
+
+        const timingPatterns = data.suspicions.cashTimingPatterns.map((pattern: any): SuspiciousActivity => ({
+            type: 'timing' as const,
+            date: pattern.time1 || pattern.date || '-',
+            from: pattern.person1 || '-',
+            to: pattern.person2 || '-',
+            amount: (pattern.amount1 || 0) + (pattern.amount2 || 0),
+            timeDiff: pattern.timeDiff || null,
+            description: pattern.description || '时序异常',
+            riskLevel: '中风险',
+        }));
+
+        switch (filter) {
+            case 'direct':
+                return directTransfers;
+            case 'cash':
+                return cashCollisions;
+            case 'timing':
+                return timingPatterns;
+            case 'all':
+            default:
+                return [...directTransfers, ...cashCollisions, ...timingPatterns];
+        }
+    };
+
+    const filteredData = getFilteredData();
+    const hasAnyData = data.suspicions.directTransfers.length > 0 ||
+        data.suspicions.cashCollisions.length > 0 ||
+        data.suspicions.cashTimingPatterns.length > 0;
+
+    const getTypeLabel = (type: 'direct' | 'cash' | 'timing') => {
+        switch (type) {
+            case 'direct': return '直接转账';
+            case 'cash': return '现金碰撞';
+            case 'timing': return '时序异常';
+        }
+    };
 
     return (
         <div className="space-y-6">
@@ -392,58 +508,66 @@ function RiskIntelTab() {
                     </div>
                     <div>
                         <h3 className="font-semibold text-white">可疑活动日志</h3>
-                        <p className="text-xs text-gray-500">按风险等级排序</p>
+                        <p className="text-xs text-gray-500">
+                            {filter === 'all' ? '显示所有类型' : `筛选: ${riskFilters.find(f => f.id === filter)?.label}`}
+                            {' • '}共 {filteredData.length} 条记录
+                        </p>
                     </div>
                 </div>
 
-                {data.suspicions.directTransfers.length > 0 ? (
+                {filteredData.length > 0 ? (
                     <div className="overflow-x-auto">
                         <table className="w-full">
                             <thead>
                                 <tr className="border-b border-gray-800">
+                                    <th className="pb-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">类型</th>
                                     <th className="pb-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">日期</th>
-                                    <th className="pb-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">转出方</th>
-                                    <th className="pb-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">转入方</th>
+                                    <th className="pb-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">转出方/当事人</th>
+                                    <th className="pb-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">转入方/关联方</th>
                                     <th className="pb-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">金额</th>
+                                    <th className="pb-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">时间差</th>
                                     <th className="pb-3 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">风险等级</th>
-                                    <th className="pb-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">操作</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                {data.suspicions.directTransfers.slice(0, 10).map((tx, idx) => (
+                                {filteredData.slice(0, 20).map((item: SuspiciousActivity, idx: number) => (
                                     <tr key={idx} className="border-b border-gray-800/50 hover:bg-red-500/5 transition-colors">
+                                        <td className="py-4">
+                                            <span className={getRiskLevelBadgeStyle(item.riskLevel)}>
+                                                {getTypeLabel(item.type)}
+                                            </span>
+                                        </td>
                                         <td className="py-4">
                                             <div className="flex items-center gap-2 text-gray-300">
                                                 <Clock className="w-3 h-3 text-gray-500" />
-                                                {tx.date}
+                                                <span className="text-xs">{formatDate(item.date)}</span>
                                             </div>
                                         </td>
-                                        <td className="py-4 text-gray-200 font-medium">{tx.from}</td>
-                                        <td className="py-4 text-gray-200 font-medium">{tx.to}</td>
+                                        <td className="py-4 text-gray-200 font-medium">{truncate(item.from, 15)}</td>
+                                        <td className="py-4 text-gray-200 font-medium">{truncate(item.to, 15)}</td>
                                         <td className="py-4 text-right">
-                                            <span className="text-red-400 font-bold">¥{tx.amount.toLocaleString()}</span>
+                                            <span className="text-red-400 font-bold">{formatCurrency(item.amount)}</span>
+                                        </td>
+                                        <td className="py-4 text-right">
+                                            <span className="text-xs text-gray-500">{item.timeDiff ? formatTimeDifference(item.timeDiff) : '-'}</span>
                                         </td>
                                         <td className="py-4 text-center">
-                                            <span className="badge badge-red">高风险</span>
-                                        </td>
-                                        <td className="py-4 text-right">
-                                            <button className="text-blue-400 hover:text-blue-300 text-sm font-medium">
-                                                详情 →
-                                            </button>
+                                            <span className={getRiskLevelBadgeStyle(item.riskLevel)}>
+                                                {item.riskLevel}
+                                            </span>
                                         </td>
                                     </tr>
                                 ))}
                             </tbody>
                         </table>
+                        {filteredData.length > 20 && (
+                            <div className="text-center py-4 text-gray-500 text-sm">
+                                仅显示前 20 条记录，共 {filteredData.length} 条
+                            </div>
+                        )}
                     </div>
                 ) : (
-                    <div className="flex flex-col items-center justify-center py-16 text-center">
-                        <div className="w-16 h-16 rounded-2xl bg-green-500/10 flex items-center justify-center mb-4">
-                            <AlertTriangle className="w-8 h-8 text-green-500" />
-                        </div>
-                        <p className="text-gray-400 font-medium">暂无可疑活动</p>
-                        <p className="text-gray-500 text-sm mt-1">系统未检测到高风险交易</p>
-                    </div>
+                    <EmptyState type="data" message={hasAnyData ? '当前筛选条件下暂无记录' : '暂无可疑活动'} />
                 )}
             </div>
         </div>
@@ -453,40 +577,30 @@ function RiskIntelTab() {
 // ==================== Graph View Tab ====================
 
 function GraphViewTab() {
+    const { addLog } = useApp();
+    
+    const handleLog = (message: string) => {
+        const now = new Date();
+        const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+        addLog?.({ time: timeStr, level: 'INFO', msg: message });
+    };
+    
     return (
-        <div className="card h-[500px] flex flex-col">
-            <div className="flex items-center justify-between mb-6">
+        <div className="card h-[600px] flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-3 bg-gray-900/50 border-b border-gray-800">
                 <div className="flex items-center gap-3">
                     <div className="p-2 rounded-lg bg-violet-500/10">
                         <Network className="w-5 h-5 text-violet-400" />
                     </div>
                     <div>
-                        <h3 className="font-semibold text-white">关联关系图谱</h3>
-                        <p className="text-xs text-gray-500">实体间资金往来可视化</p>
+                        <h3 className="font-semibold text-white">资金流向关系图谱</h3>
+                        <p className="text-xs text-gray-500">实体间资金往来可视化分析</p>
                     </div>
-                </div>
-                <div className="flex items-center gap-2">
-                    <button className="btn-secondary text-xs">
-                        <Filter className="w-3 h-3" />
-                        筛选
-                    </button>
-                    <button className="btn-secondary text-xs">
-                        <ExternalLink className="w-3 h-3" />
-                        全屏
-                    </button>
                 </div>
             </div>
-
-            <div className="flex-1 flex items-center justify-center bg-gray-900/50 rounded-xl border border-dashed border-gray-700">
-                <div className="text-center">
-                    <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-violet-500/20 to-fuchsia-500/20 flex items-center justify-center mx-auto mb-4">
-                        <Network className="w-10 h-10 text-violet-400" />
-                    </div>
-                    <p className="text-gray-300 font-medium mb-2">交互式图谱可视化</p>
-                    <p className="text-gray-500 text-sm max-w-xs">
-                        运行分析后，此处将显示实体间的资金流向关系网络
-                    </p>
-                </div>
+            
+            <div className="flex-1 overflow-hidden">
+                <NetworkGraph onLog={handleLog} />
             </div>
         </div>
     );
@@ -495,101 +609,159 @@ function GraphViewTab() {
 // ==================== Audit Report Tab ====================
 
 function AuditReportTab() {
-    const reports = [
-        {
-            name: '核查底稿 Excel',
-            desc: '完整的分析结果 Excel 格式',
-            icon: FileText,
-            size: '2.4 MB',
-            type: 'xlsx',
-            ready: true
-        },
-        {
-            name: '综合分析报告',
-            desc: '详细的文字分析报告',
-            icon: FileText,
-            size: '856 KB',
-            type: 'html',
-            ready: true
-        },
-        {
-            name: '资金流向图',
-            desc: '交互式 HTML 资金流向图',
-            icon: Network,
-            size: '1.2 MB',
-            type: 'html',
-            ready: false
-        },
-        {
-            name: '风险评估报告',
-            desc: '实体风险等级评估',
-            icon: AlertTriangle,
-            size: '420 KB',
-            type: 'pdf',
-            ready: false
-        },
-    ];
+    const [reports, setReports] = useState<Report[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [downloading, setDownloading] = useState<string | null>(null);
+
+    // 从后端获取报告列表
+    useEffect(() => {
+        fetchReports();
+    }, []);
+
+    const fetchReports = async () => {
+        try {
+            setLoading(true);
+            setError(null);
+            const response = await api.getReports();
+            setReports(response.reports);
+        } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : '获取报告列表失败';
+            setError(errorMsg);
+            console.error('获取报告列表失败:', err);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // 下载报告
+    const handleDownload = async (filename: string) => {
+        try {
+            setDownloading(filename);
+            const blob = await api.downloadReport(filename);
+
+            // 创建下载链接
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+        } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : '下载失败';
+            console.error('下载报告失败:', err);
+            alert(`下载失败: ${errorMsg}`);
+        } finally {
+            setDownloading(null);
+        }
+    };
 
     return (
         <div className="space-y-6">
             <div className="card">
-                <div className="flex items-center gap-3 mb-6">
-                    <div className="p-2 rounded-lg bg-green-500/10">
-                        <FileText className="w-5 h-5 text-green-400" />
+                <div className="flex items-center justify-between mb-6">
+                    <div className="flex items-center gap-3">
+                        <div className="p-2 rounded-lg bg-green-500/10">
+                            <FileText className="w-5 h-5 text-green-400" />
+                        </div>
+                        <div>
+                            <h3 className="font-semibold text-white">导出审计成果</h3>
+                            <p className="text-xs text-gray-500">下载分析报告和数据文件</p>
+                        </div>
                     </div>
-                    <div>
-                        <h3 className="font-semibold text-white">导出审计成果</h3>
-                        <p className="text-xs text-gray-500">下载分析报告和数据文件</p>
-                    </div>
+                    <button
+                        onClick={fetchReports}
+                        disabled={loading}
+                        className="btn-secondary text-xs"
+                    >
+                        <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
+                        刷新
+                    </button>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {reports.map((report, idx) => (
-                        <div
-                            key={idx}
-                            className={`
-                flex items-center justify-between p-4 rounded-xl
-                border transition-all duration-200
-                ${report.ready
-                                    ? 'bg-gray-800/30 border-gray-700 hover:border-gray-600'
-                                    : 'bg-gray-900/30 border-gray-800 opacity-60'
-                                }
-              `}
-                        >
-                            <div className="flex items-center gap-4">
-                                <div className={`
-                  p-3 rounded-xl
-                  ${report.ready ? 'bg-blue-500/10' : 'bg-gray-800'}
-                `}>
-                                    <report.icon className={`w-5 h-5 ${report.ready ? 'text-blue-400' : 'text-gray-500'}`} />
-                                </div>
-                                <div>
-                                    <p className="font-medium text-gray-200">{report.name}</p>
-                                    <p className="text-xs text-gray-500 mt-0.5">{report.desc}</p>
-                                    <div className="flex items-center gap-2 mt-1">
-                                        <span className="text-[10px] font-mono text-gray-500 uppercase">{report.type}</span>
-                                        <span className="text-[10px] text-gray-600">•</span>
-                                        <span className="text-[10px] text-gray-500">{report.size}</span>
-                                    </div>
-                                </div>
-                            </div>
+                {loading ? (
+                    <div className="flex flex-col items-center justify-center py-16 text-center">
+                        <div className="w-12 h-12 rounded-2xl bg-gray-800/50 flex items-center justify-center mb-4">
+                            <RefreshCw className="w-6 h-6 text-gray-500 animate-spin mb-4" />
+                            <span className="ml-3 text-gray-400 font-medium">加载报告列表...</span>
+                        </div>
+                    </div>
+                ) : error ? (
+                    <div className="flex flex-col items-center justify-center py-16 text-center">
+                        <div className="w-16 h-16 rounded-2xl bg-red-500/10 flex items-center justify-center mb-4">
+                            <AlertTriangle className="w-8 h-8 text-red-500" />
+                            <p className="text-gray-400 font-medium">加载失败</p>
+                            <p className="text-gray-500 text-sm mt-1">{error}</p>
                             <button
-                                disabled={!report.ready}
-                                className={`
-                  flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium
-                  transition-all duration-200
-                  ${report.ready
-                                        ? 'bg-blue-600 hover:bg-blue-500 text-white'
-                                        : 'bg-gray-800 text-gray-500 cursor-not-allowed'
-                                    }
-                `}
+                                onClick={fetchReports}
+                                className="mt-4 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-medium transition-colors"
                             >
-                                <Download className="w-4 h-4" />
-                                下载
+                                重试
                             </button>
                         </div>
-                    ))}
-                </div>
+                    </div>
+                ) : reports.length === 0 ? (
+                    <EmptyState type="data" message="暂无报告" />
+                ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {reports.map((report, idx) => {
+                            const Icon = (
+                                report.name.includes('xlsx') || report.name.includes('xls') ? FileText :
+                                report.name.includes('html') || report.name.includes('htm') ? Network :
+                                report.name.includes('pdf') ? FileText : FileText
+                            );
+                            const isDownloading = downloading === report.name;
+
+                            return (
+                                <div
+                                    key={idx}
+                                    className="flex items-center justify-between p-4 rounded-xl border bg-gray-800/30 border-gray-700 hover:border-gray-600 transition-all duration-200"
+                                >
+                                    <div className="flex items-center gap-4">
+                                        <div className="p-3 rounded-xl bg-blue-500/10">
+                                            <Icon className="w-5 h-5 text-blue-400" />
+                                        </div>
+                                        <div>
+                                            <p className="font-medium text-gray-200">{truncate(report.name, 25)}</p>
+                                            <p className="text-xs text-gray-500 mt-0.5">{getFileTypeDescription(report.name)}</p>
+                                            <div className="flex items-center gap-2 mt-1">
+                                                <span className="text-[10px] font-mono text-gray-500 uppercase">{getFileType(report.name)}</span>
+                                                <span className="text-[10px] text-gray-600">•</span>
+                                                <span className="text-[10px] text-gray-500">{formatFileSize(report.size)}</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <button
+                                        onClick={() => handleDownload(report.name)}
+                                        disabled={isDownloading}
+                                        className={`
+                                            flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium
+                                            transition-all duration-200
+                                            ${isDownloading
+                                                ? 'bg-gray-700 text-gray-400 cursor-wait'
+                                                : 'bg-blue-600 hover:bg-blue-500 text-white'
+                                            }
+                                        `}
+                                    >
+                                        {isDownloading ? (
+                                            <>
+                                                <RefreshCw className="w-4 h-4 animate-spin" />
+                                                下载中
+                                            </>
+                                        ) : (
+                                            <>
+                                                <Download className="w-4 h-4" />
+                                                下载
+                                            </>
+                                        )}
+                                    </button>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
             </div>
 
             {/* Report Preview */}
@@ -607,4 +779,31 @@ function AuditReportTab() {
             </div>
         </div>
     );
+}
+
+// ==================== Helper Functions ====================
+
+function getFileTypeDescription(filename: string): string {
+    const name = filename.toLowerCase();
+    if (name.includes('excel') || name.includes('xlsx') || name.includes('xls')) {
+        return '完整的分析结果 Excel 格式';
+    }
+    if (name.includes('html') || name.includes('report')) {
+        return '详细的文字分析报告';
+    }
+    if (name.includes('flow') || name.includes('graph')) {
+        return '交互式 HTML 资金流向图';
+    }
+    if (name.includes('risk') || name.includes('assessment')) {
+        return '实体风险等级评估';
+    }
+    return '分析报告文件';
+}
+
+function getFileType(filename: string): string {
+    const ext = filename.split('.').pop()?.toLowerCase();
+    if (ext === 'xlsx' || ext === 'xls') return 'Excel';
+    if (ext === 'html' || ext === 'htm') return 'HTML';
+    if (ext === 'pdf') return 'PDF';
+    return ext || 'File';
 }

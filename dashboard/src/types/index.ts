@@ -52,6 +52,7 @@ export interface AnalysisState {
     currentPhase: string;
     lastRunTime: Date | null;
     status: AnalysisStatus;
+    isLoading?: boolean; // 数据加载状态
 }
 
 export interface Profile {

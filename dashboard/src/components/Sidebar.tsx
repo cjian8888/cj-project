@@ -70,9 +70,9 @@ export function Sidebar() {
             const folderName = relativePath.split('/')[0];
 
             if (type === 'input') {
-                updateDataSources({ inputDirectory: `./${folderName}` });
+                updateDataSources({ inputDirectory: folderName });
             } else {
-                updateDataSources({ outputDirectory: `./${folderName}` });
+                updateDataSources({ outputDirectory: folderName });
             }
         }
         event.target.value = '';
@@ -143,11 +143,11 @@ export function Sidebar() {
                             <div className="absolute inset-0 bg-gradient-to-t from-blue-600/50 to-transparent" />
                         </div>
                         <div>
-                            <h1 className="text-lg font-bold text-white tracking-tight">
+                            <h1 className="text-xl font-bold text-white tracking-tight">
                                 穿云审计
                             </h1>
-                            <p className="text-[10px] text-gray-500 font-medium tracking-wider">
-                                资金穿透与关联排查系统
+                            <p className="text-[11px] bg-gradient-to-r from-cyan-400 to-blue-400 bg-clip-text text-transparent font-semibold tracking-wide">
+                                智能资金穿透与风险排查平台
                             </p>
                         </div>
                     </div>
@@ -208,45 +208,43 @@ export function Sidebar() {
                                 <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider mb-1.5 block">
                                     输入目录
                                 </label>
-                                <div className="flex gap-2">
+                                <div className="flex rounded-lg border border-gray-700/80 overflow-hidden focus-within:border-blue-500/50 focus-within:ring-1 focus-within:ring-blue-500/30 transition-all bg-gray-800/40">
                                     <input
                                         type="text"
-                                        value={config.dataSources.inputDirectory}
+                                        value={config.dataSources.inputDirectory.startsWith('./') ? config.dataSources.inputDirectory.slice(2) : config.dataSources.inputDirectory}
                                         onChange={(e) => updateDataSources({ inputDirectory: e.target.value })}
-                                        className="flex-1 input-field text-sm"
-                                        placeholder="./data"
+                                        className="flex-1 bg-transparent text-sm px-3 py-2.5 text-gray-200 placeholder:text-gray-500 outline-none"
+                                        placeholder="选择数据文件夹"
                                     />
                                     <button
                                         onClick={() => handleFolderSelect('input')}
-                                        className="btn-icon shrink-0 hover:border-blue-500 hover:text-blue-400"
+                                        className="px-3 border-l border-gray-700/80 text-gray-400 hover:text-blue-400 hover:bg-blue-500/10 transition-colors"
                                         title="选择文件夹"
                                     >
                                         <FolderOpen className="w-4 h-4" />
                                     </button>
                                 </div>
-                                <p className="text-[10px] text-gray-600 mt-1">点击图标选择数据文件夹</p>
                             </div>
                             <div>
                                 <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider mb-1.5 block">
                                     输出目录
                                 </label>
-                                <div className="flex gap-2">
+                                <div className="flex rounded-lg border border-gray-700/80 overflow-hidden focus-within:border-cyan-500/50 focus-within:ring-1 focus-within:ring-cyan-500/30 transition-all bg-gray-800/40">
                                     <input
                                         type="text"
-                                        value={config.dataSources.outputDirectory}
+                                        value={config.dataSources.outputDirectory.startsWith('./') ? config.dataSources.outputDirectory.slice(2) : config.dataSources.outputDirectory}
                                         onChange={(e) => updateDataSources({ outputDirectory: e.target.value })}
-                                        className="flex-1 input-field text-sm"
-                                        placeholder="./output"
+                                        className="flex-1 bg-transparent text-sm px-3 py-2.5 text-gray-200 placeholder:text-gray-500 outline-none"
+                                        placeholder="选择输出文件夹"
                                     />
                                     <button
                                         onClick={() => handleFolderSelect('output')}
-                                        className="btn-icon shrink-0 hover:border-cyan-500 hover:text-cyan-400"
+                                        className="px-3 border-l border-gray-700/80 text-gray-400 hover:text-cyan-400 hover:bg-cyan-500/10 transition-colors"
                                         title="选择文件夹"
                                     >
                                         <HardDrive className="w-4 h-4" />
                                     </button>
                                 </div>
-                                <p className="text-[10px] text-gray-600 mt-1">点击图标选择输出文件夹</p>
                             </div>
                         </div>
                     </ConfigSection>

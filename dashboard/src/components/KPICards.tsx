@@ -1,23 +1,24 @@
 import React from 'react';
 import { Users, Activity, ShieldAlert, Server, TrendingUp, TrendingDown, Minus } from 'lucide-react';
 import { useApp } from '../contexts/AppContext';
+import { formatAmountInWan } from '../utils/formatters';
 
 export function KPICards() {
     const { data, analysis } = useApp();
 
     // Calculate real stats from data
     const entityCount = data.persons.length + data.companies.length;
-    const totalTransactions = Object.values(data.profiles).reduce(
+    const totalTransactions = Object.values(data.profiles || {}).reduce(
         (sum, profile) => sum + (profile.transactionCount || 0),
         0
     );
-    const highRiskFunds = data.suspicions.directTransfers.reduce(
+    const highRiskFunds = (data.suspicions.directTransfers || []).reduce(
         (sum, tx) => sum + (tx.amount || 0),
         0
     );
-    const suspicionCount = data.suspicions.directTransfers.length +
-        data.suspicions.cashCollisions.length +
-        data.suspicions.cashTimingPatterns.length;
+    const suspicionCount = (data.suspicions.directTransfers || []).length +
+        (data.suspicions.cashCollisions || []).length +
+        (data.suspicions.cashTimingPatterns || []).length;
 
     const kpis = [
         {
@@ -26,7 +27,7 @@ export function KPICards() {
             value: entityCount.toLocaleString(),
             subLabel: `${data.persons.length} 个人 / ${data.companies.length} 企业`,
             icon: Users,
-            trend: entityCount > 0 ? 'up' : 'neutral',
+            trend: (entityCount > 0 ? 'up' : 'neutral') as 'up' | 'neutral' | 'down',
             trendValue: entityCount > 0 ? '+' + entityCount : '-',
             gradient: 'from-blue-500 to-cyan-500',
             glowColor: 'shadow-blue-500/20',
@@ -39,7 +40,7 @@ export function KPICards() {
             value: totalTransactions.toLocaleString(),
             subLabel: '银行流水记录',
             icon: Activity,
-            trend: totalTransactions > 1000 ? 'up' : 'neutral',
+            trend: (totalTransactions > 1000 ? 'up' : 'neutral') as 'up' | 'neutral' | 'down',
             trendValue: totalTransactions > 1000 ? '数据充足' : '待分析',
             gradient: 'from-cyan-500 to-teal-500',
             glowColor: 'shadow-cyan-500/20',
@@ -49,10 +50,10 @@ export function KPICards() {
         {
             id: 'risk',
             label: '高风险资金',
-            value: `¥${(highRiskFunds / 10000).toFixed(1)}万`,
+            value: formatAmountInWan(highRiskFunds),
             subLabel: `${suspicionCount} 条可疑记录`,
             icon: ShieldAlert,
-            trend: highRiskFunds > 0 ? 'down' : 'neutral',
+            trend: (highRiskFunds > 0 ? 'down' : 'neutral') as 'up' | 'neutral' | 'down',
             trendValue: highRiskFunds > 0 ? '需关注' : '无异常',
             gradient: 'from-red-500 to-orange-500',
             glowColor: 'shadow-red-500/20',
@@ -65,7 +66,7 @@ export function KPICards() {
             value: analysis.isRunning ? '分析中' : analysis.status === 'completed' ? '已完成' : '就绪',
             subLabel: analysis.isRunning ? `${analysis.progress}% 完成` : '等待指令',
             icon: Server,
-            trend: analysis.isRunning ? 'up' : analysis.status === 'completed' ? 'up' : 'neutral',
+            trend: (analysis.isRunning ? 'up' : analysis.status === 'completed' ? 'up' : 'neutral') as 'up' | 'neutral' | 'down',
             trendValue: analysis.isRunning ? '运行中' : analysis.status === 'completed' ? '成功' : '待机',
             gradient: analysis.isRunning
                 ? 'from-amber-500 to-yellow-500'

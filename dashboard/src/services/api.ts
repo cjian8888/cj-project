@@ -2,7 +2,7 @@
  * API 服务 - 与 FastAPI 后端通信
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000/ws';
 
 // ==================== Types ====================
@@ -86,31 +86,146 @@ export interface WebSocketMessage {
 
 class ApiService {
     private baseUrl: string;
+    private timeout: number = 30000; // 30秒超时
+    private maxRetries: number = 3;
+    private retryDelay: number = 1000; // 1秒
 
     constructor(baseUrl: string = API_BASE_URL) {
         this.baseUrl = baseUrl;
+    }
+
+    /**
+     * 检查网络连接状态
+     */
+    isOnline(): boolean {
+        return navigator.onLine;
+    }
+
+    /**
+     * 带超时的 fetch 请求
+     */
+    private async fetchWithTimeout(
+        url: string,
+        options: RequestInit = {},
+        timeout: number = this.timeout
+    ): Promise<Response> {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+        try {
+            const response = await fetch(url, {
+                ...options,
+                signal: controller.signal,
+            });
+            clearTimeout(timeoutId);
+            return response;
+        } catch (error) {
+            clearTimeout(timeoutId);
+            if (error instanceof Error && error.name === 'AbortError') {
+                throw new Error('请求超时,请检查网络连接或稍后重试');
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * 带重试机制的请求
+     */
+    private async requestWithRetry<T>(
+        endpoint: string,
+        options: RequestInit = {},
+        retries: number = this.maxRetries
+    ): Promise<T> {
+        // 检查网络连接
+        if (!this.isOnline()) {
+            throw new Error('网络连接已断开,请检查网络设置');
+        }
+
+        const url = `${this.baseUrl}${endpoint}`;
+
+        for (let attempt = 0; attempt <= retries; attempt++) {
+            try {
+                const response = await this.fetchWithTimeout(url, {
+                    ...options,
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...options.headers,
+                    },
+                });
+
+                if (!response.ok) {
+                    // 对于 4xx 错误,不重试
+                    if (response.status >= 400 && response.status < 500) {
+                        const error = await response.json().catch(() => ({ detail: '请求失败' }));
+                        throw new Error(this.getErrorMessage(response.status, error.detail));
+                    }
+
+                    // 对于 5xx 错误,可以重试
+                    if (attempt < retries) {
+                        await this.delay(this.retryDelay * Math.pow(2, attempt));
+                        continue;
+                    }
+
+                    const error = await response.json().catch(() => ({ detail: '服务器错误' }));
+                    throw new Error(this.getErrorMessage(response.status, error.detail));
+                }
+
+                return response.json();
+            } catch (error) {
+                // 如果是最后一次尝试,抛出错误
+                if (attempt === retries) {
+                    if (error instanceof Error) {
+                        throw error;
+                    }
+                    throw new Error('网络请求失败,请稍后重试');
+                }
+
+                // 否则等待后重试
+                await this.delay(this.retryDelay * Math.pow(2, attempt));
+            }
+        }
+
+        throw new Error('请求失败,已达到最大重试次数');
+    }
+
+    /**
+     * 延迟函数
+     */
+    private delay(ms: number): Promise<void> {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    /**
+     * 获取用户友好的错误消息
+     */
+    private getErrorMessage(status: number, detail: string): string {
+        switch (status) {
+            case 400:
+                return `请求参数错误: ${detail}`;
+            case 401:
+                return '未授权,请重新登录';
+            case 403:
+                return '没有权限访问此资源';
+            case 404:
+                return '请求的资源不存在';
+            case 409:
+                return `操作冲突: ${detail}`;
+            case 500:
+                return '服务器内部错误,请稍后重试';
+            case 502:
+                return '网关错误,服务暂时不可用';
+            case 503:
+                return '服务暂时不可用,请稍后重试';
+            default:
+                return detail || `请求失败 (HTTP ${status})`;
+        }
     }
 
     private async request<T>(
         endpoint: string,
         options: RequestInit = {}
     ): Promise<T> {
-        const url = `${this.baseUrl}${endpoint}`;
-
-        const response = await fetch(url, {
-            ...options,
-            headers: {
-                'Content-Type': 'application/json',
-                ...options.headers,
-            },
-        });
-
-        if (!response.ok) {
-            const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
-            throw new Error(error.detail || `HTTP ${response.status}`);
-        }
-
-        return response.json();
+        return this.requestWithRetry<T>(endpoint, options);
     }
 
     /**

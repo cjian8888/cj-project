@@ -1199,6 +1199,10 @@ def generate_profile_report(df: pd.DataFrame, entity_name: str) -> Dict:
 
     logger.info(f'{entity_name} 资金画像生成完成')
 
+    # 【内存优化】强制执行垃圾回收
+    import gc
+    gc.collect()
+
     return profile
 
 def extract_large_cash(df: pd.DataFrame, threshold: float = None) -> List[Dict]:
@@ -1302,5 +1306,3 @@ def categorize_transactions(df: pd.DataFrame) -> Dict[str, List[Dict]]:
             categories['large_amount'].append(record)
 
     return categories
-
-

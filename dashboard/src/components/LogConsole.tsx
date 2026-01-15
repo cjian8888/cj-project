@@ -1,9 +1,9 @@
-import React, { useRef, useEffect, useState } from 'react';
+import { useRef, useEffect, useState } from 'react';
 import { Terminal, X, Maximize2, Minimize2, Copy, CheckCircle2 } from 'lucide-react';
 import { useApp } from '../contexts/AppContext';
 
 export function LogConsole() {
-    const { logs, clearLogs, addLog } = useApp();
+    const { logs, clearLogs } = useApp();
     const scrollRef = useRef<HTMLDivElement>(null);
     const [isExpanded, setIsExpanded] = useState(false);
     const [copied, setCopied] = useState(false);
@@ -15,27 +15,7 @@ export function LogConsole() {
         }
     }, [logs]);
 
-    // Simulate real-time logs (demo purposes - remove in production)
-    useEffect(() => {
-        const interval = setInterval(() => {
-            const demoLogs = [
-                { level: 'INFO' as const, msgs: ['扫描数据节点...', '验证交易签名...', '更新关系图谱...', '索引实体记录...', '同步审计日志...'] },
-                { level: 'WARN' as const, msgs: ['检测到异常高频交易', '跨境资金阈值预警', '数据一致性校验差异'] },
-                { level: 'ERROR' as const, msgs: ['数据源连接超时', '签名验证失败'] }
-            ];
-
-            const random = Math.random();
-            const type = random > 0.95 ? demoLogs[2] : random > 0.85 ? demoLogs[1] : demoLogs[0];
-            const msg = type.msgs[Math.floor(Math.random() * type.msgs.length)];
-
-            const now = new Date();
-            const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-
-            addLog({ time: timeStr, level: type.level, msg });
-        }, 4000);
-
-        return () => clearInterval(interval);
-    }, [addLog]);
+    // 注意: 真实日志通过WebSocket从后端推送，参见AppContext.tsx中的ws.subscribe
 
     const copyLogs = () => {
         const logText = logs.map(log => `[${log.time}] ${log.level}: ${log.msg}`).join('\n');
@@ -165,13 +145,21 @@ interface LogEntryProps {
 }
 
 function LogEntry({ log, isNew }: LogEntryProps) {
-    const levelConfig = {
+    const levelConfig: Record<string, { color: string; label: string; bgHover: string }> = {
         INFO: { color: 'text-blue-400', label: '信息', bgHover: 'hover:bg-blue-500/5' },
         WARN: { color: 'text-yellow-400', label: '警告', bgHover: 'hover:bg-yellow-500/5' },
+        WARNING: { color: 'text-yellow-400', label: '警告', bgHover: 'hover:bg-yellow-500/5' },
         ERROR: { color: 'text-red-400', label: '错误', bgHover: 'hover:bg-red-500/5' },
+        DEBUG: { color: 'text-gray-400', label: '调试', bgHover: 'hover:bg-gray-500/5' },
     };
 
-    const config = levelConfig[log.level];
+    // 容错处理：如果level不在配置中，使用默认配置
+    const defaultConfig = { color: 'text-gray-400', label: log.level || 'LOG', bgHover: 'hover:bg-gray-500/5' };
+    const config = levelConfig[log.level?.toUpperCase?.()] || levelConfig[log.level] || defaultConfig;
+
+    // 防止log对象属性缺失
+    const time = log.time || '';
+    const msg = log.msg || '';
 
     return (
         <div className={`
@@ -180,11 +168,11 @@ function LogEntry({ log, isNew }: LogEntryProps) {
       ${isNew ? 'animate-slide-in-right' : ''}
       transition-colors cursor-default
     `}>
-            <span className="log-time">{log.time}</span>
+            <span className="log-time">{time}</span>
             <span className={`log-level ${config.color}`}>
                 [{config.label}]
             </span>
-            <span className="log-msg">{log.msg}</span>
+            <span className="log-msg">{msg}</span>
         </div>
     );
 }

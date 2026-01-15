@@ -7,6 +7,7 @@
 
 import re
 import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from typing import Optional, Union, List, Tuple, Dict, Any
 import pandas as pd
@@ -32,8 +33,13 @@ def setup_logger(name: str = 'AuditSystem') -> logging.Logger:
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.INFO)
         
-        # 文件处理器
-        file_handler = logging.FileHandler(config.OUTPUT_LOG_FILE, encoding='utf-8')
+        # 文件处理器 - 使用轮转机制
+        file_handler = RotatingFileHandler(
+            config.OUTPUT_LOG_FILE,
+            maxBytes=config.LOG_MAX_BYTES,
+            backupCount=config.LOG_BACKUP_COUNT,
+            encoding='utf-8'
+        )
         file_handler.setLevel(logging.DEBUG)
         
         # 格式化器

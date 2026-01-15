@@ -417,7 +417,22 @@ def standardize_bank_fields(df: pd.DataFrame, bank_name: str = None) -> pd.DataF
     else:
         normalized['transaction_id'] = ''
     
-    logger.info(f'字段标准化完成,有效记录: {len(normalized)}条')
+    # 【内存优化】优化数据类型以节省内存
+    # 金额列：保持 float64 确保审计精度
+    normalized['income'] = normalized['income'].astype('float64')
+    normalized['expense'] = normalized['expense'].astype('float64')
+    normalized['balance'] = normalized['balance'].astype('float64')
+    
+    # 文本列：转为 category 类型节省内存（这是内存优化的关键）
+    for col in ['description', 'counterparty', '数据来源', '银行来源', 'account_number', 'transaction_id']:
+        if col in normalized.columns:
+            normalized[col] = normalized[col].astype('category')
+    
+    # 布尔列：转为 bool 类型
+    if 'is_cash' in normalized.columns:
+        normalized['is_cash'] = normalized['is_cash'].astype('bool')
+    
+    logger.info(f'字段标准化完成,有效记录: {len(normalized)}条 (已优化数据类型)')
     
     return normalized
 
