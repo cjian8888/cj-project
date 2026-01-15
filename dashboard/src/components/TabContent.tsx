@@ -5,7 +5,6 @@ import {
     Network,
     FileText,
     Download,
-    ExternalLink,
     ChevronRight,
     TrendingUp,
     Wallet,
@@ -112,12 +111,12 @@ function OverviewTab() {
 
     // 从真实数据生成趋势图数据（如果分析未完成，使用空数组）
     const hasRealData = analysis.status === 'completed' && Object.keys(data.profiles).length > 0;
-    
+
     // 检查是否有足够的数据来显示图表
     const hasChartData = hasRealData;
-    
+
     // 生成趋势图数据（使用真实数据或占位符）
-    const trendData = hasChartData 
+    const trendData = hasChartData
         ? Object.values(data.profiles)
             .slice(0, 30)
             .map((profile, index) => ({
@@ -126,7 +125,7 @@ function OverviewTab() {
                 支出: profile.totalExpense || 0,
             }))
         : [];
-    
+
     // 收入来源分布（基于真实数据）
     const categoryData = hasChartData
         ? (() => {
@@ -134,35 +133,35 @@ function OverviewTab() {
             const totalSuspicious = (data.suspicions.directTransfers || []).length +
                 (data.suspicions.cashCollisions || []).length +
                 (data.suspicions.cashTimingPatterns || []).length;
-            
+
             const categories = [];
             if (data.suspicions.directTransfers.length > 0) {
-                categories.push({ 
-                    name: '直接转账', 
-                    value: Math.round((data.suspicions.directTransfers.length / totalSuspicious) * 100), 
-                    color: '#3b82f6' 
+                categories.push({
+                    name: '直接转账',
+                    value: Math.round((data.suspicions.directTransfers.length / totalSuspicious) * 100),
+                    color: '#3b82f6'
                 });
             }
             if (data.suspicions.cashCollisions.length > 0) {
-                categories.push({ 
-                    name: '现金碰撞', 
-                    value: Math.round((data.suspicions.cashCollisions.length / totalSuspicious) * 100), 
-                    color: '#06b6d4' 
+                categories.push({
+                    name: '现金碰撞',
+                    value: Math.round((data.suspicions.cashCollisions.length / totalSuspicious) * 100),
+                    color: '#06b6d4'
                 });
             }
             if (data.suspicions.cashTimingPatterns.length > 0) {
-                categories.push({ 
-                    name: '时序异常', 
-                    value: Math.round((data.suspicions.cashTimingPatterns.length / totalSuspicious) * 100), 
-                    color: '#f59e0b' 
+                categories.push({
+                    name: '时序异常',
+                    value: Math.round((data.suspicions.cashTimingPatterns.length / totalSuspicious) * 100),
+                    color: '#f59e0b'
                 });
             }
-            
+
             // 如果没有分类数据，显示提示
             if (categories.length === 0) {
                 return [{ name: '暂无数据', value: 100, color: '#6b7280' }];
             }
-            
+
             return categories;
         })()
         : [{ name: '等待分析', value: 100, color: '#6b7280' }];
@@ -207,58 +206,58 @@ function OverviewTab() {
 
                 <div className="h-64">
                     {hasChartData && trendData.length > 0 ? (
-                    <ResponsiveContainer width="100%" height="100%">
-                        <AreaChart data={trendData}>
-                            <defs>
-                                <linearGradient id="incomeGradient" x1="0" y1="0" x2="0" y2="1">
-                                    <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.3} />
-                                    <stop offset="100%" stopColor="#3b82f6" stopOpacity={0} />
-                                </linearGradient>
-                                <linearGradient id="expenseGradient" x1="0" y1="0" x2="0" y2="1">
-                                    <stop offset="0%" stopColor="#06b6d4" stopOpacity={0.3} />
-                                    <stop offset="100%" stopColor="#06b6d4" stopOpacity={0} />
-                                </linearGradient>
-                            </defs>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
-                            <XAxis
-                                dataKey="date"
-                                axisLine={false}
-                                tickLine={false}
-                                tick={{ fill: '#6b7280', fontSize: 11 }}
-                                interval={4}
-                            />
-                            <YAxis
-                                axisLine={false}
-                                tickLine={false}
-                                tick={{ fill: '#6b7280', fontSize: 11 }}
-                                tickFormatter={(value) => `¥${formatAmountInWan(value, false)}万`}
-                            />
-                            <Tooltip
-                                contentStyle={{
-                                    backgroundColor: '#111827',
-                                    border: '1px solid #374151',
-                                    borderRadius: '8px',
-                                    boxShadow: '0 10px 30px -10px rgba(0,0,0,0.5)'
-                                }}
-                                labelStyle={{ color: '#9ca3af' }}
-                                formatter={(value: number | undefined) => value !== undefined ? [formatCurrency(value), ''] : ['', '']}
-                            />
-                            <Area
-                                type="monotone"
-                                dataKey="收入"
-                                stroke="#3b82f6"
-                                fill="url(#incomeGradient)"
-                                strokeWidth={2}
-                            />
-                            <Area
-                                type="monotone"
-                                dataKey="支出"
-                                stroke="#06b6d4"
-                                fill="url(#expenseGradient)"
-                                strokeWidth={2}
-                            />
-                        </AreaChart>
-                    </ResponsiveContainer>
+                        <ResponsiveContainer width="100%" height="100%">
+                            <AreaChart data={trendData}>
+                                <defs>
+                                    <linearGradient id="incomeGradient" x1="0" y1="0" x2="0" y2="1">
+                                        <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.3} />
+                                        <stop offset="100%" stopColor="#3b82f6" stopOpacity={0} />
+                                    </linearGradient>
+                                    <linearGradient id="expenseGradient" x1="0" y1="0" x2="0" y2="1">
+                                        <stop offset="0%" stopColor="#06b6d4" stopOpacity={0.3} />
+                                        <stop offset="100%" stopColor="#06b6d4" stopOpacity={0} />
+                                    </linearGradient>
+                                </defs>
+                                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
+                                <XAxis
+                                    dataKey="date"
+                                    axisLine={false}
+                                    tickLine={false}
+                                    tick={{ fill: '#6b7280', fontSize: 11 }}
+                                    interval={4}
+                                />
+                                <YAxis
+                                    axisLine={false}
+                                    tickLine={false}
+                                    tick={{ fill: '#6b7280', fontSize: 11 }}
+                                    tickFormatter={(value) => `¥${formatAmountInWan(value, false)}万`}
+                                />
+                                <Tooltip
+                                    contentStyle={{
+                                        backgroundColor: '#111827',
+                                        border: '1px solid #374151',
+                                        borderRadius: '8px',
+                                        boxShadow: '0 10px 30px -10px rgba(0,0,0,0.5)'
+                                    }}
+                                    labelStyle={{ color: '#9ca3af' }}
+                                    formatter={(value: number | undefined) => value !== undefined ? [formatCurrency(value), ''] : ['', '']}
+                                />
+                                <Area
+                                    type="monotone"
+                                    dataKey="收入"
+                                    stroke="#3b82f6"
+                                    fill="url(#incomeGradient)"
+                                    strokeWidth={2}
+                                />
+                                <Area
+                                    type="monotone"
+                                    dataKey="支出"
+                                    stroke="#06b6d4"
+                                    fill="url(#expenseGradient)"
+                                    strokeWidth={2}
+                                />
+                            </AreaChart>
+                        </ResponsiveContainer>
                     ) : (
                         <EmptyState type="data" message="完成分析后查看资金流动趋势" />
                     )}
@@ -329,7 +328,7 @@ function OverviewTab() {
                             <p className="text-xs text-gray-500">按收入金额排序</p>
                         </div>
                     </div>
-                    <button className="btn-secondary text-xs">
+                    <button className="btn-secondary text-xs opacity-50 cursor-not-allowed" disabled title="功能开发中">
                         查看全部
                         <ChevronRight className="w-3 h-3" />
                     </button>
@@ -400,19 +399,19 @@ function RiskIntelTab() {
         { id: 'timing', label: '时序异常', count: data.suspicions.cashTimingPatterns.length },
     ] as const;
 
-// 定义联合类型来处理不同数据类型的属性差异
-type SuspiciousActivity = {
-    type: 'direct' | 'cash' | 'timing';
-    date: string;
-    from: string;
-    to: string;
-    amount: number;
-    description: string;
-    riskLevel: string;
-    timeDiff?: number | null;
-};
+    // 定义联合类型来处理不同数据类型的属性差异
+    type SuspiciousActivity = {
+        type: 'direct' | 'cash' | 'timing';
+        date: string;
+        from: string;
+        to: string;
+        amount: number;
+        description: string;
+        riskLevel: string;
+        timeDiff?: number | null;
+    };
 
-// 根据过滤器获取要显示的数据
+    // 根据过滤器获取要显示的数据
     const getFilteredData = () => {
         const directTransfers = data.suspicions.directTransfers.map((tx: any): SuspiciousActivity => ({
             type: 'direct' as const,
@@ -578,13 +577,13 @@ type SuspiciousActivity = {
 
 function GraphViewTab() {
     const { addLog } = useApp();
-    
+
     const handleLog = (message: string) => {
         const now = new Date();
         const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
         addLog?.({ time: timeStr, level: 'INFO', msg: message });
     };
-    
+
     return (
         <div className="card h-[600px] flex flex-col overflow-hidden">
             <div className="flex items-center justify-between px-4 py-3 bg-gray-900/50 border-b border-gray-800">
@@ -598,7 +597,7 @@ function GraphViewTab() {
                     </div>
                 </div>
             </div>
-            
+
             <div className="flex-1 overflow-hidden">
                 <NetworkGraph onLog={handleLog} />
             </div>
@@ -709,8 +708,8 @@ function AuditReportTab() {
                         {reports.map((report, idx) => {
                             const Icon = (
                                 report.name.includes('xlsx') || report.name.includes('xls') ? FileText :
-                                report.name.includes('html') || report.name.includes('htm') ? Network :
-                                report.name.includes('pdf') ? FileText : FileText
+                                    report.name.includes('html') || report.name.includes('htm') ? Network :
+                                        report.name.includes('pdf') ? FileText : FileText
                             );
                             const isDownloading = downloading === report.name;
 
@@ -764,17 +763,15 @@ function AuditReportTab() {
                 )}
             </div>
 
-            {/* Report Preview */}
+            {/* Report Preview (Placeholder) */}
             <div className="card">
                 <div className="flex items-center justify-between mb-6">
                     <h3 className="font-semibold text-white">报告预览</h3>
-                    <button className="btn-secondary text-xs">
-                        <ExternalLink className="w-3 h-3" />
-                        新窗口打开
-                    </button>
+                    <span className="text-[10px] text-gray-500 bg-gray-800 px-2 py-1 rounded">功能开发中</span>
                 </div>
-                <div className="h-64 flex items-center justify-center bg-gray-900/50 rounded-xl border border-dashed border-gray-700">
-                    <p className="text-gray-500 text-sm">选择报告后在此预览内容</p>
+                <div className="h-64 flex flex-col items-center justify-center bg-gray-900/50 rounded-xl border border-dashed border-gray-700">
+                    <p className="text-gray-500 text-sm mb-2">点击上方报告的"下载"按钮获取文件</p>
+                    <p className="text-gray-600 text-xs">预览功能正在开发中</p>
                 </div>
             </div>
         </div>

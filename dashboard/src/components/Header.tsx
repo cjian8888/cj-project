@@ -1,4 +1,4 @@
-import { Bell, Search, User, ChevronDown, Zap } from 'lucide-react';
+import { Bell, Search, User, Zap } from 'lucide-react';
 import { useApp } from '../contexts/AppContext';
 
 export function Header() {
@@ -31,18 +31,19 @@ export function Header() {
                     </div>
                 </div>
 
-                {/* Center Section - Search */}
+                {/* Center Section - Search (Disabled - Under Development) */}
                 <div className="hidden lg:flex items-center flex-1 max-w-md mx-8">
                     <div className="relative w-full group">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 transition-colors group-focus-within:text-blue-400" />
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-600" />
                         <input
                             type="text"
-                            placeholder="搜索实体、交易记录..."
-                            className="w-full pl-10 pr-4 py-2.5 bg-gray-900/50 border border-gray-800 rounded-xl text-sm text-white placeholder:text-gray-600 focus:outline-none focus:border-blue-500/50 focus:ring-2 focus:ring-blue-500/20 transition-all"
+                            placeholder="搜索功能开发中..."
+                            disabled
+                            className="w-full pl-10 pr-4 py-2.5 bg-gray-900/30 border border-gray-800/50 rounded-xl text-sm text-gray-500 placeholder:text-gray-600 cursor-not-allowed"
                         />
-                        <kbd className="absolute right-3 top-1/2 -translate-y-1/2 px-2 py-0.5 text-[10px] font-mono text-gray-500 bg-gray-800/80 border border-gray-700 rounded">
-                            ⌘K
-                        </kbd>
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 px-2 py-0.5 text-[9px] font-medium text-amber-500/80 bg-amber-500/10 border border-amber-500/20 rounded">
+                            待开发
+                        </span>
                     </div>
                 </div>
 
@@ -64,20 +65,18 @@ export function Header() {
                         {analysis.isRunning ? '分析进行中' : analysis.status === 'completed' ? '分析完成' : '系统就绪'}
                     </div>
 
-                    {/* Notification Button */}
-                    <button className="relative btn-icon">
+                    {/* Notification Button (Disabled) */}
+                    <button className="relative btn-icon opacity-50 cursor-not-allowed" title="通知功能开发中" disabled>
                         <Bell className="w-4 h-4" />
-                        <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-red-500 rounded-full ring-2 ring-[#030712]" />
                     </button>
 
-                    {/* User Avatar */}
-                    <button className="flex items-center gap-2 pl-2 pr-3 py-1.5 rounded-xl bg-gray-800/50 border border-gray-700 hover:border-gray-600 transition-colors">
+                    {/* User Info (Read-only, no dropdown) */}
+                    <div className="flex items-center gap-2 pl-2 pr-3 py-1.5 rounded-xl bg-gray-800/50 border border-gray-700">
                         <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center">
                             <User className="w-4 h-4 text-white" />
                         </div>
-                        <span className="text-sm font-medium text-gray-300 hidden sm:block">管理员</span>
-                        <ChevronDown className="w-3 h-3 text-gray-500" />
-                    </button>
+                        <span className="text-sm font-medium text-gray-300 hidden sm:block">审计人员</span>
+                    </div>
                 </div>
             </div>
         </header>

@@ -2,10 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { Network, DataSet } from 'vis-network/standalone';
 import type { Data, Node, Edge, Options } from 'vis-network/standalone';
 import { API_BASE_URL } from '../services/api';
-import { 
-  AlertTriangle, 
-  CreditCard, 
-  Banknote, 
+import {
+  AlertTriangle,
+  CreditCard,
+  Banknote,
   Landmark,
   Info
 } from 'lucide-react';
@@ -55,6 +55,7 @@ interface GraphData {
       person: string;
       counterparty: string;
       amount: number;
+      risk_level?: string;
     }>;
     online_loans: Array<{
       platform: string;
@@ -75,7 +76,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
   const fetchGraphData = async () => {
     setLoading(true);
     setError(null);
-    
+
     try {
       // Add 10s timeout
       const controller = new AbortController();
@@ -86,16 +87,16 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
       }).catch(err => {
         throw new Error(err.name === 'AbortError' ? '请求超时，请检查后端服务' : '网络请求失败');
       });
-      
+
       clearTimeout(timeoutId);
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
         throw new Error(errorData.detail || `加载失败 (${response.status})`);
       }
-      
+
       const result = await response.json();
-      
+
       if (result.message === 'success' && result.data) {
         setGraphData(result.data);
         onLog?.(`图谱数据加载成功: ${result.data.stats.nodeCount} 个节点`);
@@ -120,6 +121,23 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
   useEffect(() => {
     if (!networkRef.current || !graphData) return;
 
+    // 调试日志
+    console.log('[NetworkGraph] 初始化图表:', {
+      nodeCount: graphData.nodes?.length || 0,
+      edgeCount: graphData.edges?.length || 0,
+      containerExists: !!networkRef.current,
+      containerSize: networkRef.current ? {
+        width: networkRef.current.offsetWidth,
+        height: networkRef.current.offsetHeight
+      } : null
+    });
+
+    // 如果没有节点数据，不初始化
+    if (!graphData.nodes || graphData.nodes.length === 0) {
+      console.warn('[NetworkGraph] 没有节点数据，跳过初始化');
+      return;
+    }
+
     try {
       // Clean up previous instance
       if (networkInstance.current) {
@@ -127,187 +145,227 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
         networkInstance.current = null;
       }
 
-      // Configuration logic...
-
-
-    // 配置 Dark Sci-Fi 样式（完美复刻 HTML 版本）
-    const options: Options = {
-      // 物理引擎配置（与 HTML 完全一致）
-      physics: {
-        stabilization: {
-          iterations: 300,
-          fit: true
-        },
-        barnesHut: {
-          gravitationalConstant: -5000,
-          springLength: 200,
-          springConstant: 0.01,
-          centralGravity: 0.3
-        }
-      },
-      
-      // 交互配置
-      interaction: {
-        hover: true,
-        tooltipDelay: 100,
-        navigationButtons: true,
-        keyboard: true
-      },
-      
-      // 节点样式
-      nodes: {
-        shape: 'dot',
-        borderWidth: 2,
-        shadow: true,
-        font: {
-          color: '#fff',
-          size: 14,
-          face: 'Microsoft YaHei'
-        }
-      },
-      
-      // 边样式
-      edges: {
-        width: 2,
-        shadow: true,
-        smooth: {
-          enabled: true,
-          type: 'curvedCW',
-          roundness: 0.2
-        }
-      },
-      
-      // 分组样式（与 HTML 完全一致）
-      groups: {
-        core: {
-          color: {
-            background: '#ff6b6b',
-            border: '#c0392b',
-            highlight: {
-              background: '#e74c3c',
-              border: '#c0392b'
-            }
+      // 配置 Dark Sci-Fi 样式（完美复刻 HTML 版本）
+      const options: Options = {
+        // 物理引擎配置（与 HTML 完全一致）
+        physics: {
+          stabilization: {
+            iterations: 300,
+            fit: true
           },
-          font: { color: '#ffffff' }
-        },
-        company: {
-          color: {
-            background: '#9b59b6',
-            border: '#8e44ad',
-            highlight: {
-              background: '#8e44ad',
-              border: '#7d3c98'
-            }
-          },
-          font: { color: '#ffffff' },
-          shape: 'box'
-        },
-        involved_company: {
-          color: {
-            background: '#ff9800',
-            border: '#e65100',
-            highlight: {
-              background: '#ffa726',
-              border: '#fb8c00'
-            }
-          },
-          font: { color: '#ffffff', size: 14 },
-          shape: 'box',
-          shadow: {
-            enabled: true,
-            color: 'rgba(255,152,0,0.5)',
-            size: 10
-          },
-          borderWidth: 3
-        },
-        other: {
-          color: {
-            background: '#4ecdc4',
-            border: '#1abc9c',
-            highlight: {
-              background: '#1abc9c',
-              border: '#16a085'
-            }
+          barnesHut: {
+            gravitationalConstant: -5000,
+            springLength: 200,
+            springConstant: 0.01,
+            centralGravity: 0.3
           }
+        },
+
+        // 交互配置
+        interaction: {
+          hover: true,
+          tooltipDelay: 100,
+          navigationButtons: true,
+          keyboard: true
+        },
+
+        // 节点样式
+        nodes: {
+          shape: 'dot',
+          borderWidth: 2,
+          shadow: true,
+          scaling: {
+            min: 15,
+            max: 50,
+            label: {
+              enabled: true,
+              min: 10,
+              max: 18
+            }
+          },
+          font: {
+            color: '#fff',
+            size: 14,
+            face: 'Microsoft YaHei'
+          }
+        },
+
+        // 边样式
+        edges: {
+          width: 2,
+          shadow: true,
+          scaling: {
+            min: 1,
+            max: 8
+          },
+          smooth: {
+            enabled: true,
+            type: 'curvedCW',
+            roundness: 0.2
+          }
+        },
+
+        // 分组样式（与 HTML 完全一致）
+        groups: {
+          core: {
+            color: {
+              background: '#ff6b6b',
+              border: '#c0392b',
+              highlight: {
+                background: '#e74c3c',
+                border: '#c0392b'
+              }
+            },
+            font: { color: '#ffffff' },
+            size: 35
+          },
+          company: {
+            color: {
+              background: '#9b59b6',
+              border: '#8e44ad',
+              highlight: {
+                background: '#8e44ad',
+                border: '#7d3c98'
+              }
+            },
+            font: { color: '#ffffff' },
+            shape: 'box',
+            size: 25
+          },
+          involved_company: {
+            color: {
+              background: '#ff9800',
+              border: '#e65100',
+              highlight: {
+                background: '#ffa726',
+                border: '#fb8c00'
+              }
+            },
+            font: { color: '#ffffff', size: 14 },
+            shape: 'box',
+            shadow: {
+              enabled: true,
+              color: 'rgba(255,152,0,0.5)',
+              size: 10
+            },
+            borderWidth: 3,
+            size: 40
+          },
+          other: {
+            color: {
+              background: '#4ecdc4',
+              border: '#1abc9c',
+              highlight: {
+                background: '#1abc9c',
+                border: '#16a085'
+              }
+            },
+            size: 18
+          }
+        },
+
+        // 背景和整体样式
+        configure: {
+          enabled: false
+        },
+
+        // 自动适配
+        autoResize: true,
+        height: '100%',
+        width: '100%'
+      };
+
+      // 准备节点数据
+      const getGroupLabel = (group: string) => {
+        switch (group) {
+          case 'core': return '🔴 核心人员';
+          case 'company': return '🏢 关联企业';
+          case 'involved_company': return '⚠️ 涉案企业';
+          case 'other': return '🔵 其他关联方';
+          default: return group;
         }
-      },
-      
-      // 背景和整体样式
-      configure: {
-        enabled: false
-      },
-      
-      // 自动适配
-      autoResize: true,
-      height: '100%',
-      width: '100%'
-    };
+      };
 
-    // 准备节点数据
-    const nodes = new DataSet<Node>(
-      graphData.nodes.map(node => ({
-        id: node.id,
-        label: node.label,
-        value: node.size || 20,
-        group: node.group,
-        title: `${node.label}\n类型: ${node.group}`
-      }))
-    );
+      // 处理节点数据，确保 size/value 正确
+      const processedNodes = graphData.nodes.map(node => {
+        // 根据 group 设置默认大小
+        let nodeSize = node.size || 20;
+        if (node.group === 'core') nodeSize = Math.max(nodeSize, 35);
+        else if (node.group === 'involved_company') nodeSize = Math.max(nodeSize, 40);
+        else if (node.group === 'company') nodeSize = Math.max(nodeSize, 25);
+        else nodeSize = Math.max(nodeSize, 18);
 
-    // 准备边数据（与 HTML 完全一致的格式）
-    const edges = new DataSet<Edge>(
-      graphData.edges.map(edge => ({
+        return {
+          id: node.id,
+          label: node.label,
+          value: nodeSize,
+          size: nodeSize,
+          group: node.group,
+          title: `【${node.label}】\n${getGroupLabel(node.group || 'other')}`
+        };
+      });
+
+      const nodes = new DataSet<Node>(processedNodes);
+
+      // 处理边数据
+      const processedEdges = graphData.edges.map(edge => ({
         from: edge.from,
         to: edge.to,
-        value: edge.value,
-        title: edge.title,
+        value: edge.value || 1,
+        title: edge.title || `${edge.from} → ${edge.to}`,
         arrows: 'to',
         color: { color: '#00d2ff', opacity: 0.8 },
         smooth: { enabled: true, type: 'curvedCW', roundness: 0.2 }
-      }))
-    );
+      }));
 
-    const data: Data = { nodes, edges };
+      const edges = new DataSet<Edge>(processedEdges);
 
-    // 创建网络实例
-    networkInstance.current = new Network(networkRef.current, data, options);
+      const data: Data = { nodes, edges };
 
-    // 事件监听
-    networkInstance.current.on('click', (params) => {
-      if (params.nodes.length > 0) {
-        const nodeId = params.nodes[0];
-        const node = nodes.get(nodeId);
-        // FIXME: vis-network definitions might vary, assume node is available or fetch from DataSet
-        if (node) {
-             // In some versions node might be just the object or need retrieval
-             // Let's safe check based on dataset retrieval
-             const nodeData = nodes.get(nodeId);
-             if (nodeData && !Array.isArray(nodeData)) {
-                const n = nodeData as any; // Temporary cast to fix build
-                setSelectedNode({ label: n.label, group: n.group });
-                onLog?.(`选中节点: ${n.label}`);
-             }
+      console.log('[NetworkGraph] 创建网络实例，节点:', processedNodes.length, '边:', processedEdges.length);
+
+      // 创建网络实例
+      networkInstance.current = new Network(networkRef.current, data, options);
+
+      // 稳定化完成后日志
+      networkInstance.current.on('stabilizationIterationsDone', () => {
+        console.log('[NetworkGraph] 网络稳定化完成');
+        onLog?.('网络图谱渲染完成');
+      });
+
+      // 事件监听
+      networkInstance.current.on('click', (params) => {
+        if (params.nodes.length > 0) {
+          const nodeId = params.nodes[0];
+          const nodeData = nodes.get(nodeId);
+          if (nodeData && !Array.isArray(nodeData)) {
+            const n = nodeData as any;
+            setSelectedNode({ label: n.label, group: n.group });
+            onLog?.(`选中节点: ${n.label}`);
+          }
+        } else {
+          setSelectedNode(null);
         }
-      } else {
-        setSelectedNode(null);
-      }
-    });
+      });
+
+      // 调试：打印创建成功
+      console.log('[NetworkGraph] 网络实例创建成功');
 
     } catch (err) {
-      console.error('Failed to initialize network graph:', err);
-      setError('图表初始化失败');
+      console.error('[NetworkGraph] 初始化失败:', err);
+      setError('图表初始化失败: ' + (err instanceof Error ? err.message : String(err)));
     }
 
-      return () => {
-        if (networkInstance.current) {
-          networkInstance.current.destroy();
-          networkInstance.current = null;
-        }
-      };
+    return () => {
+      if (networkInstance.current) {
+        networkInstance.current.destroy();
+        networkInstance.current = null;
+      }
+    };
   }, [graphData]);
 
   return (
-    <div className="h-full w-full flex bg-gradient-to-br from-gray-900 to-slate-900 text-white">
+    <div className="h-full w-full flex bg-gradient-to-br from-gray-900 to-slate-900 text-white" style={{ minHeight: '700px' }}>
       {/* 左侧统计面板 */}
       <div className="w-80 flex-shrink-0 bg-white/5 backdrop-blur-sm border-r border-white/10 flex flex-col">
         <div className="p-4 border-b border-white/10">
@@ -320,6 +378,27 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {/* 空状态提示 */}
+          {!graphData && !loading && (
+            <div className="flex flex-col items-center justify-center h-full text-center py-12">
+              <div className="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center mb-4">
+                <Info className="w-8 h-8 text-gray-500" />
+              </div>
+              <h4 className="text-gray-400 font-medium mb-2">暂无图谱数据</h4>
+              <p className="text-xs text-gray-500 leading-relaxed max-w-[200px]">
+                请先在侧边栏点击"启动引擎"运行分析，完成后数据将自动加载
+              </p>
+            </div>
+          )}
+
+          {/* 加载状态 */}
+          {loading && (
+            <div className="flex flex-col items-center justify-center h-full text-center py-12">
+              <div className="w-10 h-10 border-3 border-white/20 border-t-cyan-400 rounded-full animate-spin mb-4"></div>
+              <p className="text-sm text-gray-400">正在加载图谱数据...</p>
+            </div>
+          )}
+
           {/* 核心人员 */}
           {graphData && (
             <div className="stat-card bg-white/10 rounded-lg p-4 hover:translate-x-1 transition-transform cursor-default">
@@ -454,7 +533,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
             </h2>
             {graphData && (
               <div className="text-sm text-gray-400">
-                共 <span className="text-cyan-400">{graphData.stats.nodeCount}</span> 个节点, 
+                共 <span className="text-cyan-400">{graphData.stats.nodeCount}</span> 个节点,
                 <span className="text-cyan-400"> {graphData.stats.edgeCount}</span> 条资金流向
               </div>
             )}
@@ -476,7 +555,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
               </div>
             </div>
           )}
-          
+
           {error && (
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/50 z-10">
               <div className="text-red-400 mb-4 text-lg font-medium">{error}</div>
@@ -488,7 +567,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
               </button>
             </div>
           )}
-          
+
           {!graphData && !loading && !error && (
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/50 z-10">
               <div className="text-gray-400 mb-4 text-lg">暂无图谱数据</div>
@@ -500,7 +579,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
               </button>
             </div>
           )}
-          
+
           <div ref={networkRef} className="w-full h-full" />
         </div>
 
@@ -510,9 +589,9 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
             <div className="flex items-center gap-2 text-sm">
               <Info className="w-4 h-4 text-amber-400 flex-shrink-0" />
               <p className="text-gray-300">
-                {graphData.sampling.message} 
+                {graphData.sampling.message}
                 <span className="text-amber-300 ml-2">
-                  (展示 {graphData.sampling.sampledNodes}/{graphData.sampling.totalNodes} 节点, 
+                  (展示 {graphData.sampling.sampledNodes}/{graphData.sampling.totalNodes} 节点,
                   {graphData.sampling.sampledEdges}/{graphData.sampling.totalEdges} 连线)
                 </span>
               </p>
@@ -524,9 +603,9 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
         {graphData && graphData.report && (
           <div className="p-8 space-y-8 bg-gradient-to-b from-gray-900 to-slate-900">
             <div className="flex items-center gap-2 mb-6 border-b border-white/10 pb-4">
-               <Banknote className="w-6 h-6 text-cyan-400" />
-               <h3 className="text-xl font-bold text-white">详细核查报告</h3>
-               <span className="px-2 py-0.5 rounded text-xs bg-cyan-500/20 text-cyan-400 border border-cyan-500/30">AI 分析生成</span>
+              <Banknote className="w-6 h-6 text-cyan-400" />
+              <h3 className="text-xl font-bold text-white">详细核查报告</h3>
+              <span className="px-2 py-0.5 rounded text-xs bg-cyan-500/20 text-cyan-400 border border-cyan-500/30">AI 分析生成</span>
             </div>
 
             {/* 1. 借贷关系图 */}
@@ -537,143 +616,192 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
               </h4>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
-                   <div className="px-4 py-3 border-b border-white/10 bg-white/5 font-medium text-blue-300">
-                     疑似借贷配对 (借入/还款)
-                   </div>
-                   {graphData.report.loan_pairs.length > 0 ? (
-                     <table className="w-full text-sm">
-                       <thead className="text-gray-400 bg-black/20 text-xs">
-                         <tr>
-                            <th className="px-4 py-2 text-left">借款人</th>
-                            <th className="px-4 py-2 text-left">出借人</th>
-                            <th className="px-4 py-2 text-right">借入金额</th>
-                            <th className="px-4 py-2 text-right">还款金额</th>
-                         </tr>
-                       </thead>
-                       <tbody className="divide-y divide-white/5">
-                         {graphData.report.loan_pairs.map((item, idx) => (
-                           <tr key={idx} className="hover:bg-white/5 transition-colors">
-                             <td className="px-4 py-3 text-gray-300">{item.person}</td>
-                             <td className="px-4 py-3 text-gray-300">{item.counterparty}</td>
-                             <td className="px-4 py-3 text-right text-green-400 font-mono">¥{(item.loan_amount/10000).toFixed(1)}万</td>
-                             <td className="px-4 py-3 text-right text-red-400 font-mono">¥{(item.repay_amount/10000).toFixed(1)}万</td>
-                           </tr>
-                         ))}
-                       </tbody>
-                     </table>
-                   ) : (
-                     <div className="p-6 text-center text-gray-500 text-sm">暂无借贷配对记录</div>
-                   )}
+                  <div className="px-4 py-3 border-b border-white/10 bg-white/5 font-medium text-blue-300">
+                    疑似借贷配对 (借入/还款)
+                  </div>
+                  {graphData.report.loan_pairs.length > 0 ? (
+                    <table className="w-full text-sm">
+                      <thead className="text-gray-400 bg-black/20 text-xs">
+                        <tr>
+                          <th className="px-4 py-2 text-left">借款人</th>
+                          <th className="px-4 py-2 text-left">出借人</th>
+                          <th className="px-4 py-2 text-right">借入金额</th>
+                          <th className="px-4 py-2 text-right">还款金额</th>
+                          <th className="px-4 py-2 text-center">还款率</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-white/5">
+                        {graphData.report.loan_pairs.map((item, idx) => {
+                          const repayRate = item.loan_amount > 0
+                            ? Math.round((item.repay_amount / item.loan_amount) * 100)
+                            : 0;
+                          const rateColor = repayRate >= 100 ? 'text-green-400' :
+                            repayRate >= 50 ? 'text-amber-400' : 'text-red-400';
+                          const rateBg = repayRate >= 100 ? 'bg-green-500/20' :
+                            repayRate >= 50 ? 'bg-amber-500/20' : 'bg-red-500/20';
+                          return (
+                            <tr key={idx} className="hover:bg-white/5 transition-colors">
+                              <td className="px-4 py-3 text-gray-300">{item.person}</td>
+                              <td className="px-4 py-3 text-gray-300">{item.counterparty}</td>
+                              <td className="px-4 py-3 text-right text-green-400 font-mono">
+                                ¥{item.loan_amount >= 10000 ? (item.loan_amount / 10000).toFixed(1) + '万' : item.loan_amount.toLocaleString()}
+                              </td>
+                              <td className="px-4 py-3 text-right text-red-400 font-mono">
+                                ¥{item.repay_amount >= 10000 ? (item.repay_amount / 10000).toFixed(1) + '万' : item.repay_amount.toLocaleString()}
+                              </td>
+                              <td className="px-4 py-3 text-center">
+                                <span className={`px-2 py-0.5 rounded text-xs font-semibold ${rateBg} ${rateColor}`}>
+                                  {repayRate}%
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <div className="p-6 text-center text-gray-500 text-sm">暂无借贷配对记录</div>
+                  )}
                 </div>
 
                 <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
-                   <div className="px-4 py-3 border-b border-white/10 bg-white/5 font-medium text-orange-400 flex items-center gap-2">
-                     <AlertTriangle className="w-4 h-4" />
-                     无还款大额借贷 (疑似利益输送)
-                   </div>
-                   {graphData.report.no_repayment_loans.length > 0 ? (
-                     <table className="w-full text-sm">
-                       <thead className="text-gray-400 bg-black/20 text-xs">
-                         <tr>
-                            <th className="px-4 py-2 text-left">借款人</th>
-                            <th className="px-4 py-2 text-left">出借人</th>
-                            <th className="px-4 py-2 text-right">金额</th>
-                            <th className="px-4 py-2 text-right">未还天数</th>
-                         </tr>
-                       </thead>
-                       <tbody className="divide-y divide-white/5">
-                         {graphData.report.no_repayment_loans.map((item, idx) => (
-                           <tr key={idx} className="hover:bg-white/5 transition-colors">
-                             <td className="px-4 py-3 text-gray-300">{item.person}</td>
-                             <td className="px-4 py-3 text-gray-300">{item.counterparty}</td>
-                             <td className="px-4 py-3 text-right text-orange-400 font-bold font-mono">¥{(item.income_amount/10000).toFixed(1)}万</td>
-                             <td className="px-4 py-3 text-right text-gray-400">{item.days_since}天</td>
-                           </tr>
-                         ))}
-                       </tbody>
-                     </table>
-                   ) : (
-                     <div className="p-6 text-center text-gray-500 text-sm">暂无无还款记录</div>
-                   )}
+                  <div className="px-4 py-3 border-b border-white/10 bg-white/5 font-medium text-orange-400 flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4" />
+                    无还款大额借贷 (疑似利益输送)
+                  </div>
+                  {graphData.report.no_repayment_loans.length > 0 ? (
+                    <table className="w-full text-sm">
+                      <thead className="text-gray-400 bg-black/20 text-xs">
+                        <tr>
+                          <th className="px-4 py-2 text-left">借款人</th>
+                          <th className="px-4 py-2 text-left">出借人</th>
+                          <th className="px-4 py-2 text-right">金额</th>
+                          <th className="px-4 py-2 text-right">未还天数</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-white/5">
+                        {graphData.report.no_repayment_loans.map((item, idx) => (
+                          <tr key={idx} className="hover:bg-white/5 transition-colors">
+                            <td className="px-4 py-3 text-gray-300">{item.person}</td>
+                            <td className="px-4 py-3 text-gray-300">{item.counterparty}</td>
+                            <td className="px-4 py-3 text-right text-orange-400 font-bold font-mono">¥{(item.income_amount / 10000).toFixed(1)}万</td>
+                            <td className={`px-4 py-3 text-right font-semibold ${item.days_since >= 180 ? 'text-red-400' :
+                              item.days_since >= 90 ? 'text-amber-400' : 'text-green-400'
+                              }`}>
+                              {item.days_since}天
+                              {item.days_since >= 180 && <span className="ml-1 text-[10px]">⚠️</span>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <div className="p-6 text-center text-gray-500 text-sm">暂无无还款记录</div>
+                  )}
                 </div>
               </div>
             </div>
 
             {/* 2. 异常收入与网贷 */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-               {/* 高风险收入 */}
-               <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
-                   <div className="px-4 py-3 border-b border-white/10 bg-white/5 font-medium text-red-400 flex items-center gap-2">
-                     <AlertTriangle className="w-4 h-4" />
-                     高风险异常收入来源
-                   </div>
-                   {graphData.report.high_risk_income.length > 0 ? (
-                     <div className="max-h-60 overflow-y-auto">
-                      <table className="w-full text-sm">
-                        <thead className="text-gray-400 bg-black/20 text-xs sticky top-0 backdrop-blur-md">
-                          <tr>
-                              <th className="px-4 py-2 text-left">收款人</th>
-                              <th className="px-4 py-2 text-left">来源方</th>
-                              <th className="px-4 py-2 text-right">金额</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-white/5">
-                          {graphData.report.high_risk_income.map((item, idx) => (
+              {/* 高风险收入 */}
+              <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
+                <div className="px-4 py-3 border-b border-white/10 bg-white/5 font-medium text-red-400 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4" />
+                  高风险异常收入来源
+                </div>
+                {graphData.report.high_risk_income.length > 0 ? (
+                  <div className="max-h-60 overflow-y-auto">
+                    <table className="w-full text-sm">
+                      <thead className="text-gray-400 bg-black/20 text-xs sticky top-0 backdrop-blur-md">
+                        <tr>
+                          <th className="px-4 py-2 text-left">收款人</th>
+                          <th className="px-4 py-2 text-left">来源方</th>
+                          <th className="px-4 py-2 text-right">金额</th>
+                          <th className="px-4 py-2 text-center">风险</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-white/5">
+                        {graphData.report.high_risk_income.map((item, idx) => {
+                          const riskLevel = item.risk_level || 'high';
+                          const riskConfig = {
+                            high: { bg: 'bg-red-500/20', text: 'text-red-400', label: '高' },
+                            medium: { bg: 'bg-amber-500/20', text: 'text-amber-400', label: '中' },
+                            low: { bg: 'bg-green-500/20', text: 'text-green-400', label: '低' }
+                          }[riskLevel] || { bg: 'bg-gray-500/20', text: 'text-gray-400', label: '?' };
+                          return (
                             <tr key={idx} className="hover:bg-white/5 transition-colors">
                               <td className="px-4 py-3 text-gray-300">{item.person}</td>
                               <td className="px-4 py-3 text-gray-300">{item.counterparty}</td>
                               <td className="px-4 py-3 text-right text-red-400 font-bold font-mono">
-                                ¥{item.amount >= 10000 ? (item.amount/10000).toFixed(1) + '万' : item.amount.toFixed(0)}
+                                ¥{item.amount >= 10000 ? (item.amount / 10000).toFixed(1) + '万' : item.amount.toFixed(0)}
+                              </td>
+                              <td className="px-4 py-3 text-center">
+                                <span className={`px-2 py-0.5 rounded text-xs font-semibold ${riskConfig.bg} ${riskConfig.text}`}>
+                                  {riskConfig.label}
+                                </span>
                               </td>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                     </div>
-                   ) : (
-                     <div className="p-6 text-center text-gray-500 text-sm">暂无高风险收入记录</div>
-                   )}
-               </div>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="p-6 text-center text-gray-500 text-sm">暂无高风险收入记录</div>
+                )}
+              </div>
 
-               {/* 网贷统计 */}
-               <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
-                   <div className="px-4 py-3 border-b border-white/10 bg-white/5 font-medium text-violet-400 flex items-center gap-2">
-                     <Landmark className="w-4 h-4" />
-                     网贷平台互动统计
-                   </div>
-                   {graphData.report.online_loans.length > 0 ? (
-                      <div className="max-h-60 overflow-y-auto">
-                        <table className="w-full text-sm">
-                        <thead className="text-gray-400 bg-black/20 text-xs sticky top-0 backdrop-blur-md">
-                          <tr>
-                              <th className="px-4 py-2 text-left">平台/机构</th>
-                              <th className="px-4 py-2 text-right">涉及金额</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-white/5">
-                          {/* 简单的聚合统计展示 */}
-                          {Object.entries(
-                             graphData.report.online_loans.reduce((acc, curr) => {
-                                acc[curr.platform] = (acc[curr.platform] || 0) + curr.amount;
-                                return acc;
-                             }, {} as Record<string, number>)
-                          )
-                          .sort(([, a], [, b]) => b - a)
-                          .map(([platform, amount], idx) => (
+              {/* 网贷统计 */}
+              <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
+                <div className="px-4 py-3 border-b border-white/10 bg-white/5 font-medium text-violet-400 flex items-center gap-2">
+                  <Landmark className="w-4 h-4" />
+                  网贷平台互动统计
+                </div>
+                {graphData.report.online_loans.length > 0 ? (
+                  <div className="max-h-60 overflow-y-auto">
+                    <table className="w-full text-sm">
+                      <thead className="text-gray-400 bg-black/20 text-xs sticky top-0 backdrop-blur-md">
+                        <tr>
+                          <th className="px-4 py-2 text-left">平台/机构</th>
+                          <th className="px-4 py-2 text-right">涉及金额</th>
+                          <th className="px-4 py-2 text-center">笔数</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-white/5">
+                        {/* 聚合统计：金额+笔数 */}
+                        {Object.entries(
+                          graphData.report.online_loans.reduce((acc, curr) => {
+                            if (!acc[curr.platform]) {
+                              acc[curr.platform] = { amount: 0, count: 0 };
+                            }
+                            acc[curr.platform].amount += curr.amount;
+                            acc[curr.platform].count += 1;
+                            return acc;
+                          }, {} as Record<string, { amount: number; count: number }>)
+                        )
+                          .sort(([, a], [, b]) => b.amount - a.amount)
+                          .map(([platform, stats], idx) => (
                             <tr key={idx} className="hover:bg-white/5 transition-colors">
                               <td className="px-4 py-3 text-gray-300">{platform}</td>
                               <td className="px-4 py-3 text-right text-violet-400 font-mono">
-                                ¥{amount >= 10000 ? (amount/10000).toFixed(1) + '万' : amount.toFixed(0)}
+                                ¥{stats.amount >= 10000 ? (stats.amount / 10000).toFixed(1) + '万' : stats.amount.toLocaleString()}
+                              </td>
+                              <td className="px-4 py-3 text-center">
+                                <span className={`px-1.5 py-0.5 rounded text-xs font-mono ${stats.count >= 5 ? 'bg-amber-500/20 text-amber-400' : 'text-gray-400'
+                                  }`}>
+                                  {stats.count}笔
+                                </span>
                               </td>
                             </tr>
                           ))}
-                        </tbody>
-                      </table>
-                     </div>
-                   ) : (
-                     <div className="p-6 text-center text-gray-500 text-sm">无网贷平台记录</div>
-                   )}
-               </div>
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="p-6 text-center text-gray-500 text-sm">无网贷平台记录</div>
+                )}
+              </div>
             </div>
           </div>
         )}

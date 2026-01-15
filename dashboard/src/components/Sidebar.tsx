@@ -175,21 +175,61 @@ export function Sidebar() {
                             {analysis.isRunning ? (
                                 <>
                                     <Square className="w-4 h-4 fill-current" />
-                                    <span className="uppercase tracking-wider text-sm">终止分析</span>
+                                    <span className="uppercase tracking-wider text-sm">停止分析</span>
                                 </>
                             ) : (
                                 <>
                                     <Play className="w-4 h-4 fill-current" />
-                                    <span className="uppercase tracking-wider text-sm">启动引擎</span>
+                                    <span className="uppercase tracking-wider text-sm">开始分析</span>
                                 </>
                             )}
                         </div>
                     </button>
 
                     {analysis.isRunning && (
-                        <div className="mt-3 flex items-center gap-2 text-xs text-gray-400">
-                            <div className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-                            <span>{analysis.currentPhase || '正在分析...'}</span>
+                        <div className="mt-3 space-y-2">
+                            {/* 进度条 */}
+                            <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                                <div
+                                    className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 transition-all duration-500 ease-out"
+                                    style={{ width: `${analysis.progress || 0}%` }}
+                                />
+                            </div>
+                            {/* 进度文字 */}
+                            <div className="flex items-center justify-between text-xs">
+                                <div className="flex items-center gap-2 text-gray-400">
+                                    <div className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                                    <span className="truncate max-w-[160px]">{analysis.currentPhase || '正在分析...'}</span>
+                                </div>
+                                <span className="text-cyan-400 font-mono font-semibold">{analysis.progress || 0}%</span>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* 分析完成状态 */}
+                    {analysis.status === 'completed' && !analysis.isRunning && (
+                        <div className="mt-3 flex items-center gap-2 text-xs">
+                            <div className="w-4 h-4 rounded-full bg-green-500/20 flex items-center justify-center">
+                                <svg className="w-2.5 h-2.5 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                </svg>
+                            </div>
+                            <span className="text-green-400">分析完成</span>
+                            {analysis.lastRunTime && (
+                                <span className="text-gray-500 ml-auto">
+                                    {analysis.lastRunTime.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
+                                </span>
+                            )}
+                        </div>
+                    )}
+
+                    {/* 分析失败状态 */}
+                    {analysis.status === 'failed' && !analysis.isRunning && (
+                        <div className="mt-3 flex items-center gap-2 text-xs">
+                            <div className="w-4 h-4 rounded-full bg-red-500/20 flex items-center justify-center">
+                                <span className="text-red-400 font-bold">×</span>
+                            </div>
+                            <span className="text-red-400 truncate">{analysis.currentPhase || '分析失败'}</span>
                         </div>
                     )}
                 </div>
@@ -271,6 +311,10 @@ export function Sidebar() {
                                     onChange={(e) => updateThresholds({ cashThreshold: Number(e.target.value) })}
                                     className="w-full h-2 bg-gray-800 rounded-lg appearance-none cursor-pointer accent-cyan-500"
                                 />
+                                <div className="flex justify-between text-[10px] text-gray-600 mt-1">
+                                    <span>¥1万</span>
+                                    <span>¥50万</span>
+                                </div>
                             </div>
                             <div>
                                 <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider mb-1.5 flex justify-between">
@@ -286,6 +330,10 @@ export function Sidebar() {
                                     onChange={(e) => updateThresholds({ timeWindow: Number(e.target.value) })}
                                     className="w-full h-2 bg-gray-800 rounded-lg appearance-none cursor-pointer accent-cyan-500"
                                 />
+                                <div className="flex justify-between text-[10px] text-gray-600 mt-1">
+                                    <span>1h</span>
+                                    <span>168h (7天)</span>
+                                </div>
                             </div>
                         </div>
                     </ConfigSection>
@@ -313,11 +361,11 @@ export function Sidebar() {
                         </div>
                     </ConfigSection>
 
-                    {/* Navigation Section */}
+                    {/* Navigation Section - Quick Access */}
                     <div className="mt-6">
                         <h3 className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-3 px-2 flex items-center gap-2">
                             <span className="w-1 h-3 bg-gradient-to-b from-violet-500 to-fuchsia-500 rounded-full" />
-                            导航菜单
+                            快捷导航
                         </h3>
                         <nav className="space-y-1">
                             {navItems.map(({ id, label, icon: Icon }) => (
