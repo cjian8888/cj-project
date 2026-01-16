@@ -88,6 +88,10 @@ def detect_cash_time_collision(withdrawals: pd.DataFrame, deposits: pd.DataFrame
                 'deposit_entity': entity_name,      # 存现方
                 'withdrawal_date': row['date_wd'],
                 'deposit_date': row['date_dp'],
+                'withdrawal_bank': row.get('银行来源_wd', '未知'),
+                'deposit_bank': row.get('银行来源_dp', '未知'),
+                'withdrawal_source': row.get('数据来源_wd', '未知'),
+                'deposit_source': row.get('数据来源_dp', '未知'),
                 'time_diff_hours': round(row['hours_diff'], 2), # 字段名适配
                 'withdrawal_amount': row['amount_wd'],
                 'deposit_amount': row['amount_dp'],
@@ -97,6 +101,106 @@ def detect_cash_time_collision(withdrawals: pd.DataFrame, deposits: pd.DataFrame
                 'risk_reason': f"取现{row['amount_wd']}元与存现{row['amount_dp']}元时间间隔{row['hours_diff']:.1f}小时内，金额接近"
             })
             
+    return collisions
+
+
+def detect_cross_entity_cash_collision(
+    all_withdrawals: List[Dict],
+    all_deposits: List[Dict],
+    time_window_hours: float = config.CASH_TIME_WINDOW_HOURS,
+    amount_tolerance: float = config.AMOUNT_TOLERANCE_RATIO
+) -> List[Dict]:
+    """
+    跨实体现金碰撞检测 - 核心审计功能
+    
+    检测不同人之间的现金取存时空伴随模式，这是识别洗钱、利益输送的关键手段。
+    
+    典型场景:
+    - Person A 在 ATM 取现 5万
+    - Person B 30分钟后在同一/附近 ATM 存入 5万
+    
+    Args:
+        all_withdrawals: 所有实体的取现记录列表 [{entity, date, amount, bank, ...}, ...]
+        all_deposits: 所有实体的存现记录列表 [{entity, date, amount, bank, ...}, ...]
+        time_window_hours: 时间窗口（小时）
+        amount_tolerance: 金额容差比例
+    
+    Returns:
+        跨实体现金碰撞列表
+    """
+    collisions = []
+    
+    if not all_withdrawals or not all_deposits:
+        return collisions
+    
+    # 按时间排序以优化搜索
+    sorted_withdrawals = sorted(all_withdrawals, key=lambda x: x['date'])
+    sorted_deposits = sorted(all_deposits, key=lambda x: x['date'])
+    
+    for wd in sorted_withdrawals:
+        wd_entity = wd['entity']
+        wd_date = wd['date']
+        wd_amount = wd['amount']
+        
+        for dp in sorted_deposits:
+            dp_entity = dp['entity']
+            dp_date = dp['date']
+            dp_amount = dp['amount']
+            
+            # 跳过同一实体的记录（单实体内碰撞在其他函数处理）
+            if wd_entity == dp_entity:
+                continue
+            
+            # 存现应在取现之后（或同时）
+            if dp_date < wd_date:
+                continue
+            
+            # 计算时间差
+            time_diff = (dp_date - wd_date).total_seconds() / 3600
+            
+            # 超出时间窗口则跳过
+            if time_diff > time_window_hours:
+                continue
+            
+            # 检查金额匹配
+            amount_diff = abs(wd_amount - dp_amount)
+            amount_ratio = amount_diff / wd_amount if wd_amount > 0 else 1.0
+            
+            if amount_ratio <= amount_tolerance:
+                # 判断风险等级
+                if time_diff < 2 and amount_ratio < 0.01:
+                    risk = 'high'
+                    risk_desc = '极高相关性'
+                elif time_diff < 12 and amount_ratio < 0.05:
+                    risk = 'high'
+                    risk_desc = '高度可疑'
+                elif time_diff < 24:
+                    risk = 'medium'
+                    risk_desc = '需进一步核查'
+                else:
+                    risk = 'low'
+                    risk_desc = '可能巧合'
+                
+                collisions.append({
+                    'withdrawal_entity': wd_entity,
+                    'deposit_entity': dp_entity,
+                    'withdrawal_date': wd_date,
+                    'deposit_date': dp_date,
+                    'withdrawal_amount': wd_amount,
+                    'deposit_amount': dp_amount,
+                    'withdrawal_bank': wd.get('bank', '未知'),
+                    'deposit_bank': dp.get('bank', '未知'),
+                    'withdrawal_source': wd.get('source_file', ''),
+                    'deposit_source': dp.get('source_file', ''),
+                    'time_diff_hours': round(time_diff, 2),
+                    'amount_diff': round(amount_diff, 2),
+                    'amount_diff_ratio': round(amount_ratio, 4),
+                    'risk_level': risk,
+                    'risk_reason': f"[跨实体] {wd_entity}取现{wd_amount/10000:.2f}万 → "
+                                   f"{dp_entity}存现{dp_amount/10000:.2f}万, "
+                                   f"时差{time_diff:.1f}小时, {risk_desc}"
+                })
+    
     return collisions
 
 
@@ -138,6 +242,10 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
                 return True
         return False
 
+    # 收集所有实体的取现和存现记录（用于跨实体检测）
+    all_withdrawals = []
+    all_deposits = []
+
     for entity_name, df in cleaned_data.items():
         if df.empty:
             continue
@@ -168,12 +276,48 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
             withdrawals['amount'] = withdrawals['amount'].abs()
             deposits['amount'] = deposits['amount']
 
-        # 执行检测
+        # 执行单实体内检测
         collisions = detect_cash_time_collision(withdrawals, deposits, entity_name)
         
         if collisions:
-            logger.info(f'    [{entity_name}] 发现 {len(collisions)} 处现金时空伴随')
+            logger.info(f'    [{entity_name}] 发现 {len(collisions)} 处现金时空伴随(单实体)')
             results['cash_collisions'].extend(collisions)
+        
+        # 收集取现和存现记录用于跨实体检测
+        for _, row in withdrawals.iterrows():
+            bank_val = row.get('银行来源', row.get('bank', ''))
+            source_val = row.get('数据来源', row.get('source_file', ''))
+            all_withdrawals.append({
+                'entity': entity_name,
+                'date': row['date'],
+                'amount': row['amount'],
+                'bank': str(bank_val) if bank_val and str(bank_val) != 'nan' else '',
+                'source_file': str(source_val) if source_val and str(source_val) != 'nan' else '',
+                'description': row.get('description', '')
+            })
+        
+        for _, row in deposits.iterrows():
+            bank_val = row.get('银行来源', row.get('bank', ''))
+            source_val = row.get('数据来源', row.get('source_file', ''))
+            all_deposits.append({
+                'entity': entity_name,
+                'date': row['date'],
+                'amount': row['amount'],
+                'bank': str(bank_val) if bank_val and str(bank_val) != 'nan' else '',
+                'source_file': str(source_val) if source_val and str(source_val) != 'nan' else '',
+                'description': row.get('description', '')
+            })
+    
+    # ============================
+    # 1.1 跨实体现金碰撞检测（核心审计功能）
+    # ============================
+    if all_withdrawals and all_deposits:
+        logger.info('  -> 正在检测跨实体现金碰撞（洗钱模式识别）...')
+        cross_collisions = detect_cross_entity_cash_collision(all_withdrawals, all_deposits)
+        
+        if cross_collisions:
+            logger.info(f'    发现 {len(cross_collisions)} 处跨实体现金碰撞')
+            results['cash_collisions'].extend(cross_collisions)
             
     # ============================
     # 2. 直接资金往来检测 (修复：适配 report_generator 需求)
@@ -199,6 +343,12 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
                         else:
                             risk = 'low'
                             
+                        # 提取上下文信息 (处理 category 类型和 NaN)
+                        bank_val = row.get('银行来源', None)
+                        source_val = row.get('数据来源', None)
+                        bank = str(bank_val) if bank_val is not None and str(bank_val) != 'nan' else ''
+                        source_file = str(source_val) if source_val is not None and str(source_val) != 'nan' else ''
+                        
                         results['direct_transfers'].append({
                             'person': person,
                             'company': company,
@@ -206,6 +356,8 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
                             'amount': amount,
                             'direction': 'payment',  # 付款
                             'description': row.get('description', ''),
+                            'bank': bank,
+                            'source_file': source_file,
                             'risk_level': risk
                         })
                 
@@ -222,6 +374,12 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
                             risk = 'medium'
                         else:
                             risk = 'low'
+                        
+                        # 提取上下文信息 (处理 category 类型和 NaN)
+                        bank_val = row.get('银行来源', None)
+                        source_val = row.get('数据来源', None)
+                        bank = str(bank_val) if bank_val is not None and str(bank_val) != 'nan' else ''
+                        source_file = str(source_val) if source_val is not None and str(source_val) != 'nan' else ''
                             
                         results['direct_transfers'].append({
                             'person': person,
@@ -230,6 +388,8 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
                             'amount': amount,
                             'direction': 'receive',  # 收款
                             'description': row.get('description', ''),
+                            'bank': bank,
+                            'source_file': source_file,
                             'risk_level': risk
                         })
                     

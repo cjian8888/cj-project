@@ -60,6 +60,8 @@ export interface Profile {
     totalIncome: number;
     totalExpense: number;
     transactionCount: number;
+    cashTotal?: number;        // 现金交易总额
+    maxTransaction?: number;   // 最大单笔交易金额
     accountAnalysisText?: string;
     wealthAccountAnalysis?: any;
     wealthAccountReport?: string;
@@ -92,6 +94,14 @@ export interface CashCollision {
     amount2: number;
     location1?: string;
     location2?: string;
+    // 新增后端返回的字段
+    timeDiff?: number;
+    riskLevel?: string;
+    riskReason?: string;
+    withdrawalBank?: string;
+    depositBank?: string;
+    withdrawalSource?: string;
+    depositSource?: string;
 }
 
 export interface HiddenAsset {

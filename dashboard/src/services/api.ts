@@ -28,6 +28,8 @@ export interface Profile {
     totalIncome: number;
     totalExpense: number;
     transactionCount: number;
+    cashTotal?: number;
+    maxTransaction?: number;
 }
 
 export interface SuspiciousTransaction {
@@ -92,6 +94,10 @@ class ApiService {
 
     constructor(baseUrl: string = API_BASE_URL) {
         this.baseUrl = baseUrl;
+    }
+
+    public get baseURL(): string {
+        return this.baseUrl;
     }
 
     /**
@@ -298,12 +304,39 @@ class WebSocketService {
     private ws: WebSocket | null = null;
     private url: string;
     private callbacks: Set<WebSocketCallback> = new Set();
+    private statusCallbacks: Set<(status: 'connecting' | 'connected' | 'disconnected' | 'error') => void> = new Set();
     private reconnectAttempts = 0;
     private maxReconnectAttempts = 5;
-    private reconnectDelay = 1000;
+    private reconnectDelay = 3000; // 3秒基础延迟
+    private _status: 'connecting' | 'connected' | 'disconnected' | 'error' = 'disconnected';
 
     constructor(url: string = WS_URL) {
         this.url = url;
+    }
+
+    /**
+     * 获取当前连接状态
+     */
+    get status(): 'connecting' | 'connected' | 'disconnected' | 'error' {
+        return this._status;
+    }
+
+    /**
+     * 更新状态并通知订阅者
+     */
+    private setStatus(status: 'connecting' | 'connected' | 'disconnected' | 'error'): void {
+        this._status = status;
+        this.statusCallbacks.forEach(cb => cb(status));
+    }
+
+    /**
+     * 订阅连接状态变化
+     */
+    subscribeStatus(callback: (status: 'connecting' | 'connected' | 'disconnected' | 'error') => void): () => void {
+        this.statusCallbacks.add(callback);
+        // 立即通知当前状态
+        callback(this._status);
+        return () => this.statusCallbacks.delete(callback);
     }
 
     /**
@@ -314,12 +347,15 @@ class WebSocketService {
             return;
         }
 
+        this.setStatus('connecting');
+
         try {
             this.ws = new WebSocket(this.url);
 
             this.ws.onopen = () => {
                 console.log('[WS] Connected');
                 this.reconnectAttempts = 0;
+                this.setStatus('connected');
             };
 
             this.ws.onmessage = (event) => {
@@ -333,14 +369,17 @@ class WebSocketService {
 
             this.ws.onclose = () => {
                 console.log('[WS] Disconnected');
+                this.setStatus('disconnected');
                 this.attemptReconnect();
             };
 
             this.ws.onerror = (error) => {
                 console.error('[WS] Error:', error);
+                this.setStatus('error');
             };
         } catch (error) {
             console.error('[WS] Connection failed:', error);
+            this.setStatus('error');
             this.attemptReconnect();
         }
     }
@@ -349,10 +388,21 @@ class WebSocketService {
      * 断开连接
      */
     disconnect(): void {
+        this.reconnectAttempts = this.maxReconnectAttempts; // 阻止自动重连
         if (this.ws) {
             this.ws.close();
             this.ws = null;
         }
+        this.setStatus('disconnected');
+    }
+
+    /**
+     * 手动重连
+     */
+    reconnect(): void {
+        this.reconnectAttempts = 0;
+        this.disconnect();
+        setTimeout(() => this.connect(), 100);
     }
 
     /**
@@ -373,18 +423,20 @@ class WebSocketService {
     }
 
     /**
-     * 尝试重连
+     * 尝试重连 (指数退避，3秒起始，最多5次)
      */
     private attemptReconnect(): void {
         if (this.reconnectAttempts >= this.maxReconnectAttempts) {
             console.log('[WS] Max reconnect attempts reached');
+            this.setStatus('error');
             return;
         }
 
         this.reconnectAttempts++;
         const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
 
-        console.log(`[WS] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
+        console.log(`[WS] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+        this.setStatus('connecting');
 
         setTimeout(() => {
             this.connect();

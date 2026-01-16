@@ -253,12 +253,12 @@ export function Sidebar() {
                                         type="text"
                                         value={config.dataSources.inputDirectory.startsWith('./') ? config.dataSources.inputDirectory.slice(2) : config.dataSources.inputDirectory}
                                         onChange={(e) => updateDataSources({ inputDirectory: e.target.value })}
-                                        className="flex-1 bg-transparent text-sm px-3 py-2.5 text-gray-200 placeholder:text-gray-500 outline-none"
+                                        className="flex-1 min-w-0 bg-transparent text-sm px-3 py-2.5 text-gray-200 placeholder:text-gray-500 outline-none"
                                         placeholder="选择数据文件夹"
                                     />
                                     <button
                                         onClick={() => handleFolderSelect('input')}
-                                        className="px-3 border-l border-gray-700/80 text-gray-400 hover:text-blue-400 hover:bg-blue-500/10 transition-colors"
+                                        className="flex-shrink-0 px-3 border-l border-gray-700/80 text-gray-400 hover:text-blue-400 hover:bg-blue-500/10 transition-colors"
                                         title="选择文件夹"
                                     >
                                         <FolderOpen className="w-4 h-4" />
@@ -274,12 +274,12 @@ export function Sidebar() {
                                         type="text"
                                         value={config.dataSources.outputDirectory.startsWith('./') ? config.dataSources.outputDirectory.slice(2) : config.dataSources.outputDirectory}
                                         onChange={(e) => updateDataSources({ outputDirectory: e.target.value })}
-                                        className="flex-1 bg-transparent text-sm px-3 py-2.5 text-gray-200 placeholder:text-gray-500 outline-none"
+                                        className="flex-1 min-w-0 bg-transparent text-sm px-3 py-2.5 text-gray-200 placeholder:text-gray-500 outline-none"
                                         placeholder="选择输出文件夹"
                                     />
                                     <button
                                         onClick={() => handleFolderSelect('output')}
-                                        className="px-3 border-l border-gray-700/80 text-gray-400 hover:text-cyan-400 hover:bg-cyan-500/10 transition-colors"
+                                        className="flex-shrink-0 px-3 border-l border-gray-700/80 text-gray-400 hover:text-cyan-400 hover:bg-cyan-500/10 transition-colors"
                                         title="选择文件夹"
                                     >
                                         <HardDrive className="w-4 h-4" />

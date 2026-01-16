@@ -180,6 +180,16 @@ export function AppProvider({ children }: AppProviderProps) {
         const now = new Date();
         const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
 
+        // 如果分析已在运行，先停止旧的
+        if (analysis.isRunning) {
+            addLog({ time: timeStr, level: 'WARN', msg: '检测到分析正在运行，正在重置...' });
+            try {
+                await api.stopAnalysis();
+            } catch (e) {
+                // 忽略停止失败
+            }
+        }
+
         try {
             // 将 AnalysisModules 转换为 Record<string, boolean>
             const modules: Record<string, boolean> = config.analysisModules as unknown as Record<string, boolean>;
@@ -336,17 +346,25 @@ export function AppProvider({ children }: AppProviderProps) {
         };
     }, [addLog]);
 
-    const stopAnalysis = useCallback(() => {
+    const stopAnalysis = useCallback(async () => {
+        const now = new Date();
+        const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+        
+        try {
+            // 调用后端停止分析
+            await api.stopAnalysis();
+            addLog({ time: timeStr, level: 'WARN', msg: '■ 分析已被用户终止' });
+        } catch (error) {
+            addLog({ time: timeStr, level: 'WARN', msg: '■ 分析终止（后端可能已停止）' });
+        }
+
         setAnalysis(prev => ({
             ...prev,
             isRunning: false,
-            status: 'failed',
-            currentPhase: '分析已终止'
+            status: 'idle',
+            progress: 0,
+            currentPhase: '已就绪，可重新开始'
         }));
-
-        const now = new Date();
-        const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-        addLog({ time: timeStr, level: 'WARN', msg: '■ 分析已被用户终止' });
     }, [addLog]);
 
     const updateAnalysisProgress = useCallback((progress: number, phase: string) => {

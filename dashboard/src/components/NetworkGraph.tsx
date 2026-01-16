@@ -9,6 +9,7 @@ import {
   Landmark,
   Info
 } from 'lucide-react';
+import { formatPartyName, formatRiskLevel, getRiskLevelBadgeStyle, formatCurrency } from '../utils/formatters';
 
 interface NetworkGraphProps {
   onLog?: (message: string) => void;
@@ -71,6 +72,23 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<{ label: string; group: string } | null>(null);
+  const [viewMode, setViewMode] = useState<'graph' | 'report'>('graph');
+  const [reportUrl, setReportUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Check if report exists
+    fetch(`${API_BASE_URL}/api/reports/资金流向可视化.html`, { method: 'HEAD' })
+      .then(res => {
+        if (res.ok) {
+            setReportUrl(`${API_BASE_URL}/api/reports/资金流向可视化.html`);
+            // If we have an error or no graph data, default to report view if available
+            if (!graphData && !loading) {
+                setViewMode('report');
+            }
+        }
+      })
+      .catch(() => {});
+  }, [graphData, loading]);
 
   // 获取图谱数据
   const fetchGraphData = async () => {
@@ -78,9 +96,9 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
     setError(null);
 
     try {
-      // Add 10s timeout
+      // Add 60s timeout (graph-data API needs time to process large datasets)
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      const timeoutId = setTimeout(() => controller.abort(), 60000);
 
       const response = await fetch(`${API_BASE_URL}/api/analysis/graph-data`, {
         signal: controller.signal
@@ -297,11 +315,11 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
 
         return {
           id: node.id,
-          label: node.label,
+          label: formatPartyName(node.label),
           value: nodeSize,
           size: nodeSize,
           group: node.group,
-          title: `【${node.label}】\n${getGroupLabel(node.group || 'other')}`
+          title: `【${formatPartyName(node.label)}】\n${getGroupLabel(node.group || 'other')}`
         };
       });
 
@@ -385,9 +403,17 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                 <Info className="w-8 h-8 text-gray-500" />
               </div>
               <h4 className="text-gray-400 font-medium mb-2">暂无图谱数据</h4>
-              <p className="text-xs text-gray-500 leading-relaxed max-w-[200px]">
+              <p className="text-xs text-gray-500 leading-relaxed max-w-[200px] mb-4">
                 请先在侧边栏点击"启动引擎"运行分析，完成后数据将自动加载
               </p>
+              {reportUrl && (
+                  <button 
+                    onClick={() => setViewMode('report')}
+                    className="text-cyan-400 text-xs underline hover:text-cyan-300"
+                  >
+                    尝试查看静态报告
+                  </button>
+              )}
             </div>
           )}
 
@@ -529,58 +555,94 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
         <div className="h-16 flex-shrink-0 flex items-center justify-between px-6 bg-white/5 backdrop-blur-sm border-b border-white/10 sticky top-0 z-20">
           <div className="flex items-center space-x-4">
             <h2 className="text-xl font-bold bg-gradient-to-r from-cyan-400 to-blue-500 bg-clip-text text-transparent">
-              💰 资金流向可视化分析
+              {viewMode === 'graph' ? '💰 资金流向可视化分析' : '📑 完整资金流向报告'}
             </h2>
-            {graphData && (
+            {viewMode === 'graph' && graphData && (
               <div className="text-sm text-gray-400">
                 共 <span className="text-cyan-400">{graphData.stats.nodeCount}</span> 个节点,
                 <span className="text-cyan-400"> {graphData.stats.edgeCount}</span> 条资金流向
               </div>
             )}
           </div>
-          {selectedNode && (
-            <div className="text-sm text-cyan-400">
-              选中: {selectedNode.label} ({selectedNode.group})
-            </div>
-          )}
+          <div className="flex items-center gap-4">
+            {reportUrl && (
+                <div className="flex bg-white/5 rounded-lg p-1 border border-white/10">
+                    <button
+                        onClick={() => setViewMode('graph')}
+                        className={`px-3 py-1 rounded text-sm transition-colors ${viewMode === 'graph' ? 'bg-cyan-500/20 text-cyan-400' : 'text-gray-400 hover:text-white'}`}
+                    >
+                        交互视图
+                    </button>
+                    <button
+                        onClick={() => setViewMode('report')}
+                        className={`px-3 py-1 rounded text-sm transition-colors ${viewMode === 'report' ? 'bg-cyan-500/20 text-cyan-400' : 'text-gray-400 hover:text-white'}`}
+                    >
+                        完整报告
+                    </button>
+                </div>
+            )}
+            {selectedNode && viewMode === 'graph' && (
+                <div className="text-sm text-cyan-400">
+                选中: {selectedNode.label} ({selectedNode.group})
+                </div>
+            )}
+          </div>
         </div>
 
         {/* 图表区域 (固定高度) */}
         <div className="h-[600px] flex-shrink-0 relative border-b border-white/10 bg-gray-900/50">
-          {loading && (
-            <div className="absolute inset-0 flex items-center justify-center bg-black/50 z-10 transition-opacity duration-300">
-              <div className="text-center">
-                <div className="loading-spinner w-10 h-10 border-3 border-white/20 border-t-cyan-400 rounded-full animate-spin mx-auto mb-3"></div>
-                <div className="text-cyan-400 font-medium">数据分析中...</div>
-              </div>
-            </div>
-          )}
+          {viewMode === 'report' && reportUrl ? (
+             <iframe 
+                src={reportUrl} 
+                className="w-full h-full border-none bg-white"
+                title="Funds Flow Report"
+             />
+          ) : (
+            <>
+              {loading && (
+                <div className="absolute inset-0 flex items-center justify-center bg-black/50 z-10 transition-opacity duration-300">
+                  <div className="text-center">
+                    <div className="loading-spinner w-10 h-10 border-3 border-white/20 border-t-cyan-400 rounded-full animate-spin mx-auto mb-3"></div>
+                    <div className="text-cyan-400 font-medium">数据分析中...</div>
+                  </div>
+                </div>
+              )}
 
-          {error && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/50 z-10">
-              <div className="text-red-400 mb-4 text-lg font-medium">{error}</div>
-              <button
-                onClick={fetchGraphData}
-                className="px-6 py-2 bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-400 hover:to-blue-400 text-white rounded-lg font-medium transition-all shadow-lg shadow-cyan-500/20"
-              >
-                重新加载
-              </button>
-            </div>
-          )}
+              {error && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/50 z-10">
+                  <div className="text-red-400 mb-4 text-lg font-medium">{error}</div>
+                  <button
+                    onClick={fetchGraphData}
+                    className="px-6 py-2 bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-400 hover:to-blue-400 text-white rounded-lg font-medium transition-all shadow-lg shadow-cyan-500/20"
+                  >
+                    重新加载
+                  </button>
+                  {reportUrl && (
+                      <button 
+                        onClick={() => setViewMode('report')}
+                        className="mt-4 text-gray-400 text-sm hover:text-white underline"
+                      >
+                        查看静态报告
+                      </button>
+                  )}
+                </div>
+              )}
 
-          {!graphData && !loading && !error && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/50 z-10">
-              <div className="text-gray-400 mb-4 text-lg">暂无图谱数据</div>
-              <button
-                onClick={fetchGraphData}
-                className="px-6 py-2 bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-400 hover:to-blue-400 text-white rounded-lg font-medium transition-all shadow-lg shadow-cyan-500/20"
-              >
-                加载数据
-              </button>
-            </div>
-          )}
+              {!graphData && !loading && !error && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/50 z-10">
+                  <div className="text-gray-400 mb-4 text-lg">暂无图谱数据</div>
+                  <button
+                    onClick={fetchGraphData}
+                    className="px-6 py-2 bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-400 hover:to-blue-400 text-white rounded-lg font-medium transition-all shadow-lg shadow-cyan-500/20"
+                  >
+                    加载数据
+                  </button>
+                </div>
+              )}
 
-          <div ref={networkRef} className="w-full h-full" />
+              <div ref={networkRef} className="w-full h-full" />
+            </>
+          )}
         </div>
 
         {/* 采样提示信息 */}
@@ -642,7 +704,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                           return (
                             <tr key={idx} className="hover:bg-white/5 transition-colors">
                               <td className="px-4 py-3 text-gray-300">{item.person}</td>
-                              <td className="px-4 py-3 text-gray-300">{item.counterparty}</td>
+                              <td className="px-4 py-3 text-gray-300">{formatPartyName(item.counterparty)}</td>
                               <td className="px-4 py-3 text-right text-green-400 font-mono">
                                 ¥{item.loan_amount >= 10000 ? (item.loan_amount / 10000).toFixed(1) + '万' : item.loan_amount.toLocaleString()}
                               </td>
@@ -683,7 +745,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                         {graphData.report.no_repayment_loans.map((item, idx) => (
                           <tr key={idx} className="hover:bg-white/5 transition-colors">
                             <td className="px-4 py-3 text-gray-300">{item.person}</td>
-                            <td className="px-4 py-3 text-gray-300">{item.counterparty}</td>
+                            <td className="px-4 py-3 text-gray-300">{formatPartyName(item.counterparty)}</td>
                             <td className="px-4 py-3 text-right text-orange-400 font-bold font-mono">¥{(item.income_amount / 10000).toFixed(1)}万</td>
                             <td className={`px-4 py-3 text-right font-semibold ${item.days_since >= 180 ? 'text-red-400' :
                               item.days_since >= 90 ? 'text-amber-400' : 'text-green-400'
@@ -724,21 +786,16 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                       <tbody className="divide-y divide-white/5">
                         {graphData.report.high_risk_income.map((item, idx) => {
                           const riskLevel = item.risk_level || 'high';
-                          const riskConfig = {
-                            high: { bg: 'bg-red-500/20', text: 'text-red-400', label: '高' },
-                            medium: { bg: 'bg-amber-500/20', text: 'text-amber-400', label: '中' },
-                            low: { bg: 'bg-green-500/20', text: 'text-green-400', label: '低' }
-                          }[riskLevel] || { bg: 'bg-gray-500/20', text: 'text-gray-400', label: '?' };
                           return (
                             <tr key={idx} className="hover:bg-white/5 transition-colors">
                               <td className="px-4 py-3 text-gray-300">{item.person}</td>
-                              <td className="px-4 py-3 text-gray-300">{item.counterparty}</td>
+                              <td className="px-4 py-3 text-gray-300">{formatPartyName(item.counterparty)}</td>
                               <td className="px-4 py-3 text-right text-red-400 font-bold font-mono">
-                                ¥{item.amount >= 10000 ? (item.amount / 10000).toFixed(1) + '万' : item.amount.toFixed(0)}
+                                {formatCurrency(item.amount)}
                               </td>
                               <td className="px-4 py-3 text-center">
-                                <span className={`px-2 py-0.5 rounded text-xs font-semibold ${riskConfig.bg} ${riskConfig.text}`}>
-                                  {riskConfig.label}
+                                <span className={getRiskLevelBadgeStyle(riskLevel)}>
+                                  {formatRiskLevel(riskLevel)}
                                 </span>
                               </td>
                             </tr>

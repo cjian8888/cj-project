@@ -1,20 +1,29 @@
 import React from 'react';
-import { Users, Activity, ShieldAlert, Server, TrendingUp, TrendingDown, Minus } from 'lucide-react';
+import { Users, Activity, ShieldAlert, TrendingUp, TrendingDown, Minus, Banknote } from 'lucide-react';
 import { useApp } from '../contexts/AppContext';
 import { formatAmountInWan } from '../utils/formatters';
 
 export function KPICards() {
-    const { data, analysis } = useApp();
+    const { data } = useApp();
 
     // Calculate real stats from data
     const entityCount = data.persons.length + data.companies.length;
-    const totalTransactions = Object.values(data.profiles || {}).reduce(
-        (sum, profile) => sum + (profile.transactionCount || 0),
-        0
+    
+    // Calculate financial metrics from profiles
+    const profiles = Object.values(data.profiles || {});
+    const totalTransactions = profiles.reduce(
+        (sum, p) => sum + (p.transactionCount || 0), 0
     );
+    const totalFlow = profiles.reduce(
+        (sum, p) => sum + (p.totalIncome || 0) + (p.totalExpense || 0), 0
+    );
+    const maxSingleTx = Math.max(...profiles.map(p => p.maxTransaction || 0), 0);
+    const totalCash = profiles.reduce(
+        (sum, p) => sum + (p.cashTotal || 0), 0
+    );
+    
     const highRiskFunds = (data.suspicions.directTransfers || []).reduce(
-        (sum, tx) => sum + (tx.amount || 0),
-        0
+        (sum, tx) => sum + (tx.amount || 0), 0
     );
     const suspicionCount = (data.suspicions.directTransfers || []).length +
         (data.suspicions.cashCollisions || []).length +
@@ -22,36 +31,49 @@ export function KPICards() {
 
     const kpis = [
         {
-            id: 'entities',
-            label: '已分析实体',
+            id: 'overview',
+            label: '审计概览',
             value: entityCount.toLocaleString(),
-            subLabel: `${data.persons.length} 个人 / ${data.companies.length} 企业`,
+            subLabel: `${totalTransactions.toLocaleString()} 笔交易 / ${data.persons.length}人 ${data.companies.length}企`,
             icon: Users,
             trend: (entityCount > 0 ? 'up' : 'neutral') as 'up' | 'neutral' | 'down',
-            trendValue: entityCount > 0 ? '本次分析' : '待分析',
+            trendValue: entityCount > 0 ? '数据已导入' : '等待数据',
             gradient: 'from-blue-500 to-cyan-500',
             glowColor: 'shadow-blue-500/20',
             iconBg: 'bg-blue-500/10',
             iconColor: 'text-blue-400',
         },
         {
-            id: 'transactions',
-            label: '交易总数',
-            value: totalTransactions.toLocaleString(),
-            subLabel: '银行流水记录',
+            id: 'flow',
+            label: '资金规模',
+            value: formatAmountInWan(totalFlow),
+            subLabel: `最大单笔: ${formatAmountInWan(maxSingleTx)}`,
             icon: Activity,
-            trend: (totalTransactions > 1000 ? 'up' : 'neutral') as 'up' | 'neutral' | 'down',
-            trendValue: totalTransactions > 1000 ? '数据充足' : '待分析',
+            trend: (totalFlow > 1000000 ? 'up' : 'neutral') as 'up' | 'neutral' | 'down',
+            trendValue: totalFlow > 0 ? '资金充裕' : '无流水',
             gradient: 'from-cyan-500 to-teal-500',
             glowColor: 'shadow-cyan-500/20',
             iconBg: 'bg-cyan-500/10',
             iconColor: 'text-cyan-400',
         },
         {
+            id: 'cash',
+            label: '现金交易',
+            value: formatAmountInWan(totalCash),
+            subLabel: totalFlow > 0 ? `占比 ${((totalCash / totalFlow) * 100).toFixed(1)}%` : '占比 0%',
+            icon: Banknote,
+            trend: (totalCash > 500000 ? 'up' : 'neutral') as 'up' | 'neutral' | 'down',
+            trendValue: totalCash > 0 ? '现金密集' : '正常',
+            gradient: 'from-violet-500 to-purple-500',
+            glowColor: 'shadow-violet-500/20',
+            iconBg: 'bg-violet-500/10',
+            iconColor: 'text-violet-400',
+        },
+        {
             id: 'risk',
-            label: '高风险资金',
+            label: '风险研判',
             value: formatAmountInWan(highRiskFunds),
-            subLabel: `${suspicionCount} 条可疑记录`,
+            subLabel: `${suspicionCount} 条异常线索`,
             icon: ShieldAlert,
             trend: (highRiskFunds > 0 ? 'down' : 'neutral') as 'up' | 'neutral' | 'down',
             trendValue: highRiskFunds > 0 ? '❗ 需核查' : '✅ 无异常',
@@ -59,36 +81,6 @@ export function KPICards() {
             glowColor: 'shadow-red-500/20',
             iconBg: 'bg-red-500/10',
             iconColor: 'text-red-400',
-        },
-        {
-            id: 'status',
-            label: '系统状态',
-            value: analysis.isRunning ? '分析中' : analysis.status === 'completed' ? '已完成' : '就绪',
-            subLabel: analysis.isRunning ? `${analysis.progress}% 完成` : '等待指令',
-            icon: Server,
-            trend: (analysis.isRunning ? 'up' : analysis.status === 'completed' ? 'up' : 'neutral') as 'up' | 'neutral' | 'down',
-            trendValue: analysis.isRunning ? '运行中' : analysis.status === 'completed' ? '成功' : '待机',
-            gradient: analysis.isRunning
-                ? 'from-amber-500 to-yellow-500'
-                : analysis.status === 'completed'
-                    ? 'from-green-500 to-emerald-500'
-                    : 'from-gray-500 to-slate-500',
-            glowColor: analysis.isRunning
-                ? 'shadow-amber-500/20'
-                : analysis.status === 'completed'
-                    ? 'shadow-green-500/20'
-                    : 'shadow-gray-500/10',
-            iconBg: analysis.isRunning
-                ? 'bg-amber-500/10'
-                : analysis.status === 'completed'
-                    ? 'bg-green-500/10'
-                    : 'bg-gray-500/10',
-            iconColor: analysis.isRunning
-                ? 'text-amber-400'
-                : analysis.status === 'completed'
-                    ? 'text-green-400'
-                    : 'text-gray-400',
-            isStatus: true,
         },
     ];
 

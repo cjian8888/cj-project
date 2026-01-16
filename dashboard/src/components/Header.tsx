@@ -1,8 +1,35 @@
-import { Bell, Search, User, Zap } from 'lucide-react';
+import { Bell, Search, User, Zap, Wifi, WifiOff } from 'lucide-react';
 import { useApp } from '../contexts/AppContext';
+import { ws } from '../services/api';
+import { useState, useEffect } from 'react';
+
+type WSStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
 
 export function Header() {
     const { analysis } = useApp();
+    const [wsStatus, setWsStatus] = useState<WSStatus>(ws.status);
+
+    // 订阅 WebSocket 状态变化
+    useEffect(() => {
+        const unsubscribe = ws.subscribeStatus(setWsStatus);
+        return unsubscribe;
+    }, []);
+
+    const getWSStatusConfig = () => {
+        switch (wsStatus) {
+            case 'connected':
+                return { icon: Wifi, color: 'text-green-400', bg: 'bg-green-500/10', border: 'border-green-500/30', label: '已连接', pulse: false };
+            case 'connecting':
+                return { icon: Wifi, color: 'text-amber-400', bg: 'bg-amber-500/10', border: 'border-amber-500/30', label: '连接中', pulse: true };
+            case 'error':
+                return { icon: WifiOff, color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/30', label: '连接失败', pulse: false };
+            default:
+                return { icon: WifiOff, color: 'text-gray-400', bg: 'bg-gray-800/50', border: 'border-gray-700', label: '未连接', pulse: false };
+        }
+    };
+
+    const wsConfig = getWSStatusConfig();
+    const WSIcon = wsConfig.icon;
 
     return (
         <header className="px-6 lg:px-8 py-5 border-b border-gray-800/50 bg-[#030712]/80 backdrop-blur-xl shrink-0 relative z-20">
@@ -49,6 +76,16 @@ export function Header() {
 
                 {/* Right Section - Actions */}
                 <div className="flex items-center gap-3">
+                    {/* WebSocket Connection Status */}
+                    <button
+                        onClick={() => wsStatus !== 'connected' && ws.reconnect()}
+                        className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-medium transition-all ${wsConfig.bg} ${wsConfig.color} border ${wsConfig.border} ${wsStatus !== 'connected' ? 'cursor-pointer hover:opacity-80' : 'cursor-default'}`}
+                        title={wsStatus !== 'connected' ? '点击重连' : '实时连接正常'}
+                    >
+                        <WSIcon className={`w-3.5 h-3.5 ${wsConfig.pulse ? 'animate-pulse' : ''}`} />
+                        <span className="hidden md:inline">{wsConfig.label}</span>
+                    </button>
+
                     {/* Status Badge */}
                     <div className={`hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${analysis.isRunning
                         ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
