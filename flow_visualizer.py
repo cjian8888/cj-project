@@ -306,6 +306,25 @@ def _generate_html_visualization(
         } for e in edges
     ], ensure_ascii=False)
     
+    # 读取本地 vis-network.min.js（用于内联到 HTML，实现离线渲染）
+    vis_js_paths = [
+        os.path.join(os.path.dirname(__file__), 'dashboard/node_modules/vis-network/standalone/umd/vis-network.min.js'),
+        os.path.join(os.path.dirname(__file__), 'node_modules/vis-network/standalone/umd/vis-network.min.js'),
+    ]
+    vis_js_content = ''
+    for vis_js_path in vis_js_paths:
+        if os.path.exists(vis_js_path):
+            try:
+                with open(vis_js_path, 'r', encoding='utf-8') as f:
+                    vis_js_content = f.read()
+                logger.info(f'已加载本地 vis-network: {vis_js_path}')
+                break
+            except Exception as e:
+                logger.warning(f'读取 vis-network 失败: {e}')
+    
+    if not vis_js_content:
+        logger.warning('未找到本地 vis-network，模板将使用空 JS（离线可能无法渲染）')
+    
     # 渲染模板
     try:
         html_content = render_template('flow_visualization.html', {
@@ -322,7 +341,8 @@ def _generate_html_visualization(
             'COMPANY_EDGE_COUNT': edge_stats['company'],
             'OTHER_EDGE_COUNT': edge_stats['other'],
             'NODES_JSON': nodes_json,
-            'EDGES_JSON': edges_json
+            'EDGES_JSON': edges_json,
+            'VIS_JS_CONTENT': vis_js_content,  # 新增：内联 vis-network JS
         })
     except FileNotFoundError:
         # 如果模板文件不存在，使用内置简化版
@@ -462,11 +482,42 @@ def _prepare_graph_data(flow_stats: Dict, core_persons: List[str],
 
 def _generate_fallback_html(nodes_json: str, edges_json: str, 
                             core_persons: List[str]) -> str:
-    """生成备用HTML（当模板文件不存在时使用）"""
+    """生成备用HTML（当模板文件不存在时使用）- 使用本地 vis-network，支持离线"""
+    # 尝试读取本地 vis-network.min.js
+    vis_js_paths = [
+        os.path.join(os.path.dirname(__file__), 'dashboard/node_modules/vis-network/standalone/umd/vis-network.min.js'),
+        os.path.join(os.path.dirname(__file__), 'node_modules/vis-network/standalone/umd/vis-network.min.js'),
+    ]
+    
+    vis_js_content = None
+    for vis_js_path in vis_js_paths:
+        if os.path.exists(vis_js_path):
+            try:
+                with open(vis_js_path, 'r', encoding='utf-8') as f:
+                    vis_js_content = f.read()
+                logger.info(f'已加载本地 vis-network: {vis_js_path}')
+                break
+            except Exception as e:
+                logger.warning(f'读取 vis-network 失败: {e}')
+    
+    if not vis_js_content:
+        logger.error('无法找到本地 vis-network.min.js，图谱将无法渲染')
+        return '''<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>资金流向 - 错误</title>
+<style>body{font-family:Microsoft YaHei;background:#1a1a2e;color:#fff;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}
+.error{text-align:center;}.error h1{color:#ff6b6b;}.error p{color:#888;}</style>
+</head><body>
+<div class="error">
+<h1>⚠️ 图谱渲染失败</h1>
+<p>未找到 vis-network 库文件，请确保已安装前端依赖：</p>
+<code style="color:#00d2ff;">cd dashboard && npm install</code>
+</div>
+</body></html>'''
+    
     return f'''<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>资金流向</title>
-<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
-<style>body{{margin:0;padding:0;}}#network{{width:100vw;height:100vh;}}</style>
+<script>{vis_js_content}</script>
+<style>body{{margin:0;padding:0;background:#1a1a2e;}}#network{{width:100vw;height:100vh;}}</style>
 </head><body>
 <div id="network"></div>
 <script>

@@ -4,6 +4,28 @@
 
 ---
 
+## [v4.2.0] - 2026-01-16
+
+### 🔒 离线环境适配
+
+解决资金流向可视化在单机/离线环境下无法渲染的问题。
+
+### 问题修复
+
+#### `flow_visualizer.py` - 移除外部 CDN 依赖
+- **问题**: `templates/flow_visualization.html` 和 fallback HTML 使用外部 CDN (`https://unpkg.com/vis-network`)，导致单机环境下图谱无法渲染
+- **修复**: 
+  - `_generate_fallback_html` 改为读取本地 `vis-network.min.js` 并内联到 HTML
+  - `_generate_html_visualization` 添加 `VIS_JS_CONTENT` 模板变量
+- **模板更新**: `templates/flow_visualization.html` CDN 引用替换为 `{{VIS_JS_CONTENT}}`
+
+### 验证结果
+- 完整分析流程通过（耗时 47 秒，处理 3.4 万条交易）
+- 图谱成功渲染（59 节点，80 条资金流向）
+- 无任何外部网络请求
+
+---
+
 ## [v4.1.0] - 2026-01-11
 
 ### 🎯 Phase 4：解决"线索割裂"和"黑盒评分"痛点
