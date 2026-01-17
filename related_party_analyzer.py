@@ -93,8 +93,9 @@ def _analyze_direct_flows(
             if other_person == person:
                 continue
             
-            # 向量化匹配
-            mask = counterparty_series.str.contains(other_person, na=False)
+            # 【P1修复】使用精确匹配而非 contains，避免"施灵"匹配到"施灵芝"等误判
+            # 精确匹配：对手方必须完全等于核心人员名称
+            mask = counterparty_series == other_person
             if mask.any():
                 subset = df[mask]
                 for _, row in subset.iterrows():

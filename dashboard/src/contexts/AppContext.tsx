@@ -182,11 +182,15 @@ export function AppProvider({ children }: AppProviderProps) {
 
         // 如果分析已在运行，先停止旧的
         if (analysis.isRunning) {
-            addLog({ time: timeStr, level: 'WARN', msg: '检测到分析正在运行，正在重置...' });
+            addLog({ time: timeStr, level: 'WARN', msg: '检测到分析正在运行，正在停止...' });
             try {
                 await api.stopAnalysis();
+                // 等待一下让后端完全停止
+                await new Promise(resolve => setTimeout(resolve, 500));
             } catch (e) {
-                // 忽略停止失败
+                // 停止失败时，不继续启动新分析，避免状态混乱
+                addLog({ time: timeStr, level: 'ERROR', msg: '无法停止正在运行的分析，请稍后重试' });
+                return; // 关键修复：停止失败时中止操作
             }
         }
 
@@ -393,6 +397,136 @@ export function AppProvider({ children }: AppProviderProps) {
         const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
         setLogs([{ time: timeStr, level: 'INFO', msg: '日志已清除' }]);
     }, []);
+
+    // ==================== 初始化：检查后端缓存数据 ====================
+
+    /**
+     * 页面加载时自动检查后端状态，如果已有分析结果则自动恢复
+     * 解决问题：刷新页面后需要重新分析的问题
+     */
+    useEffect(() => {
+        const initializeFromBackend = async () => {
+            const now = new Date();
+            const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+            
+            try {
+                // 设置加载状态
+                setAnalysis(prev => ({ ...prev, isLoading: true }));
+                addLog({ time: timeStr, level: 'INFO', msg: '正在检查后端缓存数据...' });
+                
+                // 1. 获取后端状态
+                const status = await api.getStatus();
+                
+                // 2. 如果后端已有完成的分析结果，加载它们
+                if (status.status === 'completed') {
+                    addLog({ time: timeStr, level: 'INFO', msg: '检测到后端缓存，正在恢复数据...' });
+                    
+                    const result = await api.getResults();
+                    
+                    if (result.data) {
+                        // 安全合并后端数据与默认值
+                        const backendData = result.data as any;
+
+                        const safeSuspicions: SuspicionResult = {
+                            directTransfers: backendData.suspicions?.directTransfers || [],
+                            cashCollisions: backendData.suspicions?.cashCollisions || [],
+                            hiddenAssets: backendData.suspicions?.hiddenAssets || {},
+                            fixedFrequency: backendData.suspicions?.fixedFrequency || {},
+                            cashTimingPatterns: backendData.suspicions?.cashTimingPatterns || [],
+                            holidayTransactions: backendData.suspicions?.holidayTransactions || {},
+                            amountPatterns: backendData.suspicions?.amountPatterns || {},
+                        };
+
+                        const ar = backendData.analysisResults || {};
+                        const safeAnalysisResults: AppAnalysisResults = {
+                            loan: {
+                                summary: { 双向往来关系数: 0, 网贷平台交易数: 0, 规律还款模式数: 0, ...ar.loan?.summary },
+                                details: ar.loan?.details || [],
+                            },
+                            income: {
+                                summary: { 规律性非工资收入: 0, 个人大额转入: 0, 来源不明收入: 0, ...ar.income?.summary },
+                                details: ar.income?.details || [],
+                            },
+                            ml: {
+                                summary: { anomalyCount: 0, highRiskCount: 0, ...ar.ml?.summary },
+                                predictions: ar.ml?.predictions || [],
+                            },
+                            penetration: {
+                                summary: { 资金穿透链数: 0, 中间节点数: 0, ...ar.penetration?.summary },
+                                chains: ar.penetration?.chains || [],
+                            },
+                            relatedParty: {
+                                summary: { 直接往来笔数: 0, 第三方中转链数: 0, 资金闭环数: 0, ...ar.relatedParty?.summary },
+                                details: ar.relatedParty?.details || [],
+                            },
+                            correlation: {
+                                summary: { 资金碰撞总数: 0, ...ar.correlation?.summary },
+                                correlations: ar.correlation?.correlations || [],
+                            },
+                            timeSeries: {
+                                summary: { 异常时间点数: 0, ...ar.timeSeries?.summary },
+                                anomalies: ar.timeSeries?.anomalies || [],
+                            },
+                            aggregation: {
+                                rankedEntities: ar.aggregation?.rankedEntities || [],
+                                summary: { 极高风险实体数: 0, 高风险实体数: 0, ...ar.aggregation?.summary },
+                            },
+                        };
+
+                        setData({
+                            persons: backendData.persons || [],
+                            companies: backendData.companies || [],
+                            profiles: backendData.profiles || {},
+                            suspicions: safeSuspicions,
+                            analysisResults: safeAnalysisResults,
+                            categorizedFiles: defaultData.categorizedFiles,
+                        });
+
+                        // 更新分析状态
+                        setAnalysis({
+                            isRunning: false,
+                            progress: 100,
+                            currentPhase: '从缓存恢复完成',
+                            lastRunTime: status.endTime ? new Date(status.endTime) : null,
+                            status: 'completed',
+                            isLoading: false,
+                        });
+
+                        addLog({ time: timeStr, level: 'INFO', msg: `✓ 已从缓存恢复: ${backendData.persons?.length || 0} 人员, ${backendData.companies?.length || 0} 企业` });
+                    }
+                } else if (status.status === 'running') {
+                    // 如果分析正在运行，连接 WebSocket 跟踪进度
+                    setAnalysis({
+                        isRunning: true,
+                        progress: status.progress,
+                        currentPhase: status.currentPhase,
+                        lastRunTime: status.startTime ? new Date(status.startTime) : null,
+                        status: 'running',
+                        isLoading: false,
+                    });
+                    ws.connect();
+                    addLog({ time: timeStr, level: 'INFO', msg: '检测到分析正在进行中，已连接实时日志...' });
+                } else {
+                    // idle 或 failed 状态
+                    setAnalysis(prev => ({
+                        ...prev,
+                        status: status.status as AnalysisState['status'],
+                        currentPhase: status.currentPhase || '等待开始分析',
+                        isLoading: false,
+                    }));
+                    addLog({ time: timeStr, level: 'INFO', msg: '系统就绪，等待启动分析' });
+                }
+            } catch (error) {
+                const errorMsg = error instanceof Error ? error.message : '未知错误';
+                console.error('初始化失败:', error);
+                // 初始化失败不阻塞用户操作
+                setAnalysis(prev => ({ ...prev, isLoading: false }));
+                addLog({ time: new Date().toLocaleTimeString(), level: 'WARN', msg: `后端连接失败: ${errorMsg}，请确保后端服务已启动` });
+            }
+        };
+
+        initializeFromBackend();
+    }, []); // 只在组件挂载时执行一次
 
     // ==================== UI Actions ====================
 

@@ -4,6 +4,25 @@
 资金穿透审计系统 - FastAPI 后端服务
 
 提供 RESTful API 和 WebSocket 实时日志推送，连接 React 前端与 Python 分析引擎
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║                        🚨🚨🚨 数据来源铁律 🚨🚨🚨                              ║
+# ╠══════════════════════════════════════════════════════════════════════════════╣
+# ║                                                                              ║
+# ║  输出目录下的 `cleaned_data` 文件夹（及其子目录 `个人` 和 `公司`）中的         ║
+# ║  Excel 文件，是本系统【唯一合法】的数据来源。                                 ║
+# ║                                                                              ║
+# ║  任何 API 接口（无论是概览、列表还是图谱），都必须基于这里面的数据进行         ║
+# ║  读取和计算。【严禁】直接读取原始输入目录 (`data/`) 或依赖内存中未落盘的       ║
+# ║  临时变量。                                                                  ║
+# ║                                                                              ║
+# ║  执行口号：Excel 里有什么，界面就显示什么；Excel 里没有的，界面绝不许瞎编。   ║
+# ║                                                                              ║
+# ║  数据流：                                                                    ║
+# ║    main.py (后端) → 读取 data/ → 清洗 → 保存 cleaned_data/*.xlsx            ║
+# ║    api_server.py (前端API) → 只读取 cleaned_data/*.xlsx → 返回给界面        ║
+# ║                                                                              ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
 import os
@@ -11,7 +30,7 @@ import sys
 import json
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from contextlib import asynccontextmanager
 import threading
@@ -177,13 +196,582 @@ class ConnectionManager:
             self.active_connections.remove(websocket)
     
     async def broadcast(self, message: dict):
-        for connection in self.active_connections:
+        # 【P1修复】遍历连接副本，避免并发修改；发送失败时移除失效连接
+        dead_connections = []
+        for connection in self.active_connections.copy():
             try:
                 await connection.send_json(message)
-            except:
-                pass
+            except Exception:
+                dead_connections.append(connection)
+        
+        # 清理失效连接
+        for conn in dead_connections:
+            self.disconnect(conn)
 
 manager = ConnectionManager()
+
+# 缓存文件路径（使用 config.py 中的配置）
+RESULTS_CACHE_PATH = config.CACHE_PATH
+
+# 🆕 分析缓存目录（用于 /api/results 铁律化）
+ANALYSIS_CACHE_DIR = os.path.join("./output", "analysis_cache")
+
+# 当前配置的目录（用于缓存验证）
+_current_config = {
+    "inputDirectory": "./data",
+    "outputDirectory": "./output"
+}
+
+# ==================== 🆕 分析缓存层（铁律: /api/results 不再依赖内存）====================
+
+def _get_cleaned_data_mtime(output_dir: str = None) -> float:
+    """
+    获取 cleaned_data 目录下所有 Excel 文件的最新修改时间
+    
+    用于缓存一致性校验：如果 cleaned_data 有更新，则缓存失效
+    
+    Returns:
+        最新的修改时间戳（float），如果目录不存在返回 0
+    """
+    if output_dir is None:
+        output_dir = _current_config.get("outputDirectory", "./output")
+    
+    cleaned_data_dir = os.path.join(output_dir, "cleaned_data")
+    latest_mtime = 0.0
+    
+    if not os.path.exists(cleaned_data_dir):
+        return 0.0
+    
+    for subdir in ["个人", "公司"]:
+        subdir_path = os.path.join(cleaned_data_dir, subdir)
+        if os.path.exists(subdir_path):
+            for filename in os.listdir(subdir_path):
+                if filename.endswith('.xlsx') and not filename.startswith('~$'):
+                    filepath = os.path.join(subdir_path, filename)
+                    try:
+                        mtime = os.path.getmtime(filepath)
+                        latest_mtime = max(latest_mtime, mtime)
+                    except OSError:
+                        pass
+    
+    return latest_mtime
+
+
+def _save_analysis_cache(results: Dict, output_dir: str = None) -> bool:
+    """
+    【铁律核心】将分析结果持久化到 analysis_cache 目录
+    
+    保存的文件：
+    - profiles.json: 资金画像
+    - suspicions.json: 可疑交易
+    - derived_data.json: 借贷分析、收入分析等派生数据
+    - metadata.json: 元数据（生成时间、cleaned_data 版本哈希）
+    
+    Args:
+        results: 分析结果字典，需包含 profiles, suspicions, analysisResults 等
+        output_dir: 输出目录，默认使用 _current_config["outputDirectory"]
+        
+    Returns:
+        保存是否成功
+    """
+    if output_dir is None:
+        output_dir = _current_config.get("outputDirectory", "./output")
+    
+    cache_dir = os.path.join(output_dir, "analysis_cache")
+    
+    try:
+        # 创建缓存目录
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        # 获取 cleaned_data 的最新修改时间（用于一致性校验）
+        cleaned_data_mtime = _get_cleaned_data_mtime(output_dir)
+        
+        # 1. 保存 metadata.json
+        metadata = {
+            "version": "3.0.0",
+            "generatedAt": datetime.now().isoformat(),
+            "generatedTimestamp": datetime.now().timestamp(),
+            "cleanedDataMtime": cleaned_data_mtime,
+            "cleanedDataMtimeHuman": datetime.fromtimestamp(cleaned_data_mtime).isoformat() if cleaned_data_mtime > 0 else None,
+            "persons": results.get("persons", []),
+            "companies": results.get("companies", []),
+        }
+        metadata_path = os.path.join(cache_dir, "metadata.json")
+        with open(metadata_path, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+        
+        # 2. 保存 profiles.json
+        profiles_path = os.path.join(cache_dir, "profiles.json")
+        with open(profiles_path, 'w', encoding='utf-8') as f:
+            json.dump(results.get("profiles", {}), f, ensure_ascii=False, indent=2)
+        
+        # 3. 保存 suspicions.json
+        suspicions_path = os.path.join(cache_dir, "suspicions.json")
+        with open(suspicions_path, 'w', encoding='utf-8') as f:
+            json.dump(results.get("suspicions", {}), f, ensure_ascii=False, indent=2)
+        
+        # 4. 保存 derived_data.json（analysisResults）
+        derived_path = os.path.join(cache_dir, "derived_data.json")
+        with open(derived_path, 'w', encoding='utf-8') as f:
+            json.dump(results.get("analysisResults", {}), f, ensure_ascii=False, indent=2)
+        
+        # 5. 保存 graph_data.json（可选，用于图谱）
+        if results.get("graphData"):
+            graph_path = os.path.join(cache_dir, "graph_data.json")
+            with open(graph_path, 'w', encoding='utf-8') as f:
+                json.dump(results.get("graphData"), f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"📦 分析缓存已保存: {cache_dir}")
+        logger.info(f"   - metadata.json: {len(metadata.get('persons', []))} 人员, {len(metadata.get('companies', []))} 企业")
+        logger.info(f"   - cleaned_data 版本时间: {metadata.get('cleanedDataMtimeHuman', 'N/A')}")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ 保存分析缓存失败: {e}")
+        return False
+
+
+def _load_analysis_cache(output_dir: str = None) -> tuple[Optional[Dict], str]:
+    """
+    【铁律核心】从 analysis_cache 目录加载分析结果
+    
+    一致性校验：比较 metadata.json 中的时间戳与 cleaned_data 目录的修改时间
+                如果 cleaned_data 更新了，则视为缓存失效
+    
+    Args:
+        output_dir: 输出目录，默认使用 _current_config["outputDirectory"]
+        
+    Returns:
+        (results, status_message)
+        - results: 成功时返回分析结果字典，失败时返回 None
+        - status_message: 状态描述（用于前端提示）
+    """
+    if output_dir is None:
+        output_dir = _current_config.get("outputDirectory", "./output")
+    
+    cache_dir = os.path.join(output_dir, "analysis_cache")
+    metadata_path = os.path.join(cache_dir, "metadata.json")
+    
+    # 检查缓存目录是否存在
+    if not os.path.exists(cache_dir) or not os.path.exists(metadata_path):
+        return None, "缓存不存在，请先运行分析"
+    
+    try:
+        # 1. 读取 metadata.json
+        with open(metadata_path, 'r', encoding='utf-8') as f:
+            metadata = json.load(f)
+        
+        # 2. 一致性校验：比较 cleaned_data 修改时间
+        cached_mtime = metadata.get("cleanedDataMtime", 0)
+        current_mtime = _get_cleaned_data_mtime(output_dir)
+        
+        if current_mtime > cached_mtime:
+            # cleaned_data 有更新，缓存失效
+            logger.warning(f"⚠️ 分析缓存过期: cleaned_data 已更新")
+            logger.warning(f"   缓存时间: {metadata.get('cleanedDataMtimeHuman', 'N/A')}")
+            logger.warning(f"   当前时间: {datetime.fromtimestamp(current_mtime).isoformat()}")
+            return None, "数据已更新，请重新运行分析"
+        
+        # 3. 读取各个缓存文件
+        profiles_path = os.path.join(cache_dir, "profiles.json")
+        suspicions_path = os.path.join(cache_dir, "suspicions.json")
+        derived_path = os.path.join(cache_dir, "derived_data.json")
+        graph_path = os.path.join(cache_dir, "graph_data.json")
+        
+        profiles = {}
+        suspicions = {}
+        analysis_results = {}
+        graph_data = None
+        
+        if os.path.exists(profiles_path):
+            with open(profiles_path, 'r', encoding='utf-8') as f:
+                profiles = json.load(f)
+        
+        if os.path.exists(suspicions_path):
+            with open(suspicions_path, 'r', encoding='utf-8') as f:
+                suspicions = json.load(f)
+        
+        if os.path.exists(derived_path):
+            with open(derived_path, 'r', encoding='utf-8') as f:
+                analysis_results = json.load(f)
+        
+        if os.path.exists(graph_path):
+            with open(graph_path, 'r', encoding='utf-8') as f:
+                graph_data = json.load(f)
+        
+        # 4. 组装完整结果
+        results = {
+            "persons": metadata.get("persons", []),
+            "companies": metadata.get("companies", []),
+            "profiles": profiles,
+            "suspicions": suspicions,
+            "analysisResults": analysis_results,
+            "graphData": graph_data,
+            "_meta": {
+                "source": "analysis_cache",
+                "generatedAt": metadata.get("generatedAt"),
+                "cleanedDataMtime": metadata.get("cleanedDataMtimeHuman"),
+            }
+        }
+        
+        logger.info(f"📦 加载分析缓存: {cache_dir}")
+        logger.info(f"   - {len(results.get('persons', []))} 人员, {len(results.get('companies', []))} 企业")
+        logger.info(f"   - 生成时间: {metadata.get('generatedAt', 'N/A')}")
+        
+        return results, "success"
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"❌ 分析缓存文件损坏 (JSON解析失败): {e}")
+        return None, "缓存文件损坏，请重新运行分析"
+    except Exception as e:
+        logger.error(f"❌ 加载分析缓存失败: {e}")
+        return None, f"加载缓存失败: {str(e)}"
+
+def _get_directory_fingerprint(directory: str) -> Dict:
+    """获取目录的指纹信息（用于判断数据是否变化）"""
+    if not os.path.exists(directory):
+        return {"exists": False, "fileCount": 0, "totalSize": 0}
+    
+    file_count = 0
+    total_size = 0
+    latest_modified = 0
+    
+    try:
+        for root, dirs, files in os.walk(directory):
+            for f in files:
+                if f.endswith(('.xlsx', '.xls', '.csv')):
+                    file_count += 1
+                    filepath = os.path.join(root, f)
+                    stat = os.stat(filepath)
+                    total_size += stat.st_size
+                    latest_modified = max(latest_modified, stat.st_mtime)
+    except Exception as e:
+        logging.warning(f"获取目录指纹失败: {e}")
+    
+    return {
+        "exists": True,
+        "fileCount": file_count,
+        "totalSize": total_size,
+        "latestModified": latest_modified
+    }
+
+# ==================== 🚨 成品库读取层 (铁律核心实现) ====================
+
+import pandas as pd
+from typing import Tuple
+
+# 【铁律】智能匹配 Excel 列名 - 使用 config.py 中的统一配置
+# 今后修改列名只需改 config.py 一处
+INCOME_COLUMN_VARIANTS = config.INCOME_COLUMN_VARIANTS
+EXPENSE_COLUMN_VARIANTS = config.EXPENSE_COLUMN_VARIANTS
+
+def _find_column(df: pd.DataFrame, variants: list) -> str:
+    """
+    在DataFrame中查找匹配的列名
+    
+    Args:
+        df: DataFrame
+        variants: 候选列名列表，按优先级排序
+        
+    Returns:
+        找到的列名，或 None
+    """
+    for col in variants:
+        if col in df.columns:
+            return col
+    return None
+
+def _safe_sum_amount(df: pd.DataFrame, col: str) -> float:
+    """
+    安全地计算金额列的总和，处理类型不一致的情况
+    
+    Args:
+        df: DataFrame
+        col: 列名
+        
+    Returns:
+        金额总和（float），如果失败返回 0.0
+    """
+    if col is None or col not in df.columns:
+        return 0.0
+    
+    try:
+        # 先转换为数值类型，无法转换的变为 NaN
+        numeric_col = pd.to_numeric(df[col], errors='coerce')
+        return numeric_col.fillna(0).abs().sum()
+    except Exception as e:
+        logging.warning(f"[金额计算] 列 '{col}' 转换失败: {e}")
+        return 0.0
+
+
+def _load_cleaned_data(output_dir: str = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    【铁律核心方法】从 cleaned_data 目录加载已清洗的成品数据
+    
+    这是本系统唯一合法的数据读取入口！
+    严禁使用 file_categorizer.categorize_files() + data_cleaner.clean_and_merge_files() 
+    重新读取原始数据。
+    
+    Args:
+        output_dir: 输出目录路径，默认使用 _current_config["outputDirectory"]
+        
+    Returns:
+        (cleaned_data_dict, metadata)
+        - cleaned_data_dict: {实体名称: DataFrame} 的字典
+        - metadata: 包含统计信息的字典
+            - persons: 个人名称列表
+            - companies: 公司名称列表
+            - person_count: 个人数量
+            - company_count: 公司数量
+            - total_records: 总记录数
+            - total_amount: 资金总规模（收入+支出绝对值）
+    """
+    if output_dir is None:
+        output_dir = _current_config.get("outputDirectory", "./output")
+    
+    cleaned_data_dir = os.path.join(output_dir, "cleaned_data")
+    person_dir = os.path.join(cleaned_data_dir, "个人")
+    company_dir = os.path.join(cleaned_data_dir, "公司")
+    
+    cleaned_data = {}
+    persons = []
+    companies = []
+    total_records = 0
+    total_income = 0.0
+    total_expense = 0.0
+    
+    # 读取个人数据
+    if os.path.exists(person_dir):
+        for filename in os.listdir(person_dir):
+            if filename.endswith('.xlsx') and not filename.startswith('~$'):
+                # 解析文件名：格式为 "姓名_合并流水.xlsx"
+                entity_name = filename.replace('_合并流水.xlsx', '').replace('_合并流水.xls', '')
+                filepath = os.path.join(person_dir, filename)
+                
+                try:
+                    df = pd.read_excel(filepath, engine='openpyxl')
+                    if not df.empty:
+                        cleaned_data[entity_name] = df
+                        persons.append(entity_name)
+                        total_records += len(df)
+                        
+                        # 计算资金规模（智能匹配列名，类型安全）
+                        income_col = _find_column(df, INCOME_COLUMN_VARIANTS)
+                        expense_col = _find_column(df, EXPENSE_COLUMN_VARIANTS)
+                        total_income += _safe_sum_amount(df, income_col)
+                        total_expense += _safe_sum_amount(df, expense_col)
+                            
+                        logging.info(f"[CleanedData] 加载个人: {entity_name} ({len(df)} 条)")
+                except Exception as e:
+                    logging.warning(f"[CleanedData] 读取失败 {filepath}: {e}")
+    
+    # 读取公司数据
+    if os.path.exists(company_dir):
+        for filename in os.listdir(company_dir):
+            if filename.endswith('.xlsx') and not filename.startswith('~$'):
+                entity_name = filename.replace('_合并流水.xlsx', '').replace('_合并流水.xls', '')
+                filepath = os.path.join(company_dir, filename)
+                
+                try:
+                    df = pd.read_excel(filepath, engine='openpyxl')
+                    if not df.empty:
+                        cleaned_data[entity_name] = df
+                        companies.append(entity_name)
+                        total_records += len(df)
+                        
+                        # 计算资金规模（智能匹配列名，类型安全）
+                        income_col = _find_column(df, INCOME_COLUMN_VARIANTS)
+                        expense_col = _find_column(df, EXPENSE_COLUMN_VARIANTS)
+                        total_income += _safe_sum_amount(df, income_col)
+                        total_expense += _safe_sum_amount(df, expense_col)
+                            
+                        logging.info(f"[CleanedData] 加载公司: {entity_name} ({len(df)} 条)")
+                except Exception as e:
+                    logging.warning(f"[CleanedData] 读取失败 {filepath}: {e}")
+    
+    metadata = {
+        "persons": persons,
+        "companies": companies,
+        "person_count": len(persons),
+        "company_count": len(companies),
+        "total_records": total_records,
+        "total_income": total_income,
+        "total_expense": total_expense,
+        "total_amount": total_income + total_expense,
+        "cleaned_data_dir": cleaned_data_dir,
+    }
+    
+    logging.info(f"[CleanedData] 成品库加载完成: {len(persons)} 人, {len(companies)} 公司, "
+                f"共 {total_records} 条记录, 资金规模 {(total_income + total_expense)/10000:.2f} 万元")
+    
+    return cleaned_data, metadata
+
+def _get_cleaned_data_stats(output_dir: str = None) -> Dict[str, Any]:
+    """
+    【快速统计接口】获取 cleaned_data 目录的统计摘要（不加载全部数据到内存）
+    
+    用于 /api/analysis/stats 等接口快速返回概览数据
+    """
+    if output_dir is None:
+        output_dir = _current_config.get("outputDirectory", "./output")
+    
+    cleaned_data_dir = os.path.join(output_dir, "cleaned_data")
+    person_dir = os.path.join(cleaned_data_dir, "个人")
+    company_dir = os.path.join(cleaned_data_dir, "公司")
+    
+    persons = []
+    companies = []
+    total_records = 0
+    total_income = 0.0
+    total_expense = 0.0
+    
+    # 扫描个人目录
+    if os.path.exists(person_dir):
+        for filename in os.listdir(person_dir):
+            if filename.endswith('.xlsx') and not filename.startswith('~$'):
+                entity_name = filename.replace('_合并流水.xlsx', '').replace('_合并流水.xls', '')
+                persons.append(entity_name)
+                
+                # 读取 Excel 获取记录数和金额
+                filepath = os.path.join(person_dir, filename)
+                try:
+                    df = pd.read_excel(filepath, engine='openpyxl')
+                    total_records += len(df)
+                    
+                    # 计算资金规模（智能匹配列名，类型安全）
+                    income_col = _find_column(df, INCOME_COLUMN_VARIANTS)
+                    expense_col = _find_column(df, EXPENSE_COLUMN_VARIANTS)
+                    total_income += _safe_sum_amount(df, income_col)
+                    total_expense += _safe_sum_amount(df, expense_col)
+                except Exception as e:
+                    logging.warning(f"[Stats] 读取失败 {filepath}: {e}")
+    
+    # 扫描公司目录
+    if os.path.exists(company_dir):
+        for filename in os.listdir(company_dir):
+            if filename.endswith('.xlsx') and not filename.startswith('~$'):
+                entity_name = filename.replace('_合并流水.xlsx', '').replace('_合并流水.xls', '')
+                companies.append(entity_name)
+                
+                filepath = os.path.join(company_dir, filename)
+                try:
+                    df = pd.read_excel(filepath, engine='openpyxl')
+                    total_records += len(df)
+                    
+                    # 计算资金规模（智能匹配列名，类型安全）
+                    income_col = _find_column(df, INCOME_COLUMN_VARIANTS)
+                    expense_col = _find_column(df, EXPENSE_COLUMN_VARIANTS)
+                    total_income += _safe_sum_amount(df, income_col)
+                    total_expense += _safe_sum_amount(df, expense_col)
+                except Exception as e:
+                    logging.warning(f"[Stats] 读取失败 {filepath}: {e}")
+    
+    return {
+        "corePersonCount": len(persons),
+        "corePersonNames": persons,
+        "involvedCompanyCount": len(companies),
+        "involvedCompanyNames": companies,
+        "totalRecords": total_records,
+        "totalIncome": total_income,
+        "totalExpense": total_expense,
+        "totalAmount": total_income + total_expense,
+        "totalAmountDisplay": f"{(total_income + total_expense)/10000:.2f} 万元",
+    }
+
+
+def _validate_cache(cached: Dict) -> tuple[bool, str]:
+    """
+    验证缓存是否有效
+    
+    返回: (是否有效, 原因说明)
+    """
+    meta = cached.get("_meta", {})
+    
+    if not meta:
+        return False, "缓存缺少元数据"
+    
+    # 【P1修复】使用配置的版本号进行兼容性检查
+    cache_version = meta.get("version", "0.0.0")
+    try:
+        cache_major = int(cache_version.split(".")[0])
+        if cache_major != config.CACHE_VERSION_MAJOR:
+            return False, f"缓存版本不兼容: {cache_version} (需要 {config.CACHE_VERSION_MAJOR}.x.x)"
+    except (ValueError, IndexError):
+        return False, f"缓存版本格式错误: {cache_version}"
+    
+    # 检查输入目录是否匹配
+    cached_input_dir = os.path.normpath(meta.get("inputDirectory", ""))
+    current_input_dir = os.path.normpath(_current_config["inputDirectory"])
+    
+    if cached_input_dir != current_input_dir:
+        return False, f"输入目录变化: {cached_input_dir} → {current_input_dir}"
+    
+    # 检查文件是否有变化（可选的更严格检查）
+    cached_fingerprint = meta.get("sourceFingerprint", {})
+    current_fingerprint = _get_directory_fingerprint(current_input_dir)
+    
+    if cached_fingerprint.get("fileCount", 0) != current_fingerprint.get("fileCount", 0):
+        return False, f"文件数量变化: {cached_fingerprint.get('fileCount')} → {current_fingerprint.get('fileCount')}"
+    
+    # 检查是否有更新的文件
+    if current_fingerprint.get("latestModified", 0) > meta.get("analysisTimestamp", 0):
+        return False, "检测到数据目录有更新"
+    
+    return True, "缓存有效"
+
+def _load_cached_results() -> Optional[Dict]:
+    """从磁盘加载缓存的分析结果"""
+    if not os.path.exists(RESULTS_CACHE_PATH):
+        return None
+    
+    try:
+        with open(RESULTS_CACHE_PATH, 'r', encoding='utf-8') as f:
+            cached = json.load(f)
+        
+        # 验证缓存有效性
+        is_valid, reason = _validate_cache(cached)
+        
+        if is_valid:
+            logging.info(f"[Cache] 缓存验证通过: {reason}")
+            return cached
+        else:
+            logging.warning(f"[Cache] 缓存无效: {reason}")
+            return None
+            
+    except json.JSONDecodeError as e:
+        logging.error(f"[Cache] 缓存文件损坏 (JSON解析失败): {e}")
+        return None
+    except Exception as e:
+        logging.warning(f"[Cache] 加载缓存失败: {e}")
+        return None
+
+def _save_cached_results(results: Dict, input_dir: str, output_dir: str):
+    """将分析结果保存到磁盘缓存，包含元数据"""
+    try:
+        # 构建带元数据的缓存
+        fingerprint = _get_directory_fingerprint(input_dir)
+        
+        cache_with_meta = {
+            "_meta": {
+                "version": "3.0.0",
+                "inputDirectory": os.path.normpath(input_dir),
+                "outputDirectory": os.path.normpath(output_dir),
+                "analysisTime": datetime.now().isoformat(),
+                "analysisTimestamp": datetime.now().timestamp(),
+                "sourceFingerprint": fingerprint,
+            },
+            **results
+        }
+        
+        os.makedirs(os.path.dirname(RESULTS_CACHE_PATH), exist_ok=True)
+        with open(RESULTS_CACHE_PATH, 'w', encoding='utf-8') as f:
+            json.dump(cache_with_meta, f, ensure_ascii=False, indent=2)
+        
+        logging.info(f"[Cache] 分析结果已保存: {fingerprint.get('fileCount')} 个源文件, "
+                    f"输入目录: {input_dir}")
+    except Exception as e:
+        logging.warning(f"[Cache] 保存缓存失败: {e}")
 
 # ==================== 应用生命周期 ====================
 
@@ -197,6 +785,28 @@ async def lifespan(app: FastAPI):
     ws_handler = WebSocketLogHandler(log_queue)
     ws_handler.setFormatter(logging.Formatter('%(message)s'))
     root_logger.addHandler(ws_handler)
+    
+    # 【优化】启动时尝试从磁盘加载之前的分析结果
+    cached_results = _load_cached_results()
+    if cached_results:
+        analysis_state.results = cached_results
+        analysis_state.status = "completed"
+        analysis_state.progress = 100
+        analysis_state.current_phase = "分析完成（从缓存恢复）"
+        
+        # 【P0修复】从缓存元数据恢复时间信息
+        meta = cached_results.get("_meta", {})
+        if meta.get("analysisTime"):
+            try:
+                analysis_state.end_time = datetime.fromisoformat(meta["analysisTime"])
+                # 假设分析耗时约1分钟（用于显示）
+                analysis_state.start_time = analysis_state.end_time - timedelta(minutes=1)
+            except (ValueError, TypeError):
+                pass
+        
+        logging.info(f"[Cache] 已恢复分析结果: {len(cached_results.get('persons', []))} 人员, "
+                    f"{len(cached_results.get('companies', []))} 企业, "
+                    f"图谱缓存: {'有' if cached_results.get('graphData') else '无'}")
     
     # 启动日志广播任务
     log_task = asyncio.create_task(broadcast_logs())
@@ -219,7 +829,9 @@ async def broadcast_logs():
             await asyncio.sleep(0.1)
         except asyncio.CancelledError:
             break
-        except:
+        except Exception as e:
+            # 【P2修复】记录异常而非静默忽略
+            logging.debug(f"日志广播异常: {e}")
             await asyncio.sleep(0.1)
 
 # ==================== FastAPI 应用 ====================
@@ -227,7 +839,7 @@ async def broadcast_logs():
 app = FastAPI(
     title="F.P.A.S API",
     description="资金穿透审计系统 API 服务",
-    version="3.0.0",
+    version="4.3.0",
     lifespan=lifespan
 )
 
@@ -275,11 +887,140 @@ async def stop_analysis():
 
 @app.get("/api/results")
 async def get_results():
-    """获取分析结果"""
-    if analysis_state.results is None:
-        return {"message": "暂无分析结果", "data": None}
+    """
+    【铁律实现】获取分析结果
     
-    return {"message": "success", "data": analysis_state.results}
+    数据来源：从 analysis_cache 目录加载持久化的分析结果，而非内存变量
+    
+    一致性校验：
+    - 如果 cleaned_data 目录的修改时间晚于缓存生成时间，缓存视为失效
+    - 失效时返回错误提示，引导用户重新运行分析
+    
+    兼容性：
+    - 如果缓存读取失败但内存中有数据，仍尝试返回内存数据（降级策略）
+    """
+    # 【铁律核心】优先从 analysis_cache 目录读取
+    cached_results, status_msg = _load_analysis_cache()
+    
+    if cached_results is not None:
+        logger.info(f"📦 /api/results: 从缓存加载成功")
+        return {"message": "success", "source": "analysis_cache", "data": cached_results}
+    
+    # 缓存失败时的降级策略：尝试使用内存数据
+    if analysis_state.results is not None:
+        logger.warning(f"⚠️ /api/results: 缓存不可用 ({status_msg})，使用内存数据")
+        return {
+            "message": "success", 
+            "source": "memory", 
+            "warning": status_msg,
+            "data": analysis_state.results
+        }
+    
+    # 两者都没有
+    logger.warning(f"⚠️ /api/results: 无可用数据 - {status_msg}")
+    return {
+        "message": status_msg, 
+        "source": None,
+        "data": None,
+        "hint": "请点击「开始分析」按钮运行分析任务"
+    }
+
+@app.get("/api/analysis/stats")
+async def get_analysis_stats():
+    """
+    【铁律实现】获取分析统计概览
+    
+    数据来源：直接从 cleaned_data 目录读取，而非内存缓存
+    
+    返回:
+    - corePersonCount: 核心人员数量 = cleaned_data/个人 下的文件数量
+    - involvedCompanyCount: 涉案公司数量 = cleaned_data/公司 下的文件数量
+    - totalAmount: 资金规模 = 所有 Excel 中金额列的总和
+    - totalRecords: 总交易记录数
+    """
+    try:
+        stats = _get_cleaned_data_stats()
+        return {
+            "message": "success",
+            "source": "cleaned_data",
+            "data": stats
+        }
+    except Exception as e:
+        logger.error(f"获取统计数据失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取统计数据失败: {str(e)}")
+
+
+@app.get("/api/cache/info")
+async def get_cache_info():
+    """获取缓存状态和元数据
+    
+    返回:
+    - hasCachedData: 是否有缓存数据
+    - isValid: 缓存是否有效
+    - reason: 验证结果说明
+    - meta: 缓存元数据（如果存在）
+    """
+    # 检查内存中是否有数据
+    if analysis_state.results is not None:
+        meta = analysis_state.results.get("_meta", {})
+        return {
+            "hasCachedData": True,
+            "isValid": True,
+            "reason": "内存中有分析结果",
+            "source": "memory",
+            "meta": meta
+        }
+    
+    # 检查磁盘缓存
+    if not os.path.exists(RESULTS_CACHE_PATH):
+        return {
+            "hasCachedData": False,
+            "isValid": False,
+            "reason": "无缓存文件",
+            "source": None,
+            "meta": None
+        }
+    
+    try:
+        with open(RESULTS_CACHE_PATH, 'r', encoding='utf-8') as f:
+            cached = json.load(f)
+        
+        is_valid, reason = _validate_cache(cached)
+        meta = cached.get("_meta", {})
+        
+        return {
+            "hasCachedData": True,
+            "isValid": is_valid,
+            "reason": reason,
+            "source": "disk",
+            "meta": meta
+        }
+    except Exception as e:
+        return {
+            "hasCachedData": False,
+            "isValid": False,
+            "reason": f"读取缓存失败: {str(e)}",
+            "source": None,
+            "meta": None
+        }
+
+@app.post("/api/cache/invalidate")
+async def invalidate_cache():
+    """手动使缓存失效（用于用户主动选择重新分析）"""
+    analysis_state.results = None
+    analysis_state.status = "idle"
+    analysis_state.progress = 0
+    analysis_state.current_phase = ""
+    
+    # 删除磁盘缓存文件
+    if os.path.exists(RESULTS_CACHE_PATH):
+        try:
+            os.remove(RESULTS_CACHE_PATH)
+            logging.info("[Cache] 缓存已手动清除")
+        except Exception as e:
+            logging.warning(f"[Cache] 删除缓存文件失败: {e}")
+    
+    return {"message": "缓存已清除", "status": "idle"}
 
 @app.get("/api/reports")
 async def list_reports():
@@ -317,77 +1058,61 @@ async def download_report(filename: str):
 
 @app.get("/api/analysis/graph-data")
 async def get_graph_data():
-    """获取资金流向图谱数据（用于前端 Vis.js 可视化）"""
+    """获取资金流向图谱数据（用于前端 Vis.js 可视化）
+    
+    【铁律实现】数据来源：
+    1. 优先使用分析时预计算的缓存数据 (graphData)
+    2. 兜底从 cleaned_data 成品目录读取，严禁读取原始 data/ 目录
+    """
     try:
         # 检查是否有分析结果
         if analysis_state.results is None:
             raise HTTPException(status_code=404, detail="暂无分析结果，请先运行分析")
         
-        # 从结果中获取核心人员和公司列表
-        all_persons = analysis_state.results.get("persons", [])
-        all_companies = analysis_state.results.get("companies", [])
+        # 【优化】直接返回预计算的图谱缓存数据
+        graph_cache = analysis_state.results.get("graphData")
+        if graph_cache:
+            logger.info(f"[graph-data] 使用缓存数据: {len(graph_cache.get('nodes', []))} 节点")
+            return {"message": "success", "data": graph_cache}
         
-        # 准备交易数据（从磁盘读取或使用缓存）
-        data_dir = config.DATA_DIR
-        categorized_files = file_categorizer.categorize_files(data_dir)
+        # 【铁律修复】兜底：从 cleaned_data 成品目录读取，而非原始目录
+        logger.warning("[graph-data] 缓存未命中，从 cleaned_data 成品目录读取...")
         
-        # 清洗数据
-        cleaned_data = {}
-        for person in all_persons:
-            p_files = categorized_files['persons'].get(person, [])
-            if p_files:
-                df, _ = data_cleaner.clean_and_merge_files(p_files, person)
-                if df is not None and not df.empty:
-                    cleaned_data[person] = df
+        # 从成品目录加载数据
+        cleaned_data, metadata = _load_cleaned_data()
+        all_persons = metadata["persons"]
+        all_companies = metadata["companies"]
         
-        for company in all_companies:
-            c_files = categorized_files['companies'].get(company, [])
-            if c_files:
-                df, _ = data_cleaner.clean_and_merge_files(c_files, company)
-                if df is not None and not df.empty:
-                    cleaned_data[company] = df
+        if not cleaned_data:
+            raise HTTPException(status_code=404, detail="cleaned_data 目录为空，请先运行后端分析生成成品数据")
         
         # 计算资金流向统计
         flow_stats = flow_visualizer._calculate_flow_stats(cleaned_data, all_persons)
-        
-        # 准备图谱数据
         nodes, edges, edge_stats = flow_visualizer._prepare_graph_data(
             flow_stats, all_persons, all_companies
         )
         
-        # 【前端优化】Top N 采样逻辑
-        # 按交易金额排序，只返回前 200 个节点和 500 条连线
-        max_nodes = 200
-        max_edges = 500
-        
-        # 按节点的大小（重要程度）排序
+        # 使用配置的采样限制
+        max_nodes, max_edges = config.GRAPH_MAX_NODES, config.GRAPH_MAX_EDGES
         sorted_nodes = sorted(nodes, key=lambda x: x.get('size', 0), reverse=True)
         sampled_nodes = sorted_nodes[:max_nodes]
         sampled_node_ids = {node['id'] for node in sampled_nodes}
         
-        # 只保留采样节点之间的边
-        sampled_edges = []
-        for edge in edges:
-            if edge['from'] in sampled_node_ids and edge['to'] in sampled_node_ids:
-                sampled_edges.append(edge)
-                if len(sampled_edges) >= max_edges:
-                    break
-        
-        # 按边的金额排序，保留最重要的边
+        sampled_edges = [e for e in edges if e['from'] in sampled_node_ids and e['to'] in sampled_node_ids]
         sampled_edges.sort(key=lambda x: x.get('value', 0), reverse=True)
         sampled_edges = sampled_edges[:max_edges]
         
-        # 【内存优化】清理临时变量
+        # 释放内存
         del cleaned_data, flow_stats
         import gc
         gc.collect()
         
-        # 准备统计数据
         loan_results = analysis_state.results.get("analysisResults", {}).get("loan", {})
         income_results = analysis_state.results.get("analysisResults", {}).get("income", {})
         
         return {
             "message": "success",
+            "source": "cleaned_data",  # 标记数据来源
             "data": {
                 "nodes": sampled_nodes,
                 "edges": sampled_edges,
@@ -405,9 +1130,9 @@ async def get_graph_data():
                     "corePersonNames": all_persons,
                     "involvedCompanyCount": len(all_companies),
                     "highRiskCount": len(income_results.get("details", [])),
-                    "mediumRiskCount": 0,  # 暂无中风险数据
+                    "mediumRiskCount": 0,
                     "loanPairCount": loan_results.get("summary", {}).get("双向往来关系数", 0),
-                    "noRepayCount": 0,  # 暂无无还款数据
+                    "noRepayCount": 0,
                     "coreEdgeCount": edge_stats.get("core", 0),
                     "companyEdgeCount": edge_stats.get("company", 0),
                     "otherEdgeCount": edge_stats.get("other", 0),
@@ -458,6 +1183,11 @@ def run_analysis(analysis_config: AnalysisConfig):
         data_dir = analysis_config.inputDirectory
         output_dir = analysis_config.outputDirectory
         
+        # 更新全局配置（用于缓存验证）
+        global _current_config
+        _current_config["inputDirectory"] = data_dir
+        _current_config["outputDirectory"] = output_dir
+        
         # 更新配置
         config.LARGE_CASH_THRESHOLD = analysis_config.cashThreshold
         
@@ -471,7 +1201,7 @@ def run_analysis(analysis_config: AnalysisConfig):
         
         logger.info(f"发现 {len(persons)} 个个人, {len(companies)} 个企业")
         
-        # 阶段 2: 数据清洗
+        # 阶段 2: 数据清洗（【铁律】保存到 cleaned_data 目录作为成品数据）
         analysis_state.update(progress=15, phase="数据清洗与标准化...")
         logger.info("开始数据清洗...")
         
@@ -479,27 +1209,44 @@ def run_analysis(analysis_config: AnalysisConfig):
         output_dirs = create_output_directories(output_dir)
         
         total_entities = len(persons) + len(companies)
+        
+        # 清洗个人数据并保存到 cleaned_data/个人/
         for i, p in enumerate(persons):
             p_files = categorized_files['persons'].get(p, [])
             if p_files:
                 df, _ = data_cleaner.clean_and_merge_files(p_files, p)
                 if df is not None and not df.empty:
                     cleaned_data[p] = df
+                    # 【铁律】保存清洗结果到成品目录
+                    output_path = os.path.join(output_dirs['cleaned_persons'], f'{p}_合并流水.xlsx')
+                    try:
+                        data_cleaner.save_formatted_excel(df, output_path)
+                        logger.info(f"已保存清洗数据: {p} -> {output_path}")
+                    except Exception as e:
+                        logger.warning(f"保存清洗数据失败 {p}: {e}")
             
             progress = 15 + int(25 * (i + 1) / total_entities)
             analysis_state.update(progress=progress)
         
+        # 清洗公司数据并保存到 cleaned_data/公司/
         for i, c in enumerate(companies):
             c_files = categorized_files['companies'].get(c, [])
             if c_files:
                 df, _ = data_cleaner.clean_and_merge_files(c_files, c)
                 if df is not None and not df.empty:
                     cleaned_data[c] = df
+                    # 【铁律】保存清洗结果到成品目录
+                    output_path = os.path.join(output_dirs['cleaned_companies'], f'{c}_合并流水.xlsx')
+                    try:
+                        data_cleaner.save_formatted_excel(df, output_path)
+                        logger.info(f"已保存清洗数据: {c} -> {output_path}")
+                    except Exception as e:
+                        logger.warning(f"保存清洗数据失败 {c}: {e}")
             
             progress = 15 + int(25 * (len(persons) + i + 1) / total_entities)
             analysis_state.update(progress=progress)
         
-        logger.info(f"清洗完成，共 {len(cleaned_data)} 个实体数据")
+        logger.info(f"清洗完成，共 {len(cleaned_data)} 个实体数据已保存到 cleaned_data 目录")
         
         # 阶段 3: 线索提取
         analysis_state.update(progress=45, phase="提取关联线索...")
@@ -599,14 +1346,103 @@ def run_analysis(analysis_config: AnalysisConfig):
         # 将时序分析结果整合到 suspicions（使前端能显示）
         enhanced_suspicions = _enhance_suspicions_with_analysis(suspicions, analysis_results)
         
-        # 保存结果
+        # 【优化】预计算图谱数据并缓存，避免 API 调用时重新读取磁盘
+        logger.info("预计算图谱数据缓存...")
+        graph_data_cache = None
+        try:
+            flow_stats = flow_visualizer._calculate_flow_stats(cleaned_data, all_persons)
+            nodes, edges, edge_stats = flow_visualizer._prepare_graph_data(
+                flow_stats, all_persons, all_companies
+            )
+            
+            # 【P1修复】使用配置的采样限制
+            max_nodes, max_edges = config.GRAPH_MAX_NODES, config.GRAPH_MAX_EDGES
+            sorted_nodes = sorted(nodes, key=lambda x: x.get('size', 0), reverse=True)
+            sampled_nodes = sorted_nodes[:max_nodes]
+            sampled_node_ids = {node['id'] for node in sampled_nodes}
+            
+            sampled_edges = [e for e in edges if e['from'] in sampled_node_ids and e['to'] in sampled_node_ids]
+            sampled_edges.sort(key=lambda x: x.get('value', 0), reverse=True)
+            sampled_edges = sampled_edges[:max_edges]
+            
+            loan_results = analysis_results.get("loan", {})
+            income_results = analysis_results.get("income", {})
+            
+            graph_data_cache = {
+                "nodes": sampled_nodes,
+                "edges": sampled_edges,
+                "sampling": {
+                    "totalNodes": len(nodes),
+                    "totalEdges": len(edges),
+                    "sampledNodes": len(sampled_nodes),
+                    "sampledEdges": len(sampled_edges),
+                    "message": "为保证流畅度，仅展示核心资金网络，完整数据请查看 Excel 报告。"
+                },
+                "stats": {
+                    "nodeCount": len(nodes),
+                    "edgeCount": len(edges),
+                    "corePersonCount": len(all_persons),
+                    "corePersonNames": all_persons,
+                    "involvedCompanyCount": len(all_companies),
+                    "highRiskCount": len(income_results.get("details", [])),
+                    "mediumRiskCount": 0,
+                    "loanPairCount": loan_results.get("summary", {}).get("双向往来关系数", 0),
+                    "noRepayCount": 0,
+                    "coreEdgeCount": edge_stats.get("core", 0),
+                    "companyEdgeCount": edge_stats.get("company", 0),
+                    "otherEdgeCount": edge_stats.get("other", 0),
+                },
+                "report": {
+                    "loan_pairs": loan_results.get("loan_pairs", []),
+                    "no_repayment_loans": loan_results.get("no_repayment_loans", []),
+                    "high_risk_income": income_results.get("high_risk", []),
+                    "online_loans": loan_results.get("online_loans", [])
+                }
+            }
+            logger.info(f"图谱缓存生成完成: {len(sampled_nodes)} 节点, {len(sampled_edges)} 边")
+        except Exception as e:
+            logger.warning(f"图谱缓存生成失败: {e}，API将使用实时计算")
+        
+        # 保存结果（包含图谱缓存）
         analysis_state.results = {
             "persons": all_persons,
             "companies": all_companies,
             "profiles": serialize_profiles(profiles),
             "suspicions": serialize_suspicions(enhanced_suspicions),
             "analysisResults": serialize_analysis_results(analysis_results),
+            "graphData": graph_data_cache,  # 新增：图谱数据缓存
         }
+        
+        # 【铁律核心】将分析结果持久化到 analysis_cache 目录
+        # 这样 /api/results 可以从文件读取，不依赖内存
+        logger.info("📦 正在保存分析缓存到 analysis_cache 目录...")
+        _save_analysis_cache(analysis_state.results, output_dir)
+        
+        # 将结果保存到磁盘缓存（旧版缓存，保持向后兼容）
+        _save_cached_results(analysis_state.results, data_dir, output_dir)
+        
+        # 【P2 内存优化】分析完成后释放大对象，减少内存占用
+        logger.info("正在释放分析过程中的临时数据...")
+        try:
+            # 删除 cleaned_data，这是最大的内存占用者
+            del cleaned_data
+            # 删除其他不再需要的中间结果
+            del profiles
+            del suspicions
+            del enhanced_suspicions
+            del analysis_results
+            
+            # 【P2修复】使用 Pythonic 的方式删除可能存在的变量
+            for var_name in ['flow_stats', 'nodes', 'edges']:
+                if var_name in locals():
+                    del locals()[var_name]
+            
+            # 强制垃圾回收
+            import gc
+            gc.collect()
+            logger.info("✓ 内存清理完成")
+        except Exception as e:
+            logger.warning(f"内存清理时出现警告: {e}")
         
         duration = (analysis_state.end_time - analysis_state.start_time).total_seconds()
         logger.info(f"✓ 分析完成，耗时 {duration:.2f} 秒")
@@ -633,10 +1469,12 @@ def run_analysis(analysis_config: AnalysisConfig):
         analysis_state.end_time = datetime.now()
 
 def create_output_directories(base_dir: str) -> Dict[str, str]:
-    """创建输出目录结构"""
+    """创建输出目录结构（与 main.py 保持一致）"""
     dirs = {
         'base': base_dir,
         'cleaned_data': os.path.join(base_dir, 'cleaned_data'),
+        'cleaned_persons': os.path.join(base_dir, 'cleaned_data', '个人'),
+        'cleaned_companies': os.path.join(base_dir, 'cleaned_data', '公司'),
         'analysis_results': os.path.join(base_dir, 'analysis_results'),
         'logs': os.path.join(base_dir, 'logs')
     }
@@ -722,7 +1560,16 @@ def _enhance_suspicions_with_analysis(suspicions: Dict, analysis_results: Dict) 
     return enhanced
 
 def serialize_profiles(profiles: Dict) -> Dict:
-    """序列化画像数据为 JSON 格式"""
+    """
+    序列化画像数据为 JSON 格式（增强版）
+    
+    新增字段：
+    - cashTotal: 现金交易总额（取现+存现）
+    - thirdPartyTotal: 第三方支付交易总额
+    - wealthTotal: 理财产品交易总额
+    - maxTransaction: 最大单笔交易金额
+    - salaryRatio: 工资收入占比
+    """
     result = {}
     for entity, profile in profiles.items():
         if not profile or profile.get("has_data") == False:
@@ -731,23 +1578,57 @@ def serialize_profiles(profiles: Dict) -> Dict:
                 "totalIncome": 0.0,
                 "totalExpense": 0.0,
                 "transactionCount": 0,
+                "cashTotal": 0.0,
+                "thirdPartyTotal": 0.0,
+                "wealthTotal": 0.0,
+                "maxTransaction": 0.0,
+                "salaryRatio": 0.0,
             }
             continue
         
         # 从 summary 或 income_structure 中获取数据
         summary = profile.get("summary", {})
         income_structure = profile.get("income_structure", {})
+        fund_flow = profile.get("fund_flow", {})
+        wealth_management = profile.get("wealth_management", {})
         
         # 优先从 summary 获取，如果没有则从 income_structure 获取
         total_income = summary.get("total_income") or income_structure.get("total_income", 0)
         total_expense = summary.get("total_expense") or income_structure.get("total_expense", 0)
         transaction_count = summary.get("transaction_count", 0)
         
+        # 现金交易总额（取现+存现）
+        cash_income = fund_flow.get("cash_income", 0) or 0
+        cash_expense = fund_flow.get("cash_expense", 0) or 0
+        cash_total = cash_income + cash_expense
+        
+        # 第三方支付交易总额（微信/支付宝等）
+        third_party_income = fund_flow.get("third_party_income", 0) or 0
+        third_party_expense = fund_flow.get("third_party_expense", 0) or 0
+        third_party_total = third_party_income + third_party_expense
+        
+        # 理财产品交易总额
+        wealth_purchase = wealth_management.get("wealth_purchase", 0) or 0
+        wealth_redemption = wealth_management.get("wealth_redemption", 0) or 0
+        wealth_total = wealth_purchase + wealth_redemption
+        
+        # 最大单笔交易
+        max_transaction = summary.get("max_transaction", 0) or summary.get("max_single_transaction", 0) or 0
+        
+        # 工资收入占比
+        salary_ratio = summary.get("salary_ratio", 0) or 0
+        
         result[entity] = {
             "entityName": entity,
             "totalIncome": float(total_income) if total_income else 0.0,
             "totalExpense": float(total_expense) if total_expense else 0.0,
             "transactionCount": int(transaction_count) if transaction_count else 0,
+            # 新增审计关键字段
+            "cashTotal": float(cash_total),
+            "thirdPartyTotal": float(third_party_total),
+            "wealthTotal": float(wealth_total),
+            "maxTransaction": float(max_transaction),
+            "salaryRatio": float(salary_ratio),
         }
     return result
 
@@ -782,6 +1663,12 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
             "amount": float(tx.get("amount", 0)),
             "date": str(tx.get("date", "")),
             "description": str(tx.get("description", "")),
+            # 新增审计关键字段
+            "direction": str(direction),
+            "bank": str(tx.get("bank", "")),
+            "sourceFile": str(tx.get("source_file", "")),
+            "riskLevel": str(tx.get("risk_level", "medium")),
+            "riskReason": str(tx.get("risk_reason", "")),
         })
     
     # 转换现金碰撞 (后端字段: withdrawal_entity, deposit_entity, withdrawal_date, etc.)
@@ -793,6 +1680,14 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
             "time2": str(collision.get("deposit_date", collision.get("time2", ""))),
             "amount1": float(collision.get("withdrawal_amount", collision.get("amount1", 0))),
             "amount2": float(collision.get("deposit_amount", collision.get("amount2", 0))),
+            # 新增审计关键字段
+            "timeDiff": float(collision.get("time_diff_hours", 0)),
+            "amountDiff": float(collision.get("amount_diff", 0)),
+            "amountDiffRatio": float(collision.get("amount_diff_ratio", 0)),
+            "withdrawalBank": str(collision.get("withdrawal_bank", "")),
+            "depositBank": str(collision.get("deposit_bank", "")),
+            "riskLevel": str(collision.get("risk_level", "medium")),
+            "riskReason": str(collision.get("risk_reason", "")),
         })
     
     # 转换现金时间点配对 (保持原有逻辑但更健壮)
@@ -836,7 +1731,12 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
     return result
 
 def serialize_analysis_results(analysis_results: Dict) -> Dict:
-    """序列化分析结果为前端期望的 JSON 格式"""
+    """
+    序列化分析结果为前端期望的 JSON 格式
+    
+    关键修复：将后端分析器返回的各个子列表（如 bidirectional_flows, online_loan_platforms）
+    合并到 details 数组中，并添加 _type 字段供前端筛选使用。
+    """
     # 定义前端期望的默认结构
     default = {
         "loan": {
@@ -873,8 +1773,96 @@ def serialize_analysis_results(analysis_results: Dict) -> Dict:
         },
     }
     
-    # 合并实际的分析结果
+    # ========== 特殊处理 loan 模块 ==========
+    # 后端 loan_analyzer 返回的是多个子列表，需要合并到 details
+    if "loan" in analysis_results and isinstance(analysis_results["loan"], dict):
+        loan_data = analysis_results["loan"]
+        
+        # 复制 summary
+        if "summary" in loan_data:
+            default["loan"]["summary"] = {**default["loan"]["summary"], **_convert_dict(loan_data["summary"])}
+        
+        # 合并各类借贷详情到 details，添加 _type 字段
+        loan_details = []
+        
+        # 1. 双向往来 (bidirectional_flows)
+        for item in loan_data.get("bidirectional_flows", []):
+            loan_details.append({**_convert_value(item), "_type": "bidirectional"})
+        
+        # 2. 网贷平台交易 (online_loan_platforms)
+        for item in loan_data.get("online_loan_platforms", []):
+            loan_details.append({**_convert_value(item), "_type": "online_loan"})
+        
+        # 3. 规律还款 (regular_repayments)
+        for item in loan_data.get("regular_repayments", []):
+            loan_details.append({**_convert_value(item), "_type": "regular_repayment"})
+        
+        # 4. 借贷配对 (loan_pairs)
+        for item in loan_data.get("loan_pairs", []):
+            loan_details.append({**_convert_value(item), "_type": "loan_pair"})
+        
+        # 5. 无还款借贷 (no_repayment_loans)
+        for item in loan_data.get("no_repayment_loans", []):
+            loan_details.append({**_convert_value(item), "_type": "no_repayment"})
+        
+        # 6. 异常利息 (abnormal_interest)
+        for item in loan_data.get("abnormal_interest", []):
+            loan_details.append({**_convert_value(item), "_type": "abnormal_interest"})
+        
+        default["loan"]["details"] = loan_details
+        logging.info(f"[Serialize] loan.details 已合并 {len(loan_details)} 条记录")
+    
+    # ========== 特殊处理 income 模块 ==========
+    # 后端 income_analyzer 返回的是多个子列表，需要合并到 details
+    if "income" in analysis_results and isinstance(analysis_results["income"], dict):
+        income_data = analysis_results["income"]
+        
+        # 复制 summary
+        if "summary" in income_data:
+            default["income"]["summary"] = {**default["income"]["summary"], **_convert_dict(income_data["summary"])}
+        
+        # 合并各类收入详情到 details，添加 _type 字段
+        income_details = []
+        
+        # 1. 规律性非工资收入 (regular_non_salary)
+        for item in income_data.get("regular_non_salary", []):
+            income_details.append({**_convert_value(item), "_type": "regular_non_salary"})
+        
+        # 2. 个人大额转入 (large_individual_income)
+        for item in income_data.get("large_individual_income", []):
+            income_details.append({**_convert_value(item), "_type": "large_individual"})
+        
+        # 3. 来源不明收入 (unknown_source_income)
+        for item in income_data.get("unknown_source_income", []):
+            income_details.append({**_convert_value(item), "_type": "unknown_source"})
+        
+        # 4. 大额单笔收入 (large_single_income)
+        for item in income_data.get("large_single_income", []):
+            income_details.append({**_convert_value(item), "_type": "large_single"})
+        
+        # 5. 同源多次收入 (same_source_multi)
+        for item in income_data.get("same_source_multi", []):
+            income_details.append({**_convert_value(item), "_type": "same_source_multi"})
+        
+        # 6. 疑似分期受贿 (potential_bribe_installment)
+        for item in income_data.get("potential_bribe_installment", []):
+            income_details.append({**_convert_value(item), "_type": "bribe_installment"})
+        
+        # 7. 高风险收入 (high_risk)
+        for item in income_data.get("high_risk", []):
+            income_details.append({**_convert_value(item), "_type": "high_risk"})
+        
+        # 8. 中风险收入 (medium_risk)
+        for item in income_data.get("medium_risk", []):
+            income_details.append({**_convert_value(item), "_type": "medium_risk"})
+        
+        default["income"]["details"] = income_details
+        logging.info(f"[Serialize] income.details 已合并 {len(income_details)} 条记录")
+    
+    # ========== 处理其他模块（使用通用逻辑）==========
     for key, value in analysis_results.items():
+        if key in ["loan", "income"]:
+            continue  # 已单独处理
         if key in default:
             default[key] = _convert_result_to_serializable(value, default[key])
         else:

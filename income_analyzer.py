@@ -773,7 +773,8 @@ def _generate_unique_key(person: str, counterparty: str, date, amount) -> str:
     Returns:
         唯一标识字符串
     """
-    date_str = str(date)[:10] if date else 'unknown'
+    # 【P2修复】统一日期格式化
+    date_str = utils.format_date_str(date) if date else 'unknown'
     # 金额四舍五入到百元，避免微小差异导致重复
     amount_key = int(round(float(amount) / 100) * 100) if amount else 0
     return f"{person}|{counterparty}|{date_str}|{amount_key}"

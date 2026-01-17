@@ -332,6 +332,44 @@ BANK_FIELD_MAPPING = {
     'transaction_id': ['交易流水号', '流水号', '交易序号', '业务流水号', '日志号']
 }
 
+# ============== Excel 列名统一映射配置 (铁律) ==============
+# 【单一修改点】今后修改 Excel 列名只需改这一处，其他模块自动引用
+
+# 内部字段名 → Excel 显示名
+COLUMN_MAPPING = {
+    'date': '交易时间',
+    'income': '收入(元)',
+    'expense': '支出(元)',
+    'balance': '余额(元)',
+    'counterparty': '交易对手',
+    'description': '交易摘要',
+    'category': '交易分类',
+    'bank_source': '所属银行',
+    '银行来源': '所属银行',  # 兼容原始列名
+    'account_number': '本方账号',
+    'is_cash': '现金',
+    '数据来源': '来源文件',
+    'transaction_id': '流水号',
+}
+
+# Excel 列显示顺序
+COLUMN_ORDER = [
+    'date', 'income', 'expense', 'balance',
+    'counterparty', 'description', 'category',
+    '银行来源', 'account_number', 'is_cash', '数据来源'
+]
+
+# 读取 Excel 时的列名变体（用于兼容不同格式）
+# 按优先级排序，第一个是标准名称
+INCOME_COLUMN_VARIANTS = ['收入(元)', 'income', '收入', '贷方金额', '存入金额']
+EXPENSE_COLUMN_VARIANTS = ['支出(元)', 'expense', '支出', '借方金额', '转出金额']
+BALANCE_COLUMN_VARIANTS = ['余额(元)', 'balance', '余额', '账户余额', '当前余额']
+DATE_COLUMN_VARIANTS = ['交易时间', 'date', '交易日期', '发生时间', '记账时间']
+COUNTERPARTY_COLUMN_VARIANTS = ['交易对手', 'counterparty', '对方名称', '交易对方名称']
+DESCRIPTION_COLUMN_VARIANTS = ['交易摘要', 'description', '摘要', '用途', '附言']
+IS_CASH_COLUMN_VARIANTS = ['现金', 'is_cash']
+CATEGORY_COLUMN_VARIANTS = ['交易分类', 'category']
+
 # ============== 去重配置 ==============
 
 # 去重时间容差(秒)
@@ -581,3 +619,10 @@ RISK_SCORE_DELAYED_TRANSFER = 10          # 固定延迟转账分值
 RISK_SCORE_DELAYED_TRANSFER_MAX = 20      # 固定延迟转账上限
 RISK_SCORE_LOAN = 8                       # 借贷关系分值
 RISK_SCORE_LOAN_MAX = 16                  # 借贷关系上限
+
+# ========== 缓存配置 (2026-01-17 新增) ==========
+CACHE_VERSION = "3.2.0"                   # 缓存版本号 (v4.3.0)
+CACHE_VERSION_MAJOR = 3                   # 缓存主版本号（用于兼容性检查）
+CACHE_PATH = "./output/analysis_results_cache.json"  # 缓存文件路径
+GRAPH_MAX_NODES = 200                     # 图谱最大节点数
+GRAPH_MAX_EDGES = 500                     # 图谱最大边数

@@ -60,8 +60,13 @@ export interface Profile {
     totalIncome: number;
     totalExpense: number;
     transactionCount: number;
-    cashTotal?: number;        // 现金交易总额
+    // 新增审计关键字段（对应后端 serialize_profiles 扩展）
+    cashTotal?: number;        // 现金交易总额（取现+存现）
+    thirdPartyTotal?: number;  // 第三方支付交易总额
+    wealthTotal?: number;      // 理财产品交易总额
     maxTransaction?: number;   // 最大单笔交易金额
+    salaryRatio?: number;      // 工资收入占比
+    // 旧字段保留向后兼容
     accountAnalysisText?: string;
     wealthAccountAnalysis?: any;
     wealthAccountReport?: string;
@@ -83,6 +88,12 @@ export interface SuspiciousTransaction {
     amount: number;
     date: string;
     description?: string;
+    // 新增审计关键字段（对应后端 serialize_suspicions 扩展）
+    direction?: string;     // 交易方向 (payment/receive/突变/延迟转账等)
+    bank?: string;          // 银行来源
+    sourceFile?: string;    // 数据来源文件
+    riskLevel?: string;     // 风险等级
+    riskReason?: string;    // 风险原因
 }
 
 export interface CashCollision {

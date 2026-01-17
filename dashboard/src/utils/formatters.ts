@@ -36,10 +36,24 @@ export const RISK_TYPE_MAP: Record<string, string> = {
   dormant_activation: '休眠激活',
   frequent_transaction: '频繁交易',
   
-  // 借贷相关
+  // 借贷相关（后端 loan_analyzer._type 映射）
   loan_repayment: '借贷还款',
   no_repayment: '无还款借贷',
-  bidirectional: '双向往来',
+  bidirectional: '借贷双向往来',
+  online_loan: '网贷平台交易',
+  regular_repayment: '规律性还款',
+  loan_pair: '借贷配对',
+  abnormal_interest: '异常利息',
+  
+  // 收入相关（后端 income_analyzer._type 映射）
+  regular_non_salary: '规律非工资收入',
+  large_individual: '个人大额转入',
+  unknown_source: '来源不明收入',
+  large_single: '大额单笔收入',
+  same_source_multi: '同源多次收入',
+  bribe_installment: '疑似分期受贿',
+  high_risk: '高风险收入',
+  medium_risk: '中风险收入',
   
   // 时间相关
   holiday_transaction: '节假日交易',
@@ -113,6 +127,54 @@ export const formatRiskDescription = (text: string | undefined | null): string =
   return cleanText || text;
 };
 
+/**
+ * 翻译借贷/收入分析类型（后端 _type 字段）
+ * @param type - 后端返回的 _type 字段值
+ * @returns 专业审计术语
+ */
+export const formatAnalysisType = (type: string | undefined | null): string => {
+  if (!type) return '--';
+  
+  const normalized = type.toLowerCase().trim();
+  return RISK_TYPE_MAP[normalized] || type;
+};
+
+/**
+ * 格式化交易时间为审计友好格式
+ * @param dateStr - 日期字符串（可能包含时间）
+ * @returns 格式化后的日期时间字符串
+ */
+export const formatAuditDateTime = (dateStr: string | Date | undefined | null): string => {
+  if (!dateStr) return '--';
+  
+  try {
+    const date = typeof dateStr === 'string' ? new Date(dateStr) : dateStr;
+    
+    if (isNaN(date.getTime())) {
+      // 如果是简单的日期字符串格式，直接返回
+      if (typeof dateStr === 'string') {
+        // 移除时区信息，保留日期部分
+        return dateStr.replace(/T.*$/, '').slice(0, 10);
+      }
+      return String(dateStr);
+    }
+    
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = date.getHours();
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    
+    // 如果有时间部分，显示完整日期时间
+    if (hours > 0 || date.getMinutes() > 0) {
+      return `${year}年${month}月${day}日 ${hours}:${minutes}`;
+    }
+    
+    return `${year}年${month}月${day}日`;
+  } catch {
+    return String(dateStr);
+  }
+};
 /**
  * 净化交易对手名称
  * - 修复 "系统检测" 等无意义的对手方名称
@@ -354,6 +416,9 @@ export const Formatters = {
   percent: formatPercent,
   direction: formatDirection,
   getRiskLevelColors,
+  // 新增审计专用函数
+  analysisType: formatAnalysisType,
+  auditDateTime: formatAuditDateTime,
   // 向后兼容
   currency: formatCurrency,
   amountInWan: formatAmountInWan,

@@ -345,6 +345,33 @@ def calculate_date_range(dates: List[datetime]) -> Tuple[Optional[datetime], Opt
     return min(valid_dates), max(valid_dates)
 
 
+def format_date_str(date: Optional[Union[datetime, pd.Timestamp, str]]) -> str:
+    """
+    【P2新增】统一的日期格式化函数
+    
+    Args:
+        date: 日期对象（datetime、pandas Timestamp 或字符串）
+        
+    Returns:
+        格式为'YYYY-MM-DD'的字符串
+    """
+    if date is None or pd.isna(date):
+        return ''
+    
+    # 如果是字符串，尝试解析
+    if isinstance(date, str):
+        parsed = parse_date(date)
+        if parsed:
+            return parsed.strftime('%Y-%m-%d')
+        return date[:10] if len(date) >= 10 else date
+    
+    # datetime 或 pandas Timestamp
+    try:
+        return date.strftime('%Y-%m-%d')
+    except (AttributeError, ValueError):
+        return str(date)[:10]
+
+
 def get_month_key(date: Optional[datetime]) -> str:
     """
     获取月份键值(用于分组)

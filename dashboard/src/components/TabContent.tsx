@@ -31,7 +31,7 @@ import {
     Cell
 } from 'recharts';
 import { useApp } from '../contexts/AppContext';
-import { formatDate, formatCurrency, formatAmountInWan, truncate, getRiskLevelBadgeStyle, formatFileSize, formatRiskLevel, formatRiskDescription, formatPartyName } from '../utils/formatters';
+import { formatDate, formatCurrency, formatAmountInWan, truncate, getRiskLevelBadgeStyle, formatFileSize, formatRiskLevel, formatRiskDescription, formatPartyName, formatAnalysisType, formatAuditDateTime } from '../utils/formatters';
 import { EmptyState } from './common/EmptyState';
 import NetworkGraph from './NetworkGraph';
 
@@ -457,10 +457,11 @@ function OverviewTab() {
 
     return (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Metric Detail Modal */}
+            {/* Metric Detail Modal - Excel 式表格布局 */}
             {selectedMetric && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setSelectedMetric(null)}>
-                    <div className="bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] overflow-hidden" onClick={e => e.stopPropagation()}>
+                    <div className="bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl max-w-4xl w-full max-h-[85vh] overflow-hidden" onClick={e => e.stopPropagation()}>
+                        {/* Header */}
                         <div className="flex items-center justify-between p-4 border-b border-gray-800">
                             <div className="flex items-center gap-3">
                                 <div className={`p-2 rounded-lg ${selectedMetric.color.replace('text-', 'bg-').replace('-400', '-500/20').replace('-500', '-500/20')}`}>
@@ -468,74 +469,111 @@ function OverviewTab() {
                                 </div>
                                 <div>
                                     <h3 className="font-semibold text-white">{selectedMetric.label}</h3>
-                                    <p className="text-xs text-gray-500">共 {selectedMetric.value} 条记录</p>
+                                    <p className="text-xs text-gray-500">共 {selectedMetric.value} 条记录 · 数据来源与卡片数字一致</p>
                                 </div>
                             </div>
                             <button onClick={() => setSelectedMetric(null)} className="p-2 hover:bg-gray-800 rounded-lg transition-colors">
                                 <X className="w-5 h-5 text-gray-400" />
                             </button>
                         </div>
-                        <div className="p-4 overflow-y-auto max-h-[60vh]">
+                        
+                        {/* Table Content */}
+                        <div className="p-4 overflow-auto max-h-[70vh]">
                             {(() => {
                                 const details = getMetricDetails(selectedMetric);
                                 if (details.length === 0) {
                                     return <div className="text-center py-8 text-gray-500">暂无详细数据</div>;
                                 }
+                                
                                 return (
-                                    <div className="space-y-2">
-                                        {details.slice(0, 20).map((item: any, idx: number) => (
-                                            <div key={idx} className="p-3 bg-gray-800/50 rounded-lg border border-gray-700/50 hover:border-gray-600 transition-colors">
-                                                <div className="flex items-center justify-between mb-2">
-                                                    <div className="flex items-center gap-2">
-                                                        <span className="text-gray-200 font-medium">
-                                                            {item.name || item.entity || item.from || item.person || `记录 ${idx + 1}`}
-                                                        </span>
-                                                        {item.counterparty && (
-                                                            <span className="text-xs text-gray-500">
-                                                            (来自: {formatPartyName(item.counterparty)})
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-sm">
+                                            <thead className="bg-gray-800/80 sticky top-0">
+                                                <tr className="text-left text-gray-400 text-xs uppercase tracking-wider">
+                                                    <th className="px-3 py-2 font-semibold border-b border-gray-700">序号</th>
+                                                    <th className="px-3 py-2 font-semibold border-b border-gray-700">对象/来源</th>
+                                                    <th className="px-3 py-2 font-semibold border-b border-gray-700">交易对手</th>
+                                                    <th className="px-3 py-2 font-semibold border-b border-gray-700 text-right">金额</th>
+                                                    <th className="px-3 py-2 font-semibold border-b border-gray-700">交易时间</th>
+                                                    <th className="px-3 py-2 font-semibold border-b border-gray-700">风险说明</th>
+                                                    <th className="px-3 py-2 font-semibold border-b border-gray-700">数据来源</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-gray-800">
+                                                {details.slice(0, 50).map((item: any, idx: number) => (
+                                                    <tr key={idx} className="hover:bg-gray-800/40 transition-colors">
+                                                        {/* 序号 */}
+                                                        <td className="px-3 py-2.5 text-gray-500 font-mono text-xs">{idx + 1}</td>
+                                                        
+                                                        {/* 对象/来源 */}
+                                                        <td className="px-3 py-2.5">
+                                                            <div className="text-gray-200 font-medium">
+                                                                {formatPartyName(item.name || item.entity || item.from || item.person || item.platform)}
+                                                            </div>
+                                                            {item._type && (
+                                                                <span className="text-[10px] text-gray-500 bg-gray-800 px-1.5 py-0.5 rounded">
+                                                                    {formatAnalysisType(item._type)}
+                                                                </span>
+                                                            )}
+                                                        </td>
+                                                        
+                                                        {/* 交易对手 */}
+                                                        <td className="px-3 py-2.5 text-gray-400">
+                                                            {formatPartyName(item.counterparty || item.to || item.lender || '--')}
+                                                        </td>
+                                                        
+                                                        {/* 金额 - 等宽字体 */}
+                                                        <td className="px-3 py-2.5 text-right">
+                                                            <span className="font-mono text-red-400 font-bold">
+                                                                {item.amount ? formatCurrency(item.amount) : (
+                                                                    item.income_total ? formatCurrency(item.income_total) : '--'
+                                                                )}
                                                             </span>
-                                                        )}
-                                                    </div>
-                                                    {item.amount && (
-                                                        <span className="text-red-400 font-bold">{formatCurrency(item.amount)}</span>
-                                                    )}
-                                                </div>
-                                                
-                                                <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-gray-400 mb-2">
-                                                    {item.date && (
-                                                        <div className="flex items-center gap-1.5">
-                                                            <Clock className="w-3 h-3 text-gray-500" />
-                                                            <span>{item.date}</span>
-                                                        </div>
-                                                    )}
-                                                    {item.bank && (
-                                                        <div className="flex items-center gap-1.5">
-                                                            <Building2 className="w-3 h-3 text-gray-500" />
-                                                            <span>{item.bank}</span>
-                                                        </div>
-                                                    )}
-                                                </div>
-
-                                                {item.source_file && (
-                                                    <div className="flex items-center gap-1.5 text-[10px] text-gray-500 bg-gray-900/50 p-1.5 rounded mb-1">
-                                                        <FileText className="w-3 h-3" />
-                                                        <span className="truncate max-w-[280px]">{item.source_file}</span>
-                                                    </div>
-                                                )}
-
-                                                {item.description && (
-                                                    <p className="text-xs text-gray-300 mt-1 pl-2 border-l-2 border-gray-600">
-                                                        {formatRiskDescription(item.description)}
-                                                    </p>
-                                                )}
-                                                {item.reasons && (
-                                                    <p className="text-xs text-gray-500 mt-1">{item.reasons.map((r: string) => formatRiskDescription(r)).join(', ')}</p>
-                                                )}
-                                            </div>
-                                        ))}
-                                        {details.length > 20 && (
-                                            <div className="text-center py-2 text-gray-500 text-sm">
-                                                仅显示前 20 条，共 {details.length} 条
+                                                            {(item.expense_total && item.expense_total > 0) && (
+                                                                <div className="font-mono text-green-400 text-xs">
+                                                                    还: {formatCurrency(item.expense_total)}
+                                                                </div>
+                                                            )}
+                                                        </td>
+                                                        
+                                                        {/* 交易时间 */}
+                                                        <td className="px-3 py-2.5 text-gray-400 font-mono text-xs">
+                                                            {formatAuditDateTime(item.date || item.first_income_date || item.loan_date || '--')}
+                                                        </td>
+                                                        
+                                                        {/* 风险说明 */}
+                                                        <td className="px-3 py-2.5 max-w-[200px]">
+                                                            <div className="text-gray-300 text-xs truncate" title={item.description || item.loan_type || item.risk_reason || ''}>
+                                                                {formatRiskDescription(item.description || item.loan_type || item.risk_reason || '--')}
+                                                            </div>
+                                                            {item.reasons && item.reasons.length > 0 && (
+                                                                <div className="text-[10px] text-gray-500 mt-0.5 truncate">
+                                                                    {item.reasons.slice(0, 2).map((r: string) => formatRiskDescription(r)).join(' | ')}
+                                                                </div>
+                                                            )}
+                                                            {item.riskLevel && item.riskLevel !== 'medium' && (
+                                                                <span className={getRiskLevelBadgeStyle(item.riskLevel)}>
+                                                                    {formatRiskLevel(item.riskLevel)}
+                                                                </span>
+                                                            )}
+                                                        </td>
+                                                        
+                                                        {/* 数据来源 */}
+                                                        <td className="px-3 py-2.5 text-gray-500 text-xs max-w-[120px]">
+                                                            <div className="truncate" title={item.source_file || item.bank || ''}>
+                                                                {item.bank && <span className="block">{truncate(item.bank, 15)}</span>}
+                                                                {item.source_file && <span className="text-[10px] text-gray-600">{truncate(item.source_file, 20)}</span>}
+                                                                {!item.bank && !item.source_file && '--'}
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                        
+                                        {details.length > 50 && (
+                                            <div className="text-center py-3 text-gray-500 text-sm border-t border-gray-800 mt-2">
+                                                仅显示前 50 条，共 {details.length} 条记录。完整数据请查看 Excel 报告。
                                             </div>
                                         )}
                                     </div>

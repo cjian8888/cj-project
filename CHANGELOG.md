@@ -2,6 +2,75 @@
 
 本文件记录资金穿透与关联排查系统的重要版本更新。
 
+格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/) 规范，
+版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
+
+---
+
+## [v4.3.0] - 2026-01-17
+
+### 🎯 数据铁律重构：`/api/results` 接口持久化
+
+解决 `/api/results` 依赖内存变量的问题，实现数据一致性保障。
+
+### 新增功能
+
+#### 分析缓存机制 (`api_server.py`)
+- **`_get_cleaned_data_mtime()`**: 获取 `cleaned_data/` 目录最新修改时间
+- **`_save_analysis_cache()`**: 分析完成时保存结果到 `output/analysis_cache/`
+- **`_load_analysis_cache()`**: 读取缓存并校验与 `cleaned_data` 的一致性
+
+#### 缓存目录结构
+```
+output/analysis_cache/
+├── metadata.json       # 元数据（版本、时间戳）
+├── profiles.json       # 资金画像
+├── suspicions.json     # 可疑交易
+├── derived_data.json   # 借贷/收入分析
+└── graph_data.json     # 图谱数据（可选）
+```
+
+### 变更
+
+#### `/api/results` 接口重构
+- **废弃**直接返回内存变量 `analysis_state.results`
+- **改为**从 `analysis_cache/` 目录读取 JSON 文件
+- **新增** `source` 字段标识数据来源（`analysis_cache` / `memory`）
+- **新增**一致性校验：`cleaned_data` 更新后，旧缓存自动失效
+
+### 修复
+
+- 解决用户修改清洗规则后前端不更新的问题
+- 解决服务重启后需重新分析的问题（缓存持久化）
+
+### 铁律修复（数据复用原则）
+
+修复以下模块中现金交易识别重复计算的问题，改为直接读取已标记的 `is_cash` 列：
+
+| 模块 | 修复函数 |
+|------|----------|
+| `suspicion_detector.py` | `run_all_detections()` - 现金碰撞检测 |
+| `risk_scoring.py` | `score_transaction()` - 交易风险评分 |
+| `risk_scoring.py` | `score_account()` - 账户风险评分 |
+| `financial_profiler.py` | `analyze_fund_flow()` - 资金流向分析 |
+| `financial_profiler.py` | `detect_large_cash()` - 大额现金检测 |
+| `financial_profiler.py` | `categorize_transactions()` - 交易分类 |
+
+### 项目维护
+
+- 清理中间过程文件（审计报告、截图等）
+- 压缩日志文件至最近 100 行
+
+### 架构优化（单一修改点原则）
+
+- 新增 `config.py: COLUMN_MAPPING` - Excel 列名统一映射配置
+- 新增 `config.py: COLUMN_ORDER` - Excel 列显示顺序配置
+- 新增 `config.py: *_COLUMN_VARIANTS` - 读取兼容性列名变体
+- 修改 `data_cleaner.py` - 使用 `config.COLUMN_MAPPING` 替代硬编码
+- 修改 `api_server.py` - 使用 `config.*_COLUMN_VARIANTS` 替代硬编码
+
+**效果**：今后修改 Excel 列名只需改 `config.py` 一处，其他模块自动引用。
+
 ---
 
 ## [v4.2.0] - 2026-01-16

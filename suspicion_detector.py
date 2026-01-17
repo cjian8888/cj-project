@@ -36,13 +36,15 @@ def detect_cash_time_collision(withdrawals: pd.DataFrame, deposits: pd.DataFrame
         return collisions
     
     # 1. 准备数据：添加辅助列用于交叉连接
-    # 添加临时key用于cross join (笛卡尔积)
-    withdrawals['join_key'] = 1
-    deposits['join_key'] = 1
+    # 使用 .copy() 避免修改原始 DataFrame（关键修复：防止数据污染）
+    wd = withdrawals.copy()
+    dp = deposits.copy()
+    wd['join_key'] = 1
+    dp['join_key'] = 1
     
     # 2. 执行交叉连接 (寻找所有可能的存取现组合)
     # 注意：在极大数据量(>10万条)下，这可能消耗内存。但对于通常的审计数据(几千-几万条)是极快的。
-    merged = pd.merge(withdrawals, deposits, on='join_key', suffixes=('_wd', '_dp'))
+    merged = pd.merge(wd, dp, on='join_key', suffixes=('_wd', '_dp'))
     
     # 3. 计算时间差和金额差
     # 确保日期列是datetime类型
@@ -233,14 +235,33 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
     # ============================
     logger.info('  -> 正在检测现金时空伴随...')
     
-    # 现金交易关键词匹配函数
-    def is_cash_transaction(row):
-        desc = str(row.get('description', '')).lower()
-        # 简单的关键词匹配，也可以用 utils.contains_keywords
-        for kw in config.CASH_KEYWORDS:
-            if kw in desc:
-                return True
-        return False
+    # 【铁律修复】现金交易识别：直接读取 cleaned_data 中已标记的 is_cash / 现金 列
+    # 不再重复用关键词匹配，复用 data_cleaner 的计算结果
+    def get_cash_transactions(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        从 DataFrame 中提取现金交易记录
+        
+        优先级：
+        1. is_cash 列（布尔类型，data_cleaner 内存中的格式）
+        2. 现金 列（字符串 '是'，从 Excel 读取时的格式）
+        3. 降级：如果都没有，使用关键词匹配（最后手段）
+        """
+        if 'is_cash' in df.columns:
+            # 直接使用已计算的布尔列
+            return df[df['is_cash'] == True].copy()
+        elif '现金' in df.columns:
+            # 从 Excel 读取时，现金列是字符串 '是' 或 ''
+            return df[df['现金'] == '是'].copy()
+        else:
+            # 降级：没有现金标记列，使用关键词匹配（兼容旧数据）
+            logger.warning('  ⚠️ 未找到现金标记列，降级为关键词匹配')
+            def is_cash_by_keyword(row):
+                desc = str(row.get('description', '')).lower()
+                for kw in config.CASH_KEYWORDS:
+                    if kw in desc:
+                        return True
+                return False
+            return df[df.apply(is_cash_by_keyword, axis=1)].copy()
 
     # 收集所有实体的取现和存现记录（用于跨实体检测）
     all_withdrawals = []
@@ -250,11 +271,8 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
         if df.empty:
             continue
             
-        # 筛选出现金交易
-        # 假设 'income' > 0 代表存现/进账, 'expense' > 0 代表取现/出账
-        # 具体逻辑视 data_cleaner 的标准而定，这里假设有 income/expense 列
-        
-        cash_df = df[df.apply(is_cash_transaction, axis=1)].copy()
+        # 【铁律】直接读取已标记的现金列
+        cash_df = get_cash_transactions(df)
         if cash_df.empty:
             continue
         

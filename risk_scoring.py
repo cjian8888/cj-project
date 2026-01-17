@@ -104,6 +104,30 @@ HIGH_RISK_COUNTERPARTY_PATTERNS = [
 
 
 # ============================================================
+# 辅助函数
+# ============================================================
+
+def _is_cash_transaction(row: pd.Series) -> bool:
+    """
+    【铁律实现】判断交易是否为现金交易
+    
+    优先级：
+    1. is_cash 列（布尔类型，data_cleaner 内存中的格式）
+    2. 现金 列（字符串 '是'，从 Excel 读取时的格式）
+    3. 降级：使用关键词匹配（最后手段）
+    """
+    # 优先读取已计算的列
+    if 'is_cash' in row.index:
+        return row['is_cash'] == True
+    if '现金' in row.index:
+        return row['现金'] == '是'
+    
+    # 降级：关键词匹配
+    desc = str(row.get('description', '')).lower()
+    return utils.contains_keywords(desc, config.CASH_KEYWORDS)
+
+
+# ============================================================
 # 交易级风险评分
 # ============================================================
 
@@ -174,7 +198,7 @@ def score_transaction(
     
     if not desc or desc == 'nan':
         desc_score = RISK_SCORE_WEIGHTS['description']['empty']
-    elif utils.contains_keywords(desc, config.CASH_KEYWORDS):
+    elif _is_cash_transaction(row):
         desc_score = RISK_SCORE_WEIGHTS['description']['cash']
     elif utils.contains_keywords(desc, SUSPICIOUS_DESCRIPTION_KEYWORDS):
         desc_score = RISK_SCORE_WEIGHTS['description']['suspicious_keywords']
@@ -438,8 +462,14 @@ def score_account(df: pd.DataFrame, account_name: str) -> Dict:
             factors['turnover'] = 15
             score += 15
     
-    # 4. 现金交易比例
-    cash_mask = df['description'].fillna('').str.contains('|'.join(config.CASH_KEYWORDS), na=False)
+    # 4. 现金交易比例 - 【铁律修复】优先使用 is_cash 列
+    if 'is_cash' in df.columns:
+        cash_mask = df['is_cash'] == True
+    elif '现金' in df.columns:
+        cash_mask = df['现金'] == '是'
+    else:
+        # 降级：使用关键词匹配
+        cash_mask = df['description'].fillna('').str.contains('|'.join(config.CASH_KEYWORDS), na=False)
     cash_ratio = cash_mask.sum() / len(df) if len(df) > 0 else 0
     if cash_ratio >= 0.3:
         factors['cash_ratio'] = 20

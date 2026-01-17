@@ -606,29 +606,11 @@ def _prepare_display_data(df: pd.DataFrame) -> pd.DataFrame:
     
     df_disp['category'] = df_disp.apply(refine_category, axis=1)
     
-    # 列名映射
-    col_mapping = {
-        'date': '交易时间',
-        'income': '收入(元)',
-        'expense': '支出(元)',
-        'balance': '余额(元)',
-        'counterparty': '交易对手',
-        'description': '交易摘要',
-        'category': '交易分类',
-        'bank_source': '所属银行',
-        '银行来源': '所属银行',
-        'account_number': '本方账号',
-        'is_cash': '现金',
-        '数据来源': '来源文件',
-        'transaction_id': '流水号'
-    }
+    # 【铁律】使用统一的列名映射（来自 config.py）
+    col_mapping = config.COLUMN_MAPPING
     
-    # 期望顺序
-    desired_order = [
-        'date', 'income', 'expense', 'balance',
-        'counterparty', 'description', 'category',
-        '银行来源', 'account_number', 'is_cash', '数据来源'
-    ]
+    # 【铁律】使用统一的列顺序（来自 config.py）
+    desired_order = config.COLUMN_ORDER
     
     # 重排与重命名
     existing_cols = [c for c in desired_order if c in df_disp.columns]

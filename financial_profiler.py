@@ -460,7 +460,9 @@ def analyze_fund_flow(df: pd.DataFrame) -> Dict:
         df: 交易DataFrame
 
     Returns:
-        资金去向分析字典
+        资金去向分析字典，包含：
+        - 第三方支付收支 (third_party_income/expense)
+        - 现金交易收支 (cash_income/expense) - ATM取现、存现、柜台现金等
     """
     logger.info('正在分析资金去向...')
 
@@ -472,9 +474,29 @@ def analyze_fund_flow(df: pd.DataFrame) -> Dict:
     third_party_income = 0.0
     third_party_income_transactions = []
 
+    # 【新增】现金交易统计（ATM取现、存现、柜台现金等物理现金）
+    cash_expense = 0.0  # 现金支出（取现）
+    cash_expense_transactions = []
+    cash_income = 0.0   # 现金收入（存现）
+    cash_income_transactions = []
+
     for _, row in df.iterrows():
-        is_third_party = utils.contains_keywords(row['description'], config.THIRD_PARTY_PAYMENT_KEYWORDS) or \
-                        utils.contains_keywords(row['counterparty'], config.THIRD_PARTY_PAYMENT_KEYWORDS)
+        description = str(row.get('description', ''))
+        counterparty = str(row.get('counterparty', ''))
+        
+        # 检查是否为第三方支付
+        is_third_party = utils.contains_keywords(description, config.THIRD_PARTY_PAYMENT_KEYWORDS) or \
+                        utils.contains_keywords(counterparty, config.THIRD_PARTY_PAYMENT_KEYWORDS)
+
+        # 【铁律修复】检查是否为现金交易 - 优先使用已计算的 is_cash 列
+        if 'is_cash' in row.index and row['is_cash'] == True:
+            is_cash = True
+        elif '现金' in row.index and row['现金'] == '是':
+            is_cash = True
+        else:
+            # 降级：使用关键词匹配
+            is_cash = utils.contains_keywords(description, config.CASH_KEYWORDS) or \
+                      utils.contains_keywords(counterparty, config.CASH_KEYWORDS)
 
         if is_third_party:
             if row['expense'] > 0:
@@ -482,8 +504,8 @@ def analyze_fund_flow(df: pd.DataFrame) -> Dict:
                 third_party_expense_transactions.append({
                     '日期': row['date'],
                     '金额': row['expense'],
-                    '摘要': row.get('description', ''),
-                    '对手方': row.get('counterparty', ''),
+                    '摘要': description,
+                    '对手方': counterparty,
                     '类型': '支出'
                 })
             if row['income'] > 0:
@@ -491,9 +513,30 @@ def analyze_fund_flow(df: pd.DataFrame) -> Dict:
                 third_party_income_transactions.append({
                     '日期': row['date'],
                     '金额': row['income'],
-                    '摘要': row.get('description', ''),
-                    '对手方': row.get('counterparty', ''),
+                    '摘要': description,
+                    '对手方': counterparty,
                     '类型': '收入'
+                })
+        
+        # 【新增】现金交易统计
+        if is_cash:
+            if row['expense'] > 0:
+                cash_expense += row['expense']
+                cash_expense_transactions.append({
+                    '日期': row['date'],
+                    '金额': row['expense'],
+                    '摘要': description,
+                    '对手方': counterparty,
+                    '类型': '取现'
+                })
+            if row['income'] > 0:
+                cash_income += row['income']
+                cash_income_transactions.append({
+                    '日期': row['date'],
+                    '金额': row['income'],
+                    '摘要': description,
+                    '对手方': counterparty,
+                    '类型': '存现'
                 })
 
     # 按对手方统计
@@ -533,12 +576,25 @@ def analyze_fund_flow(df: pd.DataFrame) -> Dict:
         'third_party_count': len(third_party_expense_transactions) + len(third_party_income_transactions),
         # 占比
         'third_party_ratio': third_party_expense / df['expense'].sum() if df['expense'].sum() > 0 else 0,
+        # 【新增】现金交易（ATM取现、存现、柜台现金等物理现金）
+        'cash_expense': cash_expense,  # 现金支出（取现）
+        'cash_expense_count': len(cash_expense_transactions),
+        'cash_expense_transactions': cash_expense_transactions,
+        'cash_income': cash_income,    # 现金收入（存现）
+        'cash_income_count': len(cash_income_transactions),
+        'cash_income_transactions': cash_income_transactions,
+        'cash_total': cash_expense + cash_income,  # 现金交易总额
+        'cash_transactions': cash_expense_transactions + cash_income_transactions,
+        'cash_count': len(cash_expense_transactions) + len(cash_income_transactions),
+        # 对手方统计
         'counterparty_stats': counterparty_stats,
         'top_counterparties': top_counterparties
     }
 
     logger.info(f'第三方支付: 收入{utils.format_currency(third_party_income)}({len(third_party_income_transactions)}笔), '
                 f'支出{utils.format_currency(third_party_expense)}({len(third_party_expense_transactions)}笔)')
+    logger.info(f'现金交易: 存现{utils.format_currency(cash_income)}({len(cash_income_transactions)}笔), '
+                f'取现{utils.format_currency(cash_expense)}({len(cash_expense_transactions)}笔)')
 
     return result
 
@@ -1224,8 +1280,13 @@ def extract_large_cash(df: pd.DataFrame, threshold: float = None) -> List[Dict]:
     large_cash_records = []
 
     for _, row in df.iterrows():
-        # 检查是否为现金交易
-        is_cash = utils.contains_keywords(row['description'], config.CASH_KEYWORDS)
+        # 【铁律修复】检查是否为现金交易 - 优先使用 is_cash 列
+        if 'is_cash' in row.index and row['is_cash'] == True:
+            is_cash = True
+        elif '现金' in row.index and row['现金'] == '是':
+            is_cash = True
+        else:
+            is_cash = utils.contains_keywords(row['description'], config.CASH_KEYWORDS)
 
         if is_cash:
             amount = max(row['income'], row['expense'])
@@ -1296,8 +1357,12 @@ def categorize_transactions(df: pd.DataFrame) -> Dict[str, List[Dict]]:
                 if row['expense'] >= config.VEHICLE_THRESHOLD:
                     categories['vehicle'].append(record)
 
-        # 现金交易
-        if utils.contains_keywords(row['description'], config.CASH_KEYWORDS):
+        # 【铁律修复】现金交易 - 优先使用 is_cash 列
+        if 'is_cash' in row.index and row['is_cash'] == True:
+            categories['cash'].append(record)
+        elif '现金' in row.index and row['现金'] == '是':
+            categories['cash'].append(record)
+        elif utils.contains_keywords(row['description'], config.CASH_KEYWORDS):
             categories['cash'].append(record)
 
         # 大额交易

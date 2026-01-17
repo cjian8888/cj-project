@@ -294,6 +294,37 @@ class ApiService {
 
         return response.blob();
     }
+
+    /**
+     * 获取缓存信息
+     */
+    async getCacheInfo(): Promise<{
+        hasCachedData: boolean;
+        isValid: boolean;
+        reason: string;
+        source: 'memory' | 'disk' | null;
+        meta: {
+            version?: string;
+            inputDirectory?: string;
+            outputDirectory?: string;
+            analysisTime?: string;
+            sourceFingerprint?: {
+                fileCount: number;
+                totalSize: number;
+            };
+        } | null;
+    }> {
+        return this.request('/api/cache/info');
+    }
+
+    /**
+     * 清除缓存（主动触发重新分析前调用）
+     */
+    async invalidateCache(): Promise<{ message: string; status: string }> {
+        return this.request('/api/cache/invalidate', {
+            method: 'POST',
+        });
+    }
 }
 
 // ==================== WebSocket Service ====================
