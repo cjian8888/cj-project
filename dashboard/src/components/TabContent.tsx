@@ -14,7 +14,9 @@ import {
     RefreshCw,
     X,
     Users,
-    Building2
+    Building2,
+    Banknote,
+    Eye
 } from 'lucide-react';
 import { api } from '../services/api';
 import type { Report } from '../services/api';
@@ -112,7 +114,7 @@ function TabButton({ label, icon: Icon, active, onClick }: TabButtonProps) {
 
 // 指标详情类型映射
 type MetricType = 'loan_analysis' | 'income_analysis' |
-    'related_direct' | 'cash_collision' | 'risk_critical' | 'risk_high' | 'risk_all';
+    'related_direct' | 'cash_collision' | 'risk_critical' | 'risk_high' | 'risk_all' | 'cash_transactions';
 
 interface AuditMetric {
     key: MetricType;
@@ -139,32 +141,101 @@ function OverviewTab() {
     const hasRealData = analysis.status === 'completed' && Object.keys(data.profiles).length > 0;
 
     // 分离个人和公司
+    // 增强版个人画像数据（审计仪表板用）
     const personProfiles = useMemo(() => {
         if (!hasRealData) return [];
+
+        // 获取每个人员的异常收入数量
+        const personAnomalyCount: { [key: string]: number } = {};
+        const incomeDetails = data.analysisResults?.income?.details || [];
+        incomeDetails.forEach((item: any) => {
+            const person = item.person || item.receiver;
+            if (person) {
+                personAnomalyCount[person] = (personAnomalyCount[person] || 0) + 1;
+            }
+        });
+
         return Object.entries(data.profiles)
             .filter(([name]) => data.persons.includes(name))
-            .map(([name, profile]) => ({
-                name: truncate(name, 10),
-                fullName: name,
-                收入: (profile?.totalIncome || 0) / 10000,
-                支出: (profile?.totalExpense || 0) / 10000,
-                total: ((profile?.totalIncome || 0) + (profile?.totalExpense || 0)) / 10000,
-            }))
+            .map(([name, profile]) => {
+                const income = profile?.totalIncome || 0;
+                const expense = profile?.totalExpense || 0;
+                const cashTotal = profile?.cashTotal || 0;
+                const cashTxCount = ((profile as any)?.cashTransactions || []).length;
+                const netFlow = income - expense;
+                const total = income + expense;
+                const cashRatio = total > 0 ? (cashTotal / total) * 100 : 0;
+
+                // 新增：工资、理财、第三方支付
+                const salaryTotal = (profile as any)?.salaryTotal || 0;  // 工资金额
+                const wealthTotal = profile?.wealthTotal || 0;  // 理财金额
+                const thirdPartyTotal = profile?.thirdPartyTotal || 0;  // 第三方支付
+                const transactionCount = profile?.transactionCount || 0;  // 交易笔数
+
+                return {
+                    name: truncate(name, 10),
+                    fullName: name,
+                    收入: income / 10000,
+                    支出: expense / 10000,
+                    income,
+                    expense,
+                    netFlow,
+                    total: total / 10000,
+                    cashTotal,
+                    cashRatio,
+                    cashTxCount,
+                    anomalyCount: personAnomalyCount[name] || 0,
+                    // 新增字段
+                    salaryTotal: salaryTotal / 10000,  // 转万元
+                    wealthTotal: wealthTotal / 10000,  // 转万元
+                    thirdPartyTotal: thirdPartyTotal / 10000,  // 转万元
+                    transactionCount,
+                    // 风险等级：现金占比>15%为高，>8%为中
+                    riskLevel: cashRatio > 15 ? 'high' : cashRatio > 8 ? 'medium' : 'low'
+                };
+            })
             .sort((a, b) => b.total - a.total)
             .slice(0, 8);
-    }, [hasRealData, data.profiles, data.persons]);
+    }, [hasRealData, data.profiles, data.persons, data.analysisResults]);
 
     const companyProfiles = useMemo(() => {
         if (!hasRealData) return [];
         return Object.entries(data.profiles)
             .filter(([name]) => data.companies.includes(name))
-            .map(([name, profile]) => ({
-                name: truncate(name, 10),
-                fullName: name,
-                收入: (profile?.totalIncome || 0) / 10000,
-                支出: (profile?.totalExpense || 0) / 10000,
-                total: ((profile?.totalIncome || 0) + (profile?.totalExpense || 0)) / 10000,
-            }))
+            .map(([name, profile]) => {
+                const income = profile?.totalIncome || 0;
+                const expense = profile?.totalExpense || 0;
+                const cashTotal = profile?.cashTotal || 0;
+                const cashTxCount = ((profile as any)?.cashTransactions || []).length;
+                const netFlow = income - expense;
+                const total = income + expense;
+                const cashRatio = total > 0 ? (cashTotal / total) * 100 : 0;
+
+                // 审计关键字段
+                const thirdPartyTotal = profile?.thirdPartyTotal || 0;
+                const maxTransaction = profile?.maxTransaction || 0;
+                const transactionCount = profile?.transactionCount || 0;
+
+                return {
+                    name: truncate(name, 10),
+                    fullName: name,
+                    收入: income / 10000,
+                    支出: expense / 10000,
+                    income,
+                    expense,
+                    netFlow,
+                    total: total / 10000,
+                    cashTotal,
+                    cashRatio,
+                    cashTxCount,
+                    // 企业专属字段
+                    thirdPartyTotal: thirdPartyTotal / 10000,  // 转万元
+                    maxTransaction: maxTransaction / 10000,  // 转万元
+                    transactionCount,
+                    // 风险等级：现金占比>20%为高，>10%为中（企业阈值略高于个人）
+                    riskLevel: cashRatio > 20 ? 'high' : cashRatio > 10 ? 'medium' : 'low'
+                };
+            })
             .sort((a, b) => b.total - a.total)
             .slice(0, 8);
     }, [hasRealData, data.profiles, data.companies]);
@@ -242,6 +313,14 @@ function OverviewTab() {
     const directTransfersCount = (data.suspicions.directTransfers || []).length;
     const cashCollisionsCount = (data.suspicions.cashCollisions || []).length;
 
+    // 从 profiles 中提取所有现金交易明细
+    const allCashTransactions = Object.values(data.profiles || {}).flatMap((p: any) =>
+        (p.cashTransactions || []).map((tx: any) => ({
+            ...tx,
+            entity: p.entityName  // 添加归属人员
+        }))
+    );
+
     // 筛选极高风险和高风险实体
     const criticalRiskEntities = rankedEntities.filter((e: any) =>
         e.riskLevel === 'critical' || (e.riskScore && e.riskScore >= 80)
@@ -314,73 +393,237 @@ function OverviewTab() {
             desc: '全部风险排名',
             icon: Users
         },
+        // 9. 物理现金存取 - 新增，显示现金交易明细
+        {
+            key: 'cash_transactions',
+            label: '物理现金存取',
+            value: allCashTransactions.length,
+            color: 'text-green-400',
+            desc: '取现/存现明细',
+            icon: Banknote
+        },
     ];
 
-    // 获取指标详情数据 - 分类汇总表格展示
-    // 【核心设计原则】审计人员需要看到分类清晰的汇总表格
+    // 分类定义
+    const loanCategories = [
+        { type: 'regular_repayment', label: '规律还款模式', desc: '每月定期还款' },
+        { type: 'no_repayment', label: '无还款借贷', desc: '借了钱没还过' },
+        { type: 'online_loan', label: '网贷平台交易', desc: '白条、花呗等' },
+        { type: 'bidirectional', label: '双向往来关系', desc: '同一人既借又还' },
+        { type: 'loan_pair', label: '借贷配对分析', desc: '借入-还款配对' },
+        { type: 'abnormal_interest', label: '异常利息检测', desc: '高利贷或零息贷' },
+    ];
+
+    const incomeCategories = [
+        { type: 'high_risk', label: '高风险项目', desc: '综合评分高风险' },
+        { type: 'large_single', label: '大额单笔收入', desc: '单笔≥10万' },
+        { type: 'medium_risk', label: '中风险项目', desc: '综合评分中风险' },
+        { type: 'large_individual', label: '个人大额转入', desc: '来自个人的大额' },
+        { type: 'unknown_source', label: '来源不明收入', desc: '对手方不明' },
+        { type: 'same_source_multi', label: '同源多次收入', desc: '同一来源多次' },
+        { type: 'regular_non_salary', label: '规律非工资收入', desc: '固定周期非工资' },
+        { type: 'bribe_installment', label: '疑似分期受贿', desc: '分期模式' },
+    ];
+
+    // 现金交易分类（取现/存现）
+    const cashCategories = [
+        { type: '取现', label: '现金取出', desc: 'ATM取现、柜台取款' },
+        { type: '存现', label: '现金存入', desc: 'ATM存现、柜台存款' },
+    ];
+
+    // 当前选中的子分类（用于钻取）
+    const [selectedSubCategory, setSelectedSubCategory] = useState<string | null>(null);
+
+    // 获取分类汇总数据（第一级）
+    // 注意：不同分类的金额字段名不同，需要分别处理
+    const getCategorySummary = (metric: AuditMetric): { type: string; label: string; desc: string; count: number; amount: number }[] => {
+        if (metric.key === 'loan_analysis') {
+            return loanCategories.map(cat => {
+                const items = loanDetails.filter((x: any) => x._type === cat.type);
+                // 根据不同类型使用不同的金额字段
+                const getAmount = (item: any): number => {
+                    switch (cat.type) {
+                        case 'regular_repayment':
+                            return item.total_amount || item.avg_amount || 0;
+                        case 'no_repayment':
+                            return item.income_amount || 0;
+                        case 'online_loan':
+                            return item.amount || 0;
+                        case 'bidirectional':
+                            return item.income_total || 0;
+                        case 'loan_pair':
+                            return item.loan_amount || 0;
+                        case 'abnormal_interest':
+                            return item.loan_amount || 0;
+                        default:
+                            return item.amount || item.income_total || item.total_amount || item.avg_amount || 0;
+                    }
+                };
+                return {
+                    ...cat,
+                    count: items.length,
+                    amount: items.reduce((sum: number, x: any) => sum + getAmount(x), 0)
+                };
+            }).filter(x => x.count > 0);
+        }
+        if (metric.key === 'income_analysis') {
+            return incomeCategories.map(cat => {
+                const items = incomeDetails.filter((x: any) => x._type === cat.type);
+                return {
+                    ...cat,
+                    count: items.length,
+                    amount: items.reduce((sum: number, x: any) =>
+                        sum + (x.amount || x.total_amount || x.avg_amount || x.income_amount || 0), 0)
+                };
+            }).filter(x => x.count > 0);
+        }
+        if (metric.key === 'cash_transactions') {
+            return cashCategories.map(cat => {
+                const items = allCashTransactions.filter((x: any) => x.type === cat.type);
+                return {
+                    ...cat,
+                    count: items.length,
+                    amount: items.reduce((sum: number, x: any) => sum + (x.amount || 0), 0)
+                };
+            }).filter(x => x.count > 0);
+        }
+        return [];
+    };
+
+    // 获取指定分类的详细记录（第二级）
+    // 注意：不同分类的后端数据结构不同，需要分别处理
+    const getCategoryDetails = (metric: AuditMetric, categoryType: string): any[] => {
+        if (metric.key === 'loan_analysis') {
+            return loanDetails
+                .filter((item: any) => item._type === categoryType)
+                .map((item: any) => {
+                    // 根据不同的借贷类型，字段名不同
+                    switch (categoryType) {
+                        case 'regular_repayment':
+                            // 规律还款：avg_amount, total_amount, day_of_month, occurrences, date_range
+                            return {
+                                name: item.person || '未知',
+                                counterparty: item.counterparty || '--',
+                                amount: item.avg_amount || item.total_amount || 0,
+                                date: item.date_range ? `每月${item.day_of_month}日 (${item.occurrences}次)` : '--',
+                                description: `月均¥${((item.avg_amount || 0) / 1).toLocaleString()}，共${item.occurrences || 0}期`,
+                                expense_total: item.total_amount,
+                                riskLevel: item.risk_level,
+                                reasons: item.is_likely_loan ? ['疑似贷款还款'] : []
+                            };
+                        case 'no_repayment':
+                            // 无还款借贷：income_amount, income_date, days_since, risk_reason
+                            return {
+                                name: item.person || '未知',
+                                counterparty: item.counterparty || '--',
+                                amount: item.income_amount || 0,
+                                date: item.income_date || '--',
+                                description: item.risk_reason || `${item.days_since}天未还款`,
+                                riskLevel: item.risk_level,
+                                reasons: [`还款比例: ${((item.repay_ratio || 0) * 100).toFixed(1)}%`]
+                            };
+                        case 'online_loan':
+                            // 网贷平台交易：platform, amount, date, direction, description
+                            return {
+                                name: item.person || '未知',
+                                counterparty: item.platform || item.counterparty || '--',
+                                amount: item.amount || 0,
+                                date: item.date || '--',
+                                description: item.description || (item.direction === 'income' ? '借入' : '还款'),
+                                riskLevel: item.risk_level,
+                                reasons: [item.direction === 'income' ? '借入' : '还款']
+                            };
+                        case 'bidirectional':
+                            // 双向往来关系：income_total, expense_total, loan_type, first_income_date
+                            return {
+                                name: item.person || '未知',
+                                counterparty: item.counterparty || '--',
+                                amount: item.income_total || 0,
+                                date: item.first_income_date || '--',
+                                description: item.loan_type || '双向往来',
+                                expense_total: item.expense_total,
+                                riskLevel: item.risk_level,
+                                reasons: [`还款/借入比: ${((item.ratio || 0) * 100).toFixed(0)}%`]
+                            };
+                        case 'loan_pair':
+                            // 借贷配对：loan_date, repay_date, loan_amount, repay_amount, interest_rate
+                            return {
+                                name: item.person || '未知',
+                                counterparty: item.counterparty || '--',
+                                amount: item.loan_amount || 0,
+                                date: item.loan_date || '--',
+                                description: `借¥${((item.loan_amount || 0) / 10000).toFixed(1)}万→还¥${((item.repay_amount || 0) / 10000).toFixed(1)}万，${item.days || 0}天`,
+                                expense_total: item.repay_amount,
+                                riskLevel: item.risk_level,
+                                reasons: item.risk_reason ? [item.risk_reason] : [`年化利率: ${(item.annual_rate || 0).toFixed(1)}%`]
+                            };
+                        case 'abnormal_interest':
+                            // 异常利息：loan_amount, repay_amount, annual_rate, abnormal_type
+                            return {
+                                name: item.person || '未知',
+                                counterparty: item.counterparty || '--',
+                                amount: item.loan_amount || 0,
+                                date: item.loan_date || '--',
+                                description: item.abnormal_type || `年化${(item.annual_rate || 0).toFixed(1)}%`,
+                                expense_total: item.repay_amount,
+                                riskLevel: item.risk_level || 'high',
+                                reasons: [item.abnormal_type || '异常利息']
+                            };
+                        default:
+                            return {
+                                name: item.person || item.borrower || '未知',
+                                counterparty: item.lender || item.counterparty || item.platform || '--',
+                                amount: item.amount || item.income_total || item.avg_amount || item.total_amount || 0,
+                                date: item.date || item.first_income_date || item.loan_date || item.income_date || '--',
+                                description: item.loan_type || item.description || item.risk_reason || '--',
+                                expense_total: item.expense_total,
+                                riskLevel: item.risk_level,
+                                reasons: item.reasons || []
+                            };
+                    }
+                });
+        }
+        if (metric.key === 'income_analysis') {
+            return incomeDetails
+                .filter((item: any) => item._type === categoryType)
+                .map((item: any) => ({
+                    name: item.person || item.receiver || '未知',
+                    counterparty: item.source || item.counterparty || item.payer || '--',
+                    // 金额：尝试多个可能的字段名
+                    amount: item.amount || item.avg_amount || item.total_amount || item.income_amount || 0,
+                    // 日期：尝试多个可能的字段名
+                    date: item.date || item.first_income_date || item.first_date || '--',
+                    // 描述：尝试多个可能的字段名
+                    description: item.risk_reason || item.description || item.reason || '--',
+                    bank: item.bank,
+                    source_file: item.source_file,
+                    riskLevel: item.riskLevel || item.risk_level,
+                    reasons: item.reasons || []
+                }));
+        }
+        if (metric.key === 'cash_transactions') {
+            return allCashTransactions
+                .filter((tx: any) => tx.type === categoryType)
+                .map((tx: any) => ({
+                    name: tx.entity || '未知',
+                    counterparty: tx.counterparty || '--',
+                    amount: tx.amount || 0,
+                    date: tx.date || '--',
+                    description: tx.description || '--',
+                    riskLevel: categoryType === '取现' ? 'medium' : 'low',
+                    reasons: [categoryType]
+                }));
+        }
+        return [];
+    };
+
+    // 获取指标详情数据（其他类型直接显示明细）
     const getMetricDetails = (metric: AuditMetric): any[] => {
         switch (metric.key) {
             case 'loan_analysis':
-                // 借贷风险分析 - 返回分类汇总数据
-                // 【优化】对象/来源列显示涉及人员，让核查对象更清晰
-                const loanTypes = [
-                    { type: 'regular_repayment', label: '规律还款模式', desc: '每月定期还款' },
-                    { type: 'no_repayment', label: '无还款借贷', desc: '借了钱没还过' },
-                    { type: 'online_loan', label: '网贷平台交易', desc: '白条、花呗等' },
-                    { type: 'bidirectional', label: '双向往来关系', desc: '同一人既借又还' },
-                ];
-                return loanTypes.map(t => {
-                    const items = loanDetails.filter((x: any) => x._type === t.type);
-                    const persons = [...new Set(items.map((x: any) => x.person))].filter(Boolean);
-                    return {
-                        // 【对象/来源】显示涉及的核查对象
-                        name: persons.length > 0 ? persons.slice(0, 3).join('、') + (persons.length > 3 ? '等' : '') : '无',
-                        // 【交易对手】显示类型名称
-                        counterparty: t.label,
-                        // 【金额】显示总金额
-                        amount: items.reduce((sum: number, x: any) => sum + (x.amount || x.income_total || 0), 0),
-                        // 【日期】显示记录数
-                        date: `${items.length}条`,
-                        // 【风险说明】显示类型描述
-                        description: t.desc,
-                        reasons: [],
-                        _subType: t.type,
-                        _count: items.length
-                    };
-                }).filter(x => x._count > 0);
-
             case 'income_analysis':
-                // 异常收入分析 - 返回分类汇总数据
-                // 【优化】对象/来源列显示涉及人员
-                const incomeTypes = [
-                    { type: 'high_risk', label: '高风险项目', desc: '综合评分高风险' },
-                    { type: 'large_single', label: '大额单笔收入', desc: '单笔≥10万' },
-                    { type: 'medium_risk', label: '中风险项目', desc: '综合评分中风险' },
-                    { type: 'large_individual', label: '个人大额转入', desc: '来自个人的大额' },
-                    { type: 'unknown_source', label: '来源不明收入', desc: '对手方不明' },
-                    { type: 'same_source_multi', label: '同源多次收入', desc: '同一来源多次' },
-                    { type: 'regular_non_salary', label: '规律非工资收入', desc: '固定周期非工资' },
-                    { type: 'bribe_installment', label: '疑似分期受贿', desc: '分期模式' },
-                ];
-                return incomeTypes.map(t => {
-                    const items = incomeDetails.filter((x: any) => x._type === t.type);
-                    const persons = [...new Set(items.map((x: any) => x.person))].filter(Boolean);
-                    return {
-                        // 【对象/来源】显示涉及的核查对象
-                        name: persons.length > 0 ? persons.slice(0, 3).join('、') + (persons.length > 3 ? '等' : '') : '无',
-                        // 【交易对手】显示类型名称
-                        counterparty: t.label,
-                        // 【金额】显示总金额
-                        amount: items.reduce((sum: number, x: any) => sum + (x.amount || x.avg_amount || x.total_amount || 0), 0),
-                        // 【日期】显示记录数
-                        date: `${items.length}条`,
-                        // 【风险说明】显示类型描述
-                        description: t.desc,
-                        reasons: [],
-                        _subType: t.type,
-                        _count: items.length
-                    };
-                }).filter(x => x._count > 0);
+                // 这两个类型使用分类汇总，不在这里返回
+                return [];
 
             case 'related_direct':
                 // 核心人员往来 - 使用 suspicions.directTransfers
@@ -467,104 +710,292 @@ function OverviewTab() {
                 }
                 return [{ name: '暂无数据', description: '未发现风险实体' }];
 
+            case 'cash_transactions':
+                // 物理现金存取 - 使用分类汇总，不在这里返回
+                return [];
+
             default:
                 return [];
         }
     };
 
+    // 判断是否需要显示分类汇总（两级钻取）
+    const needsCategorySummary = (metric: AuditMetric) => {
+        return metric.key === 'loan_analysis' || metric.key === 'income_analysis' || metric.key === 'cash_transactions';
+    };
+
+    // 关闭弹窗时重置子分类
+    const handleCloseModal = () => {
+        setSelectedMetric(null);
+        setSelectedSubCategory(null);
+    };
+
+    // 返回上一级（从明细返回分类汇总）
+    const handleBackToSummary = () => {
+        setSelectedSubCategory(null);
+    };
+
     return (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Metric Detail Modal - Excel 式表格布局 */}
+            {/* Metric Detail Modal - 两级钻取设计 */}
             {selectedMetric && (
-                <div className="fixed inset-0 lg:left-72 z-50 flex items-center justify-center p-8 bg-black/60 backdrop-blur-sm" onClick={() => setSelectedMetric(null)}>
+                <div className="fixed inset-0 lg:left-72 z-50 flex items-center justify-center p-8 bg-black/60 backdrop-blur-sm" onClick={handleCloseModal}>
                     <div className="bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl max-w-4xl w-full max-h-[85vh] overflow-hidden" onClick={e => e.stopPropagation()}>
                         {/* Header */}
                         <div className="flex items-center justify-between p-4 border-b border-gray-800">
                             <div className="flex items-center gap-3">
+                                {selectedSubCategory && (
+                                    <button onClick={handleBackToSummary} className="p-2 hover:bg-gray-800 rounded-lg transition-colors mr-1">
+                                        <ChevronRight className="w-4 h-4 text-gray-400 rotate-180" />
+                                    </button>
+                                )}
                                 <div className={`p-2 rounded-lg ${selectedMetric.color.replace('text-', 'bg-').replace('-400', '-500/20').replace('-500', '-500/20')}`}>
                                     <selectedMetric.icon className={`w-5 h-5 ${selectedMetric.color}`} />
                                 </div>
                                 <div>
-                                    <h3 className="font-semibold text-white">{selectedMetric.label}</h3>
-                                    <p className="text-xs text-gray-500">共 {getMetricDetails(selectedMetric).length} 条记录</p>
+                                    <h3 className="font-semibold text-white">
+                                        {selectedMetric.label}
+                                        {selectedSubCategory && (
+                                            <span className="text-blue-400 ml-2">
+                                                → {(selectedMetric.key === 'loan_analysis' ? loanCategories : incomeCategories).find(c => c.type === selectedSubCategory)?.label}
+                                            </span>
+                                        )}
+                                    </h3>
+                                    <p className="text-xs text-gray-500">
+                                        {selectedSubCategory
+                                            ? `共 ${getCategoryDetails(selectedMetric, selectedSubCategory).length} 条明细记录`
+                                            : needsCategorySummary(selectedMetric)
+                                                ? `共 ${getCategorySummary(selectedMetric).length} 个分类，${selectedMetric.value} 条记录`
+                                                : `共 ${getMetricDetails(selectedMetric).length} 条记录`
+                                        }
+                                    </p>
                                 </div>
                             </div>
-                            <button onClick={() => setSelectedMetric(null)} className="p-2 hover:bg-gray-800 rounded-lg transition-colors">
+                            <button onClick={handleCloseModal} className="p-2 hover:bg-gray-800 rounded-lg transition-colors">
                                 <X className="w-5 h-5 text-gray-400" />
                             </button>
                         </div>
 
-                        {/* Table Content */}
+                        {/* Content */}
                         <div className="p-4 overflow-auto max-h-[70vh]">
-                            {(() => {
-                                const details = getMetricDetails(selectedMetric);
-                                if (details.length === 0) {
-                                    return <div className="text-center py-8 text-gray-500">暂无详细数据</div>;
-                                }
-
-                                return (
-                                    <div className="overflow-x-auto rounded-lg border border-gray-700 mx-auto">
-                                        <table className="w-full text-sm">
-                                            <thead className="bg-gray-800 sticky top-0">
-                                                <tr className="text-left text-gray-300 text-xs">
-                                                    <th className="px-4 py-3 font-medium w-12">#</th>
-                                                    <th className="px-4 py-3 font-medium">对象/来源</th>
-                                                    <th className="px-4 py-3 font-medium">交易对手</th>
-                                                    <th className="px-4 py-3 font-medium text-right">金额</th>
-                                                    <th className="px-4 py-3 font-medium">交易时间</th>
-                                                    <th className="px-4 py-3 font-medium">风险说明</th>
+                            {needsCategorySummary(selectedMetric) && !selectedSubCategory ? (
+                                /* 第一级：分类汇总表格 */
+                                <div className="overflow-x-auto rounded-lg border border-gray-700">
+                                    <table className="w-full text-sm">
+                                        <thead className="bg-gray-800 sticky top-0">
+                                            <tr className="text-left text-gray-300 text-xs">
+                                                <th className="px-4 py-3 font-medium w-12">#</th>
+                                                <th className="px-4 py-3 font-medium">分类名称</th>
+                                                <th className="px-4 py-3 font-medium">说明</th>
+                                                <th className="px-4 py-3 font-medium text-right">记录数</th>
+                                                <th className="px-4 py-3 font-medium text-right">涉及金额</th>
+                                                <th className="px-4 py-3 font-medium text-center">操作</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {getCategorySummary(selectedMetric).map((cat, idx) => (
+                                                <tr
+                                                    key={cat.type}
+                                                    className={`border-t border-gray-800 ${idx % 2 === 0 ? 'bg-gray-900/30' : 'bg-gray-900/60'} hover:bg-blue-500/10 transition-colors cursor-pointer`}
+                                                    onClick={() => setSelectedSubCategory(cat.type)}
+                                                >
+                                                    <td className="px-4 py-4 text-gray-500 font-mono text-xs">{idx + 1}</td>
+                                                    <td className="px-4 py-4">
+                                                        <div className="text-white font-medium">{cat.label}</div>
+                                                    </td>
+                                                    <td className="px-4 py-4 text-gray-400 text-xs">{cat.desc}</td>
+                                                    <td className="px-4 py-4 text-right">
+                                                        <span className="font-mono text-blue-400 font-bold text-lg">{cat.count}</span>
+                                                        <span className="text-gray-500 text-xs ml-1">条</span>
+                                                    </td>
+                                                    <td className="px-4 py-4 text-right">
+                                                        <span className="font-mono text-orange-400 font-semibold">{formatCurrency(cat.amount)}</span>
+                                                    </td>
+                                                    <td className="px-4 py-4 text-center">
+                                                        <button className="px-3 py-1.5 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 text-xs rounded-lg transition-colors">
+                                                            查看明细 →
+                                                        </button>
+                                                    </td>
                                                 </tr>
-                                            </thead>
-                                            <tbody>
-                                                {details.slice(0, 50).map((item: any, idx: number) => (
-                                                    <tr key={idx} className={`border-t border-gray-800 ${idx % 2 === 0 ? 'bg-gray-900/30' : 'bg-gray-900/60'} hover:bg-gray-800/50 transition-colors`}>
-                                                        <td className="px-4 py-3 text-gray-500 font-mono text-xs">{idx + 1}</td>
-                                                        <td className="px-4 py-3">
-                                                            <div className="text-white font-medium">
-                                                                {formatPartyName(item.name || item.entity || item.from || item.person || item.platform)}
-                                                            </div>
-                                                        </td>
-                                                        <td className="px-4 py-3 text-gray-300">
-                                                            {formatPartyName(item.counterparty || item.to || item.lender || '--')}
-                                                        </td>
-                                                        <td className="px-4 py-3 text-right">
-                                                            <span className="font-mono text-orange-400 font-semibold">
-                                                                {item.amount ? formatCurrency(item.amount) : (
-                                                                    item.income_total ? formatCurrency(item.income_total) : '--'
-                                                                )}
-                                                            </span>
-                                                            {(item.expense_total && item.expense_total > 0) && (
-                                                                <div className="font-mono text-green-400 text-xs mt-0.5">
-                                                                    还款: {formatCurrency(item.expense_total)}
-                                                                </div>
-                                                            )}
-                                                        </td>
-                                                        <td className="px-4 py-3 text-gray-400 font-mono text-xs whitespace-nowrap">
-                                                            {formatAuditDateTime(item.date || item.first_income_date || item.loan_date || '--')}
-                                                        </td>
-                                                        <td className="px-4 py-3">
-                                                            <div className="text-gray-300 text-xs" title={item.description || item.loan_type || item.risk_reason || ''}>
-                                                                {formatRiskDescription(item.description || item.loan_type || item.risk_reason || '--')}
-                                                            </div>
-                                                            {item.reasons && item.reasons.length > 0 && (
-                                                                <div className="text-[10px] text-gray-500 mt-1">
-                                                                    {item.reasons.slice(0, 2).map((r: string) => formatRiskDescription(r)).join(' | ')}
-                                                                </div>
-                                                            )}
-                                                        </td>
-                                                    </tr>
-                                                ))}
-                                            </tbody>
-                                        </table>
+                                            ))}
+                                            {/* 合计行 */}
+                                            <tr className="border-t-2 border-gray-600 bg-gray-800/80">
+                                                <td className="px-4 py-4"></td>
+                                                <td className="px-4 py-4 text-white font-bold">合计</td>
+                                                <td className="px-4 py-4"></td>
+                                                <td className="px-4 py-4 text-right">
+                                                    <span className="font-mono text-white font-bold text-lg">{selectedMetric.value}</span>
+                                                    <span className="text-gray-400 text-xs ml-1">条</span>
+                                                </td>
+                                                <td className="px-4 py-4 text-right">
+                                                    <span className="font-mono text-orange-400 font-bold">
+                                                        {formatCurrency(getCategorySummary(selectedMetric).reduce((sum, c) => sum + c.amount, 0))}
+                                                    </span>
+                                                </td>
+                                                <td className="px-4 py-4"></td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            ) : (
+                                /* 第二级：详细记录表格（或其他类型的直接明细） */
+                                (() => {
+                                    const details = selectedSubCategory
+                                        ? getCategoryDetails(selectedMetric, selectedSubCategory)
+                                        : getMetricDetails(selectedMetric);
 
-                                        {details.length > 50 && (
-                                            <div className="text-center py-3 text-gray-500 text-sm bg-gray-800/50 border-t border-gray-700">
-                                                仅显示前 50 条，共 {details.length} 条记录
+                                    if (details.length === 0) {
+                                        return <div className="text-center py-8 text-gray-500">暂无详细数据</div>;
+                                    }
+
+                                    return (
+                                        <div className="overflow-x-auto rounded-lg border border-gray-700">
+                                            <table className="w-full text-sm">
+                                                <thead className="bg-gray-800 sticky top-0">
+                                                    <tr className="text-left text-gray-300 text-xs">
+                                                        <th className="px-4 py-3 font-medium w-12">#</th>
+                                                        <th className="px-4 py-3 font-medium">对象/来源</th>
+                                                        <th className="px-4 py-3 font-medium">交易对手</th>
+                                                        <th className="px-4 py-3 font-medium text-right">金额</th>
+                                                        <th className="px-4 py-3 font-medium">交易时间</th>
+                                                        <th className="px-4 py-3 font-medium">风险说明</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {details.map((item: any, idx: number) => (
+                                                        <tr key={idx} className={`border-t border-gray-800 ${idx % 2 === 0 ? 'bg-gray-900/30' : 'bg-gray-900/60'} hover:bg-gray-800/50 transition-colors`}>
+                                                            <td className="px-4 py-3 text-gray-500 font-mono text-xs">{idx + 1}</td>
+                                                            <td className="px-4 py-3">
+                                                                <div className="text-white font-medium">
+                                                                    {formatPartyName(item.name || item.entity || item.from || item.person || item.platform)}
+                                                                </div>
+                                                            </td>
+                                                            <td className="px-4 py-3 text-gray-300">
+                                                                {formatPartyName(item.counterparty || item.to || item.lender || '--')}
+                                                            </td>
+                                                            <td className="px-4 py-3 text-right">
+                                                                <span className="font-mono text-orange-400 font-semibold">
+                                                                    {item.amount ? formatCurrency(item.amount) : (
+                                                                        item.income_total ? formatCurrency(item.income_total) : '--'
+                                                                    )}
+                                                                </span>
+                                                                {(item.expense_total && item.expense_total > 0) && (
+                                                                    <div className="font-mono text-green-400 text-xs mt-0.5">
+                                                                        还款: {formatCurrency(item.expense_total)}
+                                                                    </div>
+                                                                )}
+                                                            </td>
+                                                            <td className="px-4 py-3 text-gray-400 font-mono text-xs whitespace-nowrap">
+                                                                {formatAuditDateTime(item.date || item.first_income_date || item.loan_date || '--')}
+                                                            </td>
+                                                            <td className="px-4 py-3">
+                                                                <div className="text-gray-300 text-xs" title={item.description || item.loan_type || item.risk_reason || ''}>
+                                                                    {formatRiskDescription(item.description || item.loan_type || item.risk_reason || '--')}
+                                                                </div>
+                                                                {item.reasons && item.reasons.length > 0 && (
+                                                                    <div className="text-[10px] text-gray-500 mt-1">
+                                                                        {item.reasons.slice(0, 2).map((r: string) => formatRiskDescription(r)).join(' | ')}
+                                                                    </div>
+                                                                )}
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    );
+                                })()
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* P1-2: 智能研判结论区域 */}
+            {hasRealData && (criticalRiskEntities.length > 0 || highRiskEntities.length > 0 || incomeDetails.length > 0) && (
+                <div className="lg:col-span-3 card bg-gradient-to-r from-red-500/10 via-orange-500/5 to-amber-500/10 border border-red-500/20">
+                    <div className="flex items-start gap-4">
+                        <div className="p-3 rounded-xl bg-red-500/20 flex-shrink-0">
+                            <AlertTriangle className="w-6 h-6 text-red-400" />
+                        </div>
+                        <div className="flex-1">
+                            <h3 className="font-bold text-white text-lg mb-2">⚠️ 置顶研判结论</h3>
+                            <div className="space-y-2 text-sm">
+                                {/* 核心风险点 */}
+                                {(() => {
+                                    // 找出风险评分最高的实体
+                                    const topRiskEntity = rankedEntities.length > 0
+                                        ? rankedEntities.sort((a: any, b: any) => (b.riskScore || 0) - (a.riskScore || 0))[0]
+                                        : null;
+
+                                    // 找出高频交易对手
+                                    const topCounterparty = incomeDetails.length > 0
+                                        ? incomeDetails.reduce((acc: any, curr: any) => {
+                                            const cp = curr.counterparty || curr.from_party || curr.payer;
+                                            if (cp) acc[cp] = (acc[cp] || 0) + 1;
+                                            return acc;
+                                        }, {} as Record<string, number>)
+                                        : {};
+                                    const topCpEntry = Object.entries(topCounterparty).sort(([, a], [, b]) => (b as number) - (a as number))[0];
+
+                                    if (topRiskEntity) {
+                                        return (
+                                            <div className="bg-black/20 rounded-lg p-3 border-l-4 border-red-500">
+                                                <p className="text-gray-200 leading-relaxed">
+                                                    本案核心风险点：发现核心人员
+                                                    <span className="text-red-400 font-bold mx-1">【{topRiskEntity.name}】</span>
+                                                    风险评分达 <span className="text-red-400 font-bold">{topRiskEntity.riskScore || '高'}</span>
+                                                    {topCpEntry && (
+                                                        <>，与外部企业<span className="text-orange-400 font-bold mx-1">【{topCpEntry[0]}】</span>
+                                                            存在 <span className="text-orange-400 font-bold">{String(topCpEntry[1])}</span> 次资金往来</>
+                                                    )}
+                                                    ，建议优先核查。
+                                                </p>
                                             </div>
-                                        )}
-                                    </div>
-                                );
-                            })()}
+                                        );
+                                    }
+
+                                    // 如果没有高风险实体但有异常收入
+                                    if (incomeDetails.length > 0) {
+                                        return (
+                                            <div className="bg-black/20 rounded-lg p-3 border-l-4 border-orange-500">
+                                                <p className="text-gray-200">
+                                                    系统检测到 <span className="text-orange-400 font-bold">{incomeDetails.length}</span> 条异常收入记录需要核查，
+                                                    涉及资金规模 <span className="text-orange-400 font-bold">
+                                                        ¥{(incomeDetails.reduce((sum: number, d: any) => sum + (d.amount || d.income_total || 0), 0) / 10000).toFixed(1)}万
+                                                    </span>，建议按风险等级逐一排查。
+                                                </p>
+                                            </div>
+                                        );
+                                    }
+
+                                    return null;
+                                })()}
+
+                                {/* 快速统计 */}
+                                <div className="flex flex-wrap gap-3 mt-3">
+                                    {criticalRiskEntities.length > 0 && (
+                                        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-red-500/20 text-red-400 ring-1 ring-red-500/30">
+                                            🔴 极高风险实体 {criticalRiskEntities.length}
+                                        </span>
+                                    )}
+                                    {highRiskEntities.length > 0 && (
+                                        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-orange-500/20 text-orange-400 ring-1 ring-orange-500/30">
+                                            🟠 高风险实体 {highRiskEntities.length}
+                                        </span>
+                                    )}
+                                    {loanDetails.length > 0 && (
+                                        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-yellow-500/20 text-yellow-400 ring-1 ring-yellow-500/30">
+                                            💰 借贷异常 {loanDetails.length}
+                                        </span>
+                                    )}
+                                    {directTransfersCount > 0 && (
+                                        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-blue-500/20 text-blue-400 ring-1 ring-blue-500/30">
+                                            🔗 核心人员往来 {directTransfersCount}
+                                        </span>
+                                    )}
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -612,7 +1043,7 @@ function OverviewTab() {
                                 {entityType === 'person' ? '个人资金流量' : '企业资金流量'}
                             </h3>
                             <p className="text-xs text-gray-500">
-                                {hasRealData ? 'TOP 8 按总流量排序' : '等待分析数据'}
+                                {hasRealData ? `共 ${entityType === 'person' ? personProfiles.length : companyProfiles.length} 位，按流水总额排序` : '等待分析数据'}
                             </p>
                         </div>
                     </div>
@@ -641,46 +1072,221 @@ function OverviewTab() {
                     </div>
                 </div>
 
-                <div className="h-64">
+                {/* 审计仪表板卡片列表 */}
+                <div className="space-y-3 max-h-72 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-700 scrollbar-track-transparent pr-1">
                     {hasRealData && currentFlowData.length > 0 ? (
-                        <ResponsiveContainer width="100%" height="100%" minHeight={100}>
-                            <BarChart data={currentFlowData} layout="vertical" margin={{ left: 10, right: 20 }}>
-                                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" horizontal={true} vertical={false} />
-                                <XAxis
-                                    type="number"
-                                    axisLine={false}
-                                    tickLine={false}
-                                    tick={{ fill: '#6b7280', fontSize: 10 }}
-                                    tickFormatter={(value) => `${value.toFixed(0)}万`}
-                                />
-                                <YAxis
-                                    type="category"
-                                    dataKey="name"
-                                    axisLine={false}
-                                    tickLine={false}
-                                    tick={{ fill: '#9ca3af', fontSize: 11 }}
-                                    width={80}
-                                />
-                                <Tooltip
-                                    contentStyle={{
-                                        backgroundColor: '#111827',
-                                        border: '1px solid #374151',
-                                        borderRadius: '8px',
-                                        boxShadow: '0 10px 30px -10px rgba(0,0,0,0.5)'
-                                    }}
-                                    labelStyle={{ color: '#9ca3af' }}
-                                    formatter={(value: number | undefined) => value !== undefined ? [`¥${value.toFixed(2)}万`, ''] : ['', '']}
-                                    labelFormatter={(label, payload) => {
-                                        const item = payload?.[0]?.payload;
-                                        return item?.fullName || label;
-                                    }}
-                                />
-                                <Bar dataKey="收入" fill={entityType === 'person' ? '#3b82f6' : '#10b981'} radius={[0, 4, 4, 0]} barSize={14} />
-                                <Bar dataKey="支出" fill={entityType === 'person' ? '#f97316' : '#ef4444'} radius={[0, 4, 4, 0]} barSize={14} />
-                            </BarChart>
-                        </ResponsiveContainer>
+                        <>
+                            {entityType === 'person' ? (
+                                // 个人审计卡片（增强版）
+                                personProfiles.map((person, index) => {
+                                    const maxTotal = Math.max(...personProfiles.map(p => p.total));
+                                    const widthPercent = maxTotal > 0 ? (person.total / maxTotal) * 100 : 0;
+
+                                    return (
+                                        <div
+                                            key={person.fullName}
+                                            className="group relative bg-gray-800/40 hover:bg-gray-800/70 rounded-xl p-4 transition-all duration-300 hover:shadow-lg hover:shadow-blue-500/10 border border-transparent hover:border-blue-500/30"
+                                        >
+                                            {/* 排名标识 & 名称 & 金额 */}
+                                            <div className="flex items-center justify-between mb-2">
+                                                <div className="flex items-center gap-3">
+                                                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold ${index === 0 ? 'bg-gradient-to-br from-yellow-400 to-orange-500 text-white shadow-lg shadow-orange-500/30' :
+                                                        index === 1 ? 'bg-gradient-to-br from-gray-300 to-gray-400 text-gray-800' :
+                                                            index === 2 ? 'bg-gradient-to-br from-amber-600 to-amber-700 text-white' :
+                                                                'bg-gray-700 text-gray-400'
+                                                        }`}>
+                                                        {index + 1}
+                                                    </div>
+                                                    <div>
+                                                        <span className="font-semibold text-white text-sm" title={person.fullName}>
+                                                            {person.name}
+                                                        </span>
+                                                        <span className="text-[10px] text-gray-500 ml-2">{person.transactionCount}笔</span>
+                                                    </div>
+                                                </div>
+                                                <div className="text-right">
+                                                    <span className="text-lg font-bold bg-gradient-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent">
+                                                        ¥{person.total.toFixed(0)}万
+                                                    </span>
+                                                    <div className="text-[10px] text-gray-500">流水总额</div>
+                                                </div>
+                                            </div>
+
+                                            {/* 渐变进度条 */}
+                                            <div className="relative h-2 bg-gray-700/50 rounded-full overflow-hidden mb-3">
+                                                <div
+                                                    className="absolute inset-y-0 left-0 bg-gradient-to-r from-blue-500 via-cyan-500 to-teal-400 rounded-full transition-all duration-500"
+                                                    style={{ width: `${widthPercent}%` }}
+                                                />
+                                                <div
+                                                    className="absolute inset-y-0 left-0 bg-gradient-to-r from-blue-500/50 via-cyan-500/50 to-teal-400/50 rounded-full animate-pulse"
+                                                    style={{ width: `${widthPercent}%` }}
+                                                />
+                                            </div>
+
+                                            {/* 明细行：收入/支出/净流 */}
+                                            <div className="flex items-center gap-4 text-xs text-gray-400 mb-2">
+                                                <span className="flex items-center gap-1">
+                                                    <ArrowDownLeft className="w-3 h-3 text-green-400" />
+                                                    收入 <span className="text-green-400 font-medium">{person.收入.toFixed(0)}万</span>
+                                                </span>
+                                                <span className="flex items-center gap-1">
+                                                    <ArrowUpRight className="w-3 h-3 text-orange-400" />
+                                                    支出 <span className="text-orange-400 font-medium">{person.支出.toFixed(0)}万</span>
+                                                </span>
+                                                <span className={`flex items-center gap-1 ${person.netFlow >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                                    净流 {person.netFlow >= 0 ? '+' : ''}{(person.netFlow / 10000).toFixed(0)}万
+                                                </span>
+                                            </div>
+
+                                            {/* 指标徽章行 */}
+                                            <div className="flex flex-wrap items-center gap-1.5">
+                                                {/* 工资金额徽章 */}
+                                                {person.salaryTotal > 0 && (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-500/20 text-blue-400 ring-1 ring-blue-500/30 cursor-pointer hover:bg-blue-500/30 transition-colors">
+                                                        💼 工资{person.salaryTotal.toFixed(0)}万
+                                                    </span>
+                                                )}
+
+                                                {/* 理财金额徽章 */}
+                                                {person.wealthTotal > 0 && (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-indigo-500/20 text-indigo-400 ring-1 ring-indigo-500/30 cursor-pointer hover:bg-indigo-500/30 transition-colors">
+                                                        📊 理财{person.wealthTotal.toFixed(0)}万
+                                                    </span>
+                                                )}
+
+                                                {/* 现金占比徽章 */}
+                                                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium cursor-pointer transition-colors ${person.riskLevel === 'high' ? 'bg-red-500/20 text-red-400 ring-1 ring-red-500/30 hover:bg-red-500/30' :
+                                                    person.riskLevel === 'medium' ? 'bg-yellow-500/20 text-yellow-400 ring-1 ring-yellow-500/30 hover:bg-yellow-500/30' :
+                                                        'bg-green-500/20 text-green-400 ring-1 ring-green-500/30 hover:bg-green-500/30'
+                                                    }`}>
+                                                    <Banknote className="w-3 h-3" />
+                                                    现金{person.cashRatio.toFixed(0)}% ({person.cashTxCount}笔)
+                                                </span>
+
+                                                {/* 第三方支付徽章 */}
+                                                {person.thirdPartyTotal > 0 && (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-cyan-500/20 text-cyan-400 ring-1 ring-cyan-500/30 cursor-pointer hover:bg-cyan-500/30 transition-colors">
+                                                        📱 三方{person.thirdPartyTotal.toFixed(0)}万
+                                                    </span>
+                                                )}
+
+                                                {/* 异常收入徽章 */}
+                                                {person.anomalyCount > 0 && (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-purple-500/20 text-purple-400 ring-1 ring-purple-500/30 cursor-pointer hover:bg-purple-500/30 transition-colors">
+                                                        <AlertTriangle className="w-3 h-3" />
+                                                        异常{person.anomalyCount}笔
+                                                    </span>
+                                                )}
+
+                                                {/* 查看详情按钮 */}
+                                                <button className="ml-auto opacity-0 group-hover:opacity-100 text-[10px] text-blue-400 hover:text-blue-300 transition-all flex items-center gap-1 bg-blue-500/10 hover:bg-blue-500/20 px-2 py-0.5 rounded-md">
+                                                    详情 <ChevronRight className="w-3 h-3" />
+                                                </button>
+                                            </div>
+                                        </div>
+                                    );
+                                })
+                            ) : (
+                                // 企业审计仪表板卡片（增强版）
+                                companyProfiles.map((company, index) => {
+                                    const maxTotal = Math.max(...companyProfiles.map(c => c.total));
+                                    const widthPercent = maxTotal > 0 ? (company.total / maxTotal) * 100 : 0;
+
+                                    return (
+                                        <div
+                                            key={company.fullName}
+                                            className="group relative bg-gray-800/40 hover:bg-gray-800/70 rounded-xl p-4 transition-all duration-300 hover:shadow-lg hover:shadow-cyan-500/10 border border-transparent hover:border-cyan-500/30"
+                                        >
+                                            {/* 排名标识 & 名称 & 金额 */}
+                                            <div className="flex items-center justify-between mb-2">
+                                                <div className="flex items-center gap-3">
+                                                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold ${index === 0 ? 'bg-gradient-to-br from-cyan-400 to-teal-500 text-white shadow-lg shadow-teal-500/30' :
+                                                        index === 1 ? 'bg-gradient-to-br from-gray-300 to-gray-400 text-gray-800' :
+                                                            index === 2 ? 'bg-gradient-to-br from-amber-600 to-amber-700 text-white' :
+                                                                'bg-gray-700 text-gray-400'
+                                                        }`}>
+                                                        {index + 1}
+                                                    </div>
+                                                    <div>
+                                                        <span className="font-semibold text-white text-sm" title={company.fullName}>
+                                                            {company.name}
+                                                        </span>
+                                                        <span className="text-[10px] text-gray-500 ml-2">{company.transactionCount}笔</span>
+                                                    </div>
+                                                </div>
+                                                <div className="text-right">
+                                                    <span className="text-lg font-bold bg-gradient-to-r from-cyan-400 to-teal-400 bg-clip-text text-transparent">
+                                                        ¥{company.total.toFixed(0)}万
+                                                    </span>
+                                                    <div className="text-[10px] text-gray-500">流水总额</div>
+                                                </div>
+                                            </div>
+
+                                            {/* 渐变进度条（青色系） */}
+                                            <div className="relative h-2 bg-gray-700/50 rounded-full overflow-hidden mb-3">
+                                                <div
+                                                    className="absolute inset-y-0 left-0 bg-gradient-to-r from-cyan-500 via-teal-500 to-emerald-400 rounded-full transition-all duration-500"
+                                                    style={{ width: `${widthPercent}%` }}
+                                                />
+                                                <div
+                                                    className="absolute inset-y-0 left-0 bg-gradient-to-r from-cyan-500/50 via-teal-500/50 to-emerald-400/50 rounded-full animate-pulse"
+                                                    style={{ width: `${widthPercent}%` }}
+                                                />
+                                            </div>
+
+                                            {/* 明细行：收入/支出/净流 */}
+                                            <div className="flex items-center gap-4 text-xs text-gray-400 mb-2">
+                                                <span className="flex items-center gap-1">
+                                                    <ArrowDownLeft className="w-3 h-3 text-green-400" />
+                                                    收入 <span className="text-green-400 font-medium">{company.收入.toFixed(0)}万</span>
+                                                </span>
+                                                <span className="flex items-center gap-1">
+                                                    <ArrowUpRight className="w-3 h-3 text-orange-400" />
+                                                    支出 <span className="text-orange-400 font-medium">{company.支出.toFixed(0)}万</span>
+                                                </span>
+                                                <span className={`flex items-center gap-1 ${company.netFlow >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                                    净流 {company.netFlow >= 0 ? '+' : ''}{(company.netFlow / 10000).toFixed(0)}万
+                                                </span>
+                                            </div>
+
+                                            {/* 企业专属指标徽章行 */}
+                                            <div className="flex flex-wrap items-center gap-1.5">
+                                                {/* 现金占比徽章 */}
+                                                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium cursor-pointer transition-colors ${company.riskLevel === 'high' ? 'bg-red-500/20 text-red-400 ring-1 ring-red-500/30 hover:bg-red-500/30' :
+                                                    company.riskLevel === 'medium' ? 'bg-yellow-500/20 text-yellow-400 ring-1 ring-yellow-500/30 hover:bg-yellow-500/30' :
+                                                        'bg-green-500/20 text-green-400 ring-1 ring-green-500/30 hover:bg-green-500/30'
+                                                    }`}>
+                                                    <Banknote className="w-3 h-3" />
+                                                    现金{company.cashRatio.toFixed(0)}% ({company.cashTxCount}笔)
+                                                </span>
+
+                                                {/* 第三方支付徽章 */}
+                                                {company.thirdPartyTotal > 0 && (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-cyan-500/20 text-cyan-400 ring-1 ring-cyan-500/30 cursor-pointer hover:bg-cyan-500/30 transition-colors">
+                                                        📱 三方{company.thirdPartyTotal.toFixed(0)}万
+                                                    </span>
+                                                )}
+
+                                                {/* 最大单笔交易徽章 */}
+                                                {company.maxTransaction > 0 && (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-orange-500/20 text-orange-400 ring-1 ring-orange-500/30 cursor-pointer hover:bg-orange-500/30 transition-colors">
+                                                        💰 最大{company.maxTransaction.toFixed(0)}万
+                                                    </span>
+                                                )}
+
+                                                {/* 查看详情按钮 */}
+                                                <button className="ml-auto opacity-0 group-hover:opacity-100 text-[10px] text-cyan-400 hover:text-cyan-300 transition-all flex items-center gap-1 bg-cyan-500/10 hover:bg-cyan-500/20 px-2 py-0.5 rounded-md">
+                                                    详情 <ChevronRight className="w-3 h-3" />
+                                                </button>
+                                            </div>
+                                        </div>
+                                    );
+                                })
+                            )}
+                        </>
                     ) : (
-                        <EmptyState type="data" message={`完成分析后查看${entityType === 'person' ? '个人' : '企业'}资金流量`} />
+                        <EmptyState type="data" message={`完成分析后查看${entityType === 'person' ? '个人' : '企业'}资金画像`} />
                     )}
                 </div>
             </div>
@@ -968,7 +1574,7 @@ function RiskIntelTab() {
                                 </tr>
                             </thead>
                             <tbody>
-                                {filteredData.slice(0, 20).map((item: SuspiciousActivity, idx: number) => (
+                                {filteredData.map((item: SuspiciousActivity, idx: number) => (
                                     <tr key={idx} className="border-b border-gray-800/50 hover:bg-red-500/5 transition-colors">
                                         <td className="py-4">
                                             <span className={getRiskLevelBadgeStyle(item.riskLevel)}>
@@ -1002,14 +1608,9 @@ function RiskIntelTab() {
                                 ))}
                             </tbody>
                         </table>
-                        {filteredData.length > 20 && (
-                            <div className="text-center py-4 text-gray-500 text-sm">
-                                仅显示前 20 条记录，共 {filteredData.length} 条
-                            </div>
-                        )}
                     </div>
                 ) : (
-                    <EmptyState type="data" message={hasAnyData ? '当前筛选条件下暂无记录' : '暂无可疑活动'} />
+                    <EmptyState type={hasAnyData ? 'data' : 'safe'} message={hasAnyData ? '当前筛选条件下暂无记录' : undefined} />
                 )}
             </div>
         </div>
@@ -1041,6 +1642,9 @@ function AuditReportTab() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [downloading, setDownloading] = useState<string | null>(null);
+    // P2-3: 预览状态
+    const [previewFile, setPreviewFile] = useState<{ name: string; content: string; type: 'text' | 'html' } | null>(null);
+    const [previewLoading, setPreviewLoading] = useState(false);
 
     // 从后端获取报告列表
     useEffect(() => {
@@ -1086,8 +1690,94 @@ function AuditReportTab() {
         }
     };
 
+    // P2-3: 预览报告
+    const handlePreview = async (filename: string) => {
+        // 只支持 txt/html 文件预览
+        const ext = filename.toLowerCase().split('.').pop();
+        if (!['txt', 'html', 'htm'].includes(ext || '')) {
+            // 不支持的文件类型直接下载
+            handleDownload(filename);
+            return;
+        }
+
+        try {
+            setPreviewLoading(true);
+            const blob = await api.downloadReport(filename);
+            const content = await blob.text();
+            setPreviewFile({
+                name: filename,
+                content,
+                type: ext === 'txt' ? 'text' : 'html'
+            });
+        } catch (err) {
+            console.error('预览失败:', err);
+            alert('预览失败，请尝试下载');
+        } finally {
+            setPreviewLoading(false);
+        }
+    };
+
     return (
         <div className="space-y-6">
+            {/* P2-3: 预览 Modal */}
+            {previewFile && (
+                <div
+                    className="fixed inset-0 lg:left-72 z-50 flex items-center justify-center p-4 lg:p-6 bg-black/80 backdrop-blur-sm"
+                    onClick={() => setPreviewFile(null)}
+                >
+                    <div
+                        className="bg-gray-900 border border-cyan-500/30 rounded-2xl shadow-2xl w-full max-w-5xl h-[85vh] flex flex-col overflow-hidden"
+                        onClick={e => e.stopPropagation()}
+                    >
+                        {/* Modal Header */}
+                        <div className="flex items-center justify-between p-4 border-b border-white/10 bg-gradient-to-r from-cyan-500/10 to-blue-500/10 flex-shrink-0">
+                            <div className="flex items-center gap-3">
+                                <div className="p-2 rounded-lg bg-cyan-500/20">
+                                    <FileText className="w-5 h-5 text-cyan-400" />
+                                </div>
+                                <div>
+                                    <h3 className="font-semibold text-white">{previewFile.name}</h3>
+                                    <p className="text-xs text-gray-400">
+                                        {previewFile.type === 'html' ? 'HTML 格式报告' : '文本报告'}
+                                    </p>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={() => handleDownload(previewFile.name)}
+                                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium border border-gray-600 text-gray-400 hover:text-blue-400 hover:border-blue-500 hover:bg-blue-500/10 transition-colors"
+                                >
+                                    <Download className="w-4 h-4" />
+                                    下载
+                                </button>
+                                <button
+                                    onClick={() => setPreviewFile(null)}
+                                    className="p-2 hover:bg-white/10 rounded-lg transition-colors"
+                                >
+                                    <X className="w-5 h-5 text-gray-400" />
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Modal Content */}
+                        <div className="flex-1 overflow-auto bg-white">
+                            {previewFile.type === 'html' ? (
+                                <iframe
+                                    srcDoc={previewFile.content}
+                                    className="w-full h-full border-none"
+                                    title={previewFile.name}
+                                    sandbox="allow-same-origin"
+                                />
+                            ) : (
+                                <pre className="p-6 text-sm text-gray-800 whitespace-pre-wrap font-mono leading-relaxed">
+                                    {previewFile.content}
+                                </pre>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
             <div className="card">
                 <div className="flex items-center justify-between mb-6">
                     <div className="flex items-center gap-3">
@@ -1161,30 +1851,39 @@ function AuditReportTab() {
                                             </div>
                                         </div>
                                     </div>
-                                    <button
-                                        onClick={() => handleDownload(report.name)}
-                                        disabled={isDownloading}
-                                        className={`
-                                            flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium
-                                            transition-all duration-200
-                                            ${isDownloading
-                                                ? 'bg-gray-700 text-gray-400 cursor-wait'
-                                                : 'bg-blue-600 hover:bg-blue-500 text-white'
-                                            }
-                                        `}
-                                    >
-                                        {isDownloading ? (
-                                            <>
-                                                <RefreshCw className="w-4 h-4 animate-spin" />
-                                                下载中
-                                            </>
-                                        ) : (
-                                            <>
-                                                <Download className="w-4 h-4" />
-                                                下载
-                                            </>
+                                    <div className="flex items-center gap-2">
+                                        {/* 预览按钮 - 主操作 */}
+                                        {['txt', 'html', 'htm'].includes(report.name.toLowerCase().split('.').pop() || '') && (
+                                            <button
+                                                onClick={() => handlePreview(report.name)}
+                                                disabled={previewLoading}
+                                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-cyan-500/20 border border-cyan-500/30 text-cyan-400 hover:bg-cyan-500/30 hover:border-cyan-400 transition-colors"
+                                            >
+                                                <Eye className="w-4 h-4" />
+                                                预览
+                                            </button>
                                         )}
-                                    </button>
+                                        {/* 下载按钮 - 次操作 */}
+                                        <button
+                                            onClick={() => handleDownload(report.name)}
+                                            disabled={isDownloading}
+                                            className={`
+                                                flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-sm
+                                                transition-all duration-200
+                                                ${isDownloading
+                                                    ? 'bg-gray-700/50 text-gray-500 cursor-wait border border-gray-600'
+                                                    : 'border border-gray-600 hover:border-blue-500 text-gray-400 hover:text-blue-400 hover:bg-blue-500/10'
+                                                }
+                                            `}
+                                            title="下载文件"
+                                        >
+                                            {isDownloading ? (
+                                                <RefreshCw className="w-4 h-4 animate-spin" />
+                                            ) : (
+                                                <Download className="w-4 h-4" />
+                                            )}
+                                        </button>
+                                    </div>
                                 </div>
                             );
                         })}

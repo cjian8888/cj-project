@@ -1,4 +1,5 @@
 import { useState, useCallback } from 'react';
+import { Download, FileText } from 'lucide-react';
 
 interface ReportSection {
     id: string;
@@ -175,7 +176,8 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
                 {/* 下载按钮 */}
                 {previewHtml && (
                     <button onClick={downloadReport} style={styles.downloadButton}>
-                        ⬇️ 下载报告
+                        <Download size={16} style={{ marginRight: '6px' }} />
+                        下载报告
                     </button>
                 )}
 
@@ -334,13 +336,17 @@ const styles: Record<string, React.CSSProperties> = {
     downloadButton: {
         width: '100%',
         padding: '12px',
-        backgroundColor: '#52c41a',
-        color: '#fff',
-        border: 'none',
+        backgroundColor: 'transparent',
+        color: '#52c41a',
+        border: '1px solid #52c41a',
         borderRadius: '8px',
         fontSize: '14px',
         cursor: 'pointer',
         marginTop: '10px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        transition: 'all 0.2s',
     },
     error: {
         marginTop: '15px',

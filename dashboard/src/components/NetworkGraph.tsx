@@ -2,14 +2,37 @@ import { useEffect, useRef, useState } from 'react';
 import { Network, DataSet } from 'vis-network/standalone';
 import type { Data, Node, Edge, Options } from 'vis-network/standalone';
 import { API_BASE_URL } from '../services/api';
+import html2canvas from 'html2canvas';
 import {
   AlertTriangle,
   CreditCard,
   Banknote,
   Landmark,
-  Info
+  Info,
+  X,
+  ExternalLink,
+  FileText,
+  Camera,
+  Download
 } from 'lucide-react';
 import { formatPartyName, formatRiskLevel, getRiskLevelBadgeStyle, formatCurrency } from '../utils/formatters';
+
+// 交易详情接口
+interface TransactionDetail {
+  type: 'loan_pair' | 'no_repayment' | 'high_risk_income' | 'online_loan';
+  person: string;
+  counterparty: string;
+  amount: number;
+  repayAmount?: number;
+  daysSince?: number;
+  riskLevel?: string;
+  platform?: string;
+  // 扩展字段（从后端获取）
+  date?: string;
+  description?: string;
+  bank?: string;
+  sourceFile?: string;
+}
 
 interface NetworkGraphProps {
   onLog?: (message: string) => void;
@@ -74,6 +97,56 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
   const [selectedNode, setSelectedNode] = useState<{ label: string; group: string } | null>(null);
   const [viewMode, setViewMode] = useState<'graph' | 'report'>('graph');
   const [reportUrl, setReportUrl] = useState<string | null>(null);
+  // P0-1: 交易详情 Modal 状态
+  const [transactionDetail, setTransactionDetail] = useState<TransactionDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  // P2-1: 导出快照状态
+  const exportRef = useRef<HTMLDivElement>(null);
+  const [isExporting, setIsExporting] = useState(false);
+
+  // P2-1: 导出证据快照函数
+  const handleExportSnapshot = async () => {
+    if (!exportRef.current || isExporting) return;
+
+    setIsExporting(true);
+    try {
+      const canvas = await html2canvas(exportRef.current, {
+        backgroundColor: '#0f172a',
+        scale: 2, // 高分辨率
+        logging: false,
+        useCORS: true,
+        onclone: (clonedDoc) => {
+          // 添加水印
+          const watermark = clonedDoc.createElement('div');
+          watermark.style.cssText = `
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 8px 16px;
+            background: rgba(239, 68, 68, 0.9);
+            color: white;
+            font-size: 14px;
+            font-weight: bold;
+            border-radius: 4px;
+            z-index: 9999;
+          `;
+          watermark.textContent = `内部绝密 - ${new Date().toLocaleString('zh-CN')}`;
+          clonedDoc.body.appendChild(watermark);
+        }
+      });
+
+      // 下载图片
+      const link = document.createElement('a');
+      link.download = `资金流向证据_${new Date().toISOString().slice(0, 10)}.png`;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+
+    } catch (err) {
+      console.error('导出快照失败:', err);
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
   useEffect(() => {
     // Check if report exists (only run once on mount)
@@ -381,6 +454,127 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
 
   return (
     <div className="h-full w-full flex bg-gradient-to-br from-gray-900 to-slate-900 text-white" style={{ minHeight: '700px' }}>
+      {/* P0-1: 交易详情 Modal */}
+      {transactionDetail && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+          onClick={() => setTransactionDetail(null)}
+        >
+          <div
+            className="bg-gray-900 border border-cyan-500/30 rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between p-4 border-b border-white/10 bg-gradient-to-r from-cyan-500/10 to-blue-500/10">
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-lg bg-cyan-500/20">
+                  <FileText className="w-5 h-5 text-cyan-400" />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-white">交易详情穿透</h3>
+                  <p className="text-xs text-gray-400">
+                    {transactionDetail.type === 'loan_pair' ? '借贷配对' :
+                      transactionDetail.type === 'no_repayment' ? '无还款借贷' :
+                        transactionDetail.type === 'high_risk_income' ? '高风险收入' : '网贷交易'}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setTransactionDetail(null)}
+                className="p-2 hover:bg-white/10 rounded-lg transition-colors"
+              >
+                <X className="w-5 h-5 text-gray-400" />
+              </button>
+            </div>
+
+            {/* Modal Content */}
+            <div className="p-5 space-y-4">
+              {/* 核心信息 */}
+              <div className="grid grid-cols-2 gap-4">
+                <div className="bg-white/5 rounded-lg p-3">
+                  <div className="text-xs text-gray-500 mb-1">当事人</div>
+                  <div className="text-white font-medium">{transactionDetail.person}</div>
+                </div>
+                <div className="bg-white/5 rounded-lg p-3">
+                  <div className="text-xs text-gray-500 mb-1">交易对手</div>
+                  <div className="text-white font-medium">{formatPartyName(transactionDetail.counterparty)}</div>
+                </div>
+              </div>
+
+              {/* 金额信息 */}
+              <div className="bg-gradient-to-r from-cyan-500/10 to-blue-500/10 rounded-lg p-4 border border-cyan-500/20">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-xs text-gray-400 mb-1">交易金额</div>
+                    <div className="text-2xl font-bold text-cyan-400">
+                      ¥{transactionDetail.amount >= 10000
+                        ? (transactionDetail.amount / 10000).toFixed(2) + '万'
+                        : transactionDetail.amount.toLocaleString()}
+                    </div>
+                  </div>
+                  {transactionDetail.repayAmount !== undefined && (
+                    <div className="text-right">
+                      <div className="text-xs text-gray-400 mb-1">还款金额</div>
+                      <div className="text-xl font-bold text-orange-400">
+                        ¥{transactionDetail.repayAmount >= 10000
+                          ? (transactionDetail.repayAmount / 10000).toFixed(2) + '万'
+                          : transactionDetail.repayAmount.toLocaleString()}
+                      </div>
+                    </div>
+                  )}
+                </div>
+                {transactionDetail.daysSince !== undefined && (
+                  <div className="mt-2 pt-2 border-t border-white/10 text-sm text-gray-400">
+                    未还款天数: <span className={transactionDetail.daysSince >= 180 ? 'text-red-400 font-bold' : 'text-amber-400'}>{transactionDetail.daysSince}天</span>
+                    {transactionDetail.daysSince >= 180 && <span className="ml-2">⚠️ 超过180天</span>}
+                  </div>
+                )}
+              </div>
+
+              {/* 风险等级 */}
+              {transactionDetail.riskLevel && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-500">风险等级:</span>
+                  <span className={getRiskLevelBadgeStyle(transactionDetail.riskLevel)}>
+                    {formatRiskLevel(transactionDetail.riskLevel)}
+                  </span>
+                </div>
+              )}
+
+              {/* 扩展信息提示 */}
+              <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-sm text-amber-300 flex items-start gap-2">
+                <Info className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-medium mb-1">数据溯源提示</div>
+                  <div className="text-xs text-amber-400/80">
+                    完整原始流水（时间、摘要、账号）请查阅 Excel 报告中的"清洗后流水"工作表，或在 cleaned_data 目录查看对应实体的合并流水文件。
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 border-t border-white/10 bg-white/5 flex justify-end gap-3">
+              <button
+                onClick={() => setTransactionDetail(null)}
+                className="px-4 py-2 text-gray-400 hover:text-white text-sm transition-colors"
+              >
+                关闭
+              </button>
+              <a
+                href={`${API_BASE_URL}/api/reports`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2 px-4 py-2 bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-400 text-sm rounded-lg transition-colors"
+              >
+                <ExternalLink className="w-4 h-4" />
+                查看完整报告
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 左侧统计面板 */}
       <div className="w-80 flex-shrink-0 bg-white/5 backdrop-blur-sm border-r border-white/10 flex flex-col">
         <div className="p-4 border-b border-white/10">
@@ -547,7 +741,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
       </div>
 
       {/* 右侧主区域 (改为可滚动) */}
-      <div className="flex-1 flex flex-col overflow-y-auto h-full">
+      <div ref={exportRef} className="flex-1 flex flex-col overflow-y-auto h-full">
         {/* 顶部标题栏 */}
         <div className="h-16 flex-shrink-0 flex items-center justify-between px-6 bg-white/5 backdrop-blur-sm border-b border-white/10 sticky top-0 z-20">
           <div className="flex items-center space-x-4">
@@ -582,6 +776,27 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
               <div className="text-sm text-cyan-400">
                 选中: {selectedNode.label} ({selectedNode.group})
               </div>
+            )}
+            {/* P2-1: 导出证据快照按钮 */}
+            {graphData && viewMode === 'graph' && (
+              <button
+                onClick={handleExportSnapshot}
+                disabled={isExporting}
+                className={`
+                  flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium
+                  transition-all duration-200
+                  ${isExporting
+                    ? 'bg-gray-700/50 text-gray-500 cursor-wait'
+                    : 'bg-gradient-to-r from-green-500/20 to-emerald-500/20 border border-green-500/30 text-green-400 hover:border-green-400 hover:from-green-500/30 hover:to-emerald-500/30'
+                  }
+                `}
+              >
+                {isExporting ? (
+                  <><Download className="w-4 h-4 animate-pulse" /> 导出中...</>
+                ) : (
+                  <><Camera className="w-4 h-4" /> 导出证据快照</>
+                )}
+              </button>
             )}
           </div>
         </div>
@@ -702,8 +917,20 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                             <tr key={idx} className="hover:bg-white/5 transition-colors">
                               <td className="px-4 py-3 text-gray-300">{item.person}</td>
                               <td className="px-4 py-3 text-gray-300">{formatPartyName(item.counterparty)}</td>
-                              <td className="px-4 py-3 text-right text-green-400 font-mono">
-                                ¥{item.loan_amount >= 10000 ? (item.loan_amount / 10000).toFixed(1) + '万' : item.loan_amount.toLocaleString()}
+                              <td className="px-4 py-3 text-right">
+                                <button
+                                  onClick={() => setTransactionDetail({
+                                    type: 'loan_pair',
+                                    person: item.person,
+                                    counterparty: item.counterparty,
+                                    amount: item.loan_amount,
+                                    repayAmount: item.repay_amount
+                                  })}
+                                  className="text-green-400 font-mono hover:text-green-300 hover:underline cursor-pointer transition-colors"
+                                  title="点击查看详情"
+                                >
+                                  ¥{item.loan_amount >= 10000 ? (item.loan_amount / 10000).toFixed(1) + '万' : item.loan_amount.toLocaleString()}
+                                </button>
                               </td>
                               <td className="px-4 py-3 text-right text-red-400 font-mono">
                                 ¥{item.repay_amount >= 10000 ? (item.repay_amount / 10000).toFixed(1) + '万' : item.repay_amount.toLocaleString()}
@@ -743,8 +970,22 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                           <tr key={idx} className="hover:bg-white/5 transition-colors">
                             <td className="px-4 py-3 text-gray-300">{item.person}</td>
                             <td className="px-4 py-3 text-gray-300">{formatPartyName(item.counterparty)}</td>
-                            <td className="px-4 py-3 text-right text-orange-400 font-bold font-mono">¥{(item.income_amount / 10000).toFixed(1)}万</td>
-                            <td className={`px-4 py-3 text-right font-semibold ${item.days_since >= 180 ? 'text-red-400' :
+                            <td className="px-4 py-3 text-right">
+                              <button
+                                onClick={() => setTransactionDetail({
+                                  type: 'no_repayment',
+                                  person: item.person,
+                                  counterparty: item.counterparty,
+                                  amount: item.income_amount,
+                                  daysSince: item.days_since
+                                })}
+                                className="text-orange-400 font-bold font-mono hover:text-orange-300 hover:underline cursor-pointer transition-colors"
+                                title="点击查看详情"
+                              >
+                                ¥{(item.income_amount / 10000).toFixed(1)}万
+                              </button>
+                            </td>
+                            <td className={`px-4 py-3 text-right font-mono font-semibold ${item.days_since >= 180 ? 'text-red-400' :
                               item.days_since >= 90 ? 'text-amber-400' : 'text-green-400'
                               }`}>
                               {item.days_since}天
@@ -787,8 +1028,20 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                             <tr key={idx} className="hover:bg-white/5 transition-colors">
                               <td className="px-4 py-3 text-gray-300">{item.person}</td>
                               <td className="px-4 py-3 text-gray-300">{formatPartyName(item.counterparty)}</td>
-                              <td className="px-4 py-3 text-right text-red-400 font-bold font-mono">
-                                {formatCurrency(item.amount)}
+                              <td className="px-4 py-3 text-right">
+                                <button
+                                  onClick={() => setTransactionDetail({
+                                    type: 'high_risk_income',
+                                    person: item.person,
+                                    counterparty: item.counterparty,
+                                    amount: item.amount,
+                                    riskLevel: riskLevel
+                                  })}
+                                  className="text-red-400 font-bold font-mono hover:text-red-300 hover:underline cursor-pointer transition-colors"
+                                  title="点击查看详情"
+                                >
+                                  {formatCurrency(item.amount)}
+                                </button>
                               </td>
                               <td className="px-4 py-3 text-center">
                                 <span className={getRiskLevelBadgeStyle(riskLevel)}>

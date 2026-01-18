@@ -1765,8 +1765,10 @@ def serialize_profiles(profiles: Dict) -> Dict:
         # 最大单笔交易
         max_transaction = summary.get("max_transaction", 0) or summary.get("max_single_transaction", 0) or 0
         
-        # 工资收入占比
-        salary_ratio = summary.get("salary_ratio", 0) or 0
+        # 工资收入：优先从 income_structure 获取
+        salary_income = income_structure.get("salary_income", 0) or 0
+        salary_ratio = income_structure.get("salary_ratio", 0) or summary.get("salary_ratio", 0) or 0
+        salary_total = float(salary_income) if salary_income else (float(total_income) * float(salary_ratio) if total_income and salary_ratio else 0)
         
         result[entity] = {
             "entityName": entity,
@@ -1775,10 +1777,25 @@ def serialize_profiles(profiles: Dict) -> Dict:
             "transactionCount": int(transaction_count) if transaction_count else 0,
             # 新增审计关键字段
             "cashTotal": float(cash_total),
+            "cashIncome": float(cash_income),  # 存现
+            "cashExpense": float(cash_expense),  # 取现
+            "cashIncomeCount": fund_flow.get("cash_income_count", 0) or 0,
+            "cashExpenseCount": fund_flow.get("cash_expense_count", 0) or 0,
+            "cashTransactions": [
+                {
+                    "date": str(tx.get("日期", ""))[:19] if tx.get("日期") else "",
+                    "amount": float(tx.get("金额", 0)),
+                    "description": str(tx.get("摘要", "")),
+                    "counterparty": str(tx.get("对手方", "")),
+                    "type": str(tx.get("类型", ""))  # 取现 or 存现
+                }
+                for tx in fund_flow.get("cash_transactions", [])
+            ],
             "thirdPartyTotal": float(third_party_total),
             "wealthTotal": float(wealth_total),
             "maxTransaction": float(max_transaction),
             "salaryRatio": float(salary_ratio),
+            "salaryTotal": float(salary_total),  # 工资收入金额
         }
     return result
 
