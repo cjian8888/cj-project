@@ -1,0 +1,65 @@
+{% extends "base_report.html" %}
+
+{% block content %}
+<h2 class="section-title">一、资金概览</h2>
+
+<div style="text-align: center; margin: 20px 0;">
+    <div class="summary-card">
+        <div class="value">{{ "%.2f"|format(modules.summary.total_income / 10000) }}</div>
+        <div class="label">资金流入（万元）</div>
+    </div>
+    <div class="summary-card">
+        <div class="value">{{ "%.2f"|format(modules.summary.total_expense / 10000) }}</div>
+        <div class="label">资金流出（万元）</div>
+    </div>
+    <div class="summary-card">
+        <div class="value">{{ "%.2f"|format(modules.summary.net_flow / 10000) }}</div>
+        <div class="label">净流入（万元）</div>
+    </div>
+</div>
+
+<table>
+    <thead>
+        <tr>
+            <th>统计项</th>
+            <th>数值</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>交易笔数</td>
+            <td>{{ modules.summary.transaction_count }}</td>
+        </tr>
+        <tr>
+            <td>核心人员数</td>
+            <td>{{ modules.summary.core_person_count }}</td>
+        </tr>
+        <tr>
+            <td>涉案公司数</td>
+            <td>{{ modules.summary.company_count }}</td>
+        </tr>
+        <tr>
+            <td>高风险交易笔数</td>
+            <td class="risk-high">{{ modules.summary.high_risk_count }}</td>
+        </tr>
+        <tr>
+            <td>数据时间范围</td>
+            <td>{{ modules.summary.period_start }} 至 {{ modules.summary.period_end }}</td>
+        </tr>
+    </tbody>
+</table>
+
+<p>
+    本次核查共涉及 <strong>{{ modules.summary.core_person_count }}</strong> 名核心人员和
+    <strong>{{ modules.summary.company_count }}</strong> 家涉案公司。数据时间跨度为
+    {{ modules.summary.period_start }} 至 {{ modules.summary.period_end }}，
+    累计分析交易 <strong>{{ modules.summary.transaction_count }}</strong> 笔。
+</p>
+
+<p>
+    资金流入总额 <strong>{{ "%.2f"|format(modules.summary.total_income / 10000) }}</strong> 万元，
+    资金流出总额 <strong>{{ "%.2f"|format(modules.summary.total_expense / 10000) }}</strong> 万元，
+    净流入 <strong>{{ "%.2f"|format(modules.summary.net_flow / 10000) }}</strong> 万元。
+    经系统筛查，发现 <strong class="risk-high">{{ modules.summary.high_risk_count }}</strong> 笔高风险交易。
+</p>
+{% endblock %}

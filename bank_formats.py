@@ -195,7 +195,7 @@ def normalize_dataframe(df: pd.DataFrame, bank_format: str = None) -> pd.DataFra
                 result_df['date'], 
                 format=config['date_format']
             )
-        except:
+        except (ValueError, TypeError):
             # 自动检测格式
             result_df['date'] = pd.to_datetime(result_df['date'])
     

@@ -38,7 +38,8 @@ class IncrementalAnalyzer:
             try:
                 with open(self.checkpoint_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
-            except:
+            except (json.JSONDecodeError, IOError) as e:
+                logger.warning(f"加载检查点失败: {e}")
                 return {}
         return {}
     
@@ -142,8 +143,8 @@ class IncrementalAnalyzer:
                 new_df = df[df[date_column] > last_date]
                 logger.info(f"{entity_name}: 发现 {len(new_df)} 条新记录 (上次分析至 {last_date.strftime('%Y-%m-%d')})")
                 return new_df
-            except:
-                pass
+            except (ValueError, KeyError) as e:
+                logger.debug(f"解析上次分析日期失败: {e}")
         
         logger.info(f"{entity_name}: 首次分析，处理全部 {len(df)} 条记录")
         return df
@@ -198,8 +199,8 @@ class IncrementalAnalyzer:
                 if days_since > 7:
                     logger.info(f"{entity_name}: 距上次分析已过{days_since}天，建议重新分析")
                     return True
-            except:
-                pass
+            except ValueError as e:
+                logger.debug(f"解析分析日期失败: {e}")
         
         return False
     

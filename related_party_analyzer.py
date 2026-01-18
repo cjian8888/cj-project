@@ -11,6 +11,7 @@ from typing import Dict, List, Set
 from collections import defaultdict
 import config
 import utils
+from name_normalizer import normalize_for_matching, is_same_person
 
 logger = utils.setup_logger(__name__)
 
@@ -93,9 +94,11 @@ def _analyze_direct_flows(
             if other_person == person:
                 continue
             
-            # 【P1修复】使用精确匹配而非 contains，避免"施灵"匹配到"施灵芝"等误判
-            # 精确匹配：对手方必须完全等于核心人员名称
-            mask = counterparty_series == other_person
+            # 【P1修复】使用标准化后的精确匹配
+            # 先对名称进行标准化（去空格、括号内容、全角转半角），再精确比对
+            # 这样可以处理"张 三"、"张三（个人）"等情况
+            other_norm = normalize_for_matching(other_person)
+            mask = counterparty_series.apply(lambda x: normalize_for_matching(x) == other_norm)
             if mask.any():
                 subset = df[mask]
                 for _, row in subset.iterrows():
@@ -556,14 +559,38 @@ def _find_frequent_relays(relays: List[Dict], min_count: int = 2) -> List[Dict]:
 
 
 def generate_related_party_report(results: Dict, output_dir: str) -> str:
-    """生成关联方分析报告"""
+    """生成关联方分析报告（增强版）"""
     import os
     report_path = os.path.join(output_dir, '关联方资金分析报告.txt')
     
     with open(report_path, 'w', encoding='utf-8') as f:
-        f.write('关联方资金穿透分析报告\n')
+        f.write('关联方资金穿透分析报告（增强版）\n')
         f.write('='*60 + '\n')
         f.write(f'生成时间: {datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")}\n\n')
+        
+        # 报告说明
+        f.write('【报告用途】\n')
+        f.write('本报告分析核心人员之间的资金往来，包括：\n')
+        f.write('• 直接资金往来 - 核心人员之间的转账\n')
+        f.write('• 第三方中转 - A→C→B 模式的资金中转\n')
+        f.write('• 资金闭环 - A→B→C→A 形式的资金回流\n\n')
+        
+        f.write('【分析逻辑与规则】\n')
+        f.write('1. 直接往来: 对手方与核心人员名精确匹配\n')
+        f.write('2. 第三方中转: 72小时内、金额相近(15%容差)、排除公共支付平台\n')
+        f.write('3. 资金闭环: DFS搜索>=2个核心人员参与的路径\n\n')
+        
+        f.write('【可能的误判情况】\n')
+        f.write('⚠ 家庭成员间的正常转账可能被标记为直接往来\n')
+        f.write('⚠ 同一地区同名人哥可能被误判为关联方\n')
+        f.write('⚠ 结婚/离婚财产分割可能形成伪闭环\n\n')
+        
+        f.write('【人工复核重点】\n')
+        f.write('★ 第三方中转: 核实中间人身份\n')
+        f.write('★ 高频中间人: 核实是否为掂客\n')
+        f.write('★ 资金闭环: 核实闭环形成原因\n\n')
+        
+        f.write('='*60 + '\n\n')
         
         # 汇总
         summary = results['summary']
@@ -588,36 +615,35 @@ def generate_related_party_report(results: Dict, output_dir: str) -> str:
         if results['direct_flows']:
             f.write('三、关联人直接资金往来明细\n')
             f.write('-'*40 + '\n')
-            for i, flow in enumerate(results['direct_flows'][:30], 1):
+            f.write(f'共 {len(results["direct_flows"])} 笔记录\n\n')
+            for i, flow in enumerate(results['direct_flows'], 1):
                 date_str = flow['date'].strftime('%Y-%m-%d') if hasattr(flow['date'], 'strftime') else str(flow['date'])[:10]
                 direction = '←' if flow['direction'] == 'receive' else '→'
                 desc = utils.safe_str(flow['description'], default='转账')[:30]
                 f.write(f"{i}. [{date_str}] {flow['from']} {direction} {flow['to']}: "
                        f"{utils.format_currency(flow['amount'])} | {desc}\n")
-            if len(results['direct_flows']) > 30:
-                f.write(f'... 共 {len(results["direct_flows"])} 笔\n')
             f.write('\n')
         
         # 第三方中转
         if results['third_party_relays']:
             f.write('四、第三方中转链路（重点关注）\n')
             f.write('-'*40 + '\n')
-            for i, relay in enumerate(results['third_party_relays'][:20], 1):
+            f.write(f'共 {len(results["third_party_relays"])} 条链路\n\n')
+            for i, relay in enumerate(results['third_party_relays'], 1):
                 out_date = relay['outflow_date'].strftime('%Y-%m-%d') if hasattr(relay['outflow_date'], 'strftime') else str(relay['outflow_date'])[:10]
                 in_date = relay['inflow_date'].strftime('%Y-%m-%d') if hasattr(relay['inflow_date'], 'strftime') else str(relay['inflow_date'])[:10]
                 f.write(f"{i}. 【{relay['risk_level'].upper()}】{relay['from']} → {relay['relay']} → {relay['to']}\n")
                 f.write(f"   出: {out_date} {utils.format_currency(relay['outflow_amount'])} | "
                        f"入: {in_date} {utils.format_currency(relay['inflow_amount'])} | "
                        f"时差: {relay['time_diff_hours']:.1f}小时\n")
-            if len(results['third_party_relays']) > 20:
-                f.write(f'... 共 {len(results["third_party_relays"])} 条链路\n')
             f.write('\n')
         
         # 资金闭环
         if results['fund_loops']:
             f.write('五、资金闭环（疑似走账）\n')
             f.write('-'*40 + '\n')
-            for i, loop in enumerate(results['fund_loops'][:10], 1):
+            f.write(f'共 {len(results["fund_loops"])} 个闭环\n\n')
+            for i, loop in enumerate(results['fund_loops'], 1):
                 f.write(f"{i}. 【{loop['risk_level'].upper()}】{loop['path']}\n")
             f.write('\n')
     

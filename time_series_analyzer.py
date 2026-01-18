@@ -126,7 +126,7 @@ def detect_periodic_income(
                         'amount_cv': round(amount_cv, 3),
                         'total_amount': round(sum(amounts), 2),
                         'date_range': f"{dates.iloc[0].strftime('%Y-%m-%d')} 至 {dates.iloc[-1].strftime('%Y-%m-%d')}",
-                        'risk_level': 'high' if avg_amount >= 50000 else 'medium',
+                        'risk_level': 'high' if avg_amount >= config.TIME_SERIES_HIGH_RISK_AMOUNT else 'medium',
                         'confidence': _calculate_periodicity_confidence(cv, amount_cv, len(group))
                     })
     
@@ -242,7 +242,7 @@ def detect_sudden_changes(
             
             z_score = (row['income'] - row['income_ma']) / row['income_std']
             
-            if z_score > threshold_multiplier and row['income'] > 100000:  # 10万以上才算
+            if z_score > threshold_multiplier and row['income'] > config.SUDDEN_CHANGE_MIN_AMOUNT:  # 使用配置阈值
                 sudden_changes.append({
                     'person': person,
                     'date': row['date'],
@@ -401,14 +401,45 @@ def analyze_time_series(
 
 
 def generate_time_series_report(results: Dict, output_dir: str) -> str:
-    """生成时序分析报告"""
+    """生成时序分析报告（增强版）"""
     import os
     report_path = os.path.join(output_dir, '时序分析报告.txt')
     
+    def safe_str(val):
+        """安全转换为字符串，处理 nan 值"""
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            return '(未知)'
+        s = str(val)
+        return '(未知)' if s == 'nan' or not s else s
+    
     with open(report_path, 'w', encoding='utf-8') as f:
-        f.write('时间序列分析报告\n')
+        f.write('时间序列分析报告（增强版）\n')
         f.write('='*60 + '\n')
         f.write(f'生成时间: {datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")}\n\n')
+        
+        # 报告说明
+        f.write('【报告用途】\n')
+        f.write('本报告用于识别资金流动的时序模式，包括：\n')
+        f.write('• 周期性收入 - 固定日期固定金额的非工资收入（疑似养廉资金）\n')
+        f.write('• 资金突变 - 资金突然激增（可能与特定事件关联）\n')
+        f.write('• 固定延迟转账 - 收入后固定N天转出（可能暗示利益分配协议）\n\n')
+        
+        f.write('【分析逻辑与规则】\n')
+        f.write('1. 周期性收入: 同一对手方≥5次，间隔CV<0.3，金额CV<0.1，排除工资\n')
+        f.write('2. 资金突变: Z-score>3且金额>10万元视为突变\n')
+        f.write('3. 固定延迟: 收入后1-7天内有相近金额支出，出现≥3次\n\n')
+        
+        f.write('【可能的误判情况】\n')
+        f.write('⚠ 理财产品定期到期可能被识别为周期性收入\n')
+        f.write('⚠ 房租/定期返利可能产生误报\n')
+        f.write('⚠ 工资发放后正常支出可能被标记为固定延迟\n\n')
+        
+        f.write('【人工复核重点】\n')
+        f.write('★ 周期性收入: 核实收入来源是否合法\n')
+        f.write('★ 高Z值突变: 核实突变原因，关联时间线事件\n')
+        f.write('★ 延迟转账: 核实收入与支出的关联性\n\n')
+        
+        f.write('='*60 + '\n\n')
         
         # 汇总
         f.write('一、分析汇总\n')
@@ -421,9 +452,10 @@ def generate_time_series_report(results: Dict, output_dir: str) -> str:
         if results['periodic_income']:
             f.write('二、周期性收入模式（疑似养廉资金）\n')
             f.write('-'*40 + '\n')
-            f.write('★ 固定日期固定金额的非工资收入，需重点核查\n\n')
-            for i, p in enumerate(results['periodic_income'][:20], 1):
-                f.write(f'{i}. [{p["risk_level"].upper()}] {p["person"]} ← {p["counterparty"]}\n')
+            f.write('★ 固定日期固定金额的非工资收入，需重点核查\n')
+            f.write(f'共 {len(results["periodic_income"])} 条记录\n\n')
+            for i, p in enumerate(results['periodic_income'], 1):
+                f.write(f'{i}. [{p["risk_level"].upper()}] {safe_str(p["person"])} ← {safe_str(p["counterparty"])}\n')
                 f.write(f'   周期: {p["period_type"]} | 均额: {p["avg_amount"]/10000:.2f}万 | 次数: {p["occurrences"]}\n')
                 f.write(f'   时间范围: {p["date_range"]} | 置信度: {p["confidence"]}分\n')
             f.write('\n')
@@ -432,9 +464,10 @@ def generate_time_series_report(results: Dict, output_dir: str) -> str:
         if results['sudden_changes']:
             f.write('三、资金突变事件\n')
             f.write('-'*40 + '\n')
-            f.write('★ 资金突然激增，可能与特定事件关联\n\n')
-            for i, s in enumerate(results['sudden_changes'][:20], 1):
-                f.write(f'{i}. [{s["risk_level"].upper()}] {s["person"]} - {s["date"]}\n')
+            f.write('★ 资金突然激增，可能与特定事件关联\n')
+            f.write(f'共 {len(results["sudden_changes"])} 条记录\n\n')
+            for i, s in enumerate(results['sudden_changes'], 1):
+                f.write(f'{i}. [{s["risk_level"].upper()}] {safe_str(s["person"])} - {s["date"]}\n')
                 f.write(f'   金额: {s["amount"]/10000:.2f}万 | Z值: {s["z_score"]} | 均值: {s["avg_before"]/10000:.2f}万\n')
             f.write('\n')
         
@@ -442,10 +475,14 @@ def generate_time_series_report(results: Dict, output_dir: str) -> str:
         if results['delayed_transfers']:
             f.write('四、固定延迟转账模式\n')
             f.write('-'*40 + '\n')
-            f.write('★ 收入后固定天数转出，可能暗示利益分配协议\n\n')
-            for i, d in enumerate(results['delayed_transfers'][:20], 1):
-                f.write(f'{i}. [{d["risk_level"].upper()}] {d["person"]}: {d["income_from"]} → {d["expense_to"]}\n')
+            f.write('★ 收入后固定天数转出，可能暗示利益分配协议\n')
+            f.write(f'共 {len(results["delayed_transfers"])} 条记录\n\n')
+            for i, d in enumerate(results['delayed_transfers'], 1):
+                income_from = safe_str(d.get("income_from", d.get("income_counterparty", "")))
+                expense_to = safe_str(d.get("expense_to", d.get("expense_counterparty", "")))
+                f.write(f'{i}. [{d["risk_level"].upper()}] {safe_str(d["person"])}: {income_from} → {expense_to}\n')
                 f.write(f'   延迟: {d["delay_days"]}天 | 次数: {d["occurrences"]} | 总额: {d["total_amount"]/10000:.2f}万\n')
     
     logger.info(f'时序分析报告已生成: {report_path}')
     return report_path
+

@@ -6,7 +6,7 @@
   <p>Fund Penetration & Association Screening</p>
   
   <p>
-    <img src="https://img.shields.io/badge/version-4.3.0-blue" alt="Version" />
+    <img src="https://img.shields.io/badge/version-4.4.0-blue" alt="Version" />
     <img src="https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white" alt="Python" />
     <img src="https://img.shields.io/badge/React-19.2-61DAFB?logo=react&logoColor=white" alt="React" />
     <img src="https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
@@ -64,6 +64,7 @@
 - **Excel 核查底稿** - 完整的分析结果工作表
 - **HTML 综合报告** - 详细的文字分析报告  
 - **资金流向图** - 交互式资金关系可视化
+- **可追溯信息** - 每条异常记录标注对应的 Excel 文件和账户
 
 ### 🔒 离线单机运行
 
@@ -149,6 +150,10 @@ fpas/
 ├── time_series_analyzer.py # 时序分析
 ├── clue_aggregator.py      # 线索聚合
 ├── report_generator.py     # 报告生成
+├── audit_logger.py         # 操作审计日志 (v4.4.0+)
+├── holiday_service.py      # 节假日服务 (v4.4.0+)
+├── graph_adapter.py        # Neo4j 适配器 (v4.4.0+)
+├── name_normalizer.py      # 对手方标准化 (v4.4.0+)
 ├── CHANGELOG.md            # 变更日志
 ├── CONTRIBUTING.md         # 贡献指南
 └── requirements.txt        # Python 依赖
@@ -219,13 +224,19 @@ VITE_WS_URL=ws://localhost:8000/ws
 
 ### 最近更新
 
+#### [v4.4.0] - 2026-01-18
+- 🔧 **代码质量审计**：执行 P0-P5 六阶段系统性改进
+- ✅ P0 止血：恢复流水号去重、图谱累计金额
+- ✅ P1 加固：对手方名称标准化、风险权重调整
+- ✅ P2 优化：Parquet 存储、缓存哈希校验、规则 YAML 化
+- ✅ P3 演进：操作审计日志、节假日服务、Neo4j 适配器
+- ✅ P4 报告：家庭闭环识别、从摘要提取对手方
+- ✅ P5 追溯：报告追加账户/银行/Excel 文件路径，便于人工复核
+
 #### [v4.3.0] - 2026-01-17
 - 🎯 **数据铁律重构**：`/api/results` 接口改为从缓存文件读取
 - ✅ 新增分析缓存机制 (`output/analysis_cache/`)
 - ✅ 实现 cleaned_data 一致性校验
-
-#### [v4.2.0] - 2026-01-16
-- 🔒 **离线环境适配**：移除外部 CDN 依赖，vis-network 完全内联
 
 ---
 

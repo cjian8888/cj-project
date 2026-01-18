@@ -54,15 +54,54 @@ def deduplicate_transactions(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
     duplicates_mask = pd.Series(False, index=df.index)
     dedup_details = []  # 记录去重详情
     
-    # 优先使用交易流水号去重
-    # 鉴于发现部分银行流水号存在异常（虽然看起来有效但导致大量误判重复），
-    # 且为保证数据完整性，我们暂时禁用基于流水号的强去重。
-    # 改为在启发式去重中作为参考，或完全忽略。
-    # 根据调试结果，建议完全忽略流水号，依靠时间+金额+对手方+摘要来去重。
+    # ====================================================================
+    # 【P0 修复 - 2026-01-18】恢复流水号去重
+    # 审计原则：交易流水号是银行出具的唯一电子凭证，不同流水号的交易不应被删除
+    # ====================================================================
     
-    # ... (原有流水号去重逻辑已注释) ...
+    # 第一步：基于流水号去重（如果有可靠的流水号）
+    has_valid_tx_id = (
+        'transaction_id' in df.columns and
+        df['transaction_id'].notna().sum() > len(df) * 0.5  # 超过50%的记录有流水号
+    )
     
-    # 继续使用启发式规则检查（针对无流水号或流水号不可靠的情况）
+    if has_valid_tx_id:
+        # 流水号可用：完全相同的流水号才视为重复
+        tx_id_col = df['transaction_id'].astype(str).str.strip()
+        # 排除空值和占位符
+        valid_tx_ids = ~tx_id_col.isin(['', 'nan', 'None', 'N/A', '-'])
+        
+        # 对有有效流水号的记录：按流水号去重（保留第一条）
+        if valid_tx_ids.sum() > 0:
+            df_with_tx_id = df[valid_tx_ids].copy()
+            df_without_tx_id = df[~valid_tx_ids].copy()
+            
+            # 按流水号去重
+            original_with_tx_id = len(df_with_tx_id)
+            df_with_tx_id_dedup = df_with_tx_id.drop_duplicates(
+                subset=['transaction_id'], keep='first'
+            )
+            tx_id_dups_removed = original_with_tx_id - len(df_with_tx_id_dedup)
+            
+            if tx_id_dups_removed > 0:
+                logger.info(f'基于流水号去重: 移除 {tx_id_dups_removed} 条完全重复记录')
+            
+            # 合并回来，继续处理无流水号的部分
+            df = pd.concat([df_with_tx_id_dedup, df_without_tx_id], ignore_index=True)
+            df = df.sort_values('date').reset_index(drop=True)
+            # 重新计算临时列
+            df['_timestamp'] = df['date'].astype('int64') // 10**9
+            df['_amount_rounded'] = (df['income'].fillna(0) + df['expense'].fillna(0)).round(2)
+        else:
+            logger.info('流水号字段存在但均无效，将使用启发式去重')
+    else:
+        logger.info('无可靠流水号字段，将使用启发式去重')
+    
+    # 【修复】流水号去重后 df 索引已变化，需重新创建 duplicates_mask
+    duplicates_mask = pd.Series(False, index=df.index)
+    dedup_details = []  # 重置去重详情
+    
+    # 第二步：启发式规则去重（针对无流水号或作为补充检查）
     for idx in range(len(df) - 1):
         if duplicates_mask[idx]:
             continue
@@ -417,6 +456,39 @@ def standardize_bank_fields(df: pd.DataFrame, bank_name: str = None) -> pd.DataF
     else:
         normalized['transaction_id'] = ''
     
+    # ========== 刑侦级指标字段 (Phase 0.1 - 2026-01-18 新增) ==========
+    
+    # 9. 余额归零标志 - 判断交易后余额是否清空
+    # 余额低于阈值（默认10元）视为"清空"，这是洗钱/过桥资金的典型特征
+    normalized['is_balance_zeroed'] = normalized['balance'].apply(
+        lambda x: x < config.BALANCE_ZERO_THRESHOLD if pd.notna(x) and x >= 0 else False
+    )
+    
+    # 10. 交易渠道分类 - 识别网银/ATM/柜面/手机银行等渠道
+    def classify_transaction_channel(description: str) -> str:
+        """根据交易摘要分类交易渠道"""
+        desc = str(description).upper()
+        for channel, keywords in config.TRANSACTION_CHANNEL_KEYWORDS.items():
+            if any(kw.upper() in desc for kw in keywords):
+                return channel
+        return '其他'
+    
+    normalized['transaction_channel'] = normalized['description'].apply(classify_transaction_channel)
+    
+    # 11. 敏感词提取 - 标记包含敏感词的交易
+    def extract_sensitive_keywords(description: str) -> str:
+        """从交易摘要中提取敏感词"""
+        desc = str(description)
+        found = [kw for kw in config.SENSITIVE_KEYWORDS if kw in desc]
+        return ','.join(found) if found else ''
+    
+    normalized['sensitive_keywords'] = normalized['description'].apply(extract_sensitive_keywords)
+    
+    # 12. 原始行索引 - 保留原始Excel行号用于审计追溯
+    # 审计人员可通过此字段快速定位原始凭证
+    normalized['source_row_index'] = df.index + 2  # +2 是因为 Excel 从1开始计数且有表头
+    
+    # ========== 内存优化 ==========
     # 【内存优化】优化数据类型以节省内存
     # 金额列：保持 float64 确保审计精度
     normalized['income'] = normalized['income'].astype('float64')
@@ -424,13 +496,15 @@ def standardize_bank_fields(df: pd.DataFrame, bank_name: str = None) -> pd.DataF
     normalized['balance'] = normalized['balance'].astype('float64')
     
     # 文本列：转为 category 类型节省内存（这是内存优化的关键）
-    for col in ['description', 'counterparty', '数据来源', '银行来源', 'account_number', 'transaction_id']:
+    for col in ['description', 'counterparty', '数据来源', '银行来源', 'account_number', 'transaction_id',
+                'transaction_channel', 'sensitive_keywords']:  # Phase 0.1 新增字段
         if col in normalized.columns:
             normalized[col] = normalized[col].astype('category')
     
     # 布尔列：转为 bool 类型
-    if 'is_cash' in normalized.columns:
-        normalized['is_cash'] = normalized['is_cash'].astype('bool')
+    for col in ['is_cash', 'is_balance_zeroed']:  # Phase 0.1 新增 is_balance_zeroed
+        if col in normalized.columns:
+            normalized[col] = normalized[col].astype('bool')
     
     logger.info(f'字段标准化完成,有效记录: {len(normalized)}条 (已优化数据类型)')
     
@@ -557,6 +631,30 @@ def clean_and_merge_files(file_list: List[str], entity_name: str) -> Tuple[pd.Da
     
     # 按时间排序
     df_final = df_final.sort_values('date').reset_index(drop=True)
+    
+    # Phase 0.4: 添加累计统计字段（用于识别分次规避大额的行为）
+    # 当日累计：识别当日多笔小额累加超过大额阈值的情况
+    # 当月累计：识别月度累计异常
+    if 'date' in df_final.columns and not df_final.empty:
+        try:
+            # 创建日期和月份分组键
+            df_final['_date_key'] = df_final['date'].dt.date
+            df_final['_month_key'] = df_final['date'].dt.to_period('M')
+            
+            # 计算当日累计收入/支出
+            df_final['daily_cumulative_income'] = df_final.groupby('_date_key')['income'].cumsum()
+            df_final['daily_cumulative_expense'] = df_final.groupby('_date_key')['expense'].cumsum()
+            
+            # 计算当月累计收入/支出
+            df_final['monthly_cumulative_income'] = df_final.groupby('_month_key')['income'].cumsum()
+            df_final['monthly_cumulative_expense'] = df_final.groupby('_month_key')['expense'].cumsum()
+            
+            # 删除临时分组键
+            df_final = df_final.drop(['_date_key', '_month_key'], axis=1)
+            
+            logger.info(f'  已添加累计统计字段 (当日/当月累计收支)')
+        except Exception as e:
+            logger.warning(f'  累计统计字段计算失败: {e}')
     
     total_time = (datetime.now() - start_time).total_seconds()
     
@@ -723,6 +821,115 @@ def _apply_excel_formatting(worksheet, df_disp: pd.DataFrame, formats: Dict):
     
     # 开启筛选
     worksheet.autofilter(0, 0, len(df_disp), len(df_disp.columns) - 1)
+
+
+# ============================================================
+# P2 优化：Parquet 高性能存储
+# ============================================================
+
+def save_as_parquet(df: pd.DataFrame, output_path: str) -> bool:
+    """
+    保存为 Parquet 格式（高性能中间存储）
+    
+    【P2 优化 - 2026-01-18】
+    Parquet 相比 Excel 的优势：
+    - 读取速度快 10-50 倍
+    - 文件体积小 50-70%
+    - 支持列式存储，按需读取列
+    
+    Args:
+        df: 要保存的 DataFrame
+        output_path: 输出路径（.parquet 后缀）
+        
+    Returns:
+        是否保存成功
+    """
+    if df.empty:
+        logger.warning(f'空 DataFrame，跳过 Parquet 保存')
+        return False
+    
+    try:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
+        # 保存为 Parquet（使用 pyarrow 引擎）
+        df.to_parquet(
+            output_path,
+            engine='pyarrow',
+            compression='snappy',  # 平衡压缩率和速度
+            index=False
+        )
+        
+        logger.info(f'Parquet 文件已保存: {output_path}')
+        return True
+        
+    except ImportError:
+        logger.warning('pyarrow 未安装，跳过 Parquet 保存。可通过 pip install pyarrow 安装')
+        return False
+    except Exception as e:
+        logger.error(f'Parquet 保存失败: {e}')
+        return False
+
+
+def load_from_parquet_or_excel(parquet_path: str, excel_path: str) -> pd.DataFrame:
+    """
+    优先从 Parquet 加载，如不存在则从 Excel 加载
+    
+    【P2 优化 - 2026-01-18】
+    加载顺序：
+    1. 优先尝试 Parquet（快）
+    2. 回退到 Excel（慢但兼容）
+    
+    Args:
+        parquet_path: Parquet 文件路径
+        excel_path: Excel 文件路径
+        
+    Returns:
+        加载的 DataFrame
+    """
+    # 优先尝试 Parquet
+    if os.path.exists(parquet_path):
+        try:
+            df = pd.read_parquet(parquet_path)
+            logger.debug(f'从 Parquet 加载: {parquet_path}')
+            return df
+        except Exception as e:
+            logger.warning(f'Parquet 加载失败: {e}，回退到 Excel')
+    
+    # 回退到 Excel
+    if os.path.exists(excel_path):
+        try:
+            df = pd.read_excel(excel_path, dtype=str)
+            logger.debug(f'从 Excel 加载: {excel_path}')
+            return df
+        except Exception as e:
+            logger.error(f'Excel 加载失败: {e}')
+            return pd.DataFrame()
+    
+    logger.warning(f'文件不存在: {parquet_path} 或 {excel_path}')
+    return pd.DataFrame()
+
+
+def save_cleaned_data_dual_format(df: pd.DataFrame, base_path: str, entity_name: str):
+    """
+    同时保存为 Excel 和 Parquet 格式
+    
+    Args:
+        df: 清洗后的 DataFrame
+        base_path: 基础目录路径
+        entity_name: 实体名称（用于文件名）
+    """
+    # Excel 路径（供人阅读）
+    excel_path = os.path.join(base_path, f'{entity_name}_cleaned.xlsx')
+    
+    # Parquet 路径（供程序快速读取）
+    parquet_dir = os.path.join(os.path.dirname(base_path), 'parquet')
+    parquet_path = os.path.join(parquet_dir, f'{entity_name}.parquet')
+    
+    # 保存 Excel
+    save_formatted_excel(df, excel_path)
+    
+    # 保存 Parquet
+    save_as_parquet(df, parquet_path)
 
 
 def save_formatted_excel(df: pd.DataFrame, output_path: str):

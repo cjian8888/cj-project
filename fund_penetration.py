@@ -20,6 +20,7 @@ from typing import Dict, List, Set, Tuple
 from datetime import datetime
 from collections import defaultdict
 
+import config
 import utils
 
 logger = utils.setup_logger(__name__)
@@ -260,7 +261,7 @@ class MoneyGraph:
             # 计算进出比例
             ratio = min(inflow, outflow) / max(inflow, outflow)
             
-            if ratio >= threshold_ratio and inflow >= 100000:  # 至少10万流量
+            if ratio >= threshold_ratio and inflow >= config.FUND_FLOW_MIN_AMOUNT:  # 使用配置阈值
                 channels.append({
                     'node': node,
                     'inflow': inflow,
@@ -317,6 +318,10 @@ def build_money_graph(
 ) -> MoneyGraph:
     """
     从交易数据构建资金图
+    
+    【P0 修复 - 2026-01-18】改为累计金额判定
+    审计原则：边的权重应基于两点间"累计发生额"而非单笔金额
+    这样可以避免"蚂蚁搬家"（多笔小额转账）漏查
     """
     graph = MoneyGraph()
     
@@ -326,45 +331,55 @@ def build_money_graph(
     for company in companies:
         graph.set_node_type(company, 'company')
     
+    def _add_edges_from_data(entity_name: str, df: pd.DataFrame):
+        """从单个实体的交易数据添加边（基于累计金额）"""
+        if df.empty or 'counterparty' not in df.columns:
+            return
+        
+        # 按对手方聚合累计金额
+        df_copy = df.copy()
+        df_copy['counterparty'] = df_copy['counterparty'].astype(str).fillna('')
+        
+        # 过滤无效对手方
+        df_copy = df_copy[
+            (df_copy['counterparty'] != '') & 
+            (df_copy['counterparty'] != 'nan') &
+            (df_copy['counterparty'].str.len() >= 2)
+        ]
+        
+        if df_copy.empty:
+            return
+        
+        # 按对手方聚合
+        agg_result = df_copy.groupby('counterparty').agg({
+            'income': 'sum',
+            'expense': 'sum'
+        }).reset_index()
+        
+        # 遍历聚合结果，按累计金额判断是否添加边
+        for _, row in agg_result.iterrows():
+            cp = row['counterparty']
+            total_income = row['income'] or 0
+            total_expense = row['expense'] or 0
+            
+            # 累计金额超过阈值才添加边
+            if total_income > config.GRAPH_EDGE_MIN_AMOUNT:
+                # 收入边：对手方 -> 当前实体
+                graph.add_edge(cp, entity_name, total_income, None, 'income')
+            
+            if total_expense > config.GRAPH_EDGE_MIN_AMOUNT:
+                # 支出边：当前实体 -> 对手方
+                graph.add_edge(entity_name, cp, total_expense, None, 'expense')
+    
     # 从个人数据添加边
     for person_name, df in personal_data.items():
-        if df.empty or 'counterparty' not in df.columns:
-            continue
-        
-        for _, row in df.iterrows():
-            cp = str(row.get('counterparty', ''))
-            if not cp or cp == 'nan' or len(cp) < 2:
-                continue
-            
-            income = row.get('income', 0) or 0
-            expense = row.get('expense', 0) or 0
-            date = row.get('date')
-            
-            if income > 10000:  # 1万以上才计入图
-                graph.add_edge(cp, person_name, income, date, 'income')
-            if expense > 10000:
-                graph.add_edge(person_name, cp, expense, date, 'expense')
+        _add_edges_from_data(person_name, df)
     
     # 从公司数据添加边
     for company_name, df in company_data.items():
-        if df.empty or 'counterparty' not in df.columns:
-            continue
-        
-        for _, row in df.iterrows():
-            cp = str(row.get('counterparty', ''))
-            if not cp or cp == 'nan' or len(cp) < 2:
-                continue
-            
-            income = row.get('income', 0) or 0
-            expense = row.get('expense', 0) or 0
-            date = row.get('date')
-            
-            if income > 10000:
-                graph.add_edge(cp, company_name, income, date, 'income')
-            if expense > 10000:
-                graph.add_edge(company_name, cp, expense, date, 'expense')
+        _add_edges_from_data(company_name, df)
     
-    logger.info(f'资金图构建完成: {len(graph.nodes)} 节点, {sum(len(e) for e in graph.edges.values())} 条边')
+    logger.info(f'资金图构建完成: {len(graph.nodes)} 节点, {sum(len(e) for e in graph.edges.values())} 条边（基于累计金额）')
     return graph
 
 
@@ -707,14 +722,13 @@ def _write_transaction_details(f, items: List[Dict], title: str) -> None:
     """写入交易明细部分"""
     f.write(f'{title}\n')
     f.write('-'*40 + '\n')
-    for i, item in enumerate(items[:20], 1):
+    f.write(f'共 {len(items)} 笔记录\n\n')
+    for i, item in enumerate(items, 1):
         date_str = item['日期'].strftime('%Y-%m-%d') if hasattr(item['日期'], 'strftime') else str(item['日期'])[:10]
         amount = item['收入'] if item['收入'] > 0 else item['支出']
         direction = '收入' if item['收入'] > 0 else '支出'
         desc = utils.safe_str(item['摘要'], default='转账')[:20]
         f.write(f'{i}. [{date_str}] {item["发起方"]} → {item["接收方"]}: {utils.format_currency(amount)}({direction}), 摘要:{desc}\n')
-    if len(items) > 20:
-        f.write(f'... 共 {len(items)} 笔，仅显示前20笔\n')
     f.write('\n')
 
 
@@ -722,11 +736,10 @@ def _write_fund_cycles_section(f, cycles: List[List[str]]) -> None:
     """写入资金闭环部分"""
     f.write('六、资金闭环（利益回流铁证）\n')
     f.write('-'*40 + '\n')
-    f.write('★ 资金闭环说明资金最终回流到起点，是典型的洗钱或利益输送结构\n\n')
-    for i, cycle in enumerate(cycles[:10], 1):
+    f.write('★ 资金闭环说明资金最终回流到起点，是典型的洗钱或利益输送结构\n')
+    f.write(f'共 {len(cycles)} 个闭环\n\n')
+    for i, cycle in enumerate(cycles, 1):
         f.write(f'{i}. {" → ".join(cycle)}\n')
-    if len(cycles) > 10:
-        f.write(f'... 共 {len(cycles)} 个闭环\n')
     f.write('\n')
 
 
@@ -734,12 +747,11 @@ def _write_pass_through_channels_section(f, channels: List[Dict]) -> None:
     """写入过账通道部分"""
     f.write('七、过账通道（疑似空壳/马甲账户）\n')
     f.write('-'*40 + '\n')
-    f.write('★ 进出金额高度平衡（收多少立刻转走多少），常见于空壳公司\n\n')
-    for i, ch in enumerate(channels[:10], 1):
+    f.write('★ 进出金额高度平衡（收多少立刻转走多少），常见于空壳公司\n')
+    f.write(f'共 {len(channels)} 个记录\n\n')
+    for i, ch in enumerate(channels, 1):
         f.write(f'{i}. 【{ch["risk_level"].upper()}】{ch["node"]}\n')
         f.write(f'   进账: {ch["inflow"]/10000:.2f}万 | 出账: {ch["outflow"]/10000:.2f}万 | 进出比: {ch["ratio"]*100:.1f}%\n')
-    if len(channels) > 10:
-        f.write(f'... 共 {len(channels)} 个\n')
     f.write('\n')
 
 
@@ -747,12 +759,11 @@ def _write_hub_nodes_section(f, hubs: List[Dict]) -> None:
     """写入资金枢纽节点部分"""
     f.write('八、资金枢纽节点（关键控制人/中转站）\n')
     f.write('-'*40 + '\n')
-    f.write('★ 与多方有资金往来的关键节点\n\n')
-    for i, hub in enumerate(hubs[:10], 1):
+    f.write('★ 与多方有资金往来的关键节点\n')
+    f.write(f'共 {len(hubs)} 个记录\n\n')
+    for i, hub in enumerate(hubs, 1):
         f.write(f'{i}. {hub["node"]} ({hub["node_type"]})\n')
         f.write(f'   入度: {hub["in_degree"]} | 出度: {hub["out_degree"]} | 总连接: {hub["total_degree"]}\n')
-    if len(hubs) > 10:
-        f.write(f'... 共 {len(hubs)} 个\n')
     f.write('\n')
 
 
@@ -760,11 +771,10 @@ def _write_multi_hop_paths_section(f, paths: List[Dict]) -> None:
     """写入多跳资金路径部分"""
     f.write('九、多跳资金路径（复杂利益输送链路）\n')
     f.write('-'*40 + '\n')
-    f.write('★ 2跳以上的资金链路，可能通过中间人/空壳公司中转\n\n')
-    for i, path in enumerate(paths[:15], 1):
+    f.write('★ 2跳以上的资金链路，可能通过中间人/空壳公司中转\n')
+    f.write(f'共 {len(paths)} 条路径\n\n')
+    for i, path in enumerate(paths, 1):
         f.write(f'{i}. [{path["hops"]}跳] {path["path_str"]}\n')
-    if len(paths) > 15:
-        f.write(f'... 共 {len(paths)} 条路径\n')
     f.write('\n')
 
 
@@ -792,9 +802,36 @@ def generate_penetration_report(results: Dict, output_dir: str) -> str:
     report_path = os.path.join(output_dir, '资金穿透分析报告.txt')
     
     with open(report_path, 'w', encoding='utf-8') as f:
-        f.write('资金穿透分析报告\n')
+        f.write('资金穿透分析报告（增强版）\n')
         f.write('='*60 + '\n')
         f.write(f'生成时间: {datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")}\n\n')
+        
+        # 报告说明
+        f.write('【报告用途】\n')
+        f.write('本报告用于深度分析资金流动关系，包括：\n')
+        f.write('• 个人与涉案公司的资金往来\n')
+        f.write('• 资金闭环（资金回流铁证）\n')
+        f.write('• 过账通道（疑似空壳公司）\n')
+        f.write('• 资金枢纽节点（关键控制人）\n')
+        f.write('• 多跳资金路径（复杂利益输送链）\n\n')
+        
+        f.write('【分析逻辑与规则】\n')
+        f.write('1. 资金闭环: 使用 Tarjan 算法检测强连通分量，发现 A→B→C→A 形式的资金回流\n')
+        f.write('2. 过账通道: 进出金额比例&gt;90%，说明资金只是过境而不沉淀\n')
+        f.write('3. 枢纽节点: 连接数&gt;3，与多方有资金往来\n')
+        f.write('4. 多跳路径: BFS 搜索 2 跳以上的资金链路\n\n')
+        
+        f.write('【可能的误判情况】\n')
+        f.write('⚠ 支付宝/微信等公共通道可能形成伪闭环\n')
+        f.write('⚠ 正常业务往来可能被识别为过账通道\n')
+        f.write('⚠ 第三方支付可能导致枢纽节点误报\n\n')
+        
+        f.write('【人工复核重点】\n')
+        f.write('★ 资金闭环: 重点关注，核实闭环形成原因\n')
+        f.write('★ 过账通道: 核实该账户的业务实质\n')
+        f.write('★ 枢纽节点: 核实该人/公司在业务中的角色\n\n')
+        
+        f.write('='*60 + '\n\n')
         
         # 汇总统计
         _write_penetration_summary(f, results['summary'])

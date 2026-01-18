@@ -350,13 +350,19 @@ COLUMN_MAPPING = {
     'is_cash': '现金',
     '数据来源': '来源文件',
     'transaction_id': '流水号',
+    # Phase 0.1 刑侦级指标字段 (2026-01-18 新增)
+    'is_balance_zeroed': '余额清空',
+    'transaction_channel': '交易渠道',
+    'sensitive_keywords': '敏感词',
 }
 
 # Excel 列显示顺序
 COLUMN_ORDER = [
     'date', 'income', 'expense', 'balance',
     'counterparty', 'description', 'category',
-    '银行来源', 'account_number', 'is_cash', '数据来源'
+    '银行来源', 'account_number', 'is_cash',
+    'is_balance_zeroed', 'transaction_channel', 'sensitive_keywords',  # Phase 0.1 新增
+    '数据来源'
 ]
 
 # 读取 Excel 时的列名变体（用于兼容不同格式）
@@ -626,3 +632,73 @@ CACHE_VERSION_MAJOR = 3                   # 缓存主版本号（用于兼容性
 CACHE_PATH = "./output/analysis_results_cache.json"  # 缓存文件路径
 GRAPH_MAX_NODES = 200                     # 图谱最大节点数
 GRAPH_MAX_EDGES = 500                     # 图谱最大边数
+
+# ========== 刑侦级指标配置 (Phase 0.1 - 2026-01-18 新增) ==========
+
+# 敏感词列表 - 交易摘要中包含这些词需要标记
+SENSITIVE_KEYWORDS = [
+    # 借贷类
+    '还款', '借款', '借贷', '借条', '欠款',
+    # 好处费类
+    '回扣', '佣金', '好处费', '感谢费', '辛苦费', '介绍费', '中介费',
+    # 咨询服务类（可疑）
+    '咨询费', '服务费', '顾问费', '劳务费',
+    # 礼金类
+    '红包', '礼金', '礼品', '过节费', '慰问',
+    # 资金走账类
+    '过桥', '走账', '垫资', '周转',
+    # 退款类
+    '退款', '退回', '返还', '退还'
+]
+
+# 交易渠道分类关键词
+TRANSACTION_CHANNEL_KEYWORDS = {
+    'ATM': ['ATM', '自助', '自动柜员', '自助终端', '自助设备'],
+    '柜面': ['柜面', '柜台', '网点', '现钞', '柜员', '临柜'],
+    '手机银行': ['手机银行', '掌银', 'APP', '移动银行', '手机支付'],
+    '网银': ['网银', '网上银行', 'EBANK', '网上支付', '网银转账'],
+    '第三方支付': ['支付宝', '微信', '财付通', '云闪付', '京东支付', '银联在线'],
+    'POS消费': ['POS', '刷卡', '消费', '银联', '商户']
+}
+
+# 余额归零判断阈值（元）
+BALANCE_ZERO_THRESHOLD = 10.0  # 余额低于此值视为"清空"
+
+# ========== 行为特征检测配置 (Phase 0.2 - 2026-01-18 新增) ==========
+
+# 快进快出检测参数
+FAST_IN_OUT_TIME_WINDOW_HOURS = 24      # 时间窗口（小时）
+FAST_IN_OUT_MIN_AMOUNT = 10000          # 触发检测的最低金额（1万）
+FAST_IN_OUT_AMOUNT_RATIO = 0.8          # 进出金额匹配比例
+
+# 整进散出检测参数
+STRUCTURING_MIN_SPLIT_COUNT = 3         # 最少拆分笔数
+STRUCTURING_AMOUNT_TOLERANCE = 0.2      # 金额匹配容差（20%）
+STRUCTURING_TIME_WINDOW_DAYS = 7        # 时间窗口（天）
+STRUCTURING_MIN_LARGE_AMOUNT = 50000    # 大额交易阈值（5万）
+
+# 休眠激活检测参数
+DORMANT_MIN_DAYS = 180                  # 休眠期最少天数
+DORMANT_ACTIVATION_MIN_AMOUNT = 50000   # 激活后大额交易阈值（5万）
+
+# ========== P1 硬编码阈值迁移 (2026-01-18 新增) ==========
+# 以下阈值从各分析模块中迁移过来，便于统一管理和调整
+
+# --- 借贷分析阈值 (loan_analyzer.py) ---
+LOAN_MIN_MATCH_AMOUNT = 5000              # 借贷配对最低金额（5000元）
+
+# --- 时序分析阈值 (time_series_analyzer.py) ---
+TIME_SERIES_HIGH_RISK_AMOUNT = 50000      # 周期性收入高风险阈值（5万元）
+SUDDEN_CHANGE_MIN_AMOUNT = 100000         # 资金突变检测最低金额（10万元）
+
+# --- 资金穿透阈值 (fund_penetration.py) ---
+FUND_FLOW_MIN_AMOUNT = 100000             # 过账通道最低流量（10万元）
+GRAPH_EDGE_MIN_AMOUNT = 10000             # 资金图边最低金额（1万元）
+
+# --- 疑点检测阈值 (suspicion_detector.py) ---
+SUSPICION_MEDIUM_HIGH_AMOUNT = 50000      # 疑点检测中等风险阈值（5万元）
+
+# --- 高频收入阈值 (financial_profiler.py) ---
+# 注意：HIGH_FREQUENCY_SALARY_CAP 已在前面定义，此处复用
+
+

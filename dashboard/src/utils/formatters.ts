@@ -199,7 +199,7 @@ export const formatPartyName = (name: string | undefined | null): string => {
   ];
   
   if (systemPlaceholders.includes(trimmedName)) {
-    return '目标账户(本人)';
+    return '--';
   }
   
   return trimmedName;

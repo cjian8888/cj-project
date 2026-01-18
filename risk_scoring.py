@@ -187,7 +187,7 @@ def score_transaction(
             if hasattr(date, 'weekday'):
                 if date.weekday() >= 5:
                     time_score += RISK_SCORE_WEIGHTS['time']['weekend']
-        except:
+        except (AttributeError, TypeError):
             pass
     scores['time'] = time_score
     total_score += time_score * RISK_SCORE_WEIGHTS['time']['weight']

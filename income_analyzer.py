@@ -114,6 +114,68 @@ def detect_suspicious_income(
     return results
 
 
+def _extract_counterparty_from_description(desc: str) -> str:
+    """
+    【P4 优化】从摘要中提取对手方信息
+    
+    常见模式：
+    - "转账 张三" -> "张三"
+    - "来自:李四" -> "李四"
+    - "代发 某某公司" -> "某某公司"
+    - "支付宝转账-王五" -> "王五"
+    
+    Args:
+        desc: 交易摘要
+        
+    Returns:
+        提取到的对手方名称，如果提取失败返回空字符串
+    """
+    import re
+    
+    if not desc or desc == 'nan':
+        return ''
+    
+    desc = str(desc).strip()
+    
+    # 模式1: "转账 张三" 或 "转账给张三"
+    match = re.search(r'转账[给到]?\s*([^\s,，;；\d]{2,10})', desc)
+    if match:
+        return match.group(1)
+    
+    # 模式2: "来自:李四" 或 "来自李四"
+    match = re.search(r'来自[:：]?\s*([^\s,，;；\d]{2,10})', desc)
+    if match:
+        return match.group(1)
+    
+    # 模式3: "代发 某某公司"
+    match = re.search(r'代发\s*([^\s,，;；\d]{2,20})', desc)
+    if match:
+        return match.group(1)
+    
+    # 模式4: "支付宝转账-王五"
+    match = re.search(r'[-—]\s*([^\s,，;；\d]{2,10})$', desc)
+    if match:
+        return match.group(1)
+    
+    # 模式5: "付款人:某某"
+    match = re.search(r'付款人[:：]?\s*([^\s,，;；\d]{2,10})', desc)
+    if match:
+        return match.group(1)
+    
+    # 模式6: 某些银行摘要末尾是对手方 "网银转账 张三丰"
+    match = re.search(r'(?:网银|手机银行|APP|跨行)转账?\s+([^\s,，;；\d]{2,10})$', desc)
+    if match:
+        return match.group(1)
+    
+    # 模式7: 理财产品到账 "理财产品到账-ABC理财"
+    if '理财' in desc or '赎回' in desc:
+        match = re.search(r'[-—]\s*(.{2,20}理财.{0,10})$', desc)
+        if match:
+            return match.group(1)
+    
+    return ''
+
+
 def _detect_regular_non_salary(
     all_transactions: Dict[str, pd.DataFrame],
     core_persons: List[str],
@@ -344,6 +406,13 @@ def _detect_unknown_income(
                 desc = str(row.get('description', ''))
                 account = str(row.get('account', ''))  # 账号
                 
+                # 【P4 优化】对手方缺失时尝试从摘要中提取
+                if not cp or cp == 'nan' or len(cp) < 2:
+                    extracted_cp = _extract_counterparty_from_description(desc)
+                    if extracted_cp:
+                        cp = extracted_cp
+                        logger.debug(f'  从摘要提取对手方: {person} - {cp}')
+                
                 # 判断是否来源不明
                 is_unknown = False
                 reason = ''
@@ -387,6 +456,15 @@ def _detect_unknown_income(
                     continue
                 
                 if is_unknown:
+                    # 【P5 优化】添加可追溯信息
+                    bank = str(row.get('bank', ''))
+                    account_full = str(row.get('account', ''))
+                    # 账户号码部分隐藏（显示前4后4位）
+                    if len(account_full) > 8:
+                        account_display = account_full[:4] + '****' + account_full[-4:]
+                    else:
+                        account_display = account_full
+                    
                     unknown_income.append({
                         'person': person,
                         'counterparty': cp if cp and cp != 'nan' else '(无)',
@@ -394,7 +472,11 @@ def _detect_unknown_income(
                         'amount': row['income'],
                         'description': desc,
                         'reason': reason,
-                        'risk_level': 'high'
+                        'risk_level': 'high',
+                        # 【P5 新增】追溯字段
+                        'account': account_display,
+                        'bank': bank,
+                        'source_file': f'cleaned_data/个人/{person}_合并流水.xlsx'
                     })
     
     # 按金额排序
@@ -842,7 +924,11 @@ def _add_risk_entry(item: Dict, entry_type: str, item_type: str,
         'amount': amount,
         'detail': detail,
         'risk_level': item['risk_level'],
-        'confidence': _calculate_confidence_score(item, item_type)
+        'confidence': _calculate_confidence_score(item, item_type),
+        # 【P5 新增】复制追溯字段
+        'account': item.get('account', ''),
+        'bank': item.get('bank', ''),
+        'source_file': item.get('source_file', f"cleaned_data/个人/{item['person']}_合并流水.xlsx")
     }
     
     # 添加到对应列表
@@ -900,7 +986,7 @@ def _classify_by_risk(results: Dict) -> tuple:
 
 def _write_report_header(f) -> None:
     """
-    写入报告头部
+    写入报告头部（含用途说明、逻辑依据、误判提示、复核重点）
     
     Args:
         f: 文件对象
@@ -908,6 +994,35 @@ def _write_report_header(f) -> None:
     f.write('异常收入来源分析报告（增强版）\n')
     f.write('='*60 + '\n')
     f.write(f'生成时间: {datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")}\n\n')
+    
+    # 报告说明
+    f.write('【报告用途】\n')
+    f.write('本报告用于识别核心人员的异常收入来源，包括：\n')
+    f.write('• 规律性非工资收入 - 非发薪单位的定期转入\n')
+    f.write('• 个人大额转入 - 来自个人的≥5万元转入\n')
+    f.write('• 来源不明收入 - 对手方信息缺失的大额收入\n')
+    f.write('• 同源多次收入 - 同一来源多次转入且累计金额较大\n')
+    f.write('• 疑似分期受贿 - 同一个人每月固定金额转入\n\n')
+    
+    f.write('【分析逻辑与规则】\n')
+    f.write('1. 规律性非工资: 同一对手方≥3次转入，金额变异系CV<0.3，排除已知发薪单位\n')
+    f.write('2. 个人大额转入: 来自2-4字汉字姓名的≥5万元收入\n')
+    f.write('3. 来源不明: 对手方为空/nan且金额≥1万元\n')
+    f.write('4. 同源多次: 同一对手方≥5次转入且累计≥1万元\n')
+    f.write('5. 分期受贿: 个人每月转入≥1万元，持续≥4个月，CV<0.5\n\n')
+    
+    f.write('【可能的误判情况】\n')
+    f.write('⚠ 理财产品到期、赎回可能被误识别为异常收入(已部分过滤)\n')
+    f.write('⚠ 家庭成员间的资金往来可能被标记为疑似分期受贿\n')
+    f.write('⚠ 兑职/商业投资收益可能产生误报\n')
+    f.write('⚠ 港澳台同胞汇款可能被标记为来源不明\n\n')
+    
+    f.write('【人工复核重点】\n')
+    f.write('★ 疑似分期受贿: 重点关注，核实统一转入者身份\n')
+    f.write('★ 大额个人转入: 核实对手方与本人的关系\n')
+    f.write('★ 来源不明: 调取银行原始凭证核实真实来源\n\n')
+    
+    f.write('='*60 + '\n\n')
 
 
 def _write_summary_section(f, summary: Dict) -> None:
@@ -937,11 +1052,20 @@ def _write_high_risk_section(f, high_risk: List) -> None:
     f.write('='*40 + '\n')
     f.write('以下项目风险较高，建议优先核实\n')
     f.write('（可信度评分: 0-100分，分数越高越需关注）\n\n')
-    for i, item in enumerate(high_risk[:20], 1):
+    f.write(f'共 {len(high_risk)} 条记录\n\n')
+    for i, item in enumerate(high_risk, 1):
         confidence = item.get('confidence', 50)
         f.write(f"{i}. 【{item['type']}】{item['person']} ← {item['counterparty']} [可信度:{confidence}分]\n")
         f.write(f"   金额: {utils.format_currency(item['amount'])}\n")
         f.write(f"   详情: {item['detail']}\n")
+        # 【P5 新增】追溯信息
+        bank = item.get('bank', '')
+        account = item.get('account', '')
+        source_file = item.get('source_file', '')
+        if bank or account:
+            f.write(f"   ▶ 追溯: {bank} {account}\n")
+        if source_file:
+            f.write(f"   ▶ 文件: {source_file}\n")
     f.write('\n')
 
 
@@ -956,7 +1080,8 @@ def _write_medium_risk_section(f, medium_risk: List) -> None:
     f.write('三、中风险项目（参考信息）\n')
     f.write('-'*40 + '\n')
     f.write('以下项目需酌情关注\n\n')
-    for i, item in enumerate(medium_risk[:15], 1):
+    f.write(f'共 {len(medium_risk)} 条记录\n\n')
+    for i, item in enumerate(medium_risk, 1):
         f.write(f"{i}. 【{item['type']}】{item['person']} ← {item['counterparty']}\n")
         f.write(f"   金额: {utils.format_currency(item['amount'])}\n")
     f.write('\n')
@@ -972,7 +1097,8 @@ def _write_regular_non_salary_section(f, regular_non_salary: List) -> None:
     """
     f.write('四、规律性非工资收入\n')
     f.write('-'*40 + '\n')
-    for i, inc in enumerate(regular_non_salary[:15], 1):
+    f.write(f'共 {len(regular_non_salary)} 条记录\n\n')
+    for i, inc in enumerate(regular_non_salary, 1):
         f.write(f"{i}. 【{inc['risk_level'].upper()}】{inc['person']} ← {inc['counterparty']}\n")
         f.write(f"   共{inc['occurrences']}次, 均额{utils.format_currency(inc['avg_amount'])}, "
                f"合计{utils.format_currency(inc['total_amount'])}\n")
@@ -990,7 +1116,8 @@ def _write_large_single_income_section(f, large_single_income: List) -> None:
     """
     f.write('五、大额单笔收入（≥10万元）\n')
     f.write('-'*40 + '\n')
-    for i, inc in enumerate(large_single_income[:15], 1):
+    f.write(f'共 {len(large_single_income)} 条记录\n\n')
+    for i, inc in enumerate(large_single_income, 1):
         date_str = inc['date'].strftime('%Y-%m-%d') if hasattr(inc['date'], 'strftime') else str(inc['date'])[:10]
         f.write(f"{i}. 【{inc['risk_level'].upper()}】{inc['person']} ← {inc['counterparty']}\n")
         f.write(f"   金额: {utils.format_currency(inc['amount'])} ({date_str})\n")
@@ -1008,7 +1135,8 @@ def _write_same_source_multi_section(f, same_source_multi: List) -> None:
     """
     f.write('六、同源多次收入\n')
     f.write('-'*40 + '\n')
-    for i, inc in enumerate(same_source_multi[:15], 1):
+    f.write(f'共 {len(same_source_multi)} 条记录\n\n')
+    for i, inc in enumerate(same_source_multi, 1):
         f.write(f"{i}. 【{inc['risk_level'].upper()}】{inc['person']} ← {inc['counterparty']}\n")
         f.write(f"   共{inc['count']}次, 均额{utils.format_currency(inc['avg_amount'])}, "
                f"合计{utils.format_currency(inc['total'])}\n")
@@ -1026,7 +1154,8 @@ def _write_large_individual_income_section(f, large_individual_income: List) -> 
     """
     f.write('七、来自个人的大额收入\n')
     f.write('-'*40 + '\n')
-    for i, inc in enumerate(large_individual_income[:20], 1):
+    f.write(f'共 {len(large_individual_income)} 条记录\n\n')
+    for i, inc in enumerate(large_individual_income, 1):
         date_str = inc['date'].strftime('%Y-%m-%d') if hasattr(inc['date'], 'strftime') else str(inc['date'])[:10]
         f.write(f"{i}. {inc['person']} ← {inc['from_individual']}: "
                f"{utils.format_currency(inc['amount'])} ({date_str})\n")
@@ -1043,8 +1172,10 @@ def _write_unknown_source_income_section(f, unknown_source_income: List) -> None
     """
     f.write('八、来源不明的大额收入（重点核查）\n')
     f.write('-'*40 + '\n')
-    f.write('【说明】这些交易的对手方信息在原始银行数据中缺失，需核实资金来源。\n\n')
-    for i, inc in enumerate(unknown_source_income[:15], 1):
+    f.write('【说明】这些交易的对手方信息在原始银行数据中缺失，需核实资金来源。\n')
+    f.write('【追溯】每条记录包含账户和文件信息，便于在 Excel 中定位复核。\n\n')
+    f.write(f'共 {len(unknown_source_income)} 条记录\n\n')
+    for i, inc in enumerate(unknown_source_income, 1):
         date_str = inc['date'].strftime('%Y-%m-%d') if hasattr(inc['date'], 'strftime') else str(inc['date'])[:10]
         f.write(f"{i}. 【{inc['risk_level'].upper()}】{inc['person']}: "
                f"{utils.format_currency(inc['amount'])} ({date_str})\n")
@@ -1052,6 +1183,14 @@ def _write_unknown_source_income_section(f, unknown_source_income: List) -> None
         desc = inc.get('description', '')
         if desc and desc != 'nan':
             f.write(f"   摘要: {desc[:50]}\n")
+        # 【P5 新增】追溯信息
+        bank = inc.get('bank', '')
+        account = inc.get('account', '')
+        source_file = inc.get('source_file', '')
+        if bank or account:
+            f.write(f"   ▶ 追溯: {bank} {account}\n")
+        if source_file:
+            f.write(f"   ▶ 文件: {source_file}\n")
     f.write('\n')
 
 
@@ -1116,15 +1255,13 @@ def _write_potential_bribe_section(f, bribe_items: List[Dict]) -> None:
     f.write('【特征】从同一个人（非发薪单位）处每月收到固定金额\n')
     f.write('【风险】此类收入可能是分期受贿、利益输送或掩盖性质的款项\n\n')
     
-    for i, item in enumerate(bribe_items[:20], 1):
+    f.write(f'共 {len(bribe_items)} 条记录\n\n')
+    for i, item in enumerate(bribe_items, 1):
         f.write(f'{i}. 【{item["risk_level"].upper()}】{item["person"]} ← {item["counterparty"]}\n')
         f.write(f'   金额: 月均 {item["avg_amount"]/10000:.2f}万 (波动系数: {item["cv"]:.2f})\n')
         f.write(f'   时间: {item["months"]}个月, 共{item["occurrences"]}笔\n')
         f.write(f'   总额: {item["total_amount"]/10000:.2f}万\n')
         f.write(f'   风险因素: {item["risk_factors"]}\n\n')
-    
-    if len(bribe_items) > 20:
-        f.write(f'... 共{len(bribe_items)}项\n')
 
 
 def _detect_potential_bribe_installment(

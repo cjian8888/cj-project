@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ metadata.case_name }} - 审计报告</title>
+    <style>
+        /* 公文风格样式 */
+        @page {
+            size: A4;
+            margin: 25mm 20mm;
+        }
+        
+        body {
+            font-family: "SimSun", "Songti SC", "宋体", serif;
+            background-color: #f0f0f0;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+        }
+        
+        .report-container {
+            background-color: white;
+            width: 210mm;
+            min-height: 297mm;
+            padding: 25mm 20mm;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            box-sizing: border-box;
+        }
+        
+        /* 标题样式 */
+        h1.report-title {
+            text-align: center;
+            font-size: 22px;
+            font-weight: bold;
+            margin-bottom: 30px;
+            font-family: "Microsoft YaHei", "微软雅黑", sans-serif;
+            color: #000;
+        }
+        
+        h2.section-title {
+            font-size: 18px;
+            font-weight: bold;
+            margin-top: 25px;
+            margin-bottom: 15px;
+            padding-bottom: 5px;
+            border-bottom: 2px solid #333;
+            font-family: "Microsoft YaHei", "微软雅黑", sans-serif;
+        }
+        
+        h3.subsection-title {
+            font-size: 16px;
+            font-weight: bold;
+            margin-top: 15px;
+            margin-bottom: 10px;
+            color: #333;
+        }
+        
+        /* 正文样式 */
+        p {
+            font-size: 16px;
+            line-height: 1.8;
+            text-align: justify;
+            text-indent: 2em;
+            margin-bottom: 12px;
+            color: #000;
+        }
+        
+        /* 表格样式 */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+            font-size: 14px;
+        }
+        
+        th, td {
+            border: 1px solid #000;
+            padding: 8px 10px;
+            text-align: center;
+        }
+        
+        th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+            font-family: "Microsoft YaHei", "微软雅黑", sans-serif;
+        }
+        
+        /* 风险标记 */
+        .risk-high {
+            color: #c00;
+            background-color: #fff0f0;
+            font-weight: bold;
+        }
+        
+        .risk-medium {
+            color: #f60;
+            background-color: #fff8f0;
+        }
+        
+        .risk-low {
+            color: #060;
+        }
+        
+        .risk-critical {
+            color: #fff;
+            background-color: #c00;
+            font-weight: bold;
+        }
+        
+        /* 元数据 */
+        .metadata {
+            text-align: right;
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 20px;
+        }
+        
+        /* 列表样式 */
+        ul, ol {
+            margin-left: 2em;
+            line-height: 1.8;
+        }
+        
+        li {
+            margin-bottom: 5px;
+        }
+        
+        /* 摘要卡片 */
+        .summary-card {
+            display: inline-block;
+            width: 30%;
+            margin: 5px 1%;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            text-align: center;
+            background-color: #fafafa;
+        }
+        
+        .summary-card .value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .summary-card .label {
+            font-size: 12px;
+            color: #666;
+        }
+        
+        /* 证据引用 */
+        .evidence-ref {
+            font-size: 12px;
+            color: #666;
+            background-color: #f5f5f5;
+            padding: 2px 5px;
+            border-radius: 3px;
+        }
+        
+        /* 打印优化 */
+        @media print {
+            body {
+                background-color: white;
+            }
+            .report-container {
+                box-shadow: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="report-container">
+        <!-- 报告标题 -->
+        <h1 class="report-title">{{ metadata.case_name }}</h1>
+        
+        <!-- 元数据 -->
+        <div class="metadata">
+            <p>生成时间：{{ metadata.generated_at[:19] | replace('T', ' ') }}</p>
+            <p>报告版本：{{ metadata.version }}</p>
+        </div>
+        
+        <!-- 模块内容区域 -->
+        {% block content %}{% endblock %}
+        
+    </div>
+</body>
+</html>

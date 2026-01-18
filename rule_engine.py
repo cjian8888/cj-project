@@ -90,12 +90,82 @@ class RuleEngine:
     2. 规则执行和推理
     3. 规则结果聚合
     4. 规则报告生成
+    
+    【P2 优化 - 2026-01-18】
+    5. 支持从 YAML 配置文件加载规则参数
     """
     
-    def __init__(self):
+    # 默认配置文件路径
+    DEFAULT_CONFIG_PATH = "config/rules.yaml"
+    
+    def __init__(self, config_path: str = None):
         self.rules: Dict[str, Rule] = {}
         self.rule_groups: Dict[str, List[str]] = {}
+        self.rule_config: Dict[str, Any] = {}
+        
+        # 加载配置
+        if config_path:
+            self.load_config(config_path)
+        else:
+            self._try_load_default_config()
+        
         self._register_default_rules()
+    
+    def load_config(self, config_path: str) -> bool:
+        """
+        从 YAML 文件加载规则配置
+        
+        Args:
+            config_path: YAML 配置文件路径
+            
+        Returns:
+            是否加载成功
+        """
+        try:
+            import yaml
+            import os
+            
+            if not os.path.exists(config_path):
+                logger.warning(f'规则配置文件不存在: {config_path}')
+                return False
+            
+            with open(config_path, 'r', encoding='utf-8') as f:
+                self.rule_config = yaml.safe_load(f) or {}
+            
+            logger.info(f'从 {config_path} 加载规则配置成功')
+            return True
+            
+        except ImportError:
+            logger.warning('PyYAML 未安装，跳过配置加载。可通过 pip install pyyaml 安装')
+            return False
+        except Exception as e:
+            logger.error(f'加载规则配置失败: {e}')
+            return False
+    
+    def _try_load_default_config(self):
+        """尝试加载默认配置文件"""
+        import os
+        default_path = os.path.join(os.path.dirname(__file__), self.DEFAULT_CONFIG_PATH)
+        if os.path.exists(default_path):
+            self.load_config(default_path)
+    
+    def get_rule_param(self, group: str, rule: str, param: str, default: Any = None) -> Any:
+        """
+        获取规则参数
+        
+        Args:
+            group: 规则组名（如 'fund_anomaly'）
+            rule: 规则名（如 'large_cash_income'）
+            param: 参数名（如 'threshold'）
+            default: 默认值
+            
+        Returns:
+            参数值
+        """
+        try:
+            return self.rule_config.get(group, {}).get(rule, {}).get(param, default)
+        except Exception:
+            return default
     
     def register_rule(self, rule: Rule):
         """注册规则"""

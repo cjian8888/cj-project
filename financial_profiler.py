@@ -251,7 +251,7 @@ def _identify_salary_by_frequency(income_df: pd.DataFrame) -> pd.DataFrame:
     import re
     
     # 【新增】高频收入金额上限（超过此金额需人工复核）
-    HIGH_FREQUENCY_AMOUNT_CAP = 100000  # 10万/月
+    HIGH_FREQUENCY_AMOUNT_CAP = config.HIGH_FREQUENCY_SALARY_CAP  # 使用统一配置
 
     counterparty_groups = income_df.groupby('counterparty')
     for counterparty, group in counterparty_groups:

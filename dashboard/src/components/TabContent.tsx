@@ -34,6 +34,7 @@ import { useApp } from '../contexts/AppContext';
 import { formatDate, formatCurrency, formatAmountInWan, truncate, getRiskLevelBadgeStyle, formatFileSize, formatRiskLevel, formatRiskDescription, formatPartyName, formatAnalysisType, formatAuditDateTime } from '../utils/formatters';
 import { EmptyState } from './common/EmptyState';
 import NetworkGraph from './NetworkGraph';
+import { ReportBuilder } from './ReportBuilder';
 
 export function TabContent() {
     const { ui, setActiveTab } = useApp();
@@ -110,8 +111,8 @@ function TabButton({ label, icon: Icon, active, onClick }: TabButtonProps) {
 // ==================== Overview Tab ====================
 
 // 指标详情类型映射
-type MetricType = 'loan_bilateral' | 'loan_platform' | 'income_regular' | 
-                  'related_direct' | 'cash_collision' | 'risk_critical' | 'risk_high' | 'risk_all';
+type MetricType = 'loan_analysis' | 'income_analysis' |
+    'related_direct' | 'cash_collision' | 'risk_critical' | 'risk_high' | 'risk_all';
 
 interface AuditMetric {
     key: MetricType;
@@ -124,13 +125,13 @@ interface AuditMetric {
 
 function OverviewTab() {
     const { data, analysis } = useApp();
-    
+
     // Modal 状态
     const [selectedMetric, setSelectedMetric] = useState<AuditMetric | null>(null);
-    
+
     // 实体选择器状态
     const [selectedEntity, setSelectedEntity] = useState<string>('all');
-    
+
     // 实体类型切换：个人 vs 公司
     const [entityType, setEntityType] = useState<'person' | 'company'>('person');
 
@@ -184,13 +185,13 @@ function OverviewTab() {
         if (selectedEntity !== 'all') {
             const profile = data.profiles[selectedEntity];
             if (!profile) return [{ name: '无数据', value: 100, color: '#374151' }];
-            
+
             const income = profile.totalIncome || 0;
             const expense = profile.totalExpense || 0;
             const total = income + expense;
-            
+
             if (total === 0) return [{ name: '无交易', value: 100, color: '#374151' }];
-            
+
             return [
                 { name: '收入', value: Math.round((income / total) * 100), color: '#10b981' },
                 { name: '支出', value: Math.round((expense / total) * 100), color: '#ef4444' },
@@ -236,219 +237,235 @@ function OverviewTab() {
     const incomeDetails = data.analysisResults?.income?.details || [];
     const aggregationSummary = data.analysisResults?.aggregation?.summary || {};
     const rankedEntities = data.analysisResults?.aggregation?.rankedEntities || [];
-    
+
     // 直接从 suspicions 计算实际数据条数
     const directTransfersCount = (data.suspicions.directTransfers || []).length;
     const cashCollisionsCount = (data.suspicions.cashCollisions || []).length;
-    
+
     // 筛选极高风险和高风险实体
-    const criticalRiskEntities = rankedEntities.filter((e: any) => 
+    const criticalRiskEntities = rankedEntities.filter((e: any) =>
         e.riskLevel === 'critical' || (e.riskScore && e.riskScore >= 80)
     );
-    const highRiskEntities = rankedEntities.filter((e: any) => 
+    const highRiskEntities = rankedEntities.filter((e: any) =>
         e.riskLevel === 'high' || (e.riskScore && e.riskScore >= 60 && e.riskScore < 80)
     );
 
     const auditMetrics: AuditMetric[] = [
-        // 1. 借贷双向往来 - 使用后端 loan.details 或 summary
-        { 
-            key: 'loan_bilateral', 
-            label: '借贷双向往来', 
-            value: loanDetails.length > 0 ? loanDetails.length : (loanSummary['双向往来关系数'] || 0), 
-            color: 'text-red-400', 
-            desc: '同一对象有借有还', 
-            icon: Users 
+        // 1. 借贷风险分析 - 显示所有借贷类型总数，弹窗中分类展示
+        {
+            key: 'loan_analysis',
+            label: '借贷风险分析',
+            value: loanDetails.length,
+            color: 'text-red-400',
+            desc: '点击查看分类汇总',
+            icon: Users
         },
-        // 2. 网贷平台交易 - 使用 summary（后端应提供 details）
-        { 
-            key: 'loan_platform', 
-            label: '网贷平台交易', 
-            value: loanSummary['网贷平台交易数'] || 0, 
-            color: 'text-orange-400', 
-            desc: '互联网借贷平台', 
-            icon: Building2 
+        // 2. 异常收入分析 - 显示所有收入类型总数，弹窗中分类展示
+        {
+            key: 'income_analysis',
+            label: '异常收入分析',
+            value: incomeDetails.length,
+            color: 'text-orange-400',
+            desc: '点击查看分类汇总',
+            icon: TrendingUp
         },
-        // 3. 规律非工资收入 - 使用 income.details 或 summary
-        { 
-            key: 'income_regular', 
-            label: '规律非工资收入', 
-            value: incomeDetails.length > 0 ? incomeDetails.length : (incomeSummary['规律性非工资收入'] || 0), 
-            color: 'text-yellow-400', 
-            desc: '固定来源非工资', 
-            icon: TrendingUp 
-        },
-        // 4. 核心人员往来 - 使用 directTransfers（完全一致）
-        { 
-            key: 'related_direct', 
-            label: '核心人员往来', 
-            value: directTransfersCount, 
-            color: 'text-purple-400', 
-            desc: '与涉案公司/人员', 
-            icon: Network 
+        // 4. 核心人员往来
+        {
+            key: 'related_direct',
+            label: '核心人员往来',
+            value: directTransfersCount,
+            color: 'text-purple-400',
+            desc: '与涉案公司/人员',
+            icon: Network
         },
         // 5. 现金时空伴随 - 使用 cashCollisions（完全一致）
-        { 
-            key: 'cash_collision', 
-            label: '现金时空伴随', 
-            value: cashCollisionsCount, 
-            color: 'text-cyan-400', 
-            desc: 'ATM取存配对', 
-            icon: Clock 
+        {
+            key: 'cash_collision',
+            label: '现金时空伴随',
+            value: cashCollisionsCount,
+            color: 'text-cyan-400',
+            desc: 'ATM取存配对',
+            icon: Clock
         },
         // 6. 极高风险实体 - 使用筛选后的 rankedEntities
-        { 
-            key: 'risk_critical', 
-            label: '极高风险实体', 
-            value: criticalRiskEntities.length > 0 ? criticalRiskEntities.length : (aggregationSummary['极高风险实体数'] || 0), 
-            color: 'text-red-500', 
-            desc: '风险评分≥80', 
-            icon: AlertTriangle 
+        {
+            key: 'risk_critical',
+            label: '极高风险实体',
+            value: criticalRiskEntities.length > 0 ? criticalRiskEntities.length : (aggregationSummary['极高风险实体数'] || 0),
+            color: 'text-red-500',
+            desc: '风险评分≥80',
+            icon: AlertTriangle
         },
         // 7. 高风险实体 - 使用筛选后的 rankedEntities
-        { 
-            key: 'risk_high', 
-            label: '高风险实体', 
-            value: highRiskEntities.length > 0 ? highRiskEntities.length : (aggregationSummary['高风险实体数'] || 0), 
-            color: 'text-orange-500', 
-            desc: '风险评分60-79', 
-            icon: AlertTriangle 
+        {
+            key: 'risk_high',
+            label: '高风险实体',
+            value: highRiskEntities.length > 0 ? highRiskEntities.length : (aggregationSummary['高风险实体数'] || 0),
+            color: 'text-orange-500',
+            desc: '风险评分60-79',
+            icon: AlertTriangle
         },
         // 8. 全部风险实体 - 新增，展示所有排名实体
-        { 
-            key: 'risk_all', 
-            label: '风险实体总数', 
-            value: rankedEntities.length, 
-            color: 'text-pink-400', 
-            desc: '全部风险排名', 
-            icon: Users 
+        {
+            key: 'risk_all',
+            label: '风险实体总数',
+            value: rankedEntities.length,
+            color: 'text-pink-400',
+            desc: '全部风险排名',
+            icon: Users
         },
     ];
 
-    // 获取指标详情数据 - 确保与卡片数字来源完全一致
+    // 获取指标详情数据 - 分类汇总表格展示
+    // 【核心设计原则】审计人员需要看到分类清晰的汇总表格
     const getMetricDetails = (metric: AuditMetric): any[] => {
         switch (metric.key) {
-            case 'loan_bilateral':
-                // 借贷双向往来 - 使用 _type = 'bidirectional' 过滤
-                const bidirectionalLoans = loanDetails.filter((item: any) => 
-                    item._type === 'bidirectional'
-                );
-                if (bidirectionalLoans.length > 0) {
-                    return bidirectionalLoans.map((item: any) => ({
-                        name: item.person || item.entity || '未知',
-                        counterparty: item.counterparty || item.lender || '',
-                        amount: item.income_total || item.amount || 0,
-                        date: item.first_income_date || item.date || '',
-                        description: item.loan_type || '借贷往来',
-                        reasons: [
-                            `收入${item.income_count || 0}笔/${(item.income_total/10000).toFixed(1)}万`,
-                            `支出${item.expense_count || 0}笔/${(item.expense_total/10000).toFixed(1)}万`
-                        ]
-                    }));
-                }
-                // 兜底：使用全部 loanDetails
-                if (loanDetails.length > 0) {
-                    return loanDetails.slice(0, 50).map((item: any) => ({
-                        name: item.person || item.entity || '未知',
-                        counterparty: item.counterparty || '',
-                        amount: item.amount || item.income_total || 0,
-                        date: item.date || '',
-                        description: item._type || '借贷往来'
-                    }));
-                }
-                return [{ name: '暂无详情数据', description: '后端 loan.details 待填充' }];
-                
-            case 'loan_platform':
-                // 网贷平台交易 - 使用 _type = 'online_loan' 过滤
-                const platformLoans = loanDetails.filter((item: any) => 
-                    item._type === 'online_loan'
-                );
-                if (platformLoans.length > 0) {
-                    return platformLoans.map((item: any) => ({
-                        name: item.platform || item.counterparty || '网贷平台',
-                        amount: item.amount || 0,
-                        date: item.date || '',
-                        description: item.description || '网络借贷',
-                        reasons: item.risk_level ? [`风险: ${item.risk_level}`] : []
-                    }));
-                }
-                return [{ name: '暂无详情数据', description: '未发现网贷平台交易' }];
-                
-            case 'income_regular':
-                // 规律非工资收入 - 使用 _type = 'regular_non_salary' 过滤
-                const regularIncomes = incomeDetails.filter((item: any) => 
-                    item._type === 'regular_non_salary'
-                );
-                if (regularIncomes.length > 0) {
-                    return regularIncomes.map((item: any) => ({
-                        name: item.source || item.counterparty || '未知来源',
-                        amount: item.amount || item.total || 0,
-                        date: item.date || '',
-                        description: item.description || item.pattern || '规律性收入',
-                        reasons: item.reasons || [item.frequency || '']
-                    }));
-                }
-                // 兜底：使用全部 incomeDetails
-                if (incomeDetails.length > 0) {
-                    return incomeDetails.slice(0, 50).map((item: any) => ({
-                        name: item.source || item.counterparty || '未知来源',
-                        amount: item.amount || 0,
-                        date: item.date || '',
-                        description: item._type || '收入'
-                    }));
-                }
-                return [{ name: '暂无详情数据', description: '后端 income.details 待填充' }];
+            case 'loan_analysis':
+                // 借贷风险分析 - 返回分类汇总数据
+                // 【优化】对象/来源列显示涉及人员，让核查对象更清晰
+                const loanTypes = [
+                    { type: 'regular_repayment', label: '规律还款模式', desc: '每月定期还款' },
+                    { type: 'no_repayment', label: '无还款借贷', desc: '借了钱没还过' },
+                    { type: 'online_loan', label: '网贷平台交易', desc: '白条、花呗等' },
+                    { type: 'bidirectional', label: '双向往来关系', desc: '同一人既借又还' },
+                ];
+                return loanTypes.map(t => {
+                    const items = loanDetails.filter((x: any) => x._type === t.type);
+                    const persons = [...new Set(items.map((x: any) => x.person))].filter(Boolean);
+                    return {
+                        // 【对象/来源】显示涉及的核查对象
+                        name: persons.length > 0 ? persons.slice(0, 3).join('、') + (persons.length > 3 ? '等' : '') : '无',
+                        // 【交易对手】显示类型名称
+                        counterparty: t.label,
+                        // 【金额】显示总金额
+                        amount: items.reduce((sum: number, x: any) => sum + (x.amount || x.income_total || 0), 0),
+                        // 【日期】显示记录数
+                        date: `${items.length}条`,
+                        // 【风险说明】显示类型描述
+                        description: t.desc,
+                        reasons: [],
+                        _subType: t.type,
+                        _count: items.length
+                    };
+                }).filter(x => x._count > 0);
+
+            case 'income_analysis':
+                // 异常收入分析 - 返回分类汇总数据
+                // 【优化】对象/来源列显示涉及人员
+                const incomeTypes = [
+                    { type: 'high_risk', label: '高风险项目', desc: '综合评分高风险' },
+                    { type: 'large_single', label: '大额单笔收入', desc: '单笔≥10万' },
+                    { type: 'medium_risk', label: '中风险项目', desc: '综合评分中风险' },
+                    { type: 'large_individual', label: '个人大额转入', desc: '来自个人的大额' },
+                    { type: 'unknown_source', label: '来源不明收入', desc: '对手方不明' },
+                    { type: 'same_source_multi', label: '同源多次收入', desc: '同一来源多次' },
+                    { type: 'regular_non_salary', label: '规律非工资收入', desc: '固定周期非工资' },
+                    { type: 'bribe_installment', label: '疑似分期受贿', desc: '分期模式' },
+                ];
+                return incomeTypes.map(t => {
+                    const items = incomeDetails.filter((x: any) => x._type === t.type);
+                    const persons = [...new Set(items.map((x: any) => x.person))].filter(Boolean);
+                    return {
+                        // 【对象/来源】显示涉及的核查对象
+                        name: persons.length > 0 ? persons.slice(0, 3).join('、') + (persons.length > 3 ? '等' : '') : '无',
+                        // 【交易对手】显示类型名称
+                        counterparty: t.label,
+                        // 【金额】显示总金额
+                        amount: items.reduce((sum: number, x: any) => sum + (x.amount || x.avg_amount || x.total_amount || 0), 0),
+                        // 【日期】显示记录数
+                        date: `${items.length}条`,
+                        // 【风险说明】显示类型描述
+                        description: t.desc,
+                        reasons: [],
+                        _subType: t.type,
+                        _count: items.length
+                    };
+                }).filter(x => x._count > 0);
 
             case 'related_direct':
-                // 核心人员往来 - 使用 suspicions.directTransfers（与卡片一致）
-                return (data.suspicions.directTransfers || []).map((tx: any) => ({
-                    name: `${tx.from} → ${tx.to}`,
-                    amount: tx.amount,
-                    date: tx.date,
-                    bank: tx.bank,
-                    source_file: tx.source_file,
-                    description: tx.description || '资金往来',
-                    reasons: tx.riskLevel ? [`风险等级: ${formatRiskLevel(tx.riskLevel)}`] : undefined
-                }));
+                // 核心人员往来 - 使用 suspicions.directTransfers
+                const transfers = data.suspicions.directTransfers || [];
+                if (transfers.length > 0) {
+                    return transfers.map((tx: any) => ({
+                        name: tx.from || '未知',
+                        counterparty: tx.to || '',
+                        amount: tx.amount || 0,
+                        date: tx.date || '',
+                        description: tx.description || '资金往来',
+                        bank: tx.bank,
+                        source_file: tx.sourceFile,
+                        reasons: [
+                            tx.direction ? `方向: ${tx.direction === 'payment' ? '付款' : '收款'}` : null,
+                            tx.riskLevel ? `风险: ${formatRiskLevel(tx.riskLevel)}` : null
+                        ].filter(Boolean)
+                    }));
+                }
+                return [{ name: '暂无数据', description: '未发现核心人员与涉案公司的直接往来' }];
 
             case 'cash_collision':
-                // 现金时空伴随 - 使用 suspicions.cashCollisions（与卡片一致）
-                return (data.suspicions.cashCollisions || []).map((collision: any) => ({
-                    name: `${collision.person1} ⇄ ${collision.person2}`,
-                    amount: (collision.amount1 || 0) + (collision.amount2 || 0),
-                    date: collision.time1,
-                    description: `取现: ¥${(collision.amount1 || 0).toLocaleString()} / 存现: ¥${(collision.amount2 || 0).toLocaleString()}`,
-                    reasons: [
-                        `时间差: ${collision.timeDiff ? collision.timeDiff + '小时' : '未知'}`,
-                        collision.riskLevel ? `风险等级: ${formatRiskLevel(collision.riskLevel)}` : ''
-                    ].filter(Boolean)
-                }));
+                // 现金时空伴随 - 使用 suspicions.cashCollisions
+                const collisions = data.suspicions.cashCollisions || [];
+                if (collisions.length > 0) {
+                    return collisions.map((c: any) => ({
+                        name: c.person1 || '未知',
+                        counterparty: c.person2 || '',
+                        amount: c.amount1 || 0,
+                        date: c.time1 || '',
+                        description: `取现¥${(c.amount1 || 0).toLocaleString()} → 存现¥${(c.amount2 || 0).toLocaleString()}`,
+                        reasons: [
+                            c.timeDiff ? `时间差: ${c.timeDiff}小时` : null,
+                            c.withdrawalBank ? `取现银行: ${c.withdrawalBank}` : null,
+                            c.depositBank ? `存现银行: ${c.depositBank}` : null,
+                            c.riskLevel ? `风险: ${formatRiskLevel(c.riskLevel)}` : null
+                        ].filter(Boolean)
+                    }));
+                }
+                return [{ name: '暂无数据', description: '未发现现金时空伴随' }];
 
             case 'risk_critical':
-                // 极高风险实体 - 使用筛选后的列表（与卡片一致）
-                return criticalRiskEntities.map((e: any) => ({
-                    name: e.name || e.entity,
-                    riskScore: e.riskScore || e.score,
-                    description: `风险评分: ${e.riskScore || e.score || 'N/A'}`,
-                    reasons: e.reasons || []
-                }));
+                // 极高风险实体
+                if (criticalRiskEntities.length > 0) {
+                    return criticalRiskEntities.map((e: any) => ({
+                        name: e.name || e.entity || '未知',
+                        counterparty: '',
+                        amount: 0,
+                        date: '',
+                        description: `风险评分: ${e.riskScore || e.score || 'N/A'}`,
+                        riskScore: e.riskScore || e.score,
+                        reasons: e.reasons || []
+                    }));
+                }
+                return [{ name: '暂无数据', description: '未发现极高风险实体' }];
 
             case 'risk_high':
-                // 高风险实体 - 使用筛选后的列表（与卡片一致）
-                return highRiskEntities.map((e: any) => ({
-                    name: e.name || e.entity,
-                    riskScore: e.riskScore || e.score,
-                    description: `风险评分: ${e.riskScore || e.score || 'N/A'}`,
-                    reasons: e.reasons || []
-                }));
+                // 高风险实体
+                if (highRiskEntities.length > 0) {
+                    return highRiskEntities.map((e: any) => ({
+                        name: e.name || e.entity || '未知',
+                        counterparty: '',
+                        amount: 0,
+                        date: '',
+                        description: `风险评分: ${e.riskScore || e.score || 'N/A'}`,
+                        riskScore: e.riskScore || e.score,
+                        reasons: e.reasons || []
+                    }));
+                }
+                return [{ name: '暂无数据', description: '未发现高风险实体' }];
 
             case 'risk_all':
                 // 全部风险实体
-                return rankedEntities.map((e: any) => ({
-                    name: e.name || e.entity,
-                    riskScore: e.riskScore || e.score,
-                    description: `风险评分: ${e.riskScore || e.score || 'N/A'} (${e.riskLevel || '未分级'})`,
-                    reasons: e.reasons || []
-                }));
+                if (rankedEntities.length > 0) {
+                    return rankedEntities.map((e: any) => ({
+                        name: e.name || e.entity || '未知',
+                        counterparty: '',
+                        amount: 0,
+                        date: '',
+                        description: `风险评分: ${e.riskScore || e.score || 'N/A'} (${e.riskLevel || '未分级'})`,
+                        riskScore: e.riskScore || e.score,
+                        reasons: e.reasons || []
+                    }));
+                }
+                return [{ name: '暂无数据', description: '未发现风险实体' }];
 
             default:
                 return [];
@@ -459,7 +476,7 @@ function OverviewTab() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             {/* Metric Detail Modal - Excel 式表格布局 */}
             {selectedMetric && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setSelectedMetric(null)}>
+                <div className="fixed inset-0 lg:left-72 z-50 flex items-center justify-center p-8 bg-black/60 backdrop-blur-sm" onClick={() => setSelectedMetric(null)}>
                     <div className="bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl max-w-4xl w-full max-h-[85vh] overflow-hidden" onClick={e => e.stopPropagation()}>
                         {/* Header */}
                         <div className="flex items-center justify-between p-4 border-b border-gray-800">
@@ -469,14 +486,14 @@ function OverviewTab() {
                                 </div>
                                 <div>
                                     <h3 className="font-semibold text-white">{selectedMetric.label}</h3>
-                                    <p className="text-xs text-gray-500">共 {selectedMetric.value} 条记录 · 数据来源与卡片数字一致</p>
+                                    <p className="text-xs text-gray-500">共 {getMetricDetails(selectedMetric).length} 条记录</p>
                                 </div>
                             </div>
                             <button onClick={() => setSelectedMetric(null)} className="p-2 hover:bg-gray-800 rounded-lg transition-colors">
                                 <X className="w-5 h-5 text-gray-400" />
                             </button>
                         </div>
-                        
+
                         {/* Table Content */}
                         <div className="p-4 overflow-auto max-h-[70vh]">
                             {(() => {
@@ -484,96 +501,65 @@ function OverviewTab() {
                                 if (details.length === 0) {
                                     return <div className="text-center py-8 text-gray-500">暂无详细数据</div>;
                                 }
-                                
+
                                 return (
-                                    <div className="overflow-x-auto">
+                                    <div className="overflow-x-auto rounded-lg border border-gray-700 mx-auto">
                                         <table className="w-full text-sm">
-                                            <thead className="bg-gray-800/80 sticky top-0">
-                                                <tr className="text-left text-gray-400 text-xs uppercase tracking-wider">
-                                                    <th className="px-3 py-2 font-semibold border-b border-gray-700">序号</th>
-                                                    <th className="px-3 py-2 font-semibold border-b border-gray-700">对象/来源</th>
-                                                    <th className="px-3 py-2 font-semibold border-b border-gray-700">交易对手</th>
-                                                    <th className="px-3 py-2 font-semibold border-b border-gray-700 text-right">金额</th>
-                                                    <th className="px-3 py-2 font-semibold border-b border-gray-700">交易时间</th>
-                                                    <th className="px-3 py-2 font-semibold border-b border-gray-700">风险说明</th>
-                                                    <th className="px-3 py-2 font-semibold border-b border-gray-700">数据来源</th>
+                                            <thead className="bg-gray-800 sticky top-0">
+                                                <tr className="text-left text-gray-300 text-xs">
+                                                    <th className="px-4 py-3 font-medium w-12">#</th>
+                                                    <th className="px-4 py-3 font-medium">对象/来源</th>
+                                                    <th className="px-4 py-3 font-medium">交易对手</th>
+                                                    <th className="px-4 py-3 font-medium text-right">金额</th>
+                                                    <th className="px-4 py-3 font-medium">交易时间</th>
+                                                    <th className="px-4 py-3 font-medium">风险说明</th>
                                                 </tr>
                                             </thead>
-                                            <tbody className="divide-y divide-gray-800">
+                                            <tbody>
                                                 {details.slice(0, 50).map((item: any, idx: number) => (
-                                                    <tr key={idx} className="hover:bg-gray-800/40 transition-colors">
-                                                        {/* 序号 */}
-                                                        <td className="px-3 py-2.5 text-gray-500 font-mono text-xs">{idx + 1}</td>
-                                                        
-                                                        {/* 对象/来源 */}
-                                                        <td className="px-3 py-2.5">
-                                                            <div className="text-gray-200 font-medium">
+                                                    <tr key={idx} className={`border-t border-gray-800 ${idx % 2 === 0 ? 'bg-gray-900/30' : 'bg-gray-900/60'} hover:bg-gray-800/50 transition-colors`}>
+                                                        <td className="px-4 py-3 text-gray-500 font-mono text-xs">{idx + 1}</td>
+                                                        <td className="px-4 py-3">
+                                                            <div className="text-white font-medium">
                                                                 {formatPartyName(item.name || item.entity || item.from || item.person || item.platform)}
                                                             </div>
-                                                            {item._type && (
-                                                                <span className="text-[10px] text-gray-500 bg-gray-800 px-1.5 py-0.5 rounded">
-                                                                    {formatAnalysisType(item._type)}
-                                                                </span>
-                                                            )}
                                                         </td>
-                                                        
-                                                        {/* 交易对手 */}
-                                                        <td className="px-3 py-2.5 text-gray-400">
+                                                        <td className="px-4 py-3 text-gray-300">
                                                             {formatPartyName(item.counterparty || item.to || item.lender || '--')}
                                                         </td>
-                                                        
-                                                        {/* 金额 - 等宽字体 */}
-                                                        <td className="px-3 py-2.5 text-right">
-                                                            <span className="font-mono text-red-400 font-bold">
+                                                        <td className="px-4 py-3 text-right">
+                                                            <span className="font-mono text-orange-400 font-semibold">
                                                                 {item.amount ? formatCurrency(item.amount) : (
                                                                     item.income_total ? formatCurrency(item.income_total) : '--'
                                                                 )}
                                                             </span>
                                                             {(item.expense_total && item.expense_total > 0) && (
-                                                                <div className="font-mono text-green-400 text-xs">
-                                                                    还: {formatCurrency(item.expense_total)}
+                                                                <div className="font-mono text-green-400 text-xs mt-0.5">
+                                                                    还款: {formatCurrency(item.expense_total)}
                                                                 </div>
                                                             )}
                                                         </td>
-                                                        
-                                                        {/* 交易时间 */}
-                                                        <td className="px-3 py-2.5 text-gray-400 font-mono text-xs">
+                                                        <td className="px-4 py-3 text-gray-400 font-mono text-xs whitespace-nowrap">
                                                             {formatAuditDateTime(item.date || item.first_income_date || item.loan_date || '--')}
                                                         </td>
-                                                        
-                                                        {/* 风险说明 */}
-                                                        <td className="px-3 py-2.5 max-w-[200px]">
-                                                            <div className="text-gray-300 text-xs truncate" title={item.description || item.loan_type || item.risk_reason || ''}>
+                                                        <td className="px-4 py-3">
+                                                            <div className="text-gray-300 text-xs" title={item.description || item.loan_type || item.risk_reason || ''}>
                                                                 {formatRiskDescription(item.description || item.loan_type || item.risk_reason || '--')}
                                                             </div>
                                                             {item.reasons && item.reasons.length > 0 && (
-                                                                <div className="text-[10px] text-gray-500 mt-0.5 truncate">
+                                                                <div className="text-[10px] text-gray-500 mt-1">
                                                                     {item.reasons.slice(0, 2).map((r: string) => formatRiskDescription(r)).join(' | ')}
                                                                 </div>
                                                             )}
-                                                            {item.riskLevel && item.riskLevel !== 'medium' && (
-                                                                <span className={getRiskLevelBadgeStyle(item.riskLevel)}>
-                                                                    {formatRiskLevel(item.riskLevel)}
-                                                                </span>
-                                                            )}
-                                                        </td>
-                                                        
-                                                        {/* 数据来源 */}
-                                                        <td className="px-3 py-2.5 text-gray-500 text-xs max-w-[120px]">
-                                                            <div className="truncate" title={item.source_file || item.bank || ''}>
-                                                                {item.bank && <span className="block">{truncate(item.bank, 15)}</span>}
-                                                                {item.source_file && <span className="text-[10px] text-gray-600">{truncate(item.source_file, 20)}</span>}
-                                                                {!item.bank && !item.source_file && '--'}
-                                                            </div>
                                                         </td>
                                                     </tr>
                                                 ))}
                                             </tbody>
                                         </table>
-                                        
+
                                         {details.length > 50 && (
-                                            <div className="text-center py-3 text-gray-500 text-sm border-t border-gray-800 mt-2">
-                                                仅显示前 50 条，共 {details.length} 条记录。完整数据请查看 Excel 报告。
+                                            <div className="text-center py-3 text-gray-500 text-sm bg-gray-800/50 border-t border-gray-700">
+                                                仅显示前 50 条，共 {details.length} 条记录
                                             </div>
                                         )}
                                     </div>
@@ -598,8 +584,8 @@ function OverviewTab() {
                 {hasRealData ? (
                     <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
                         {auditMetrics.map((metric, idx) => (
-                            <div 
-                                key={idx} 
+                            <div
+                                key={idx}
                                 className="bg-gray-800/40 rounded-lg p-3 text-center hover:bg-gray-800/60 transition-colors cursor-pointer hover:ring-1 hover:ring-blue-500/50"
                                 onClick={() => setSelectedMetric(metric)}
                             >
@@ -632,24 +618,22 @@ function OverviewTab() {
                     </div>
                     {/* Person/Company Tab Switcher */}
                     <div className="flex items-center gap-1 bg-gray-800/50 rounded-lg p-1">
-                        <button 
+                        <button
                             onClick={() => setEntityType('person')}
-                            className={`px-3 py-1.5 text-xs rounded-md transition-all ${
-                                entityType === 'person' 
-                                    ? 'bg-blue-500 text-white shadow-lg' 
-                                    : 'text-gray-400 hover:text-white'
-                            }`}
+                            className={`px-3 py-1.5 text-xs rounded-md transition-all ${entityType === 'person'
+                                ? 'bg-blue-500 text-white shadow-lg'
+                                : 'text-gray-400 hover:text-white'
+                                }`}
                         >
                             <Users className="w-3 h-3 inline mr-1" />
                             个人
                         </button>
-                        <button 
+                        <button
                             onClick={() => setEntityType('company')}
-                            className={`px-3 py-1.5 text-xs rounded-md transition-all ${
-                                entityType === 'company' 
-                                    ? 'bg-cyan-500 text-white shadow-lg' 
-                                    : 'text-gray-400 hover:text-white'
-                            }`}
+                            className={`px-3 py-1.5 text-xs rounded-md transition-all ${entityType === 'company'
+                                ? 'bg-cyan-500 text-white shadow-lg'
+                                : 'text-gray-400 hover:text-white'
+                                }`}
                         >
                             <Building2 className="w-3 h-3 inline mr-1" />
                             企业
@@ -659,17 +643,17 @@ function OverviewTab() {
 
                 <div className="h-64">
                     {hasRealData && currentFlowData.length > 0 ? (
-                        <ResponsiveContainer width="100%" height="100%">
+                        <ResponsiveContainer width="100%" height="100%" minHeight={100}>
                             <BarChart data={currentFlowData} layout="vertical" margin={{ left: 10, right: 20 }}>
                                 <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" horizontal={true} vertical={false} />
-                                <XAxis 
+                                <XAxis
                                     type="number"
                                     axisLine={false}
                                     tickLine={false}
                                     tick={{ fill: '#6b7280', fontSize: 10 }}
                                     tickFormatter={(value) => `${value.toFixed(0)}万`}
                                 />
-                                <YAxis 
+                                <YAxis
                                     type="category"
                                     dataKey="name"
                                     axisLine={false}
@@ -715,7 +699,7 @@ function OverviewTab() {
                     </div>
                     {/* Entity Selector */}
                     {entityList.length > 0 && (
-                        <select 
+                        <select
                             value={selectedEntity}
                             onChange={(e) => setSelectedEntity(e.target.value)}
                             className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 focus:outline-none focus:ring-1 focus:ring-blue-500"
@@ -729,7 +713,7 @@ function OverviewTab() {
                 </div>
 
                 <div className="h-48 mb-4">
-                    <ResponsiveContainer width="100%" height="100%">
+                    <ResponsiveContainer width="100%" height="100%" minHeight={80}>
                         <PieChart>
                             <Pie
                                 data={incomeDistributionData}
@@ -1044,32 +1028,8 @@ function GraphViewTab() {
     };
 
     return (
-        <div className="card h-[600px] flex flex-col overflow-hidden">
-            <div className="flex items-center justify-between px-4 py-3 bg-gray-900/50 border-b border-gray-800">
-                <div className="flex items-center gap-3">
-                    <div className="p-2 rounded-lg bg-violet-500/10">
-                        <Network className="w-5 h-5 text-violet-400" />
-                    </div>
-                    <div>
-                        <h3 className="font-semibold text-white">资金流向关系图谱</h3>
-                        <p className="text-xs text-gray-500">实体间资金往来可视化分析</p>
-                    </div>
-                </div>
-                <button 
-                    onClick={() => {
-                        // baseURL is http://localhost:8000, API reports are at /api/reports/
-                        window.open(`${api.baseURL}/api/reports/资金流向可视化.html`, '_blank');
-                    }}
-                    className="flex items-center gap-2 px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-lg text-xs font-medium transition-colors"
-                >
-                    <ArrowUpRight className="w-3 h-3" />
-                    全屏交互报告
-                </button>
-            </div>
-
-            <div className="flex-1 overflow-hidden">
-                <NetworkGraph onLog={handleLog} />
-            </div>
+        <div className="w-full" style={{ height: 'calc(100vh - 200px)', minHeight: '700px' }}>
+            <NetworkGraph onLog={handleLog} />
         </div>
     );
 }
@@ -1232,16 +1192,21 @@ function AuditReportTab() {
                 )}
             </div>
 
-            {/* Report Preview (Placeholder) */}
+            {/* Report Builder - Interactive Report Generator */}
             <div className="card">
                 <div className="flex items-center justify-between mb-6">
-                    <h3 className="font-semibold text-white">报告预览</h3>
-                    <span className="text-[10px] text-gray-500 bg-gray-800 px-2 py-1 rounded">功能开发中</span>
+                    <div className="flex items-center gap-3">
+                        <div className="p-2 rounded-lg bg-cyan-500/10">
+                            <FileText className="w-5 h-5 text-cyan-400" />
+                        </div>
+                        <div>
+                            <h3 className="font-semibold text-white">自定义报告生成器</h3>
+                            <p className="text-xs text-gray-500">选择模块、生成专业审计报告</p>
+                        </div>
+                    </div>
+                    <span className="text-[10px] text-cyan-400 bg-cyan-500/10 px-2 py-1 rounded">Protocol Omega</span>
                 </div>
-                <div className="h-64 flex flex-col items-center justify-center bg-gray-900/50 rounded-xl border border-dashed border-gray-700">
-                    <p className="text-gray-500 text-sm mb-2">点击上方报告的"下载"按钮获取文件</p>
-                    <p className="text-gray-600 text-xs">预览功能正在开发中</p>
-                </div>
+                <ReportBuilder />
             </div>
         </div>
     );

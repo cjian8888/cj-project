@@ -726,14 +726,32 @@ def generate_ml_report(results: Dict, output_dir: str) -> str:
     summary = results.get('summary', {})
     
     with open(report_path, 'w', encoding='utf-8') as f:
-        f.write('机器学习风险预测报告 (优化版)\n')
+        f.write('机器学习风险预测报告 (增强版)\n')
         f.write('='*60 + '\n')
-        f.write(f'生成时间: {datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")}\n')
-        f.write('算法模型: \n')
-        f.write('1. 多维统计异常检测 (Statistical Anomaly Detection)\n')
-        f.write('2. 图社区/团伙挖掘 (Graph Community Detection - Tarjan Algorithm)\n')
-        f.write('   - 仅在核心人员与涉案公司之间构建图\n')
-        f.write('   - 排除公共服务商户，减少虚假团伙\n\n')
+        f.write(f'生成时间: {datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")}\n\n')
+        
+        # 报告说明
+        f.write('【报告用途】\n')
+        f.write('本报告使用机器学习算法发现规则引擎难以覆盖的深层异常模式：\n')
+        f.write('• 统计异常检测 - 多维特征的综合偏离度\n')
+        f.write('• 图团伙挖掘 - Tarjan 算法检测资金闭环\n\n')
+        
+        f.write('【分析逻辑与规则】\n')
+        f.write('1. 特征工程: 金额对数、时间周期编码、整数判定、对手方频率编码、摘要长度\n')
+        f.write('2. 异常检测: Z-Score + IQR 融合，阈值 85 分\n')
+        f.write('3. 图团伙: 仅在核心实体之间构建图，金额门槛 1000 元\n\n')
+        
+        f.write('【可能的误判情况】\n')
+        f.write('⚠ 非标走时间的工作交易可能被标记为异常\n')
+        f.write('⚠ 大额年终奖/报销可能产生误报\n')
+        f.write('⚠ 正常业务往来可能被识别为团伙\n\n')
+        
+        f.write('【人工复核重点】\n')
+        f.write('★ 高分异常: 核实交易背景\n')
+        f.write('★ 资金闭环团伙: 核实闭环形成原因\n')
+        f.write('★ 深夜交易: 核实交易时间合理性\n\n')
+        
+        f.write('='*60 + '\n\n')
         
         f.write('一、模型分析摘要\n')
         f.write('-'*40 + '\n')
@@ -772,9 +790,10 @@ def generate_ml_report(results: Dict, output_dir: str) -> str:
         f.write('三、高风险异常交易 (Top Anomalies)\n')
         f.write('-'*40 + '\n')
         f.write('注：评分(Score)基于交易金额、时间、对手方罕见度等维度的综合偏离度计算\n')
-        f.write('    已过滤小额交易和低风险类别，仅展示高置信度异常\n\n')
+        f.write('    已过滤小额交易和低风险类别\n')
+        f.write(f'共 {len(anomalies)} 条记录\n\n')
         
-        for i, item in enumerate(anomalies[:50], 1):  # 只显示前50个
+        for i, item in enumerate(anomalies, 1):
             date_str = item['date'].strftime('%Y-%m-%d %H:%M')
             amount_str = utils.format_currency(item['amount'])
             

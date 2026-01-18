@@ -7,6 +7,96 @@
 
 ---
 
+## [v4.4.0] - 2026-01-18
+
+### 🔧 代码质量审计：P0-P5 六阶段系统性改进
+
+基于 Claude 版代码审查意见书，执行了全面的系统性改进。
+
+### P0 止血（Immediate Fixes）
+
+#### 数据清洗 (`data_cleaner.py`)
+- **恢复流水号去重**：优先使用 `transaction_id` 而非启发式规则
+- **修复索引警告**：流水号去重后重新创建 `duplicates_mask`
+
+#### 资金穿透 (`fund_penetration.py`)
+- **图谱改为累计金额**：边权重基于累计发生额，解决"蚂蚁搬家"漏查问题
+
+### P1 加固（High Priority）
+
+#### 新增模块
+- **`name_normalizer.py`**：对手方名称标准化模块
+  - `normalize_for_matching()`：模糊匹配标准化
+  - `is_same_person()`：同名判断
+
+#### 线索聚合 (`clue_aggregator.py`)
+- **调整周期性收入权重**：从 +5/10 提高到 +12/24
+
+### P2 优化（Medium Priority）
+
+#### 数据清洗 (`data_cleaner.py`)
+- **Parquet 中间存储**：`save_as_parquet()` 高性能存储
+- **双格式输出**：`save_cleaned_data_dual_format()` Excel + Parquet
+
+#### API 服务 (`api_server.py`)
+- **缓存哈希校验**：`_compute_cleaned_data_hash()` 替代 mtime 检测
+
+#### 新增配置
+- **`config/rules.yaml`**：规则引擎 YAML 配置文件
+- **`rule_engine.py`**：支持从 YAML 加载规则参数
+
+### P3 演进（Long-term）
+
+#### 新增模块
+- **`audit_logger.py`**：操作审计日志（等保合规）
+  - 线程安全日志记录
+  - 防篡改校验 (MD5 checksum)
+  - 日志自动轮转
+  - `@audited` 装饰器
+  
+- **`holiday_service.py`**：节假日服务
+  - 优先使用 chinese-calendar 库
+  - 回退到本地配置
+  
+- **`graph_adapter.py`**：Neo4j 图数据库适配器
+  - `GraphAdapter` 抽象接口
+  - `MemoryGraphAdapter` 内存实现
+  - `Neo4jAdapter` 数据库实现
+
+### P4 报告质量
+
+#### 收入分析 (`income_analyzer.py`)
+- **从摘要提取对手方**：`_extract_counterparty_from_description()` 支持 7 种模式
+- 减少"来源不明"收入误报
+
+#### 线索聚合 (`clue_aggregator.py`)
+- **家庭成员闭环识别**：`_is_family_cycle()` 函数
+- **降低家庭闭环评分**：从 +15/30 降为 +3/6
+
+### P5 报告可追溯性
+
+#### 追溯字段
+- 数据记录新增 `account`、`bank`、`source_file` 字段
+- 报告显示 `▶ 追溯: 银行 账户` 和 `▶ 文件: Excel路径`
+- 便于从报告直接定位到 Excel 进行人工复核
+
+### 测试结果
+- 单元测试：190 passed ✓
+- 完整运行：~55 秒，正常生成所有报告
+
+---
+
+## [v4.3.1] - 2026-01-17
+
+### 修复
+
+#### 前端问题修复
+- **P1 DOM 结构错误**: 修复 `NetworkGraph.tsx` 中 `<p>` 标签内嵌套 `<div>` 导致的 React Hydration 警告
+- **P2 连接状态显示**: 修复 WebSocket 初始显示"未连接"问题，应用启动时自动连接
+- **P2 图表初始化警告**: 为 `TabContent.tsx` 中的 ResponsiveContainer 添加 minHeight 防止负尺寸警告
+
+---
+
 ## [v4.3.0] - 2026-01-17
 
 ### 🎯 数据铁律重构：`/api/results` 接口持久化

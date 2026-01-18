@@ -34,6 +34,7 @@ import flow_visualizer
 import ml_analyzer
 import time_series_analyzer
 import clue_aggregator
+import behavioral_profiler  # Phase 0.2/0.3 刑侦级行为特征分析 (2026-01-18 新增)
 
 logger = utils.setup_logger(__name__)
 
@@ -468,11 +469,48 @@ def phase5_14_clue_aggregation(all_persons: List[str], all_companies: List[str],
     return aggregator
 
 
+def phase5_15_behavioral_analysis(cleaned_data: Dict, all_persons: List[str],
+                                    output_dirs: Dict) -> Dict:
+    """阶段5.15: 行为特征画像分析 (Phase 0.2/0.3 刑侦级指标)"""
+    logger.info('【阶段5.15】行为特征画像分析')
+    logger.info('-' * 80)
+    
+    # Phase 0.2: 快进快出、整进散出、休眠激活
+    behavioral_results = behavioral_profiler.analyze_behavioral_patterns(cleaned_data, all_persons)
+    
+    # Phase 0.3: 资金沉淀与去向
+    sedimentation_results = behavioral_profiler.analyze_fund_sedimentation(cleaned_data, all_persons)
+    
+    # 合并结果
+    behavioral_results['sedimentation'] = sedimentation_results
+    
+    # 生成报告
+    report_path = behavioral_profiler.generate_behavioral_report(
+        behavioral_results, output_dirs['analysis_results']
+    )
+    logger.info(f'✓ 行为特征报告已生成: {report_path}')
+    
+    # 输出摘要
+    summary = behavioral_results.get('summary', {})
+    logger.info(f'  - 快进快出: {summary.get("fast_in_out_count", 0)} 个')
+    logger.info(f'  - 整进散出: {summary.get("structuring_count", 0)} 个')
+    logger.info(f'  - 休眠激活: {summary.get("dormant_activation_count", 0)} 个')
+    
+    sed_summary = sedimentation_results.get('summary', {})
+    logger.info(f'  - 过账账户: {sed_summary.get("pass_through_count", 0)} 个')
+    logger.info(f'  - 高频对手方: {sed_summary.get("suspicious_counterparties_count", 0)} 个')
+    logger.info('')
+    
+    return behavioral_results
+
+
 def phase6_generate_reports(profiles: Dict, suspicions: Dict, all_persons: List[str], 
                              all_companies: List[str], family_tree: Dict, family_summary: Dict,
                              family_assets: Dict, transaction_validations: Dict,
                              property_validations: List, penetration_results: Dict,
-                             cleaned_data: Dict, output_dirs: Dict):
+                             cleaned_data: Dict, output_dirs: Dict,
+                             loan_results: Dict = None, income_results: Dict = None,
+                             time_series_results: Dict = None):
     """阶段6: 生成分析报告"""
     logger.info('【阶段6】生成分析报告')
     logger.info('-' * 80)
@@ -487,7 +525,10 @@ def phase6_generate_reports(profiles: Dict, suspicions: Dict, all_persons: List[
             'transactions': transaction_validations,
             'properties': property_validations
         },
-        penetration_results=penetration_results
+        penetration_results=penetration_results,
+        loan_results=loan_results,
+        income_results=income_results,
+        time_series_results=time_series_results
     )
     logger.info(f'✓ Excel底稿已生成: {excel_path}')
     
@@ -501,6 +542,17 @@ def phase6_generate_reports(profiles: Dict, suspicions: Dict, all_persons: List[
         cleaned_data=cleaned_data
     )
     logger.info(f'✓ 公文报告已生成: {report_path}')
+    
+    # 生成 Word 审计报告 (Phase 1.4 新增)
+    word_path = report_generator.generate_word_report(
+        profiles, suspicions, all_persons, all_companies,
+        os.path.join(output_dirs['analysis_results'], '审计分析报告.docx'),
+        family_summary=family_summary,
+        family_assets=family_assets,
+        cleaned_data=cleaned_data
+    )
+    if word_path:
+        logger.info(f'✓ Word报告已生成: {word_path}')
     logger.info('')
 
 
@@ -666,12 +718,20 @@ def main(data_directory: str = '.', output_directory: str = './output'):
             related_party_results, loan_results, output_dirs
         )
         
+        # 阶段5.15: 行为特征分析（Phase 0.2/0.3 新增）
+        behavioral_results = phase5_15_behavioral_analysis(
+            cleaned_data, all_persons, output_dirs
+        )
+        
         # 阶段6: 报告生成
         phase6_generate_reports(
             profiles, suspicions, all_persons, all_companies,
             family_tree, family_summary, family_assets,
             transaction_validations, property_validations,
-            penetration_results, cleaned_data, output_dirs
+            penetration_results, cleaned_data, output_dirs,
+            loan_results=loan_results,
+            income_results=income_results,
+            time_series_results=ts_results
         )
         
         # 执行摘要

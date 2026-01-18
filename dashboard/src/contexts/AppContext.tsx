@@ -332,7 +332,7 @@ export function AppProvider({ children }: AppProviderProps) {
                     const now = new Date();
                     const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
                     addLog({ time: timeStr, level: 'ERROR', msg: `获取结果失败: ${errorMsg}` });
-                    
+
                     // 更新状态为失败
                     setAnalysis(prev => ({
                         ...prev,
@@ -353,7 +353,7 @@ export function AppProvider({ children }: AppProviderProps) {
     const stopAnalysis = useCallback(async () => {
         const now = new Date();
         const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-        
+
         try {
             // 调用后端停止分析
             await api.stopAnalysis();
@@ -408,21 +408,21 @@ export function AppProvider({ children }: AppProviderProps) {
         const initializeFromBackend = async () => {
             const now = new Date();
             const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-            
+
             try {
                 // 设置加载状态
                 setAnalysis(prev => ({ ...prev, isLoading: true }));
                 addLog({ time: timeStr, level: 'INFO', msg: '正在检查后端缓存数据...' });
-                
+
                 // 1. 获取后端状态
                 const status = await api.getStatus();
-                
+
                 // 2. 如果后端已有完成的分析结果，加载它们
                 if (status.status === 'completed') {
                     addLog({ time: timeStr, level: 'INFO', msg: '检测到后端缓存，正在恢复数据...' });
-                    
+
                     const result = await api.getResults();
-                    
+
                     if (result.data) {
                         // 安全合并后端数据与默认值
                         const backendData = result.data as any;
@@ -514,6 +514,8 @@ export function AppProvider({ children }: AppProviderProps) {
                         currentPhase: status.currentPhase || '等待开始分析',
                         isLoading: false,
                     }));
+                    // 无论状态如何，都尝试连接 WebSocket 以显示正确的连接状态
+                    ws.connect();
                     addLog({ time: timeStr, level: 'INFO', msg: '系统就绪，等待启动分析' });
                 }
             } catch (error) {

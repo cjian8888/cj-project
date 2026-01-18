@@ -68,6 +68,46 @@ LEGITIMATE_FINANCIAL_INSTITUTIONS = [
     '购物中心', '大厦', '广场', '商场', '运营', '管理公司'
 ]
 
+
+def _is_family_cycle(cycle: tuple, core_persons: List[str]) -> bool:
+    """
+    【P4 优化】判断资金闭环是否为家庭成员闭环
+    
+    如果闭环中的所有节点都是核心人员（通常为家庭成员），
+    则认为是家庭内部资金往来，降低风险评分。
+    
+    Args:
+        cycle: 资金闭环，可能是元组如 ('张三', '李四', '王五', '张三')
+               或字典如 {'cycle': (...), 'cycle_str': '...', 'length': N}
+        core_persons: 核心人员列表
+        
+    Returns:
+        是否为家庭成员闭环
+    """
+    if not cycle or not core_persons:
+        return False
+    
+    # 处理字典格式（存储在 evidence_packs 中的格式）
+    if isinstance(cycle, dict):
+        cycle = cycle.get('cycle', ())
+    
+    if not cycle:
+        return False
+    
+    # 闭环中的所有节点（排除首尾重复）
+    try:
+        unique_nodes = set(cycle[:-1]) if len(cycle) > 1 else set(cycle)
+    except (TypeError, KeyError):
+        return False
+    
+    # 判断所有节点是否都是核心人员
+    for node in unique_nodes:
+        if node not in core_persons:
+            return False
+    
+    return True
+
+
 # 理财产品关键词（用于过滤资金突变中的理财交易）
 WEALTH_MANAGEMENT_KEYWORDS = [
     '理财', '申购', '赎回', '本息', '结息', '分红', '到期', '转存', '定期',
@@ -280,11 +320,31 @@ class ClueAggregator:
             
             evidence = pack['evidence']
             
-            # 资金闭环: 每个+15分，上限30分
+            # 【P4 优化】资金闭环: 区分家庭闭环和其他闭环
+            # 家庭成员间的资金闭环属于正常家庭财务往来，降低评分
             cycle_count = len(evidence['fund_cycles'])
             if cycle_count > 0:
-                score += min(cycle_count * 15, 30)
-                reasons.append(f'涉及{cycle_count}个资金闭环')
+                # 判断是否为家庭成员闭环
+                family_cycle_count = 0
+                other_cycle_count = 0
+                
+                for cycle in evidence['fund_cycles']:
+                    if _is_family_cycle(cycle, self.core_persons):
+                        family_cycle_count += 1
+                    else:
+                        other_cycle_count += 1
+                
+                # 家庭闭环: +3分/个，上限6分（大幅降低）
+                # 其他闭环: +15分/个，上限30分
+                if family_cycle_count > 0:
+                    family_score = min(family_cycle_count * 3, 6)
+                    score += family_score
+                    reasons.append(f'{family_cycle_count}个家庭成员资金闭环')
+                
+                if other_cycle_count > 0:
+                    other_score = min(other_cycle_count * 15, 30)
+                    score += other_score
+                    reasons.append(f'涉及{other_cycle_count}个资金闭环')
             
             # 过账通道: +25分
             if evidence['pass_through']:
@@ -314,12 +374,13 @@ class ClueAggregator:
                 score += min(community_count * 10, 20)
                 reasons.append(f'涉及{community_count}个资金团伙')
             
-            # 周期性收入: 【优化】降低权重，可能是正常兼职
-            # 原: 每个+8分，上限16分
-            # 新: 每个+5分，上限10分
+            # 周期性收入: 【P1 修复 2026-01-18】提高权重
+            # 审计原则：固定周期收入是"养廉资金"的铁证，定性价值不低于偶发大额
+            # 原: 每个+5分，上限10分
+            # 新: 每个+12分，上限24分
             periodic_count = len(evidence['periodic_income'])
             if periodic_count > 0:
-                score += min(periodic_count * 5, 10)
+                score += min(periodic_count * 12, 24)
                 reasons.append(f'{periodic_count}个周期性非工资收入')
             
             # 资金突变: 每个+3分（降低权重，可能是理财）
@@ -442,11 +503,34 @@ def aggregate_all_results(
 
 
 def _write_aggregation_report_header(f) -> None:
-    """写入报告头部"""
+    """写入报告头部（含专业说明）"""
     f.write('线索聚合报告（证据包视图）\n')
     f.write('='*60 + '\n')
-    f.write(f'生成时间: {datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")}\n')
-    f.write('说明: 本报告以人员/公司为中心，聚合所有分析模块的发现\n\n')
+    f.write(f'生成时间: {datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")}\n\n')
+    
+    # 报告说明
+    f.write('【报告用途】\n')
+    f.write('本报告以人员/公司为中心，聚合所有分析模块的发现，形成完整的“证据包”\n')
+    f.write('每个实体的证据包包括：资金闭环、过账通道、高风险交易、周期性收入等\n\n')
+    
+    f.write('【风险评分逻辑】\n')
+    f.write('1. 基础分 20 分\n')
+    f.write('2. 涉及资金闭环: +30分\n')
+    f.write('3. 过账通道特征: +20分\n')
+    f.write('4. 连接多个实体: +10分(>=3个)\n')
+    f.write('5. ML模型检测异常: +15分\n\n')
+    
+    f.write('【风险等级划分】\n')
+    f.write('• 极高风险 (70-100分): 建议立即核查\n')
+    f.write('• 高风险 (50-70分): 优先核查\n')
+    f.write('• 中风险 (30-50分): 酌情关注\n\n')
+    
+    f.write('【人工复核重点】\n')
+    f.write('★ 极高风险实体: 核实证据包中所有线索\n')
+    f.write('★ 资金闭环: 核实闭环形成原因\n')
+    f.write('★ 过账通道: 核实账户业务实质\n\n')
+    
+    f.write('='*60 + '\n\n')
 
 
 def _write_risk_overview_section(f, ranked: List[Dict]) -> None:
@@ -528,11 +612,21 @@ def _write_sudden_changes_section(f, sudden_changes: List[Dict]) -> None:
 
 
 def _write_delayed_transfers_section(f, delayed_transfers: List[Dict]) -> None:
-    """写入固定延迟转账部分"""
+    """写入固定延迟转账部分（修复 nan 显示）"""
+    def safe_str(val, max_len=10):
+        if val is None:
+            return '(未知)'
+        s = str(val)
+        if s == 'nan' or not s:
+            return '(未知)'
+        return s[:max_len] if len(s) > max_len else s
+    
     f.write('    ▶ 固定延迟转账模式:\n')
     for j, d in enumerate(delayed_transfers[:3], 1):
         count = d.get('occurrences', d.get('count', 0))
-        f.write(f'      {j}. ← {d.get("income_from", "?")[:10]} 收入后{d.get("delay_days", 0)}天 → {d.get("expense_to", "?")[:10]}\n')
+        income_from = safe_str(d.get('income_from', d.get('income_counterparty', '')))
+        expense_to = safe_str(d.get('expense_to', d.get('expense_counterparty', '')))
+        f.write(f'      {j}. ← {income_from} 收入后{d.get("delay_days", 0)}天 → {expense_to}\n')
         f.write(f'         次数: {count} | 总额: {d.get("total_amount", 0)/10000:.2f}万\n')
     f.write('\n')
 

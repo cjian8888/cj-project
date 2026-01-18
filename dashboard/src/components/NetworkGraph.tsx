@@ -76,19 +76,16 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
   const [reportUrl, setReportUrl] = useState<string | null>(null);
 
   useEffect(() => {
-    // Check if report exists
+    // Check if report exists (only run once on mount)
     fetch(`${API_BASE_URL}/api/reports/资金流向可视化.html`, { method: 'HEAD' })
       .then(res => {
         if (res.ok) {
-            setReportUrl(`${API_BASE_URL}/api/reports/资金流向可视化.html`);
-            // If we have an error or no graph data, default to report view if available
-            if (!graphData && !loading) {
-                setViewMode('report');
-            }
+          setReportUrl(`${API_BASE_URL}/api/reports/资金流向可视化.html`);
+          // Always keep graph view as default, don't auto-switch to report
         }
       })
-      .catch(() => {});
-  }, [graphData, loading]);
+      .catch(() => { });
+  }, []); // Empty deps - only run once
 
   // 获取图谱数据
   const fetchGraphData = async () => {
@@ -407,12 +404,12 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                 请先在侧边栏点击"启动引擎"运行分析，完成后数据将自动加载
               </p>
               {reportUrl && (
-                  <button 
-                    onClick={() => setViewMode('report')}
-                    className="text-cyan-400 text-xs underline hover:text-cyan-300"
-                  >
-                    尝试查看静态报告
-                  </button>
+                <button
+                  onClick={() => setViewMode('report')}
+                  className="text-cyan-400 text-xs underline hover:text-cyan-300"
+                >
+                  尝试查看静态报告
+                </button>
               )}
             </div>
           )}
@@ -489,12 +486,12 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
               <h3 className="text-cyan-400 font-bold text-sm mb-3 pb-2 border-b border-white/10">
                 📊 资金流向统计
               </h3>
-              <p className="text-xs text-gray-400 leading-relaxed space-y-1">
+              <div className="text-xs text-gray-400 leading-relaxed space-y-1">
                 <div>• 核心人员间: <span className="text-cyan-400">{graphData.stats.coreEdgeCount}笔</span></div>
                 <div>• 公司间交易: <span className="text-cyan-400">{graphData.stats.companyEdgeCount}笔</span></div>
                 <div>• 核心-外部: <span className="text-cyan-400">{graphData.stats.otherEdgeCount}笔</span></div>
                 <div className="pt-2 text-gray-500 italic">• 线条越粗金额越大</div>
-              </p>
+              </div>
             </div>
           )}
 
@@ -527,12 +524,12 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
               <h3 className="text-cyan-400 font-bold text-sm mb-3 pb-2 border-b border-white/10">
                 💡 操作提示
               </h3>
-              <p className="text-xs text-gray-400 leading-relaxed space-y-1">
+              <div className="text-xs text-gray-400 leading-relaxed space-y-1">
                 <div>• 拖拽节点可调整位置</div>
                 <div>• 滚轮缩放视图</div>
                 <div>• 悬停查看交易详情</div>
                 <div>• 导航按钮在右下角</div>
-              </p>
+              </div>
             </div>
           )}
         </div>
@@ -566,25 +563,25 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
           </div>
           <div className="flex items-center gap-4">
             {reportUrl && (
-                <div className="flex bg-white/5 rounded-lg p-1 border border-white/10">
-                    <button
-                        onClick={() => setViewMode('graph')}
-                        className={`px-3 py-1 rounded text-sm transition-colors ${viewMode === 'graph' ? 'bg-cyan-500/20 text-cyan-400' : 'text-gray-400 hover:text-white'}`}
-                    >
-                        交互视图
-                    </button>
-                    <button
-                        onClick={() => setViewMode('report')}
-                        className={`px-3 py-1 rounded text-sm transition-colors ${viewMode === 'report' ? 'bg-cyan-500/20 text-cyan-400' : 'text-gray-400 hover:text-white'}`}
-                    >
-                        完整报告
-                    </button>
-                </div>
+              <div className="flex bg-white/5 rounded-lg p-1 border border-white/10">
+                <button
+                  onClick={() => setViewMode('graph')}
+                  className={`px-3 py-1 rounded text-sm transition-colors ${viewMode === 'graph' ? 'bg-cyan-500/20 text-cyan-400' : 'text-gray-400 hover:text-white'}`}
+                >
+                  交互视图
+                </button>
+                <button
+                  onClick={() => setViewMode('report')}
+                  className={`px-3 py-1 rounded text-sm transition-colors ${viewMode === 'report' ? 'bg-cyan-500/20 text-cyan-400' : 'text-gray-400 hover:text-white'}`}
+                >
+                  完整报告
+                </button>
+              </div>
             )}
             {selectedNode && viewMode === 'graph' && (
-                <div className="text-sm text-cyan-400">
+              <div className="text-sm text-cyan-400">
                 选中: {selectedNode.label} ({selectedNode.group})
-                </div>
+              </div>
             )}
           </div>
         </div>
@@ -592,11 +589,11 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
         {/* 图表区域 (固定高度) */}
         <div className="h-[600px] flex-shrink-0 relative border-b border-white/10 bg-gray-900/50">
           {viewMode === 'report' && reportUrl ? (
-             <iframe 
-                src={reportUrl} 
-                className="w-full h-full border-none bg-white"
-                title="Funds Flow Report"
-             />
+            <iframe
+              src={reportUrl}
+              className="w-full h-full border-none bg-white"
+              title="Funds Flow Report"
+            />
           ) : (
             <>
               {loading && (
@@ -618,12 +615,12 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                     重新加载
                   </button>
                   {reportUrl && (
-                      <button 
-                        onClick={() => setViewMode('report')}
-                        className="mt-4 text-gray-400 text-sm hover:text-white underline"
-                      >
-                        查看静态报告
-                      </button>
+                    <button
+                      onClick={() => setViewMode('report')}
+                      className="mt-4 text-gray-400 text-sm hover:text-white underline"
+                    >
+                      查看静态报告
+                    </button>
                   )}
                 </div>
               )}
@@ -640,7 +637,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                 </div>
               )}
 
-              <div ref={networkRef} className="w-full h-full" />
+              <div ref={networkRef} className="w-full" style={{ height: '580px' }} />
             </>
           )}
         </div>

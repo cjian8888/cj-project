@@ -38,7 +38,7 @@ import queue
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 # 导入分析模块
@@ -67,6 +67,70 @@ import clue_aggregator
 
 # 初始化模块级日志记录器
 logger = utils.setup_logger(__name__)
+
+
+# ==================== 自定义 JSON 编码器 ====================
+
+class CustomJSONEncoder(json.JSONEncoder):
+    """处理 Pandas Timestamp 和 numpy 类型的 JSON 编码器"""
+    def default(self, obj):
+        if isinstance(obj, (pd.Timestamp, datetime)):
+            return obj.isoformat()
+        if hasattr(obj, 'to_pydatetime'):  # Pandas Timestamp
+            return obj.to_pydatetime().isoformat()
+        if hasattr(obj, 'dtype'):  # numpy types
+            if hasattr(obj, 'item'):
+                return obj.item()
+        if hasattr(obj, 'tolist'):  # numpy array
+            return obj.tolist()
+        if pd.isna(obj):
+            return None
+        return super().default(obj)
+
+
+def _make_json_serializable(obj):
+    """
+    递归将对象转换为 JSON 可序列化格式
+    
+    处理 Pandas Timestamp、numpy 数组、NaN 等特殊类型
+    在保存缓存前调用此函数预处理数据
+    """
+    if obj is None:
+        return None
+    
+    # 首先处理复合类型（dict、list、tuple）- 递归处理其内容
+    if isinstance(obj, dict):
+        return {str(k): _make_json_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_make_json_serializable(item) for item in obj]
+    
+    # 处理 numpy 数组（必须在检查 pd.isna 之前，因为数组会导致 isna 返回数组）
+    if hasattr(obj, 'tolist'):  # numpy array
+        return obj.tolist()
+    
+    # 处理日期时间类型
+    if isinstance(obj, (pd.Timestamp, datetime)):
+        return obj.isoformat()
+    if hasattr(obj, 'to_pydatetime'):
+        return obj.to_pydatetime().isoformat()
+    
+    # 处理 numpy 标量
+    if hasattr(obj, 'item'):  # numpy scalar
+        return obj.item()
+    
+    # 安全检查 NaN（使用 try-except 保护）
+    try:
+        if pd.isna(obj):
+            return None
+    except (ValueError, TypeError):
+        # 如果 isna 无法处理该对象，忽略错误
+        pass
+    
+    # 处理基本类型
+    if isinstance(obj, (int, float, str, bool)):
+        return obj
+    
+    return str(obj)
 
 class WebSocketLogHandler(logging.Handler):
     """WebSocket 日志处理器，将日志推送到所有连接的客户端"""
@@ -257,6 +321,57 @@ def _get_cleaned_data_mtime(output_dir: str = None) -> float:
     return latest_mtime
 
 
+def _compute_cleaned_data_hash(output_dir: str = None) -> str:
+    """
+    计算 cleaned_data 目录的内容哈希（版本标识）
+    
+    【P2 优化 - 2026-01-18】基于内容哈希替代 mtime
+    解决问题：
+    - mtime 在分布式系统中不可靠
+    - 并发写入时可能读取到不一致的数据
+    
+    哈希计算基于：
+    - 文件列表（排序后）
+    - 每个文件的大小
+    - 每个文件的 mtime（作为补充）
+    
+    Returns:
+        16 位哈希字符串，如 "a1b2c3d4e5f67890"
+    """
+    import hashlib
+    
+    if output_dir is None:
+        output_dir = _current_config.get("outputDirectory", "./output")
+    
+    cleaned_data_dir = os.path.join(output_dir, "cleaned_data")
+    
+    if not os.path.exists(cleaned_data_dir):
+        return "empty"
+    
+    # 收集所有文件信息
+    file_info_list = []
+    
+    for subdir in ["个人", "公司"]:
+        subdir_path = os.path.join(cleaned_data_dir, subdir)
+        if os.path.exists(subdir_path):
+            for filename in sorted(os.listdir(subdir_path)):
+                if filename.endswith('.xlsx') and not filename.startswith('~$'):
+                    filepath = os.path.join(subdir_path, filename)
+                    try:
+                        stat = os.stat(filepath)
+                        file_info_list.append(f"{subdir}/{filename}:{stat.st_size}:{int(stat.st_mtime)}")
+                    except OSError:
+                        pass
+    
+    if not file_info_list:
+        return "empty"
+    
+    # 计算哈希
+    content = "|".join(file_info_list)
+    hash_obj = hashlib.md5(content.encode('utf-8'))
+    return hash_obj.hexdigest()[:16]
+
+
 def _save_analysis_cache(results: Dict, output_dir: str = None) -> bool:
     """
     【铁律核心】将分析结果持久化到 analysis_cache 目录
@@ -286,13 +401,17 @@ def _save_analysis_cache(results: Dict, output_dir: str = None) -> bool:
         # 获取 cleaned_data 的最新修改时间（用于一致性校验）
         cleaned_data_mtime = _get_cleaned_data_mtime(output_dir)
         
+        # 【P2 优化】计算数据哈希（更可靠的版本控制）
+        data_hash = _compute_cleaned_data_hash(output_dir)
+        
         # 1. 保存 metadata.json
         metadata = {
-            "version": "3.0.0",
+            "version": "3.1.0",  # 升级版本号
             "generatedAt": datetime.now().isoformat(),
             "generatedTimestamp": datetime.now().timestamp(),
             "cleanedDataMtime": cleaned_data_mtime,
             "cleanedDataMtimeHuman": datetime.fromtimestamp(cleaned_data_mtime).isoformat() if cleaned_data_mtime > 0 else None,
+            "dataHash": data_hash,  # 【P2 新增】基于内容的版本标识
             "persons": results.get("persons", []),
             "companies": results.get("companies", []),
         }
@@ -300,26 +419,26 @@ def _save_analysis_cache(results: Dict, output_dir: str = None) -> bool:
         with open(metadata_path, 'w', encoding='utf-8') as f:
             json.dump(metadata, f, ensure_ascii=False, indent=2)
         
-        # 2. 保存 profiles.json
+        # 2. 保存 profiles.json (预处理数据确保可序列化)
         profiles_path = os.path.join(cache_dir, "profiles.json")
         with open(profiles_path, 'w', encoding='utf-8') as f:
-            json.dump(results.get("profiles", {}), f, ensure_ascii=False, indent=2)
+            json.dump(_make_json_serializable(results.get("profiles", {})), f, ensure_ascii=False, indent=2)
         
-        # 3. 保存 suspicions.json
+        # 3. 保存 suspicions.json (预处理数据确保可序列化)
         suspicions_path = os.path.join(cache_dir, "suspicions.json")
         with open(suspicions_path, 'w', encoding='utf-8') as f:
-            json.dump(results.get("suspicions", {}), f, ensure_ascii=False, indent=2)
+            json.dump(_make_json_serializable(results.get("suspicions", {})), f, ensure_ascii=False, indent=2)
         
-        # 4. 保存 derived_data.json（analysisResults）
+        # 4. 保存 derived_data.json（analysisResults，预处理数据确保可序列化）
         derived_path = os.path.join(cache_dir, "derived_data.json")
         with open(derived_path, 'w', encoding='utf-8') as f:
-            json.dump(results.get("analysisResults", {}), f, ensure_ascii=False, indent=2)
+            json.dump(_make_json_serializable(results.get("analysisResults", {})), f, ensure_ascii=False, indent=2)
         
-        # 5. 保存 graph_data.json（可选，用于图谱）
+        # 5. 保存 graph_data.json（可选，用于图谱，预处理数据确保可序列化）
         if results.get("graphData"):
             graph_path = os.path.join(cache_dir, "graph_data.json")
             with open(graph_path, 'w', encoding='utf-8') as f:
-                json.dump(results.get("graphData"), f, ensure_ascii=False, indent=2)
+                json.dump(_make_json_serializable(results.get("graphData")), f, ensure_ascii=False, indent=2)
         
         logger.info(f"📦 分析缓存已保存: {cache_dir}")
         logger.info(f"   - metadata.json: {len(metadata.get('persons', []))} 人员, {len(metadata.get('companies', []))} 企业")
@@ -362,16 +481,27 @@ def _load_analysis_cache(output_dir: str = None) -> tuple[Optional[Dict], str]:
         with open(metadata_path, 'r', encoding='utf-8') as f:
             metadata = json.load(f)
         
-        # 2. 一致性校验：比较 cleaned_data 修改时间
-        cached_mtime = metadata.get("cleanedDataMtime", 0)
-        current_mtime = _get_cleaned_data_mtime(output_dir)
+        # 2. 一致性校验：【P2 优化】优先使用哈希，回退到 mtime
+        cached_hash = metadata.get("dataHash", "")
+        current_hash = _compute_cleaned_data_hash(output_dir)
         
-        if current_mtime > cached_mtime:
-            # cleaned_data 有更新，缓存失效
-            logger.warning(f"⚠️ 分析缓存过期: cleaned_data 已更新")
-            logger.warning(f"   缓存时间: {metadata.get('cleanedDataMtimeHuman', 'N/A')}")
-            logger.warning(f"   当前时间: {datetime.fromtimestamp(current_mtime).isoformat()}")
-            return None, "数据已更新，请重新运行分析"
+        # 哈希校验（3.1.0+ 版本）
+        if cached_hash and current_hash != "empty":
+            if cached_hash != current_hash:
+                logger.warning(f"⚠️ 分析缓存过期: 数据哈希不匹配")
+                logger.warning(f"   缓存哈希: {cached_hash}")
+                logger.warning(f"   当前哈希: {current_hash}")
+                return None, "数据已更新，请重新运行分析"
+        else:
+            # 回退到 mtime 校验（兼容 3.0.0 版本缓存）
+            cached_mtime = metadata.get("cleanedDataMtime", 0)
+            current_mtime = _get_cleaned_data_mtime(output_dir)
+            
+            if current_mtime > cached_mtime:
+                logger.warning(f"⚠️ 分析缓存过期: cleaned_data 已更新")
+                logger.warning(f"   缓存时间: {metadata.get('cleanedDataMtimeHuman', 'N/A')}")
+                logger.warning(f"   当前时间: {datetime.fromtimestamp(current_mtime).isoformat()}")
+                return None, "数据已更新，请重新运行分析"
         
         # 3. 读取各个缓存文件
         profiles_path = os.path.join(cache_dir, "profiles.json")
@@ -1056,6 +1186,15 @@ async def download_report(filename: str):
         media_type="application/octet-stream"
     )
 
+@app.head("/api/reports/{filename}")
+async def check_report_exists(filename: str):
+    """检查报告文件是否存在 (HEAD 请求)"""
+    filepath = os.path.join("./output/analysis_results", filename)
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return Response(status_code=200)
+
+
 @app.get("/api/analysis/graph-data")
 async def get_graph_data():
     """获取资金流向图谱数据（用于前端 Vis.js 可视化）
@@ -1486,76 +1625,87 @@ def _enhance_suspicions_with_analysis(suspicions: Dict, analysis_results: Dict) 
     """
     将分析模块结果整合到 suspicions 中（使前端能显示更多风险数据）
     
+    【重要修改】时序分析结果（资金突变、延迟转账、周期收入）属于系统检测的异常，
+    不应混入"核心人员往来"（direct_transfers），它们是单个人的资金异常，不是转账记录。
+    
     主要整合：
-    - timeSeries.sudden_changes -> direct_transfers (资金突变)
-    - timeSeries.delayed_transfers -> direct_transfers (延迟转账)
-    - relatedParty.direct_flows -> direct_transfers (关联方资金往来)
+    - timeSeries.sudden_changes -> time_series_alerts（新增）
+    - timeSeries.delayed_transfers -> time_series_alerts（新增）
+    - timeSeries.periodic_income -> time_series_alerts（新增）
+    - relatedParty.direct_flows -> direct_transfers（真正的关联方往来）
     """
     enhanced = suspicions.copy()
     
-    # 1. 整合时序分析结果
+    # 初始化时序告警列表（新增独立列表，不再混入 direct_transfers）
+    if "time_series_alerts" not in enhanced:
+        enhanced["time_series_alerts"] = []
+    
+    # 1. 时序分析结果 -> 独立列表 time_series_alerts（不再混入核心人员往来）
     ts_results = analysis_results.get("timeSeries", {})
     
-    # 资金突变转为风险记录
+    # 资金突变（单个人的收入异常，不是转账记录）
     sudden_changes = ts_results.get("sudden_changes", [])
     for change in sudden_changes:
         if isinstance(change, dict):
-            enhanced["direct_transfers"].append({
-                "person": change.get("entity", change.get("person", "")),
-                "company": "系统检测",
+            enhanced["time_series_alerts"].append({
+                "entity": change.get("entity", change.get("person", "")),
+                "alert_type": "资金突变",
                 "date": change.get("date", change.get("change_date", "")),
                 "amount": change.get("amount", change.get("income_change", 0)),
-                "direction": "突变",
                 "description": change.get("description", f"资金突变: {change.get('change_type', '未知')}"),
-                "risk_level": change.get("risk_level", "medium")
+                "risk_level": change.get("risk_level", "high")
             })
     
-    # 延迟转账转为风险记录
+    # 延迟转账检测
     delayed_transfers = ts_results.get("delayed_transfers", [])
     for dt in delayed_transfers:
         if isinstance(dt, dict):
-            enhanced["direct_transfers"].append({
-                "person": dt.get("source_person", dt.get("person", "")),
-                "company": dt.get("target_person", "系统检测"),
+            enhanced["time_series_alerts"].append({
+                "entity": dt.get("source_person", dt.get("person", "")),
+                "counterparty": dt.get("target_person", ""),
+                "alert_type": "延迟转账",
                 "date": dt.get("source_date", dt.get("date", "")),
                 "amount": dt.get("amount", 0),
-                "direction": "延迟转账",
                 "description": dt.get("description", f"延迟{dt.get('delay_days', 0)}天转账"),
                 "risk_level": dt.get("risk_level", "medium")
             })
     
-    # 周期性收入转为风险记录
+    # 周期性收入检测
     periodic_income = ts_results.get("periodic_income", [])
     for pi in periodic_income:
         if isinstance(pi, dict):
-            enhanced["direct_transfers"].append({
-                "person": pi.get("entity", pi.get("person", "")),
-                "company": pi.get("counterparty", "系统检测"),
+            enhanced["time_series_alerts"].append({
+                "entity": pi.get("entity", pi.get("person", "")),
+                "counterparty": pi.get("counterparty", ""),
+                "alert_type": "周期收入",
                 "date": pi.get("last_date", pi.get("date", "")),
                 "amount": pi.get("avg_amount", pi.get("amount", 0)),
-                "direction": "周期收入",
                 "description": pi.get("description", f"周期性收入: {pi.get('period_type', '未知')}"),
                 "risk_level": pi.get("risk_level", "low")
             })
     
-    # 2. 整合关联方分析结果
+    # 2. 关联方往来 -> 这才是真正的"核心人员往来"
     rp_results = analysis_results.get("relatedParty", {})
     direct_flows = rp_results.get("direct_flows", [])
     for flow in direct_flows:
         if isinstance(flow, dict):
-            enhanced["direct_transfers"].append({
-                "person": flow.get("from_person", flow.get("person", "")),
-                "company": flow.get("to_person", flow.get("counterparty", "")),
-                "date": flow.get("date", ""),
-                "amount": flow.get("amount", 0),
-                "direction": "关联往来",
-                "description": flow.get("description", "关联方资金往来"),
-                "risk_level": flow.get("risk_level", "medium")
-            })
+            from_person = flow.get("from_person", flow.get("person", ""))
+            to_person = flow.get("to_person", flow.get("counterparty", ""))
+            # 只有当 from 和 to 都有明确值时，才是真正的核心人员往来
+            if from_person and to_person:
+                enhanced["direct_transfers"].append({
+                    "person": from_person,
+                    "company": to_person,
+                    "date": flow.get("date", ""),
+                    "amount": flow.get("amount", 0),
+                    "direction": "关联往来",
+                    "description": flow.get("description", "关联方资金往来"),
+                    "risk_level": flow.get("risk_level", "medium")
+                })
     
-    logger.info(f"风险整合: 原始{len(suspicions.get('direct_transfers', []))}条 + "
-               f"时序分析{len(sudden_changes)+len(delayed_transfers)+len(periodic_income)}条 + "
-               f"关联方{len(direct_flows)}条 = {len(enhanced.get('direct_transfers', []))}条")
+    logger.info(f"风险整合: 核心人员往来{len(enhanced.get('direct_transfers', []))}条, "
+               f"时序告警{len(enhanced.get('time_series_alerts', []))}条 "
+               f"(突变{len(sudden_changes)}+延迟{len(delayed_transfers)}+周期{len(periodic_income)})")
     
     return enhanced
 
@@ -1642,6 +1792,7 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
         "cashTimingPatterns": [],
         "holidayTransactions": {},
         "amountPatterns": {},
+        "timeSeriesAlerts": [],  # 新增：时序分析告警（资金突变、延迟转账等）
     }
     
     # 转换直接转账 (后端字段: person, company, date, amount, direction)
@@ -1727,6 +1878,19 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
                     }
                 else:
                     result[camel_key][str(k)] = str(v)
+    
+    # 转换时序分析告警 (新增)
+    for alert in suspicions.get("time_series_alerts", []):
+        if isinstance(alert, dict):
+            result["timeSeriesAlerts"].append({
+                "entity": str(alert.get("entity", "")),
+                "counterparty": str(alert.get("counterparty", "")),
+                "alertType": str(alert.get("alert_type", "")),
+                "date": str(alert.get("date", "")),
+                "amount": float(alert.get("amount", 0)),
+                "description": str(alert.get("description", "")),
+                "riskLevel": str(alert.get("risk_level", "medium")),
+            })
     
     return result
 
@@ -1907,6 +2071,283 @@ def _convert_value(v: Any) -> Any:
         return None
     else:
         return str(v)
+
+# ==================== 报告生成 API (Protocol Omega - Phase 1) ====================
+
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+# 初始化 Jinja2 环境
+_jinja_env = None
+
+def _get_jinja_env():
+    """获取 Jinja2 模板环境（延迟初始化）"""
+    global _jinja_env
+    if _jinja_env is None:
+        templates_dir = os.path.join(os.path.dirname(__file__), 'templates')
+        _jinja_env = Environment(
+            loader=FileSystemLoader(templates_dir),
+            autoescape=select_autoescape(['html', 'xml'])
+        )
+    return _jinja_env
+
+
+class ReportGenerateRequest(BaseModel):
+    """报告生成请求"""
+    sections: List[str] = ["summary", "suspicious_transactions"]
+    format: str = "html"  # html, json
+    case_name: str = "审计报告"
+
+
+@app.post("/api/reports/generate")
+async def generate_report(request: ReportGenerateRequest):
+    """
+    动态生成审计报告 (Protocol Omega)
+    
+    支持按需选择模块，动态拼接 Jinja2 模板生成 HTML 报告。
+    
+    请求体:
+    {
+        "sections": ["summary", "risks", "assets"],
+        "format": "html",
+        "case_name": "案件名称"
+    }
+    
+    可用 sections:
+    - summary: 资金概览
+    - assets: 个人资产
+    - risks: 可疑交易 (包含资金闭环、现金时空伴随)
+    """
+    try:
+        # 1. 加载分析结果
+        cached_results, status_msg = _load_analysis_cache()
+        
+        if cached_results is None:
+            # 尝试使用内存数据
+            if analysis_state.results is not None:
+                cached_results = analysis_state.results
+            else:
+                return JSONResponse(
+                    status_code=400,
+                    content={"success": False, "error": "无可用分析数据，请先运行分析"}
+                )
+        
+        # 2. 构建报告数据结构
+        from datetime import datetime
+        import report_schema
+        
+        report_data = {
+            "metadata": {
+                "case_name": request.case_name,
+                "generated_at": datetime.now().isoformat(),
+                "version": "3.0.0",
+                "core_persons": cached_results.get("persons", []),
+                "companies": cached_results.get("companies", [])
+            },
+            "modules": {}
+        }
+        
+        # 3. 按请求的 sections 填充模块数据
+        profiles = cached_results.get("profiles", {})
+        suspicions = cached_results.get("suspicions", {})
+        analysis_results = cached_results.get("analysisResults", {})
+        
+        # Summary 模块
+        if "summary" in request.sections:
+            total_income = 0
+            total_expense = 0
+            transaction_count = 0
+            period_start = None
+            period_end = None
+            
+            for entity, profile in profiles.items():
+                if profile.get("has_data"):
+                    summary = profile.get("summary", {})
+                    total_income += summary.get("total_income", 0)
+                    total_expense += summary.get("total_expense", 0)
+                    transaction_count += summary.get("transaction_count", 0)
+                    
+                    date_range = summary.get("date_range", [])
+                    if date_range and len(date_range) >= 2:
+                        if date_range[0]:
+                            start = str(date_range[0])[:10]
+                            if period_start is None or start < period_start:
+                                period_start = start
+                        if date_range[1]:
+                            end = str(date_range[1])[:10]
+                            if period_end is None or end > period_end:
+                                period_end = end
+            
+            report_data["modules"]["summary"] = {
+                "total_income": total_income,
+                "total_expense": total_expense,
+                "net_flow": total_income - total_expense,
+                "transaction_count": transaction_count,
+                "high_risk_count": len(suspicions.get("direct_transfers", [])),
+                "core_person_count": len(cached_results.get("persons", [])),
+                "company_count": len(cached_results.get("companies", [])),
+                "period_start": period_start or "",
+                "period_end": period_end or ""
+            }
+        
+        # Assets 模块
+        if "assets" in request.sections:
+            assets_data = []
+            for entity, profile in profiles.items():
+                if profile.get("has_data"):
+                    summary = profile.get("summary", {})
+                    wealth_mgmt = profile.get("wealth_management", {})
+                    
+                    assets_data.append({
+                        "entity_name": entity,
+                        "deposit_estimate": (summary.get("total_income", 0) - summary.get("total_expense", 0)) / 10000,
+                        "wealth_holding": wealth_mgmt.get("estimated_holding", 0) / 10000,
+                        "property_count": 0,  # 需要从 family_assets 获取
+                        "property_value": 0,
+                        "vehicle_count": 0,
+                        "total_income": summary.get("total_income", 0),
+                        "total_expense": summary.get("total_expense", 0)
+                    })
+            
+            report_data["modules"]["personal_assets"] = {
+                "data": assets_data,
+                "columns": ["户名", "存款估算(万)", "理财持仓(万)", "房产套数", 
+                           "房产价值(万)", "车辆数", "总收入", "总支出"]
+            }
+        
+        # Risks 模块 (可疑交易)
+        if "risks" in request.sections:
+            # 直接转账
+            suspicious_txs = []
+            for tx in suspicions.get("direct_transfers", []):
+                suspicious_txs.append({
+                    "date": str(tx.get("date", ""))[:19] if tx.get("date") else "",
+                    "entity": tx.get("person", ""),
+                    "counterparty": tx.get("company", ""),
+                    "amount": tx.get("amount", 0),
+                    "direction": tx.get("direction", ""),
+                    "description": tx.get("description", ""),
+                    "risk_level": tx.get("risk_level", "low"),
+                    "risk_reason": tx.get("description", "核心人员与涉案公司直接往来"),
+                    "evidence_refs": tx.get("evidence_refs", {})
+                })
+            
+            report_data["modules"]["suspicious_transactions"] = {
+                "data": suspicious_txs,
+                "reasoning": "系统自动筛查核心人员与涉案公司之间的直接资金往来。",
+                "total_count": len(suspicious_txs),
+                "high_risk_count": len([t for t in suspicious_txs if t.get("risk_level") == "high"]),
+                "medium_risk_count": len([t for t in suspicious_txs if t.get("risk_level") == "medium"])
+            }
+            
+            # 资金闭环
+            if analysis_results.get("penetration", {}).get("fund_cycles"):
+                cycles = analysis_results["penetration"]["fund_cycles"]
+                report_data["modules"]["fund_cycles"] = {
+                    "data": [{"cycle": c, "cycle_str": " → ".join(c), "length": len(c)} for c in cycles[:20]],
+                    "total_count": len(cycles),
+                    "reasoning": "资金闭环表明资金最终回流起点，是典型的洗钱或利益输送结构。"
+                }
+            
+            # 现金时空伴随
+            if suspicions.get("cash_collisions"):
+                collisions = suspicions["cash_collisions"]
+                report_data["modules"]["cash_collisions"] = {
+                    "data": [{
+                        "withdrawal_entity": c.get("withdrawal_entity", ""),
+                        "deposit_entity": c.get("deposit_entity", ""),
+                        "withdrawal_date": str(c.get("withdrawal_date", ""))[:19],
+                        "deposit_date": str(c.get("deposit_date", ""))[:19],
+                        "withdrawal_amount": c.get("withdrawal_amount", 0),
+                        "deposit_amount": c.get("deposit_amount", 0),
+                        "time_diff_hours": c.get("time_diff_hours", 0),
+                        "risk_level": c.get("risk_level", "low"),
+                        "risk_reason": c.get("risk_reason", "")
+                    } for c in collisions[:20]],
+                    "total_count": len(collisions),
+                    "reasoning": "现金在短时间内从一方取出另一方存入，金额相近，可能是现金过账或洗钱。"
+                }
+        
+        # 4. 根据格式生成输出
+        if request.format == "json":
+            return JSONResponse(content={
+                "success": True,
+                "format": "json",
+                "data": report_data
+            })
+        
+        elif request.format == "html":
+            # 使用 Jinja2 渲染
+            env = _get_jinja_env()
+            
+            # 动态选择模板
+            html_parts = []
+            
+            # 渲染基础模板头部
+            base_template = env.get_template("base_report.html")
+            
+            # 为每个请求的 section 渲染内容
+            section_templates = {
+                "summary": "summary.html",
+                "assets": "assets.html",
+                "risks": "risks.html"
+            }
+            
+            content_html = ""
+            for section in request.sections:
+                template_name = section_templates.get(section)
+                if template_name:
+                    try:
+                        section_template = env.get_template(template_name)
+                        content_html += section_template.render(
+                            metadata=report_data["metadata"],
+                            modules=report_data["modules"]
+                        )
+                    except Exception as e:
+                        logger.warning(f"模板渲染失败 {template_name}: {e}")
+                        content_html += f"<p>模块 {section} 渲染失败: {e}</p>"
+            
+            # 渲染完整 HTML
+            full_html = base_template.render(
+                metadata=report_data["metadata"],
+                modules=report_data["modules"]
+            ).replace("{% block content %}{% endblock %}", content_html)
+            
+            # 对中文文件名进行 RFC 5987 编码
+            import urllib.parse
+            encoded_filename = urllib.parse.quote(f"{request.case_name}.html")
+            
+            return Response(
+                content=full_html,
+                media_type="text/html; charset=utf-8",
+                headers={"Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}"}
+            )
+        
+        else:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": f"不支持的格式: {request.format}"}
+            )
+    
+    except Exception as e:
+        logger.error(f"报告生成失败: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+
+@app.get("/api/reports/available-sections")
+async def get_available_sections():
+    """获取可用的报告模块列表"""
+    return {
+        "sections": [
+            {"id": "summary", "name": "资金概览", "description": "核心统计指标汇总"},
+            {"id": "assets", "name": "个人资产", "description": "各人员资产情况表"},
+            {"id": "risks", "name": "可疑交易", "description": "疑点交易、资金闭环、现金伴随"}
+        ],
+        "formats": ["html", "json"]
+    }
+
 
 # ==================== 启动入口 ====================
 

@@ -513,8 +513,8 @@ def _detect_loan_pairs(
                 cp_df = df[df['counterparty'] == cp].copy()
                 
                 # 分离收入和支出
-                incomes = cp_df[cp_df['income'] > 5000].copy()
-                expenses = cp_df[cp_df['expense'] > 5000].copy()
+                incomes = cp_df[cp_df['income'] > config.LOAN_MIN_MATCH_AMOUNT].copy()
+                expenses = cp_df[cp_df['expense'] > config.LOAN_MIN_MATCH_AMOUNT].copy()
                 
                 if incomes.empty or expenses.empty:
                     continue
@@ -804,10 +804,35 @@ def _analyze_loan_network(
 
 
 def _write_report_header(f) -> None:
-    """写入报告头部"""
+    """写入报告头部（含用途说明、逻辑依据、误判提示、复核重点）"""
     f.write('借贷行为分析报告（增强版）\n')
     f.write('='*60 + '\n')
     f.write(f'生成时间: {datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")}\n\n')
+    
+    # 报告说明
+    f.write('【报告用途】\n')
+    f.write('本报告用于识别核心人员之间的借贷关系，包括：双向资金往来、规律还款、\n')
+    f.write('无还款大额收入（疑似利益输送）、网贷平台交易、异常利息等。\n\n')
+    
+    f.write('【分析逻辑与规则】\n')
+    f.write('1. 双向往来检测：与同一对手方既有收入又有支出（≥5万元），支出/收入比0.7-1.3\n')
+    f.write('2. 无还款借贷：大额收入(≥5万)后180天内未还款或还款<50%\n')
+    f.write('3. 规律还款：每月固定日期向同一对手方支出，金额变异系数CV<0.3\n')
+    f.write('4. 借贷配对：收入后365天内有金额相近的支出，计算隐含年化利率\n')
+    f.write('5. 异常利息：年化利率>24%为高利贷，<4%且金额>5万为疑似无息借贷\n\n')
+    
+    f.write('【可能的误判情况】\n')
+    f.write('⚠ 理财申赎可能被误识别为借贷（已部分过滤但不完全）\n')
+    f.write('⚠ 家庭成员间的日常资金往来可能被标记为借贷\n')
+    f.write('⚠ 企业代发工资、报销等正常业务可能产生"规律还款"误报\n')
+    f.write('⚠ "现金"作为对手方的借贷分析无实际意义\n\n')
+    
+    f.write('【人工复核重点】\n')
+    f.write('★ 无还款借贷：核实收入性质，是否为借款还是其他收入\n')
+    f.write('★ 双向往来：核实是否为真实借贷还是理财/代购等\n')
+    f.write('★ 异常利息：重点关注无息大额借贷，可能为利益输送\n\n')
+    
+    f.write('='*60 + '\n\n')
 
 
 def _write_summary_section(f, summary: Dict) -> None:
@@ -823,7 +848,8 @@ def _write_bidirectional_flows_section(f, flows: List[Dict]) -> None:
     """写入双向资金往来部分"""
     f.write('二、双向资金往来（疑似借贷）\n')
     f.write('-'*40 + '\n')
-    for i, flow in enumerate(flows[:20], 1):
+    f.write(f'共 {len(flows)} 条记录\n\n')
+    for i, flow in enumerate(flows, 1):
         f.write(f"{i}. 【{flow['risk_level'].upper()}】{flow['person']} ↔ {flow['counterparty']}\n")
         f.write(f"   收入: {flow['income_count']}笔 {utils.format_currency(flow['income_total'])}\n")
         f.write(f"   支出: {flow['expense_count']}笔 {utils.format_currency(flow['expense_total'])}\n")
@@ -836,7 +862,8 @@ def _write_loan_pairs_section(f, pairs: List[Dict]) -> None:
     f.write('三、借贷配对分析（新增）\n')
     f.write('-'*40 + '\n')
     f.write('智能匹配借入和还款记录，计算隐含利率\n\n')
-    for i, pair in enumerate(pairs[:15], 1):
+    f.write(f'共 {len(pairs)} 条记录\n\n')
+    for i, pair in enumerate(pairs, 1):
         f.write(f"{i}. 【{pair['risk_level'].upper()}】{pair['person']} ↔ {pair['counterparty']}\n")
         f.write(f"   借入: {pair['loan_date'].strftime('%Y-%m-%d')} {utils.format_currency(pair['loan_amount'])}\n")
         f.write(f"   还款: {pair['repay_date'].strftime('%Y-%m-%d')} {utils.format_currency(pair['repay_amount'])}\n")
@@ -851,7 +878,8 @@ def _write_no_repayment_loans_section(f, loans: List[Dict]) -> None:
     f.write('四、无还款借贷检测（疑似利益输送）\n')
     f.write('-'*40 + '\n')
     f.write('大额收入但长期无对应还款的情况\n\n')
-    for i, loan in enumerate(loans[:10], 1):
+    f.write(f'共 {len(loans)} 条记录\n\n')
+    for i, loan in enumerate(loans, 1):
         f.write(f"{i}. 【{loan['risk_level'].upper()}】{loan['person']} ← {loan['counterparty']}\n")
         f.write(f"   收入: {loan['income_date'].strftime('%Y-%m-%d')} {utils.format_currency(loan['income_amount'])}\n")
         f.write(f"   距今: {loan['days_since']}天\n")
@@ -865,7 +893,8 @@ def _write_abnormal_interest_section(f, abnormal: List[Dict]) -> None:
     f.write('五、异常利息检测\n')
     f.write('-'*40 + '\n')
     f.write('识别高利贷（>24%）和疑似无息借贷（<4%）\n\n')
-    for i, item in enumerate(abnormal[:10], 1):
+    f.write(f'共 {len(abnormal)} 条记录\n\n')
+    for i, item in enumerate(abnormal, 1):
         f.write(f"{i}. 【{item['risk_level'].upper()}】{item['person']} ↔ {item['counterparty']}\n")
         f.write(f"   金额: {utils.format_currency(item['loan_amount'])}\n")
         f.write(f"   年化利率: {item['annual_rate']:.1f}%\n")
@@ -881,12 +910,9 @@ def _write_loan_network_section(f, network: Dict) -> None:
     
     if network['hubs']:
         f.write('借贷中心节点（与多人有借贷关系）:\n')
-        for i, hub in enumerate(network['hubs'][:5], 1):
+        for i, hub in enumerate(network['hubs'], 1):
             f.write(f"{i}. {hub['person']}: 与{hub['connection_count']}人有借贷往来\n")
-            f.write(f"   关联人: {', '.join(hub['connections'][:5])}")
-            if len(hub['connections']) > 5:
-                f.write(f" 等{len(hub['connections'])}人")
-            f.write('\n')
+            f.write(f"   关联人: {', '.join(hub['connections'])}\n")
     f.write('\n')
 
 
@@ -910,7 +936,8 @@ def _write_regular_repayments_section(f, repayments: List[Dict]) -> None:
     """写入规律性还款模式部分"""
     f.write('八、规律性还款模式\n')
     f.write('-'*40 + '\n')
-    for i, rep in enumerate(repayments[:15], 1):
+    f.write(f'共 {len(repayments)} 条记录\n\n')
+    for i, rep in enumerate(repayments, 1):
         f.write(f"{i}. {rep['person']} → {rep['counterparty']}\n")
         f.write(f"   每月{rep['day_of_month']}日, 均额{utils.format_currency(rep['avg_amount'])}, "
                f"共{rep['occurrences']}次, 合计{utils.format_currency(rep['total_amount'])}\n")

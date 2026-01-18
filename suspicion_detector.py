@@ -356,7 +356,7 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
                         # 简单的风险定级
                         if amount > config.INCOME_HIGH_RISK_MIN:
                             risk = 'high'
-                        elif amount > 50000:
+                        elif amount > config.SUSPICION_MEDIUM_HIGH_AMOUNT:
                             risk = 'medium'
                         else:
                             risk = 'low'
@@ -376,7 +376,14 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
                             'description': row.get('description', ''),
                             'bank': bank,
                             'source_file': source_file,
-                            'risk_level': risk
+                            'risk_level': risk,
+                            # Phase 0.2: 证据追溯字段
+                            'evidence_refs': {
+                                'source_row_index': int(row.get('source_row_index', row.name)) if row.get('source_row_index') is not None else int(row.name) + 2,
+                                'transaction_id': str(row.get('transaction_id', '')) if row.get('transaction_id') else '',
+                                'balance_after': float(row.get('balance', 0)) if row.get('balance') else 0.0,
+                                'channel': str(row.get('transaction_channel', '')) if row.get('transaction_channel') else '',
+                            }
                         })
                 
                 # 检测：公司 -> 人员 (收入)
@@ -388,7 +395,7 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
                         # 简单的风险定级
                         if amount > config.INCOME_HIGH_RISK_MIN:
                             risk = 'high'
-                        elif amount > 50000:
+                        elif amount > config.SUSPICION_MEDIUM_HIGH_AMOUNT:
                             risk = 'medium'
                         else:
                             risk = 'low'
@@ -408,11 +415,23 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
                             'description': row.get('description', ''),
                             'bank': bank,
                             'source_file': source_file,
-                            'risk_level': risk
+                            'risk_level': risk,
+                            # Phase 0.2: 证据追溯字段
+                            'evidence_refs': {
+                                'source_row_index': int(row.get('source_row_index', row.name)) if row.get('source_row_index') is not None else int(row.name) + 2,
+                                'transaction_id': str(row.get('transaction_id', '')) if row.get('transaction_id') else '',
+                                'balance_after': float(row.get('balance', 0)) if row.get('balance') else 0.0,
+                                'channel': str(row.get('transaction_channel', '')) if row.get('transaction_channel') else '',
+                            }
                         })
                     
-    # 其他检测模块 (holiday, fixed_frequency 等) 保持为空/TODO，
-    # 待后续完善或添加具体的 Analyzer 模块。
+    # ============================
+    # 3. 预留检测模块 (待后续实现)
+    # ============================
+    # 以下检测模块预留接口，待后续完善：
+    #   - holiday: 节假日异常交易检测 (参考 holiday_utils.py)
+    #   - fixed_frequency: 固定频率异常检测 (参考 config.FIXED_FREQUENCY_* 常量)
+    # 实现时可参考 detect_cash_time_collision 和 detect_cross_entity_cash_collision 的模式
     
     total_found = len(results['cash_collisions']) + len(results['direct_transfers'])
     logger.info(f'✓ 疑点检测完成，共发现 {total_found} 条有效线索')
