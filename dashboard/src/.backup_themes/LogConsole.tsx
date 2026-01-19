@@ -51,8 +51,8 @@ export function LogConsole() {
                     </div>
 
                     <div className="flex items-center gap-2">
-                        <Terminal className="w-4 h-4 theme-text-muted" />
-                        <span className="text-sm font-medium theme-text-secondary font-mono">实时分析日志</span>
+                        <Terminal className="w-4 h-4 text-gray-400" />
+                        <span className="text-sm font-medium text-gray-300 font-mono">实时分析日志</span>
                     </div>
                 </div>
 
@@ -61,36 +61,36 @@ export function LogConsole() {
                     <div className="hidden sm:flex items-center gap-3 mr-3 text-xs">
                         <span className="flex items-center gap-1">
                             <span className="w-2 h-2 rounded-full bg-blue-500" />
-                            <span className="theme-text-dim">{logs.filter(l => l.level === 'INFO').length}</span>
+                            <span className="text-gray-500">{logs.filter(l => l.level === 'INFO').length}</span>
                         </span>
                         <span className="flex items-center gap-1">
                             <span className="w-2 h-2 rounded-full bg-yellow-500" />
-                            <span className="theme-text-dim">{logs.filter(l => l.level === 'WARN').length}</span>
+                            <span className="text-gray-500">{logs.filter(l => l.level === 'WARN').length}</span>
                         </span>
                         <span className="flex items-center gap-1">
                             <span className="w-2 h-2 rounded-full bg-red-500" />
-                            <span className="theme-text-dim">{logs.filter(l => l.level === 'ERROR').length}</span>
+                            <span className="text-gray-500">{logs.filter(l => l.level === 'ERROR').length}</span>
                         </span>
                     </div>
 
                     {/* Action Buttons */}
                     <button
                         onClick={copyLogs}
-                        className="p-1.5 theme-text-dim hover:theme-text-secondary transition-colors rounded-md theme-hover"
+                        className="p-1.5 text-gray-500 hover:text-gray-300 transition-colors rounded-md hover:bg-gray-800"
                         title="复制日志"
                     >
                         {copied ? <CheckCircle2 className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
                     </button>
                     <button
                         onClick={() => setIsExpanded(!isExpanded)}
-                        className="p-1.5 theme-text-dim hover:theme-text-secondary transition-colors rounded-md theme-hover"
+                        className="p-1.5 text-gray-500 hover:text-gray-300 transition-colors rounded-md hover:bg-gray-800"
                         title={isExpanded ? '收起' : '全屏'}
                     >
                         {isExpanded ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
                     </button>
                     <button
                         onClick={clearLogs}
-                        className="p-1.5 theme-text-dim hover:theme-text-secondary transition-colors rounded-md theme-hover"
+                        className="p-1.5 text-gray-500 hover:text-gray-300 transition-colors rounded-md hover:bg-gray-800"
                         title="清除"
                     >
                         <X className="w-4 h-4" />
@@ -107,7 +107,7 @@ export function LogConsole() {
         `}
             >
                 {logs.length === 0 ? (
-                    <div className="flex items-center justify-center h-full theme-text-dim font-mono">
+                    <div className="flex items-center justify-center h-full text-gray-600 font-mono">
                         <span className="animate-pulse">等待日志输出...</span>
                     </div>
                 ) : (
@@ -120,12 +120,12 @@ export function LogConsole() {
             </div>
 
             {/* Command Input (decorative) */}
-            <div className="px-4 py-2 border-t theme-border-muted theme-bg-base flex items-center gap-2">
+            <div className="px-4 py-2 border-t border-gray-800/50 bg-[#080c14] flex items-center gap-2">
                 <span className="text-green-400 font-mono text-sm">❯</span>
                 <input
                     type="text"
                     placeholder="输入命令..."
-                    className="flex-1 bg-transparent text-sm theme-text-secondary font-mono placeholder:theme-text-dim focus:outline-none"
+                    className="flex-1 bg-transparent text-sm text-gray-300 font-mono placeholder:text-gray-600 focus:outline-none"
                     readOnly
                 />
             </div>
@@ -150,11 +150,11 @@ function LogEntry({ log, isNew }: LogEntryProps) {
         WARN: { color: 'text-yellow-400', label: '警告', bgHover: 'hover:bg-yellow-500/5' },
         WARNING: { color: 'text-yellow-400', label: '警告', bgHover: 'hover:bg-yellow-500/5' },
         ERROR: { color: 'text-red-400', label: '错误', bgHover: 'hover:bg-red-500/5' },
-        DEBUG: { color: 'theme-text-muted', label: '调试', bgHover: 'theme-hover' },
+        DEBUG: { color: 'text-gray-400', label: '调试', bgHover: 'hover:bg-gray-500/5' },
     };
 
     // 容错处理：如果level不在配置中，使用默认配置
-    const defaultConfig = { color: 'theme-text-muted', label: log.level || 'LOG', bgHover: 'theme-hover' };
+    const defaultConfig = { color: 'text-gray-400', label: log.level || 'LOG', bgHover: 'hover:bg-gray-500/5' };
     const config = levelConfig[log.level?.toUpperCase?.()] || levelConfig[log.level] || defaultConfig;
 
     // 防止log对象属性缺失

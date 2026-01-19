@@ -25,7 +25,7 @@ export function Header() {
             case 'error':
                 return { icon: WifiOff, color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/30', label: '连接失败', pulse: false };
             default:
-                return { icon: WifiOff, color: 'theme-text-muted', bg: 'theme-bg-muted', border: 'theme-border', label: '未连接', pulse: false };
+                return { icon: WifiOff, color: 'text-gray-400', bg: 'bg-gray-800/50', border: 'border-gray-700', label: '未连接', pulse: false };
         }
     };
 
@@ -33,7 +33,7 @@ export function Header() {
     const WSIcon = wsConfig.icon;
 
     return (
-        <header className="px-6 lg:px-8 py-5 border-b theme-border theme-bg-overlay backdrop-blur-xl shrink-0 relative z-20">
+        <header className="px-6 lg:px-8 py-5 border-b border-gray-800/50 bg-[#030712]/80 backdrop-blur-xl shrink-0 relative z-20">
             <div className="flex items-center justify-between">
                 {/* Left Section - Title */}
                 <div className="flex items-center gap-4">
@@ -50,7 +50,7 @@ export function Header() {
                         )}
                     </div>
                     <div>
-                        <h1 className="text-xl font-bold theme-text tracking-tight">
+                        <h1 className="text-xl font-bold text-white tracking-tight">
                             指挥中心
                         </h1>
                         <p className="text-xs bg-gradient-to-r from-cyan-400 to-blue-400 bg-clip-text text-transparent font-semibold tracking-wide">
@@ -62,12 +62,12 @@ export function Header() {
                 {/* Center Section - Search (Disabled - Under Development) */}
                 <div className="hidden lg:flex items-center flex-1 max-w-md mx-8">
                     <div className="relative w-full group">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 theme-text-dim" />
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-600" />
                         <input
                             type="text"
                             placeholder="搜索功能开发中..."
                             disabled
-                            className="w-full pl-10 pr-4 py-2.5 theme-bg-muted border theme-border rounded-xl text-sm theme-text-dim placeholder:theme-text-dim cursor-not-allowed"
+                            className="w-full pl-10 pr-4 py-2.5 bg-gray-900/30 border border-gray-800/50 rounded-xl text-sm text-gray-500 placeholder:text-gray-600 cursor-not-allowed"
                         />
                         <span className="absolute right-3 top-1/2 -translate-y-1/2 px-2 py-0.5 text-[9px] font-medium text-amber-500/80 bg-amber-500/10 border border-amber-500/20 rounded">
                             待开发
@@ -92,13 +92,13 @@ export function Header() {
                         ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
                         : analysis.status === 'completed'
                             ? 'bg-green-500/10 text-green-400 border border-green-500/30'
-                            : 'theme-bg-muted theme-text-muted border theme-border'
+                            : 'bg-gray-800/50 text-gray-400 border border-gray-700'
                         }`}>
                         <span className={`w-2 h-2 rounded-full ${analysis.isRunning
                             ? 'bg-amber-400 animate-pulse'
                             : analysis.status === 'completed'
                                 ? 'bg-green-400'
-                                : 'theme-bg-muted'
+                                : 'bg-gray-500'
                             }`} />
                         {analysis.isRunning ? '分析进行中' : analysis.status === 'completed' ? '分析完成' : '系统就绪'}
                     </div>
@@ -111,12 +111,12 @@ export function Header() {
                     {/* Theme Toggle Button */}
                     <button
                         onClick={toggleTheme}
-                        className="flex items-center gap-2 pl-2 pr-3 py-1.5 rounded-xl theme-bg-muted border theme-border hover:border-blue-500/50 hover:bg-blue-500/10 transition-all cursor-pointer"
+                        className="flex items-center gap-2 pl-2 pr-3 py-1.5 rounded-xl bg-gray-800/50 border border-gray-700 hover:border-blue-500/50 hover:bg-blue-500/10 transition-all cursor-pointer"
                         title={ui.theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'}
                     >
                         <div className={`w-7 h-7 rounded-lg flex items-center justify-center transition-all ${ui.theme === 'dark'
-                            ? 'bg-gradient-to-br from-indigo-500 to-purple-600'
-                            : 'bg-gradient-to-br from-amber-400 to-orange-500'
+                                ? 'bg-gradient-to-br from-indigo-500 to-purple-600'
+                                : 'bg-gradient-to-br from-amber-400 to-orange-500'
                             }`}>
                             {ui.theme === 'dark' ? (
                                 <Moon className="w-4 h-4 text-white" />
@@ -124,7 +124,7 @@ export function Header() {
                                 <Sun className="w-4 h-4 text-white" />
                             )}
                         </div>
-                        <span className="text-sm font-medium theme-text-secondary hidden sm:block">
+                        <span className="text-sm font-medium text-gray-300 hidden sm:block">
                             {ui.theme === 'dark' ? '深色' : '浅色'}
                         </span>
                     </button>

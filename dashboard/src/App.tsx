@@ -7,7 +7,7 @@ import { MainContent } from './components/MainContent';
 export default function App() {
   return (
     <AppProvider>
-      <div className="flex h-screen bg-[#030712] text-gray-50 selection:bg-blue-500/30 overflow-hidden">
+      <div className="flex h-screen theme-bg-base theme-text selection:bg-blue-500/30 overflow-hidden">
         {/* Background Effects */}
         <div className="grid-bg" />
         <div className="scan-line opacity-30" />

@@ -27,7 +27,7 @@ export function EmptyState({
       case 'safe':
         return <ShieldCheck className="w-12 h-12 text-green-400" />;
       default:
-        return <FileText className="w-12 h-12 text-gray-500" />;
+        return <FileText className="w-12 h-12 theme-text-dim" />;
     }
   };
 
@@ -55,11 +55,11 @@ export function EmptyState({
       <div className={`mb-4 ${isSafeType ? 'p-4 rounded-full bg-green-500/10' : ''}`}>
         {getIcon()}
       </div>
-      <p className={`text-sm mb-6 ${isSafeType ? 'text-green-400 font-medium' : 'text-gray-400'}`}>
+      <p className={`text-sm mb-6 ${isSafeType ? 'text-green-400 font-medium' : 'theme-text-muted'}`}>
         {getMessage()}
       </p>
       {isSafeType && (
-        <p className="text-xs text-gray-500 text-center max-w-xs">
+        <p className="text-xs theme-text-dim text-center max-w-xs">
           所有监测指标正常，暂未发现需要关注的可疑交易
         </p>
       )}

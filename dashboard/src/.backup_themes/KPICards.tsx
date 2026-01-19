@@ -8,7 +8,7 @@ export function KPICards() {
 
     // Calculate real stats from data
     const entityCount = data.persons.length + data.companies.length;
-
+    
     // Calculate financial metrics from profiles
     const profiles = Object.values(data.profiles || {});
     const totalTransactions = profiles.reduce(
@@ -21,7 +21,7 @@ export function KPICards() {
     const totalCash = profiles.reduce(
         (sum, p) => sum + (p.cashTotal || 0), 0
     );
-
+    
     const highRiskFunds = (data.suspicions.directTransfers || []).reduce(
         (sum, tx) => sum + (tx.amount || 0), 0
     );
@@ -115,17 +115,17 @@ function KPICard({
     gradient, glowColor, iconBg, iconColor, isStatus, delay
 }: KPICardProps) {
     const TrendIcon = trend === 'up' ? TrendingUp : trend === 'down' ? TrendingDown : Minus;
-    const trendColor = trend === 'up' ? 'text-green-400' : trend === 'down' ? 'text-red-400' : 'theme-text-muted';
+    const trendColor = trend === 'up' ? 'text-green-400' : trend === 'down' ? 'text-red-400' : 'text-gray-400';
 
     return (
         <div
             className={`
         relative overflow-hidden rounded-2xl p-5
-        theme-bg-glass
-        border theme-border
+        bg-gradient-to-br from-gray-900/80 to-gray-900/40
+        border border-gray-800/60
         backdrop-blur-xl
         transition-all duration-300
-        hover:theme-border-strong hover:shadow-xl ${glowColor}
+        hover:border-gray-700/80 hover:shadow-xl ${glowColor}
         group
       `}
             style={{ animationDelay: `${delay}s` }}
@@ -154,24 +154,24 @@ function KPICard({
             {/* Value */}
             <div className="relative z-10">
                 <div className="flex items-baseline gap-2">
-                    <h3 className={`text-2xl lg:text-3xl font-bold theme-text tracking-tight ${isStatus ? '' : ''}`}>
+                    <h3 className={`text-2xl lg:text-3xl font-bold text-white tracking-tight ${isStatus ? '' : ''}`}>
                         {value}
                     </h3>
                     {isStatus && (
                         <span className="relative flex h-2.5 w-2.5">
                             <span className={`
                 animate-ping absolute inline-flex h-full w-full rounded-full opacity-75
-                ${trend === 'up' ? 'bg-green-400' : 'theme-bg-muted'}
+                ${trend === 'up' ? 'bg-green-400' : 'bg-gray-400'}
               `} />
                             <span className={`
                 relative inline-flex rounded-full h-2.5 w-2.5
-                ${trend === 'up' ? 'bg-green-500' : 'theme-bg-subtle'}
+                ${trend === 'up' ? 'bg-green-500' : 'bg-gray-500'}
               `} />
                         </span>
                     )}
                 </div>
-                <p className="text-sm theme-text-muted mt-1">{label}</p>
-                <p className="text-xs theme-text-dim mt-0.5">{subLabel}</p>
+                <p className="text-sm text-gray-400 mt-1">{label}</p>
+                <p className="text-xs text-gray-500 mt-0.5">{subLabel}</p>
             </div>
 
             {/* Bottom Accent Line */}

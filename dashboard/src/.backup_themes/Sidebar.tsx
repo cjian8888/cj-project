@@ -42,7 +42,7 @@ export function Sidebar() {
         dataSources: true,
         thresholds: true,
         modules: false,
-        navigation: true  // 快捷导航默认展开
+        navigation: true
     });
 
     // 文件夹选择的隐藏 input refs
@@ -120,7 +120,7 @@ export function Sidebar() {
             {/* Mobile Toggle Button */}
             <button
                 onClick={toggleSidebar}
-                className="lg:hidden fixed top-4 left-4 z-50 p-2 theme-bg-surface border theme-border rounded-lg theme-text"
+                className="lg:hidden fixed top-4 left-4 z-50 p-2 bg-gray-900 border border-gray-700 rounded-lg"
             >
                 {ui.sidebarCollapsed ? <Menu className="w-5 h-5" /> : <X className="w-5 h-5" />}
             </button>
@@ -129,19 +129,19 @@ export function Sidebar() {
             <aside className={`
         fixed lg:relative inset-y-0 left-0 z-40
         w-72 flex flex-col h-screen shrink-0
-        theme-gradient-sidebar backdrop-blur-xl
-        border-r theme-border
+        bg-[#0a0f1a]/95 backdrop-blur-xl
+        border-r border-gray-800/80
         transform transition-transform duration-300 ease-out
         ${ui.sidebarCollapsed ? '-translate-x-full lg:translate-x-0' : 'translate-x-0'}
       `}>
                 {/* Logo Section */}
-                <div className="p-6 border-b theme-border-muted flex flex-col items-center justify-center gap-4">
+                <div className="p-6 border-b border-gray-800/50 flex flex-col items-center justify-center gap-4">
                     <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500 via-cyan-500 to-blue-600 flex items-center justify-center shadow-lg relative overflow-hidden p-0.5">
                         <img src={Logo} alt="Logo" className="w-full h-full object-contain relative z-10" />
                         <div className="absolute inset-0 bg-gradient-to-t from-blue-600/50 to-transparent" />
                     </div>
                     <div className="text-center">
-                        <h1 className="text-2xl font-bold theme-text tracking-tight mb-1">
+                        <h1 className="text-2xl font-bold text-white tracking-tight mb-1">
                             穿云审计
                         </h1>
                         <p className="text-[10px] bg-gradient-to-r from-cyan-400 to-blue-400 bg-clip-text text-transparent font-semibold tracking-wide uppercase">
@@ -186,7 +186,7 @@ export function Sidebar() {
                     {analysis.isRunning && (
                         <div className="mt-3 space-y-2">
                             {/* 进度条 */}
-                            <div className="h-1.5 theme-bg-muted rounded-full overflow-hidden">
+                            <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
                                 <div
                                     className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 transition-all duration-500 ease-out"
                                     style={{ width: `${analysis.progress || 0}%` }}
@@ -194,7 +194,7 @@ export function Sidebar() {
                             </div>
                             {/* 进度文字 */}
                             <div className="flex items-center justify-between text-xs">
-                                <div className="flex items-center gap-2 theme-text-muted">
+                                <div className="flex items-center gap-2 text-gray-400">
                                     <div className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
                                     <span className="truncate max-w-[160px]">{analysis.currentPhase || '正在分析...'}</span>
                                 </div>
@@ -213,7 +213,7 @@ export function Sidebar() {
                             </div>
                             <span className="text-green-400">分析完成</span>
                             {analysis.lastRunTime && (
-                                <span className="theme-text-dim ml-auto">
+                                <span className="text-gray-500 ml-auto">
                                     {analysis.lastRunTime.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
                                 </span>
                             )}
@@ -242,20 +242,20 @@ export function Sidebar() {
                     >
                         <div className="space-y-3">
                             <div>
-                                <label className="text-[11px] font-medium theme-text-dim uppercase tracking-wider mb-1.5 block">
+                                <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider mb-1.5 block">
                                     输入目录
                                 </label>
-                                <div className="flex rounded-lg border theme-border overflow-hidden focus-within:border-blue-500/50 focus-within:ring-1 focus-within:ring-blue-500/30 transition-all theme-bg-muted/40">
+                                <div className="flex rounded-lg border border-gray-700/80 overflow-hidden focus-within:border-blue-500/50 focus-within:ring-1 focus-within:ring-blue-500/30 transition-all bg-gray-800/40">
                                     <input
                                         type="text"
                                         value={config.dataSources.inputDirectory.startsWith('./') ? config.dataSources.inputDirectory.slice(2) : config.dataSources.inputDirectory}
                                         onChange={(e) => updateDataSources({ inputDirectory: e.target.value })}
-                                        className="flex-1 min-w-0 bg-transparent text-sm px-3 py-2.5 theme-text placeholder:theme-text-dim outline-none"
+                                        className="flex-1 min-w-0 bg-transparent text-sm px-3 py-2.5 text-gray-200 placeholder:text-gray-500 outline-none"
                                         placeholder="选择数据文件夹"
                                     />
                                     <button
                                         onClick={() => handleFolderSelect('input')}
-                                        className="flex-shrink-0 px-3 border-l theme-border theme-text-muted hover:text-blue-400 hover:bg-blue-500/10 transition-colors"
+                                        className="flex-shrink-0 px-3 border-l border-gray-700/80 text-gray-400 hover:text-blue-400 hover:bg-blue-500/10 transition-colors"
                                         title="选择文件夹"
                                     >
                                         <FolderOpen className="w-4 h-4" />
@@ -263,20 +263,20 @@ export function Sidebar() {
                                 </div>
                             </div>
                             <div>
-                                <label className="text-[11px] font-medium theme-text-dim uppercase tracking-wider mb-1.5 block">
+                                <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider mb-1.5 block">
                                     输出目录
                                 </label>
-                                <div className="flex rounded-lg border theme-border overflow-hidden focus-within:border-cyan-500/50 focus-within:ring-1 focus-within:ring-cyan-500/30 transition-all theme-bg-muted/40">
+                                <div className="flex rounded-lg border border-gray-700/80 overflow-hidden focus-within:border-cyan-500/50 focus-within:ring-1 focus-within:ring-cyan-500/30 transition-all bg-gray-800/40">
                                     <input
                                         type="text"
                                         value={config.dataSources.outputDirectory.startsWith('./') ? config.dataSources.outputDirectory.slice(2) : config.dataSources.outputDirectory}
                                         onChange={(e) => updateDataSources({ outputDirectory: e.target.value })}
-                                        className="flex-1 min-w-0 bg-transparent text-sm px-3 py-2.5 theme-text placeholder:theme-text-dim outline-none"
+                                        className="flex-1 min-w-0 bg-transparent text-sm px-3 py-2.5 text-gray-200 placeholder:text-gray-500 outline-none"
                                         placeholder="选择输出文件夹"
                                     />
                                     <button
                                         onClick={() => handleFolderSelect('output')}
-                                        className="flex-shrink-0 px-3 border-l theme-border theme-text-muted hover:text-cyan-400 hover:bg-cyan-500/10 transition-colors"
+                                        className="flex-shrink-0 px-3 border-l border-gray-700/80 text-gray-400 hover:text-cyan-400 hover:bg-cyan-500/10 transition-colors"
                                         title="选择文件夹"
                                     >
                                         <HardDrive className="w-4 h-4" />
@@ -295,7 +295,7 @@ export function Sidebar() {
                     >
                         <div className="space-y-3">
                             <div>
-                                <label className="text-[11px] font-medium theme-text-dim uppercase tracking-wider mb-1.5 flex justify-between">
+                                <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider mb-1.5 flex justify-between">
                                     <span>大额现金阈值</span>
                                     <span className="text-cyan-400 font-mono">¥{config.thresholds.cashThreshold.toLocaleString()}</span>
                                 </label>
@@ -306,15 +306,15 @@ export function Sidebar() {
                                     step={10000}
                                     value={config.thresholds.cashThreshold}
                                     onChange={(e) => updateThresholds({ cashThreshold: Number(e.target.value) })}
-                                    className="w-full h-2 theme-bg-muted rounded-lg appearance-none cursor-pointer accent-cyan-500"
+                                    className="w-full h-2 bg-gray-800 rounded-lg appearance-none cursor-pointer accent-cyan-500"
                                 />
-                                <div className="flex justify-between text-[10px] theme-text-dim mt-1">
+                                <div className="flex justify-between text-[10px] text-gray-600 mt-1">
                                     <span>¥1万</span>
                                     <span>¥50万</span>
                                 </div>
                             </div>
                             <div>
-                                <label className="text-[11px] font-medium theme-text-dim uppercase tracking-wider mb-1.5 flex justify-between">
+                                <label className="text-[11px] font-medium text-gray-500 uppercase tracking-wider mb-1.5 flex justify-between">
                                     <span>时间窗口</span>
                                     <span className="text-cyan-400 font-mono">{config.thresholds.timeWindow}h</span>
                                 </label>
@@ -325,9 +325,9 @@ export function Sidebar() {
                                     step={1}
                                     value={config.thresholds.timeWindow}
                                     onChange={(e) => updateThresholds({ timeWindow: Number(e.target.value) })}
-                                    className="w-full h-2 theme-bg-muted rounded-lg appearance-none cursor-pointer accent-cyan-500"
+                                    className="w-full h-2 bg-gray-800 rounded-lg appearance-none cursor-pointer accent-cyan-500"
                                 />
-                                <div className="flex justify-between text-[10px] theme-text-dim mt-1">
+                                <div className="flex justify-between text-[10px] text-gray-600 mt-1">
                                     <span>1h</span>
                                     <span>168h (7天)</span>
                                 </div>
@@ -358,60 +358,46 @@ export function Sidebar() {
                         </div>
                     </ConfigSection>
 
-                    {/* Navigation Section - Quick Access (可折叠) */}
-                    <div className="mt-6 border-t theme-border-muted pt-4">
-                        <button
-                            onClick={() => toggleSection('navigation')}
-                            className="w-full flex items-center justify-between py-2.5 px-2 text-left group theme-hover rounded-lg transition-colors"
-                        >
-                            <div className="flex items-center gap-2">
-                                <span className="w-1 h-3 bg-gradient-to-b from-violet-500 to-fuchsia-500 rounded-full" />
-                                <span className="text-[11px] font-semibold theme-text-muted uppercase tracking-wider group-hover:theme-text transition-colors">
-                                    快捷导航
-                                </span>
-                            </div>
-                            <div className="flex items-center gap-1">
-                                <span className="text-[10px] theme-text-dim group-hover:theme-text-muted transition-colors">
-                                    {expandedSections.navigation ? '收起' : '展开'}
-                                </span>
-                                <ChevronDown className={`w-4 h-4 theme-text-dim group-hover:theme-text-secondary transition-all duration-200 ${expandedSections.navigation ? 'rotate-0' : '-rotate-90'}`} />
-                            </div>
-                        </button>
-                        {expandedSections.navigation && (
-                            <nav className="space-y-1 px-2 pb-2 animate-fade-in">
-                                {navItems.map(({ id, label, icon: Icon }) => (
-                                    <button
-                                        key={id}
-                                        onClick={() => setActiveTab(id)}
-                                        className={`
-                        flex items-center gap-3 w-full px-3 py-2.5 rounded-lg
-                        text-sm font-medium transition-all duration-200
-                        ${ui.activeTab === id
-                                                ? 'bg-blue-500/10 text-blue-400 border-l-2 border-blue-500'
-                                                : 'theme-text-muted theme-hover hover:theme-text border-l-2 border-transparent'
-                                            }
-                      `}
-                                    >
-                                        <Icon className="w-4 h-4" />
-                                        {label}
-                                    </button>
-                                ))}
-                            </nav>
-                        )}
-                    </div>
+                    {/* Navigation Section - Quick Access */}
+                    <ConfigSection
+                        title="快捷导航"
+                        expanded={expandedSections.navigation}
+                        onToggle={() => toggleSection('navigation')}
+                        accentColor="violet"
+                    >
+                        <nav className="space-y-1">
+                            {navItems.map(({ id, label, icon: Icon }) => (
+                                <button
+                                    key={id}
+                                    onClick={() => setActiveTab(id)}
+                                    className={`
+                    flex items-center gap-3 w-full px-3 py-2.5 rounded-lg
+                    text-sm font-medium transition-all duration-200
+                    ${ui.activeTab === id
+                                            ? 'bg-blue-500/10 text-blue-400 border-l-2 border-blue-500'
+                                            : 'text-gray-400 hover:bg-gray-800/50 hover:text-gray-200 border-l-2 border-transparent'
+                                        }
+                  `}
+                                >
+                                    <Icon className="w-4 h-4" />
+                                    {label}
+                                </button>
+                            ))}
+                        </nav>
+                    </ConfigSection>
                 </div>
 
                 {/* Footer */}
-                <div className="p-4 border-t theme-border-muted theme-bg-muted">
+                <div className="p-4 border-t border-gray-800/50 bg-gray-900/30">
                     <div className="flex items-center justify-between text-xs">
                         <div className="flex items-center gap-2">
                             <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                            <span className="theme-text-dim">系统在线</span>
+                            <span className="text-gray-500">系统在线</span>
                         </div>
-                        <span className="theme-text-dim font-mono">v3.0.0</span>
+                        <span className="text-gray-600 font-mono">v3.0.0</span>
                     </div>
                     {analysis.lastRunTime && (
-                        <p className="text-[10px] theme-text-dim mt-2">
+                        <p className="text-[10px] text-gray-600 mt-2">
                             上次运行: {analysis.lastRunTime.toLocaleTimeString()}
                         </p>
                     )}
@@ -448,16 +434,16 @@ function ConfigSection({ title, expanded, onToggle, accentColor, badge, children
             >
                 <div className="flex items-center gap-2">
                     <span className={`w-1 h-3 bg-gradient-to-b ${colorMap[accentColor]} rounded-full`} />
-                    <span className="text-[11px] font-semibold theme-text-muted uppercase tracking-wider group-hover:theme-text-secondary transition-colors">
+                    <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider group-hover:text-gray-300 transition-colors">
                         {title}
                     </span>
                     {badge && (
-                        <span className="px-1.5 py-0.5 text-[10px] font-mono theme-text-dim theme-bg-muted rounded">
+                        <span className="px-1.5 py-0.5 text-[10px] font-mono text-gray-500 bg-gray-800 rounded">
                             {badge}
                         </span>
                     )}
                 </div>
-                <ChevronDown className={`w-3.5 h-3.5 theme-text-dim transition-transform duration-200 ${expanded ? 'rotate-0' : '-rotate-90'}`} />
+                <ChevronDown className={`w-3.5 h-3.5 text-gray-500 transition-transform duration-200 ${expanded ? 'rotate-0' : '-rotate-90'}`} />
             </button>
             {expanded && (
                 <div className="px-2 pb-2 animate-fade-in">
@@ -479,7 +465,7 @@ interface ModuleToggleProps {
 
 function ModuleToggle({ label, icon: Icon, checked, onChange }: ModuleToggleProps) {
     return (
-        <label className="flex items-center gap-3 px-2 py-2 rounded-lg theme-hover cursor-pointer transition-colors group">
+        <label className="flex items-center gap-3 px-2 py-2 rounded-lg hover:bg-gray-800/30 cursor-pointer transition-colors group">
             <div className="relative">
                 <input
                     type="checkbox"
@@ -492,7 +478,7 @@ function ModuleToggle({ label, icon: Icon, checked, onChange }: ModuleToggleProp
           flex items-center justify-center
           ${checked
                         ? 'bg-blue-500 border-blue-500'
-                        : 'theme-border bg-transparent group-hover:theme-border-strong'
+                        : 'border-gray-600 bg-transparent group-hover:border-gray-500'
                     }
         `}>
                     {checked && (
@@ -502,8 +488,8 @@ function ModuleToggle({ label, icon: Icon, checked, onChange }: ModuleToggleProp
                     )}
                 </div>
             </div>
-            <Icon className={`w-3.5 h-3.5 transition-colors ${checked ? 'text-blue-400' : 'theme-text-dim'}`} />
-            <span className={`text-sm transition-colors ${checked ? 'theme-text-secondary' : 'theme-text-muted'}`}>
+            <Icon className={`w-3.5 h-3.5 transition-colors ${checked ? 'text-blue-400' : 'text-gray-500'}`} />
+            <span className={`text-sm transition-colors ${checked ? 'text-gray-200' : 'text-gray-400'}`}>
                 {label}
             </span>
         </label>

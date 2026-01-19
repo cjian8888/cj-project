@@ -260,9 +260,12 @@ export interface CategorizedFiles {
 
 export type TabType = 'overview' | 'risk' | 'graph' | 'report';
 
+export type ThemeType = 'dark' | 'light';
+
 export interface UIState {
     activeTab: TabType;
     sidebarCollapsed: boolean;
+    theme: ThemeType;
 }
 
 // ==================== App State ====================

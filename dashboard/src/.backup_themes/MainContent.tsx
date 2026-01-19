@@ -21,7 +21,7 @@ export function MainContent() {
                 {analysis.isRunning && (
                     <div className="mb-6 animate-fade-in">
                         <div className="flex items-center justify-between mb-2">
-                            <span className="text-sm font-medium theme-text-secondary">{analysis.currentPhase}</span>
+                            <span className="text-sm font-medium text-gray-300">{analysis.currentPhase}</span>
                             <span className="text-sm font-mono text-blue-400">{analysis.progress}%</span>
                         </div>
                         <div className="progress-bar">

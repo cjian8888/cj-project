@@ -48,7 +48,7 @@ export function Skeleton({
 
   return (
     <div
-      className={`bg-gray-700 ${getVariantClass()} ${getAnimationClass()} ${className}`}
+      className={`theme-bg-muted ${getVariantClass()} ${getAnimationClass()} ${className}`}
       style={style}
     />
   );
@@ -113,7 +113,7 @@ export function ListSkeleton({ items = 5 }: { items?: number }) {
  */
 export function StatCardSkeleton() {
   return (
-    <div className="bg-gradient-to-br from-gray-800/50 to-gray-900/50 border border-white/10 rounded-xl p-6 space-y-4">
+    <div className="theme-bg-glass border theme-border rounded-xl p-6 space-y-4">
       <Skeleton variant="text" height={20} width="40%" />
       <Skeleton variant="text" height={40} />
       <Skeleton variant="text" height={16} width="60%" />
@@ -126,7 +126,7 @@ export function StatCardSkeleton() {
  */
 export function GraphSkeleton() {
   return (
-    <div className="w-full h-full bg-gray-900/50 flex items-center justify-center">
+    <div className="w-full h-full theme-bg-muted/50 flex items-center justify-center">
       <div className="text-center">
         <Skeleton variant="circular" width={80} height={80} className="mx-auto mb-4" />
         <Skeleton variant="text" height={24} width="200" className="mx-auto" />

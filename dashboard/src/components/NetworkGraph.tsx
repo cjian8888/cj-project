@@ -445,7 +445,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
   }, [graphData]);
 
   return (
-    <div className="h-full w-full flex bg-gradient-to-br from-gray-900 to-slate-900 text-white" style={{ minHeight: '700px' }}>
+    <div className="h-full w-full flex bg-gradient-to-br from-theme-bg-base to-theme-bg-elevated text-white" style={{ minHeight: '700px' }}>
       {/* P0-1: 交易详情 Modal */}
       {transactionDetail && (
         <div
@@ -453,7 +453,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
           onClick={() => setTransactionDetail(null)}
         >
           <div
-            className="bg-gray-900 border border-cyan-500/30 rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden"
+            className="theme-bg-base border border-cyan-500/30 rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden"
             onClick={e => e.stopPropagation()}
           >
             {/* Modal Header */}
@@ -464,7 +464,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                 </div>
                 <div>
                   <h3 className="font-semibold text-white">交易详情穿透</h3>
-                  <p className="text-xs text-gray-400">
+                  <p className="text-xs theme-text-muted">
                     {transactionDetail.type === 'loan_pair' ? '借贷配对' :
                       transactionDetail.type === 'no_repayment' ? '无还款借贷' :
                         transactionDetail.type === 'high_risk_income' ? '高风险收入' : '网贷交易'}
@@ -475,7 +475,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                 onClick={() => setTransactionDetail(null)}
                 className="p-2 hover:bg-white/10 rounded-lg transition-colors"
               >
-                <X className="w-5 h-5 text-gray-400" />
+                <X className="w-5 h-5 theme-text-muted" />
               </button>
             </div>
 
@@ -484,7 +484,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
               {/* 交易双方信息（P1修复: 明确标注方向） */}
               <div className="grid grid-cols-2 gap-4">
                 <div className="bg-white/5 rounded-lg p-3">
-                  <div className="text-xs text-gray-500 mb-1">付款方</div>
+                  <div className="text-xs theme-text-dim mb-1">付款方</div>
                   <div className="text-white font-medium">
                     {transactionDetail.counterparty &&
                      transactionDetail.counterparty !== '未知' &&
@@ -496,14 +496,14 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                   </div>
                 </div>
                 <div className="bg-white/5 rounded-lg p-3">
-                  <div className="text-xs text-gray-500 mb-1">收款方</div>
+                  <div className="text-xs theme-text-dim mb-1">收款方</div>
                   <div className="text-cyan-400 font-medium">{transactionDetail.person}</div>
                 </div>
               </div>
 
               {/* 资金方向指示 */}
-              <div className="flex items-center justify-center text-gray-500 text-sm">
-                <span className="text-gray-400">{formatPartyName(transactionDetail.counterparty || '付款方')}</span>
+              <div className="flex items-center justify-center theme-text-dim text-sm">
+                <span className="theme-text-muted">{formatPartyName(transactionDetail.counterparty || '付款方')}</span>
                 <span className="mx-2 text-cyan-400">→</span>
                 <span className="text-cyan-400">{transactionDetail.person}</span>
               </div>
@@ -512,7 +512,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
               <div className="bg-gradient-to-r from-cyan-500/10 to-blue-500/10 rounded-lg p-4 border border-cyan-500/20">
                 <div className="flex items-center justify-between">
                   <div>
-                    <div className="text-xs text-gray-400 mb-1">交易金额</div>
+                    <div className="text-xs theme-text-muted mb-1">交易金额</div>
                     <div className="text-2xl font-bold text-cyan-400">
                       ¥{transactionDetail.amount >= 10000
                         ? (transactionDetail.amount / 10000).toFixed(2) + '万'
@@ -521,7 +521,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                   </div>
                   {transactionDetail.repayAmount !== undefined && (
                     <div className="text-right">
-                      <div className="text-xs text-gray-400 mb-1">还款金额</div>
+                      <div className="text-xs theme-text-muted mb-1">还款金额</div>
                       <div className="text-xl font-bold text-orange-400">
                         ¥{transactionDetail.repayAmount >= 10000
                           ? (transactionDetail.repayAmount / 10000).toFixed(2) + '万'
@@ -531,7 +531,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                   )}
                 </div>
                 {transactionDetail.daysSince !== undefined && (
-                  <div className="mt-2 pt-2 border-t border-white/10 text-sm text-gray-400">
+                  <div className="mt-2 pt-2 border-t border-white/10 text-sm theme-text-muted">
                     未还款天数: <span className={transactionDetail.daysSince >= 180 ? 'text-red-400 font-bold' : 'text-amber-400'}>{transactionDetail.daysSince}天</span>
                     {transactionDetail.daysSince >= 180 && <span className="ml-2">⚠️ 超过180天</span>}
                   </div>
@@ -541,7 +541,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
               {/* 风险等级 */}
               {transactionDetail.riskLevel && (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-500">风险等级:</span>
+                  <span className="text-xs theme-text-dim">风险等级:</span>
                   <span className={getRiskLevelBadgeStyle(transactionDetail.riskLevel)}>
                     {formatRiskLevel(transactionDetail.riskLevel)}
                   </span>
@@ -551,7 +551,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
               {/* 收入类型（如果有） */}
               {transactionDetail.incomeType && (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-500">收入类型:</span>
+                  <span className="text-xs theme-text-dim">收入类型:</span>
                   <span className="text-xs text-cyan-400 bg-cyan-500/10 px-2 py-0.5 rounded">
                     {transactionDetail.incomeType}
                   </span>
@@ -561,8 +561,8 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
               {/* 交易详情（如果有） */}
               {transactionDetail.detail && (
                 <div className="bg-white/5 rounded-lg p-3">
-                  <div className="text-xs text-gray-500 mb-1">交易详情</div>
-                  <div className="text-sm text-gray-300 font-mono whitespace-pre-line">
+                  <div className="text-xs theme-text-dim mb-1">交易详情</div>
+                  <div className="text-sm theme-text-secondary font-mono whitespace-pre-line">
                     {transactionDetail.detail}
                   </div>
                 </div>
@@ -577,14 +577,14 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                   </div>
                   <div className="space-y-1 text-xs">
                     <div className="flex items-start gap-2">
-                      <span className="text-gray-500 w-16 flex-shrink-0">来源文件:</span>
+                      <span className="theme-text-dim w-16 flex-shrink-0">来源文件:</span>
                       <span className="text-green-300 font-mono break-all">
                         {transactionDetail.sourceFile.split('/').pop()}
                       </span>
                     </div>
                     {transactionDetail.sourceRow && (
                       <div className="flex items-center gap-2">
-                        <span className="text-gray-500 w-16">原始行号:</span>
+                        <span className="theme-text-dim w-16">原始行号:</span>
                         <span className="text-green-400 font-mono font-bold">
                           第 {transactionDetail.sourceRow} 行
                         </span>
@@ -612,7 +612,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
             <div className="p-4 border-t border-white/10 bg-white/5 flex justify-end gap-3">
               <button
                 onClick={() => setTransactionDetail(null)}
-                className="px-4 py-2 text-gray-400 hover:text-white text-sm transition-colors"
+                className="px-4 py-2 theme-text-muted hover:text-white text-sm transition-colors"
               >
                 关闭
               </button>
@@ -635,7 +635,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
         <div className="p-4 border-b border-white/10">
           <h3 className="text-cyan-400 font-bold text-lg mb-2">📊 数据概览</h3>
           {graphData && (
-            <p className="text-xs text-gray-400">
+            <p className="text-xs theme-text-muted">
               生成时间: {new Date().toLocaleString('zh-CN')}
             </p>
           )}
@@ -646,10 +646,10 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
           {!graphData && !loading && (
             <div className="flex flex-col items-center justify-center h-full text-center py-12">
               <div className="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center mb-4">
-                <Info className="w-8 h-8 text-gray-500" />
+                <Info className="w-8 h-8 theme-text-dim" />
               </div>
-              <h4 className="text-gray-400 font-medium mb-2">暂无图谱数据</h4>
-              <p className="text-xs text-gray-500 leading-relaxed max-w-[200px] mb-4">
+              <h4 className="theme-text-muted font-medium mb-2">暂无图谱数据</h4>
+              <p className="text-xs theme-text-dim leading-relaxed max-w-[200px] mb-4">
                 请先在侧边栏点击"启动引擎"运行分析，完成后数据将自动加载
               </p>
               {reportUrl && (
@@ -667,7 +667,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
           {loading && (
             <div className="flex flex-col items-center justify-center h-full text-center py-12">
               <div className="w-10 h-10 border-3 border-white/20 border-t-cyan-400 rounded-full animate-spin mb-4"></div>
-              <p className="text-sm text-gray-400">正在加载图谱数据...</p>
+              <p className="text-sm theme-text-muted">正在加载图谱数据...</p>
             </div>
           )}
 
@@ -688,15 +688,15 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                   </div>
                 </div>
                 {expandedSections['corePersons'] ? 
-                  <ChevronUp className="w-5 h-5 text-gray-400" /> : 
-                  <ChevronDown className="w-5 h-5 text-gray-400" />
+                  <ChevronUp className="w-5 h-5 theme-text-muted" /> : 
+                  <ChevronDown className="w-5 h-5 theme-text-muted" />
                 }
               </button>
               {expandedSections['corePersons'] && (
                 <div className="px-4 pb-4 border-t border-white/10 pt-3">
                   <div className="space-y-2">
                     {graphData.stats.corePersonNames.map((name, idx) => (
-                      <div key={idx} className="flex items-center gap-2 text-sm text-gray-300">
+                      <div key={idx} className="flex items-center gap-2 text-sm theme-text-secondary">
                         <div className="w-2 h-2 rounded-full bg-red-500"></div>
                         {name}
                       </div>
@@ -720,11 +720,11 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                     {/* P0修复: 使用实际数据长度，而非可能不一致的 stats */}
                     {graphData.report.high_risk_income.length}
                   </div>
-                  <div className="text-xs text-gray-400">建议优先核查</div>
+                  <div className="text-xs theme-text-muted">建议优先核查</div>
                 </div>
                 {expandedSections['highRisk'] ? 
-                  <ChevronUp className="w-5 h-5 text-gray-400" /> : 
-                  <ChevronDown className="w-5 h-5 text-gray-400" />
+                  <ChevronUp className="w-5 h-5 theme-text-muted" /> : 
+                  <ChevronDown className="w-5 h-5 theme-text-muted" />
                 }
               </button>
               {expandedSections['highRisk'] && graphData.report.high_risk_income.length > 0 && (
@@ -750,8 +750,8 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                         {/* P1修复: 明确标注付款方→收款方方向 */}
                         <div className="flex justify-between items-center text-sm">
                           <div className="flex items-center gap-1">
-                            <span className="text-gray-400">{formatCounterpartyWithWarning(item.counterparty)}</span>
-                            <span className="text-gray-500">→</span>
+                            <span className="theme-text-muted">{formatCounterpartyWithWarning(item.counterparty)}</span>
+                            <span className="theme-text-dim">→</span>
                             <span className="text-cyan-400">{item.person}</span>
                           </div>
                           <span className="text-red-400 font-mono">{formatAmount(item.amount)}</span>
@@ -779,12 +779,12 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                       {/* P0修复: 使用实际数据长度 */}
                       {graphData.report.loan_pairs.length}
                     </div>
-                    <div className="text-xs text-gray-400">双向资金往来</div>
+                    <div className="text-xs theme-text-muted">双向资金往来</div>
                   </div>
                 </div>
                 {expandedSections['loanPairs'] ? 
-                  <ChevronUp className="w-5 h-5 text-gray-400" /> : 
-                  <ChevronDown className="w-5 h-5 text-gray-400" />
+                  <ChevronUp className="w-5 h-5 theme-text-muted" /> : 
+                  <ChevronDown className="w-5 h-5 theme-text-muted" />
                 }
               </button>
               {expandedSections['loanPairs'] && graphData.report.loan_pairs.length > 0 && (
@@ -810,7 +810,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                           className="w-full text-left p-2 rounded bg-white/5 hover:bg-white/10 transition-colors"
                         >
                           <div className="flex justify-between items-center text-sm">
-                            <span className="text-gray-300">{item.person} ↔ {formatPartyName(item.counterparty)}</span>
+                            <span className="theme-text-secondary">{item.person} ↔ {formatPartyName(item.counterparty)}</span>
                             <span className={`text-xs px-1.5 py-0.5 rounded ${repayRate >= 100 ? 'bg-green-500/20 text-green-400' : repayRate >= 50 ? 'bg-amber-500/20 text-amber-400' : 'bg-red-500/20 text-red-400'}`}>
                               {repayRate}%
                             </span>
@@ -820,7 +820,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                             <span className="text-red-400">还: {formatAmount(repayAmount)}</span>
                           </div>
                           {item.loan_type && (
-                            <div className="text-xs text-gray-500 mt-1">{item.loan_type}</div>
+                            <div className="text-xs theme-text-dim mt-1">{item.loan_type}</div>
                           )}
                         </button>
                       );
@@ -846,12 +846,12 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                       {/* P0修复: 使用实际数据长度 */}
                       {graphData.report.no_repayment_loans.length}
                     </div>
-                    <div className="text-xs text-gray-400">疑似利益输送</div>
+                    <div className="text-xs theme-text-muted">疑似利益输送</div>
                   </div>
                 </div>
                 {expandedSections['noRepayment'] ? 
-                  <ChevronUp className="w-5 h-5 text-gray-400" /> : 
-                  <ChevronDown className="w-5 h-5 text-gray-400" />
+                  <ChevronUp className="w-5 h-5 theme-text-muted" /> : 
+                  <ChevronDown className="w-5 h-5 theme-text-muted" />
                 }
               </button>
               {expandedSections['noRepayment'] && graphData.report.no_repayment_loans.length > 0 && (
@@ -872,8 +872,8 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                         {/* P1修复: 明确付款方→收款方 */}
                         <div className="flex justify-between items-center text-sm">
                           <div className="flex items-center gap-1">
-                            <span className="text-gray-400">{formatCounterpartyWithWarning(item.counterparty)}</span>
-                            <span className="text-gray-500">→</span>
+                            <span className="theme-text-muted">{formatCounterpartyWithWarning(item.counterparty)}</span>
+                            <span className="theme-text-dim">→</span>
                             <span className="text-cyan-400">{item.person}</span>
                           </div>
                           <span className="text-orange-400 font-mono">{formatAmount(item.income_amount)}</span>
@@ -905,12 +905,12 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                     <div className="text-2xl font-bold text-cyan-400">
                       {graphData.stats.involvedCompanyCount}
                     </div>
-                    <div className="text-xs text-gray-400">重点监控企业</div>
+                    <div className="text-xs theme-text-muted">重点监控企业</div>
                   </div>
                 </div>
                 {expandedSections['companies'] ? 
-                  <ChevronUp className="w-5 h-5 text-gray-400" /> : 
-                  <ChevronDown className="w-5 h-5 text-gray-400" />
+                  <ChevronUp className="w-5 h-5 theme-text-muted" /> : 
+                  <ChevronDown className="w-5 h-5 theme-text-muted" />
                 }
               </button>
               {expandedSections['companies'] && (
@@ -919,7 +919,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                     {graphData.nodes
                       .filter(node => node.group === 'involved_company')
                       .map((node, idx) => (
-                        <div key={idx} className="flex items-center gap-2 text-sm text-gray-300 p-2 rounded bg-white/5">
+                        <div key={idx} className="flex items-center gap-2 text-sm theme-text-secondary p-2 rounded bg-white/5">
                           <div className="w-3 h-3 rounded bg-orange-500"></div>
                           {formatPartyName(String(node.label))}
                         </div>
@@ -947,12 +947,12 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                         return acc;
                       }, {} as Record<string, boolean>)).length}
                     </div>
-                    <div className="text-xs text-gray-400">涉及平台数</div>
+                    <div className="text-xs theme-text-muted">涉及平台数</div>
                   </div>
                 </div>
                 {expandedSections['onlineLoans'] ? 
-                  <ChevronUp className="w-5 h-5 text-gray-400" /> : 
-                  <ChevronDown className="w-5 h-5 text-gray-400" />
+                  <ChevronUp className="w-5 h-5 theme-text-muted" /> : 
+                  <ChevronDown className="w-5 h-5 theme-text-muted" />
                 }
               </button>
               {expandedSections['onlineLoans'] && (
@@ -972,10 +972,10 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                       .map(([platform, stats], idx) => (
                         <div key={idx} className="p-2 rounded bg-white/5 text-sm">
                           <div className="flex justify-between items-center">
-                            <span className="text-gray-300">{platform}</span>
+                            <span className="theme-text-secondary">{platform}</span>
                             <span className="text-violet-400 font-mono">{formatAmount(stats.amount)}</span>
                           </div>
-                          <div className="text-xs text-gray-500 mt-1">{stats.count}笔交易</div>
+                          <div className="text-xs theme-text-dim mt-1">{stats.count}笔交易</div>
                         </div>
                       ))}
                   </div>
@@ -993,13 +993,13 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
               >
                 <div>
                   <h3 className="text-cyan-400 font-bold text-sm">📊 资金流向统计</h3>
-                  <div className="text-xs text-gray-400 mt-1">
+                  <div className="text-xs theme-text-muted mt-1">
                     共 {graphData.stats.coreEdgeCount + graphData.stats.companyEdgeCount + graphData.stats.otherEdgeCount} 条资金流向
                   </div>
                 </div>
                 {expandedSections['flowStats'] ? 
-                  <ChevronUp className="w-5 h-5 text-gray-400" /> : 
-                  <ChevronDown className="w-5 h-5 text-gray-400" />
+                  <ChevronUp className="w-5 h-5 theme-text-muted" /> : 
+                  <ChevronDown className="w-5 h-5 theme-text-muted" />
                 }
               </button>
               {expandedSections['flowStats'] && (
@@ -1011,7 +1011,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                         <span className="text-sm text-red-400 font-medium">🔴 核心人员间</span>
                         <span className="text-sm text-cyan-400">{graphData.stats.coreEdgeCount} 条</span>
                       </div>
-                      <div className="text-xs text-gray-500 mt-1">核心审查对象之间的直接资金往来</div>
+                      <div className="text-xs theme-text-dim mt-1">核心审查对象之间的直接资金往来</div>
                     </div>
                     {/* 公司间交易 */}
                     <div className="bg-orange-500/10 rounded p-2">
@@ -1019,7 +1019,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                         <span className="text-sm text-orange-400 font-medium">🏢 公司间交易</span>
                         <span className="text-sm text-cyan-400">{graphData.stats.companyEdgeCount} 条</span>
                       </div>
-                      <div className="text-xs text-gray-500 mt-1">涉案公司的业务往来</div>
+                      <div className="text-xs theme-text-dim mt-1">涉案公司的业务往来</div>
                     </div>
                     {/* 核心-外部 */}
                     <div className="bg-teal-500/10 rounded p-2">
@@ -1027,10 +1027,10 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                         <span className="text-sm text-teal-400 font-medium">🔵 核心-外部</span>
                         <span className="text-sm text-cyan-400">{graphData.stats.otherEdgeCount} 条</span>
                       </div>
-                      <div className="text-xs text-gray-500 mt-1">核心人员与外部实体的资金流动</div>
+                      <div className="text-xs theme-text-dim mt-1">核心人员与外部实体的资金流动</div>
                     </div>
                   </div>
-                  <div className="mt-3 pt-2 border-t border-white/10 text-xs text-gray-500 italic">
+                  <div className="mt-3 pt-2 border-t border-white/10 text-xs theme-text-dim italic">
                     💡 图中线条越粗，累计金额越大
                   </div>
                 </div>
@@ -1067,7 +1067,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
               <h3 className="text-cyan-400 font-bold text-sm mb-3 pb-2 border-b border-white/10">
                 💡 操作提示
               </h3>
-              <div className="text-xs text-gray-400 leading-relaxed space-y-1">
+              <div className="text-xs theme-text-muted leading-relaxed space-y-1">
                 <div>• 拖拽节点可调整位置</div>
                 <div>• 滚轮缩放视图</div>
                 <div>• 悬停查看交易详情</div>
@@ -1098,7 +1098,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
               {viewMode === 'graph' ? '💰 资金流向可视化分析' : '📑 完整资金流向报告'}
             </h2>
             {viewMode === 'graph' && graphData && (
-              <div className="text-sm text-gray-400">
+              <div className="text-sm theme-text-muted">
                 共 <span className="text-cyan-400">{graphData.stats.nodeCount}</span> 个节点,
                 <span className="text-cyan-400"> {graphData.stats.edgeCount}</span> 条资金流向
               </div>
@@ -1114,7 +1114,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
         </div>
 
         {/* 图表区域 (固定高度) */}
-        <div className="h-[600px] flex-shrink-0 relative border-b border-white/10 bg-gray-900/50">
+        <div className="h-[600px] flex-shrink-0 relative border-b border-white/10 theme-bg-base/50">
           {viewMode === 'report' && reportUrl ? (
             <iframe
               src={reportUrl}
@@ -1144,7 +1144,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                   {reportUrl && (
                     <button
                       onClick={() => setViewMode('report')}
-                      className="mt-4 text-gray-400 text-sm hover:text-white underline"
+                      className="mt-4 theme-text-muted text-sm hover:text-white underline"
                     >
                       查看静态报告
                     </button>
@@ -1154,7 +1154,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
 
               {!graphData && !loading && !error && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/50 z-10">
-                  <div className="text-gray-400 mb-4 text-lg">暂无图谱数据</div>
+                  <div className="theme-text-muted mb-4 text-lg">暂无图谱数据</div>
                   <button
                     onClick={fetchGraphData}
                     className="px-6 py-2 bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-400 hover:to-blue-400 text-white rounded-lg font-medium transition-all shadow-lg shadow-cyan-500/20"
@@ -1174,7 +1174,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
           <div className="px-6 py-3 bg-gradient-to-r from-amber-500/10 to-orange-500/10 border-b border-white/10">
             <div className="flex items-center gap-2 text-sm">
               <Info className="w-4 h-4 text-amber-400 flex-shrink-0" />
-              <p className="text-gray-300">
+              <p className="theme-text-secondary">
                 {graphData.sampling.message}
                 <span className="text-amber-300 ml-2">
                   (展示 {graphData.sampling.sampledNodes}/{graphData.sampling.totalNodes} 节点,
