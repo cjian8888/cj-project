@@ -2,20 +2,20 @@ import { useEffect, useRef, useState } from 'react';
 import { Network, DataSet } from 'vis-network/standalone';
 import type { Data, Node, Edge, Options } from 'vis-network/standalone';
 import { API_BASE_URL } from '../services/api';
-import html2canvas from 'html2canvas';
 import {
   AlertTriangle,
   CreditCard,
-  Banknote,
   Landmark,
   Info,
   X,
   ExternalLink,
   FileText,
-  Camera,
-  Download
+  ChevronDown,
+  ChevronUp,
+  Users,
+  Building2
 } from 'lucide-react';
-import { formatPartyName, formatRiskLevel, getRiskLevelBadgeStyle, formatCurrency } from '../utils/formatters';
+import { formatPartyName, formatRiskLevel, getRiskLevelBadgeStyle } from '../utils/formatters';
 
 // 交易详情接口
 interface TransactionDetail {
@@ -32,6 +32,9 @@ interface TransactionDetail {
   description?: string;
   bank?: string;
   sourceFile?: string;
+  sourceRow?: number;
+  detail?: string;  // 原始交易详细信息
+  incomeType?: string; // 收入类型
 }
 
 interface NetworkGraphProps {
@@ -66,8 +69,13 @@ interface GraphData {
     loan_pairs: Array<{
       person: string;
       counterparty: string;
-      loan_amount: number;
-      repay_amount: number;
+      income_total: number;  // 借入总额
+      expense_total: number; // 还款总额
+      income_count?: number;
+      expense_count?: number;
+      loan_type?: string;
+      ratio?: number;
+      risk_level?: string;
     }>;
     no_repayment_loans: Array<{
       person: string;
@@ -80,6 +88,10 @@ interface GraphData {
       counterparty: string;
       amount: number;
       risk_level?: string;
+      type?: string;  // 收入类型
+      detail?: string; // 原始交易详情
+      source_file?: string; // 来源文件
+      source_row?: number;  // 行号
     }>;
     online_loans: Array<{
       platform: string;
@@ -99,53 +111,33 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
   const [reportUrl, setReportUrl] = useState<string | null>(null);
   // P0-1: 交易详情 Modal 状态
   const [transactionDetail, setTransactionDetail] = useState<TransactionDetail | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-  // P2-1: 导出快照状态
+  // 导出快照引用（保留用于未来功能）
   const exportRef = useRef<HTMLDivElement>(null);
-  const [isExporting, setIsExporting] = useState(false);
+  // 左侧菜单展开状态
+  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
+  
+  // 切换展开/折叠状态
+  const toggleSection = (section: string) => {
+    setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
+  };
 
-  // P2-1: 导出证据快照函数
-  const handleExportSnapshot = async () => {
-    if (!exportRef.current || isExporting) return;
-
-    setIsExporting(true);
-    try {
-      const canvas = await html2canvas(exportRef.current, {
-        backgroundColor: '#0f172a',
-        scale: 2, // 高分辨率
-        logging: false,
-        useCORS: true,
-        onclone: (clonedDoc) => {
-          // 添加水印
-          const watermark = clonedDoc.createElement('div');
-          watermark.style.cssText = `
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            padding: 8px 16px;
-            background: rgba(239, 68, 68, 0.9);
-            color: white;
-            font-size: 14px;
-            font-weight: bold;
-            border-radius: 4px;
-            z-index: 9999;
-          `;
-          watermark.textContent = `内部绝密 - ${new Date().toLocaleString('zh-CN')}`;
-          clonedDoc.body.appendChild(watermark);
-        }
-      });
-
-      // 下载图片
-      const link = document.createElement('a');
-      link.download = `资金流向证据_${new Date().toISOString().slice(0, 10)}.png`;
-      link.href = canvas.toDataURL('image/png');
-      link.click();
-
-    } catch (err) {
-      console.error('导出快照失败:', err);
-    } finally {
-      setIsExporting(false);
+  // 格式化金额显示 - 统一使用万元单位（P2: 金额单位统一）
+  const formatAmount = (amount: number) => {
+    // 统一使用万元单位，保留2位小数
+    const wan = amount / 10000;
+    if (wan >= 0.01) {
+      return `¥${wan.toFixed(2)}万`;
     }
+    // 不足0.01万（100元）的显示原值
+    return `¥${amount.toFixed(2)}`;
+  };
+
+  // 格式化对手方名称 - 标注未知来源（P1: 未知对手方问题）
+  const formatCounterpartyWithWarning = (name: string) => {
+    if (!name || name === '未知' || name === '(未知)' || name === 'nan' || name.length < 2) {
+      return <span className="text-orange-400 font-medium">⚠ 来源不明</span>;
+    }
+    return formatPartyName(name);
   };
 
   useEffect(() => {
@@ -489,16 +481,31 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
 
             {/* Modal Content */}
             <div className="p-5 space-y-4">
-              {/* 核心信息 */}
+              {/* 交易双方信息（P1修复: 明确标注方向） */}
               <div className="grid grid-cols-2 gap-4">
                 <div className="bg-white/5 rounded-lg p-3">
-                  <div className="text-xs text-gray-500 mb-1">当事人</div>
-                  <div className="text-white font-medium">{transactionDetail.person}</div>
+                  <div className="text-xs text-gray-500 mb-1">付款方</div>
+                  <div className="text-white font-medium">
+                    {transactionDetail.counterparty &&
+                     transactionDetail.counterparty !== '未知' &&
+                     transactionDetail.counterparty !== '(未知)' &&
+                     transactionDetail.counterparty !== 'nan' ?
+                      formatPartyName(transactionDetail.counterparty) :
+                      <span className="text-orange-400">⚠ 来源不明</span>
+                    }
+                  </div>
                 </div>
                 <div className="bg-white/5 rounded-lg p-3">
-                  <div className="text-xs text-gray-500 mb-1">交易对手</div>
-                  <div className="text-white font-medium">{formatPartyName(transactionDetail.counterparty)}</div>
+                  <div className="text-xs text-gray-500 mb-1">收款方</div>
+                  <div className="text-cyan-400 font-medium">{transactionDetail.person}</div>
                 </div>
+              </div>
+
+              {/* 资金方向指示 */}
+              <div className="flex items-center justify-center text-gray-500 text-sm">
+                <span className="text-gray-400">{formatPartyName(transactionDetail.counterparty || '付款方')}</span>
+                <span className="mx-2 text-cyan-400">→</span>
+                <span className="text-cyan-400">{transactionDetail.person}</span>
               </div>
 
               {/* 金额信息 */}
@@ -541,16 +548,64 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                 </div>
               )}
 
-              {/* 扩展信息提示 */}
-              <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-sm text-amber-300 flex items-start gap-2">
-                <Info className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                <div>
-                  <div className="font-medium mb-1">数据溯源提示</div>
-                  <div className="text-xs text-amber-400/80">
-                    完整原始流水（时间、摘要、账号）请查阅 Excel 报告中的"清洗后流水"工作表，或在 cleaned_data 目录查看对应实体的合并流水文件。
+              {/* 收入类型（如果有） */}
+              {transactionDetail.incomeType && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-500">收入类型:</span>
+                  <span className="text-xs text-cyan-400 bg-cyan-500/10 px-2 py-0.5 rounded">
+                    {transactionDetail.incomeType}
+                  </span>
+                </div>
+              )}
+
+              {/* 交易详情（如果有） */}
+              {transactionDetail.detail && (
+                <div className="bg-white/5 rounded-lg p-3">
+                  <div className="text-xs text-gray-500 mb-1">交易详情</div>
+                  <div className="text-sm text-gray-300 font-mono whitespace-pre-line">
+                    {transactionDetail.detail}
                   </div>
                 </div>
-              </div>
+              )}
+
+              {/* 数据溯源信息 */}
+              {transactionDetail.sourceFile ? (
+                <div className="bg-green-500/10 border border-green-500/20 rounded-lg p-3">
+                  <div className="flex items-center gap-2 text-green-400 font-medium text-sm mb-2">
+                    <Info className="w-4 h-4" />
+                    📍 精确溯源信息
+                  </div>
+                  <div className="space-y-1 text-xs">
+                    <div className="flex items-start gap-2">
+                      <span className="text-gray-500 w-16 flex-shrink-0">来源文件:</span>
+                      <span className="text-green-300 font-mono break-all">
+                        {transactionDetail.sourceFile.split('/').pop()}
+                      </span>
+                    </div>
+                    {transactionDetail.sourceRow && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-gray-500 w-16">原始行号:</span>
+                        <span className="text-green-400 font-mono font-bold">
+                          第 {transactionDetail.sourceRow} 行
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="mt-2 pt-2 border-t border-green-500/20 text-xs text-green-400/70">
+                    💡 可直接在 cleaned_data 目录定位该文件核对原始记录
+                  </div>
+                </div>
+              ) : (
+                <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-sm text-amber-300 flex items-start gap-2">
+                  <Info className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <div className="font-medium mb-1">数据溯源提示</div>
+                    <div className="text-xs text-amber-400/80">
+                      完整原始流水请查阅 Excel 报告中的"清洗后流水"工作表，或在 cleaned_data 目录查看对应实体的合并流水文件。
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Modal Footer */}
@@ -562,13 +617,13 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                 关闭
               </button>
               <a
-                href={`${API_BASE_URL}/api/reports`}
+                href={`${API_BASE_URL}/api/reports/资金核查底稿.xlsx`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center gap-2 px-4 py-2 bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-400 text-sm rounded-lg transition-colors"
               >
                 <ExternalLink className="w-4 h-4" />
-                查看完整报告
+                下载 Excel 报告
               </a>
             </div>
           </div>
@@ -616,76 +671,370 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
             </div>
           )}
 
-          {/* 核心人员 */}
+          {/* 核心人员 - 可折叠 */}
           {graphData && (
-            <div className="stat-card bg-white/10 rounded-lg p-4 hover:translate-x-1 transition-transform cursor-default">
-              <h4 className="text-white text-sm font-medium mb-2">核心人员</h4>
-              <div className="value text-2xl font-bold text-cyan-400 mb-1">
-                {graphData.stats.corePersonCount}
-              </div>
-              <div className="desc text-xs text-gray-400 leading-relaxed">
-                {graphData.stats.corePersonNames.join(', ')}
-              </div>
+            <div className="stat-card bg-white/10 rounded-lg overflow-hidden">
+              <button 
+                onClick={() => toggleSection('corePersons')}
+                className="w-full p-4 hover:bg-white/5 transition-colors text-left flex items-center justify-between"
+              >
+                <div className="flex items-center gap-3">
+                  <Users className="w-5 h-5 text-cyan-400" />
+                  <div>
+                    <h4 className="text-white text-sm font-medium">核心人员</h4>
+                    <div className="text-2xl font-bold text-cyan-400">
+                      {graphData.stats.corePersonCount}
+                    </div>
+                  </div>
+                </div>
+                {expandedSections['corePersons'] ? 
+                  <ChevronUp className="w-5 h-5 text-gray-400" /> : 
+                  <ChevronDown className="w-5 h-5 text-gray-400" />
+                }
+              </button>
+              {expandedSections['corePersons'] && (
+                <div className="px-4 pb-4 border-t border-white/10 pt-3">
+                  <div className="space-y-2">
+                    {graphData.stats.corePersonNames.map((name, idx) => (
+                      <div key={idx} className="flex items-center gap-2 text-sm text-gray-300">
+                        <div className="w-2 h-2 rounded-full bg-red-500"></div>
+                        {name}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
-          {/* 高风险项目 */}
+          {/* 高风险项目 - 可折叠（P0修复: 使用实际数据长度） */}
           {graphData && (
-            <div className="stat-card bg-white/10 rounded-lg p-4 border-l-4 border-red-500 hover:translate-x-1 transition-transform cursor-default">
-              <h4 className="text-white text-sm font-medium mb-2">🔴 高风险项目</h4>
-              <div className="value text-2xl font-bold text-cyan-400 mb-1">
-                {graphData.stats.highRiskCount}
-              </div>
-              <div className="desc text-xs text-gray-400">建议优先核查</div>
+            <div className="stat-card bg-white/10 rounded-lg overflow-hidden border-l-4 border-red-500">
+              <button 
+                onClick={() => toggleSection('highRisk')}
+                className="w-full p-4 hover:bg-white/5 transition-colors text-left flex items-center justify-between"
+              >
+                <div>
+                  <h4 className="text-white text-sm font-medium mb-1">🔴 高风险项目</h4>
+                  <div className="text-2xl font-bold text-red-400">
+                    {/* P0修复: 使用实际数据长度，而非可能不一致的 stats */}
+                    {graphData.report.high_risk_income.length}
+                  </div>
+                  <div className="text-xs text-gray-400">建议优先核查</div>
+                </div>
+                {expandedSections['highRisk'] ? 
+                  <ChevronUp className="w-5 h-5 text-gray-400" /> : 
+                  <ChevronDown className="w-5 h-5 text-gray-400" />
+                }
+              </button>
+              {expandedSections['highRisk'] && graphData.report.high_risk_income.length > 0 && (
+                <div className="px-4 pb-4 border-t border-white/10 pt-3 max-h-48 overflow-y-auto">
+                  <div className="space-y-2">
+                    {graphData.report.high_risk_income.map((item, idx) => (
+                      <button 
+                        key={idx} 
+                        onClick={() => setTransactionDetail({
+                          type: 'high_risk_income',
+                          person: item.person,
+                          counterparty: item.counterparty,
+                          amount: item.amount,
+                          riskLevel: item.risk_level || 'high',
+                          // 新增: 溯源信息
+                          sourceFile: item.source_file,
+                          sourceRow: item.source_row,
+                          detail: item.detail,
+                          incomeType: item.type
+                        })}
+                        className="w-full text-left p-2 rounded bg-white/5 hover:bg-white/10 transition-colors"
+                      >
+                        {/* P1修复: 明确标注付款方→收款方方向 */}
+                        <div className="flex justify-between items-center text-sm">
+                          <div className="flex items-center gap-1">
+                            <span className="text-gray-400">{formatCounterpartyWithWarning(item.counterparty)}</span>
+                            <span className="text-gray-500">→</span>
+                            <span className="text-cyan-400">{item.person}</span>
+                          </div>
+                          <span className="text-red-400 font-mono">{formatAmount(item.amount)}</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
-          {/* 中风险项目 */}
+          {/* 借贷配对 - 可折叠 */}
           {graphData && (
-            <div className="stat-card bg-white/10 rounded-lg p-4 border-l-4 border-yellow-500 hover:translate-x-1 transition-transform cursor-default">
-              <h4 className="text-white text-sm font-medium mb-2">🟡 中风险项目</h4>
-              <div className="value text-2xl font-bold text-cyan-400 mb-1">
-                {graphData.stats.mediumRiskCount}
-              </div>
-              <div className="desc text-xs text-gray-400">需酌情关注</div>
+            <div className="stat-card bg-white/10 rounded-lg overflow-hidden border-l-4 border-blue-500">
+              <button 
+                onClick={() => toggleSection('loanPairs')}
+                className="w-full p-4 hover:bg-white/5 transition-colors text-left flex items-center justify-between"
+              >
+                <div className="flex items-center gap-3">
+                  <CreditCard className="w-5 h-5 text-blue-400" />
+                  <div>
+                    <h4 className="text-white text-sm font-medium">借贷配对</h4>
+                    <div className="text-2xl font-bold text-blue-400">
+                      {/* P0修复: 使用实际数据长度 */}
+                      {graphData.report.loan_pairs.length}
+                    </div>
+                    <div className="text-xs text-gray-400">双向资金往来</div>
+                  </div>
+                </div>
+                {expandedSections['loanPairs'] ? 
+                  <ChevronUp className="w-5 h-5 text-gray-400" /> : 
+                  <ChevronDown className="w-5 h-5 text-gray-400" />
+                }
+              </button>
+              {expandedSections['loanPairs'] && graphData.report.loan_pairs.length > 0 && (
+                <div className="px-4 pb-4 border-t border-white/10 pt-3 max-h-48 overflow-y-auto">
+                  <div className="space-y-2">
+                    {graphData.report.loan_pairs.map((item, idx) => {
+                      // 使用 income_total/expense_total 字段（bidirectional_flows 格式）
+                      const loanAmount = item.income_total || 0;
+                      const repayAmount = item.expense_total || 0;
+                      const repayRate = loanAmount > 0
+                        ? Math.round((repayAmount / loanAmount) * 100)
+                        : 0;
+                      return (
+                        <button 
+                          key={idx} 
+                          onClick={() => setTransactionDetail({
+                            type: 'loan_pair',
+                            person: item.person,
+                            counterparty: item.counterparty,
+                            amount: loanAmount,
+                            repayAmount: repayAmount
+                          })}
+                          className="w-full text-left p-2 rounded bg-white/5 hover:bg-white/10 transition-colors"
+                        >
+                          <div className="flex justify-between items-center text-sm">
+                            <span className="text-gray-300">{item.person} ↔ {formatPartyName(item.counterparty)}</span>
+                            <span className={`text-xs px-1.5 py-0.5 rounded ${repayRate >= 100 ? 'bg-green-500/20 text-green-400' : repayRate >= 50 ? 'bg-amber-500/20 text-amber-400' : 'bg-red-500/20 text-red-400'}`}>
+                              {repayRate}%
+                            </span>
+                          </div>
+                          <div className="flex justify-between text-xs mt-1">
+                            <span className="text-green-400">借: {formatAmount(loanAmount)}</span>
+                            <span className="text-red-400">还: {formatAmount(repayAmount)}</span>
+                          </div>
+                          {item.loan_type && (
+                            <div className="text-xs text-gray-500 mt-1">{item.loan_type}</div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
-          {/* 借贷配对 */}
-          {graphData && (
-            <div className="stat-card bg-white/10 rounded-lg p-4 hover:translate-x-1 transition-transform cursor-default">
-              <h4 className="text-white text-sm font-medium mb-2">借贷配对</h4>
-              <div className="value text-2xl font-bold text-cyan-400">
-                {graphData.stats.loanPairCount}
-              </div>
+          {/* 无还款借贷 - 可折叠（P0修复: 使用实际数据长度） */}
+          {graphData && graphData.report.no_repayment_loans.length > 0 && (
+            <div className="stat-card bg-white/10 rounded-lg overflow-hidden border-l-4 border-orange-500">
+              <button 
+                onClick={() => toggleSection('noRepayment')}
+                className="w-full p-4 hover:bg-white/5 transition-colors text-left flex items-center justify-between"
+              >
+                <div className="flex items-center gap-3">
+                  <AlertTriangle className="w-5 h-5 text-orange-400" />
+                  <div>
+                    <h4 className="text-white text-sm font-medium">无还款借贷</h4>
+                    <div className="text-2xl font-bold text-orange-400">
+                      {/* P0修复: 使用实际数据长度 */}
+                      {graphData.report.no_repayment_loans.length}
+                    </div>
+                    <div className="text-xs text-gray-400">疑似利益输送</div>
+                  </div>
+                </div>
+                {expandedSections['noRepayment'] ? 
+                  <ChevronUp className="w-5 h-5 text-gray-400" /> : 
+                  <ChevronDown className="w-5 h-5 text-gray-400" />
+                }
+              </button>
+              {expandedSections['noRepayment'] && graphData.report.no_repayment_loans.length > 0 && (
+                <div className="px-4 pb-4 border-t border-white/10 pt-3 max-h-48 overflow-y-auto">
+                  <div className="space-y-2">
+                    {graphData.report.no_repayment_loans.map((item, idx) => (
+                      <button 
+                        key={idx} 
+                        onClick={() => setTransactionDetail({
+                          type: 'no_repayment',
+                          person: item.person,
+                          counterparty: item.counterparty,
+                          amount: item.income_amount,
+                          daysSince: item.days_since
+                        })}
+                        className="w-full text-left p-2 rounded bg-white/5 hover:bg-white/10 transition-colors"
+                      >
+                        {/* P1修复: 明确付款方→收款方 */}
+                        <div className="flex justify-between items-center text-sm">
+                          <div className="flex items-center gap-1">
+                            <span className="text-gray-400">{formatCounterpartyWithWarning(item.counterparty)}</span>
+                            <span className="text-gray-500">→</span>
+                            <span className="text-cyan-400">{item.person}</span>
+                          </div>
+                          <span className="text-orange-400 font-mono">{formatAmount(item.income_amount)}</span>
+                        </div>
+                        <div className="flex justify-end text-xs mt-1">
+                          <span className={item.days_since >= 180 ? 'text-red-400' : 'text-amber-400'}>
+                            {item.days_since}天未还 {item.days_since >= 180 && '⚠️'}
+                          </span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
-          {/* 涉案公司 */}
-          {graphData && (
-            <div className="stat-card bg-white/10 rounded-lg p-4 border-l-4 border-orange-500 hover:translate-x-1 transition-transform cursor-default">
-              <h4 className="text-white text-sm font-medium mb-2">涉案公司</h4>
-              <div className="value text-2xl font-bold text-cyan-400 mb-1">
-                {graphData.stats.involvedCompanyCount}
-              </div>
-              <div className="desc text-xs text-gray-400 leading-relaxed">
-                重点监控企业
-              </div>
+          {/* 涉案公司 - 可折叠 */}
+          {graphData && graphData.stats.involvedCompanyCount > 0 && (
+            <div className="stat-card bg-white/10 rounded-lg overflow-hidden border-l-4 border-purple-500">
+              <button 
+                onClick={() => toggleSection('companies')}
+                className="w-full p-4 hover:bg-white/5 transition-colors text-left flex items-center justify-between"
+              >
+                <div className="flex items-center gap-3">
+                  <Building2 className="w-5 h-5 text-purple-400" />
+                  <div>
+                    <h4 className="text-white text-sm font-medium">涉案公司</h4>
+                    <div className="text-2xl font-bold text-cyan-400">
+                      {graphData.stats.involvedCompanyCount}
+                    </div>
+                    <div className="text-xs text-gray-400">重点监控企业</div>
+                  </div>
+                </div>
+                {expandedSections['companies'] ? 
+                  <ChevronUp className="w-5 h-5 text-gray-400" /> : 
+                  <ChevronDown className="w-5 h-5 text-gray-400" />
+                }
+              </button>
+              {expandedSections['companies'] && (
+                <div className="px-4 pb-4 border-t border-white/10 pt-3">
+                  <div className="space-y-2">
+                    {graphData.nodes
+                      .filter(node => node.group === 'involved_company')
+                      .map((node, idx) => (
+                        <div key={idx} className="flex items-center gap-2 text-sm text-gray-300 p-2 rounded bg-white/5">
+                          <div className="w-3 h-3 rounded bg-orange-500"></div>
+                          {formatPartyName(String(node.label))}
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
-          {/* 资金流向统计 */}
+          {/* 网贷平台 - 可折叠 */}
+          {graphData && graphData.report.online_loans.length > 0 && (
+            <div className="stat-card bg-white/10 rounded-lg overflow-hidden border-l-4 border-violet-500">
+              <button 
+                onClick={() => toggleSection('onlineLoans')}
+                className="w-full p-4 hover:bg-white/5 transition-colors text-left flex items-center justify-between"
+              >
+                <div className="flex items-center gap-3">
+                  <Landmark className="w-5 h-5 text-violet-400" />
+                  <div>
+                    <h4 className="text-white text-sm font-medium">网贷平台</h4>
+                    <div className="text-2xl font-bold text-violet-400">
+                      {Object.keys(graphData.report.online_loans.reduce((acc, curr) => {
+                        acc[curr.platform] = true;
+                        return acc;
+                      }, {} as Record<string, boolean>)).length}
+                    </div>
+                    <div className="text-xs text-gray-400">涉及平台数</div>
+                  </div>
+                </div>
+                {expandedSections['onlineLoans'] ? 
+                  <ChevronUp className="w-5 h-5 text-gray-400" /> : 
+                  <ChevronDown className="w-5 h-5 text-gray-400" />
+                }
+              </button>
+              {expandedSections['onlineLoans'] && (
+                <div className="px-4 pb-4 border-t border-white/10 pt-3 max-h-48 overflow-y-auto">
+                  <div className="space-y-2">
+                    {Object.entries(
+                      graphData.report.online_loans.reduce((acc, curr) => {
+                        if (!acc[curr.platform]) {
+                          acc[curr.platform] = { amount: 0, count: 0 };
+                        }
+                        acc[curr.platform].amount += curr.amount;
+                        acc[curr.platform].count += 1;
+                        return acc;
+                      }, {} as Record<string, { amount: number; count: number }>)
+                    )
+                      .sort(([, a], [, b]) => b.amount - a.amount)
+                      .map(([platform, stats], idx) => (
+                        <div key={idx} className="p-2 rounded bg-white/5 text-sm">
+                          <div className="flex justify-between items-center">
+                            <span className="text-gray-300">{platform}</span>
+                            <span className="text-violet-400 font-mono">{formatAmount(stats.amount)}</span>
+                          </div>
+                          <div className="text-xs text-gray-500 mt-1">{stats.count}笔交易</div>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 资金流向统计 - 可展开（P2修复: 添加穿透能力） */}
           {graphData && (
-            <div className="mt-6">
-              <h3 className="text-cyan-400 font-bold text-sm mb-3 pb-2 border-b border-white/10">
-                📊 资金流向统计
-              </h3>
-              <div className="text-xs text-gray-400 leading-relaxed space-y-1">
-                <div>• 核心人员间: <span className="text-cyan-400">{graphData.stats.coreEdgeCount}笔</span></div>
-                <div>• 公司间交易: <span className="text-cyan-400">{graphData.stats.companyEdgeCount}笔</span></div>
-                <div>• 核心-外部: <span className="text-cyan-400">{graphData.stats.otherEdgeCount}笔</span></div>
-                <div className="pt-2 text-gray-500 italic">• 线条越粗金额越大</div>
-              </div>
+            <div className="stat-card bg-white/10 rounded-lg overflow-hidden mt-6">
+              <button 
+                onClick={() => toggleSection('flowStats')}
+                className="w-full p-4 hover:bg-white/5 transition-colors text-left flex items-center justify-between"
+              >
+                <div>
+                  <h3 className="text-cyan-400 font-bold text-sm">📊 资金流向统计</h3>
+                  <div className="text-xs text-gray-400 mt-1">
+                    共 {graphData.stats.coreEdgeCount + graphData.stats.companyEdgeCount + graphData.stats.otherEdgeCount} 条资金流向
+                  </div>
+                </div>
+                {expandedSections['flowStats'] ? 
+                  <ChevronUp className="w-5 h-5 text-gray-400" /> : 
+                  <ChevronDown className="w-5 h-5 text-gray-400" />
+                }
+              </button>
+              {expandedSections['flowStats'] && (
+                <div className="px-4 pb-4 border-t border-white/10 pt-3">
+                  <div className="space-y-3">
+                    {/* 核心人员间 */}
+                    <div className="bg-red-500/10 rounded p-2">
+                      <div className="flex justify-between items-center">
+                        <span className="text-sm text-red-400 font-medium">🔴 核心人员间</span>
+                        <span className="text-sm text-cyan-400">{graphData.stats.coreEdgeCount} 条</span>
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1">核心审查对象之间的直接资金往来</div>
+                    </div>
+                    {/* 公司间交易 */}
+                    <div className="bg-orange-500/10 rounded p-2">
+                      <div className="flex justify-between items-center">
+                        <span className="text-sm text-orange-400 font-medium">🏢 公司间交易</span>
+                        <span className="text-sm text-cyan-400">{graphData.stats.companyEdgeCount} 条</span>
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1">涉案公司的业务往来</div>
+                    </div>
+                    {/* 核心-外部 */}
+                    <div className="bg-teal-500/10 rounded p-2">
+                      <div className="flex justify-between items-center">
+                        <span className="text-sm text-teal-400 font-medium">🔵 核心-外部</span>
+                        <span className="text-sm text-cyan-400">{graphData.stats.otherEdgeCount} 条</span>
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1">核心人员与外部实体的资金流动</div>
+                    </div>
+                  </div>
+                  <div className="mt-3 pt-2 border-t border-white/10 text-xs text-gray-500 italic">
+                    💡 图中线条越粗，累计金额越大
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -756,47 +1105,10 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
             )}
           </div>
           <div className="flex items-center gap-4">
-            {reportUrl && (
-              <div className="flex bg-white/5 rounded-lg p-1 border border-white/10">
-                <button
-                  onClick={() => setViewMode('graph')}
-                  className={`px-3 py-1 rounded text-sm transition-colors ${viewMode === 'graph' ? 'bg-cyan-500/20 text-cyan-400' : 'text-gray-400 hover:text-white'}`}
-                >
-                  交互视图
-                </button>
-                <button
-                  onClick={() => setViewMode('report')}
-                  className={`px-3 py-1 rounded text-sm transition-colors ${viewMode === 'report' ? 'bg-cyan-500/20 text-cyan-400' : 'text-gray-400 hover:text-white'}`}
-                >
-                  完整报告
-                </button>
-              </div>
-            )}
-            {selectedNode && viewMode === 'graph' && (
+            {selectedNode && (
               <div className="text-sm text-cyan-400">
                 选中: {selectedNode.label} ({selectedNode.group})
               </div>
-            )}
-            {/* P2-1: 导出证据快照按钮 */}
-            {graphData && viewMode === 'graph' && (
-              <button
-                onClick={handleExportSnapshot}
-                disabled={isExporting}
-                className={`
-                  flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium
-                  transition-all duration-200
-                  ${isExporting
-                    ? 'bg-gray-700/50 text-gray-500 cursor-wait'
-                    : 'bg-gradient-to-r from-green-500/20 to-emerald-500/20 border border-green-500/30 text-green-400 hover:border-green-400 hover:from-green-500/30 hover:to-emerald-500/30'
-                  }
-                `}
-              >
-                {isExporting ? (
-                  <><Download className="w-4 h-4 animate-pulse" /> 导出中...</>
-                ) : (
-                  <><Camera className="w-4 h-4" /> 导出证据快照</>
-                )}
-              </button>
             )}
           </div>
         </div>
@@ -873,245 +1185,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
           </div>
         )}
 
-        {/* 详细核查报告区域 */}
-        {graphData && graphData.report && (
-          <div className="p-8 space-y-8 bg-gradient-to-b from-gray-900 to-slate-900">
-            <div className="flex items-center gap-2 mb-6 border-b border-white/10 pb-4">
-              <Banknote className="w-6 h-6 text-cyan-400" />
-              <h3 className="text-xl font-bold text-white">详细核查报告</h3>
-              <span className="px-2 py-0.5 rounded text-xs bg-cyan-500/20 text-cyan-400 border border-cyan-500/30">AI 分析生成</span>
-            </div>
-
-            {/* 1. 借贷关系图 */}
-            <div className="report-section">
-              <h4 className="flex items-center gap-2 text-lg font-semibold text-white mb-4">
-                <CreditCard className="w-5 h-5 text-blue-400" />
-                借贷关系分析
-              </h4>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
-                  <div className="px-4 py-3 border-b border-white/10 bg-white/5 font-medium text-blue-300">
-                    疑似借贷配对 (借入/还款)
-                  </div>
-                  {graphData.report.loan_pairs.length > 0 ? (
-                    <table className="w-full text-sm">
-                      <thead className="text-gray-400 bg-black/20 text-xs">
-                        <tr>
-                          <th className="px-4 py-2 text-left">借款人</th>
-                          <th className="px-4 py-2 text-left">出借人</th>
-                          <th className="px-4 py-2 text-right">借入金额</th>
-                          <th className="px-4 py-2 text-right">还款金额</th>
-                          <th className="px-4 py-2 text-center">还款率</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-white/5">
-                        {graphData.report.loan_pairs.map((item, idx) => {
-                          const repayRate = item.loan_amount > 0
-                            ? Math.round((item.repay_amount / item.loan_amount) * 100)
-                            : 0;
-                          const rateColor = repayRate >= 100 ? 'text-green-400' :
-                            repayRate >= 50 ? 'text-amber-400' : 'text-red-400';
-                          const rateBg = repayRate >= 100 ? 'bg-green-500/20' :
-                            repayRate >= 50 ? 'bg-amber-500/20' : 'bg-red-500/20';
-                          return (
-                            <tr key={idx} className="hover:bg-white/5 transition-colors">
-                              <td className="px-4 py-3 text-gray-300">{item.person}</td>
-                              <td className="px-4 py-3 text-gray-300">{formatPartyName(item.counterparty)}</td>
-                              <td className="px-4 py-3 text-right">
-                                <button
-                                  onClick={() => setTransactionDetail({
-                                    type: 'loan_pair',
-                                    person: item.person,
-                                    counterparty: item.counterparty,
-                                    amount: item.loan_amount,
-                                    repayAmount: item.repay_amount
-                                  })}
-                                  className="text-green-400 font-mono hover:text-green-300 hover:underline cursor-pointer transition-colors"
-                                  title="点击查看详情"
-                                >
-                                  ¥{item.loan_amount >= 10000 ? (item.loan_amount / 10000).toFixed(1) + '万' : item.loan_amount.toLocaleString()}
-                                </button>
-                              </td>
-                              <td className="px-4 py-3 text-right text-red-400 font-mono">
-                                ¥{item.repay_amount >= 10000 ? (item.repay_amount / 10000).toFixed(1) + '万' : item.repay_amount.toLocaleString()}
-                              </td>
-                              <td className="px-4 py-3 text-center">
-                                <span className={`px-2 py-0.5 rounded text-xs font-semibold ${rateBg} ${rateColor}`}>
-                                  {repayRate}%
-                                </span>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  ) : (
-                    <div className="p-6 text-center text-gray-500 text-sm">暂无借贷配对记录</div>
-                  )}
-                </div>
-
-                <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
-                  <div className="px-4 py-3 border-b border-white/10 bg-white/5 font-medium text-orange-400 flex items-center gap-2">
-                    <AlertTriangle className="w-4 h-4" />
-                    无还款大额借贷 (疑似利益输送)
-                  </div>
-                  {graphData.report.no_repayment_loans.length > 0 ? (
-                    <table className="w-full text-sm">
-                      <thead className="text-gray-400 bg-black/20 text-xs">
-                        <tr>
-                          <th className="px-4 py-2 text-left">借款人</th>
-                          <th className="px-4 py-2 text-left">出借人</th>
-                          <th className="px-4 py-2 text-right">金额</th>
-                          <th className="px-4 py-2 text-right">未还天数</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-white/5">
-                        {graphData.report.no_repayment_loans.map((item, idx) => (
-                          <tr key={idx} className="hover:bg-white/5 transition-colors">
-                            <td className="px-4 py-3 text-gray-300">{item.person}</td>
-                            <td className="px-4 py-3 text-gray-300">{formatPartyName(item.counterparty)}</td>
-                            <td className="px-4 py-3 text-right">
-                              <button
-                                onClick={() => setTransactionDetail({
-                                  type: 'no_repayment',
-                                  person: item.person,
-                                  counterparty: item.counterparty,
-                                  amount: item.income_amount,
-                                  daysSince: item.days_since
-                                })}
-                                className="text-orange-400 font-bold font-mono hover:text-orange-300 hover:underline cursor-pointer transition-colors"
-                                title="点击查看详情"
-                              >
-                                ¥{(item.income_amount / 10000).toFixed(1)}万
-                              </button>
-                            </td>
-                            <td className={`px-4 py-3 text-right font-mono font-semibold ${item.days_since >= 180 ? 'text-red-400' :
-                              item.days_since >= 90 ? 'text-amber-400' : 'text-green-400'
-                              }`}>
-                              {item.days_since}天
-                              {item.days_since >= 180 && <span className="ml-1 text-[10px]">⚠️</span>}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  ) : (
-                    <div className="p-6 text-center text-gray-500 text-sm">暂无无还款记录</div>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* 2. 异常收入与网贷 */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* 高风险收入 */}
-              <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
-                <div className="px-4 py-3 border-b border-white/10 bg-white/5 font-medium text-red-400 flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4" />
-                  高风险异常收入来源
-                </div>
-                {graphData.report.high_risk_income.length > 0 ? (
-                  <div className="max-h-60 overflow-y-auto">
-                    <table className="w-full text-sm">
-                      <thead className="text-gray-400 bg-black/20 text-xs sticky top-0 backdrop-blur-md">
-                        <tr>
-                          <th className="px-4 py-2 text-left">收款人</th>
-                          <th className="px-4 py-2 text-left">来源方</th>
-                          <th className="px-4 py-2 text-right">金额</th>
-                          <th className="px-4 py-2 text-center">风险</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-white/5">
-                        {graphData.report.high_risk_income.map((item, idx) => {
-                          const riskLevel = item.risk_level || 'high';
-                          return (
-                            <tr key={idx} className="hover:bg-white/5 transition-colors">
-                              <td className="px-4 py-3 text-gray-300">{item.person}</td>
-                              <td className="px-4 py-3 text-gray-300">{formatPartyName(item.counterparty)}</td>
-                              <td className="px-4 py-3 text-right">
-                                <button
-                                  onClick={() => setTransactionDetail({
-                                    type: 'high_risk_income',
-                                    person: item.person,
-                                    counterparty: item.counterparty,
-                                    amount: item.amount,
-                                    riskLevel: riskLevel
-                                  })}
-                                  className="text-red-400 font-bold font-mono hover:text-red-300 hover:underline cursor-pointer transition-colors"
-                                  title="点击查看详情"
-                                >
-                                  {formatCurrency(item.amount)}
-                                </button>
-                              </td>
-                              <td className="px-4 py-3 text-center">
-                                <span className={getRiskLevelBadgeStyle(riskLevel)}>
-                                  {formatRiskLevel(riskLevel)}
-                                </span>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="p-6 text-center text-gray-500 text-sm">暂无高风险收入记录</div>
-                )}
-              </div>
-
-              {/* 网贷统计 */}
-              <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
-                <div className="px-4 py-3 border-b border-white/10 bg-white/5 font-medium text-violet-400 flex items-center gap-2">
-                  <Landmark className="w-4 h-4" />
-                  网贷平台互动统计
-                </div>
-                {graphData.report.online_loans.length > 0 ? (
-                  <div className="max-h-60 overflow-y-auto">
-                    <table className="w-full text-sm">
-                      <thead className="text-gray-400 bg-black/20 text-xs sticky top-0 backdrop-blur-md">
-                        <tr>
-                          <th className="px-4 py-2 text-left">平台/机构</th>
-                          <th className="px-4 py-2 text-right">涉及金额</th>
-                          <th className="px-4 py-2 text-center">笔数</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-white/5">
-                        {/* 聚合统计：金额+笔数 */}
-                        {Object.entries(
-                          graphData.report.online_loans.reduce((acc, curr) => {
-                            if (!acc[curr.platform]) {
-                              acc[curr.platform] = { amount: 0, count: 0 };
-                            }
-                            acc[curr.platform].amount += curr.amount;
-                            acc[curr.platform].count += 1;
-                            return acc;
-                          }, {} as Record<string, { amount: number; count: number }>)
-                        )
-                          .sort(([, a], [, b]) => b.amount - a.amount)
-                          .map(([platform, stats], idx) => (
-                            <tr key={idx} className="hover:bg-white/5 transition-colors">
-                              <td className="px-4 py-3 text-gray-300">{platform}</td>
-                              <td className="px-4 py-3 text-right text-violet-400 font-mono">
-                                ¥{stats.amount >= 10000 ? (stats.amount / 10000).toFixed(1) + '万' : stats.amount.toLocaleString()}
-                              </td>
-                              <td className="px-4 py-3 text-center">
-                                <span className={`px-1.5 py-0.5 rounded text-xs font-mono ${stats.count >= 5 ? 'bg-amber-500/20 text-amber-400' : 'text-gray-400'
-                                  }`}>
-                                  {stats.count}笔
-                                </span>
-                              </td>
-                            </tr>
-                          ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="p-6 text-center text-gray-500 text-sm">无网贷平台记录</div>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
+        {/* 底部报告区域已移除，详情通过左侧二级菜单展开查看 */}
       </div>
     </div>
   );

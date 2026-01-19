@@ -116,36 +116,137 @@ def serialize_suspicions(suspicions):
     
     return result
 
-def serialize_analysis_results(analysis_results):
-    """序列化分析结果"""
+def serialize_list_with_dates(data_list):
+    """序列化包含日期对象的列表"""
+    import pandas as pd
+    
+    def convert_item(item):
+        if isinstance(item, dict):
+            return {k: convert_value(v) for k, v in item.items()}
+        elif isinstance(item, list):
+            return [convert_item(i) for i in item]
+        else:
+            return convert_value(item)
+    
     def convert_value(v):
+        if v is None:
+            return None
+        if isinstance(v, (datetime, pd.Timestamp)):
+            return v.strftime('%Y-%m-%d') if pd.notna(v) else None
         if isinstance(v, (int, float)):
+            if pd.isna(v):
+                return None
+            return float(v) if not isinstance(v, bool) else v
+        if isinstance(v, dict):
+            return {str(k): convert_value(vv) for k, vv in v.items()}
+        if isinstance(v, list):
+            return [convert_value(item) for item in v]
+        return str(v)
+    
+    return [convert_item(item) for item in data_list]
+
+def serialize_analysis_results(analysis_results):
+    """
+    序列化分析结果
+    
+    重要: 前端期望 income.details 和 loan.details 包含所有带 _type 标记的条目
+    需要将各子分类合并到 details 数组中
+    """
+    import pandas as pd
+    
+    def convert_value(v):
+        # 处理 datetime 对象
+        if isinstance(v, (datetime, pd.Timestamp)):
+            return v.strftime('%Y-%m-%d') if pd.notna(v) else None
+        elif isinstance(v, (int, float)):
+            if pd.isna(v):
+                return None
             return float(v) if not isinstance(v, bool) else v
         elif isinstance(v, dict):
             return {str(k): convert_value(vv) for k, vv in v.items()}
         elif isinstance(v, list):
             return [convert_value(item) for item in v]
-        elif v is None:
+        elif v is None or (isinstance(v, float) and pd.isna(v)):
             return None
         else:
             return str(v)
     
-    default = {
-        "loan": {
-            "summary": {"双向往来关系数": 0, "网贷平台交易数": 0, "规律还款模式数": 0},
-            "details": []
-        },
-        "income": {
-            "summary": {"规律性非工资收入": 0, "个人大额转入": 0, "来源不明收入": 0},
-            "details": []
-        },
+    def build_income_details(income_data):
+        """将 income 各子分类合并到 details 数组，添加 _type 标记"""
+        details = []
+        
+        # 映射: 后端字段名 -> 前端 _type
+        type_mapping = {
+            'high_risk': 'high_risk',
+            'medium_risk': 'medium_risk',
+            'large_single_income': 'large_single',
+            'large_individual_income': 'large_individual',
+            'unknown_source_income': 'unknown_source',
+            'same_source_multi': 'same_source_multi',
+            'regular_non_salary': 'regular_non_salary',
+            'potential_bribe_installment': 'bribe_installment',
+        }
+        
+        for backend_key, frontend_type in type_mapping.items():
+            items = income_data.get(backend_key, [])
+            for item in items:
+                entry = convert_value(item) if isinstance(item, dict) else item
+                if isinstance(entry, dict):
+                    entry['_type'] = frontend_type
+                    details.append(entry)
+        
+        return details
+    
+    def build_loan_details(loan_data):
+        """将 loan 各子分类合并到 details 数组，添加 _type 标记"""
+        details = []
+        
+        # 映射: 后端字段名 -> 前端 _type
+        type_mapping = {
+            'bidirectional_flows': 'bidirectional',
+            'online_loan_platforms': 'online_loan',
+            'regular_repayments': 'regular_repayment',
+            'loan_pairs': 'loan_pair',
+            'no_repayment_loans': 'no_repayment',
+            'abnormal_interest': 'abnormal_interest',
+        }
+        
+        for backend_key, frontend_type in type_mapping.items():
+            items = loan_data.get(backend_key, [])
+            for item in items:
+                entry = convert_value(item) if isinstance(item, dict) else item
+                if isinstance(entry, dict):
+                    entry['_type'] = frontend_type
+                    details.append(entry)
+        
+        return details
+    
+    result = {}
+    
+    # 处理 income 数据
+    income_data = analysis_results.get('income', {})
+    result['income'] = {
+        'summary': convert_value(income_data.get('summary', {})),
+        'details': build_income_details(income_data),
+        # 保留原始子分类数据（用于 graphData.report）
+        **{k: convert_value(v) for k, v in income_data.items() if k not in ['summary']}
     }
     
-    for key, value in analysis_results.items():
-        if isinstance(value, dict):
-            default[key] = convert_value(value)
+    # 处理 loan 数据
+    loan_data = analysis_results.get('loan', {})
+    result['loan'] = {
+        'summary': convert_value(loan_data.get('summary', {})),
+        'details': build_loan_details(loan_data),
+        # 保留原始子分类数据
+        **{k: convert_value(v) for k, v in loan_data.items() if k not in ['summary']}
+    }
     
-    return default
+    # 处理其他分析结果
+    for key, value in analysis_results.items():
+        if key not in ['income', 'loan']:
+            result[key] = convert_value(value)
+    
+    return result
 
 def main():
     print("=" * 60)
@@ -286,19 +387,19 @@ def main():
                 "corePersonCount": len(persons),
                 "corePersonNames": persons,
                 "involvedCompanyCount": len(companies),
-                "highRiskCount": len(income_results.get("details", [])),
-                "mediumRiskCount": 0,
-                "loanPairCount": loan_results.get("summary", {}).get("双向往来关系数", 0),
-                "noRepayCount": 0,
+                "highRiskCount": len(income_results.get("high_risk", [])),
+                "mediumRiskCount": len(income_results.get("medium_risk", [])),
+                "loanPairCount": len(loan_results.get("bidirectional_flows", [])),
+                "noRepayCount": len(loan_results.get("no_repayment_loans", [])),
                 "coreEdgeCount": edge_stats.get("core", 0),
                 "companyEdgeCount": edge_stats.get("company", 0),
                 "otherEdgeCount": edge_stats.get("other", 0),
             },
             "report": {
-                "loan_pairs": loan_results.get("loan_pairs", []),
-                "no_repayment_loans": loan_results.get("no_repayment_loans", []),
-                "high_risk_income": income_results.get("high_risk", []),
-                "online_loans": loan_results.get("online_loans", [])
+                "loan_pairs": serialize_list_with_dates(loan_results.get("bidirectional_flows", [])),
+                "no_repayment_loans": serialize_list_with_dates(loan_results.get("no_repayment_loans", [])),
+                "high_risk_income": serialize_list_with_dates(income_results.get("high_risk", [])),
+                "online_loans": serialize_list_with_dates(loan_results.get("online_loan_platforms", []))
             }
         }
         print(f"  - 节点: {len(sampled_nodes)}, 边: {len(sampled_edges)}")

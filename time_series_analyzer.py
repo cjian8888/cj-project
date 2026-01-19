@@ -115,6 +115,9 @@ def detect_periodic_income(
                 is_salary = utils.contains_keywords(str(cp), config.SALARY_KEYWORDS)
                 
                 if not is_salary:
+                    # 获取第一条记录的溯源信息
+                    first_record = group.iloc[0]
+                    
                     periodic_patterns.append({
                         'person': person,
                         'counterparty': str(cp),
@@ -127,7 +130,10 @@ def detect_periodic_income(
                         'total_amount': round(sum(amounts), 2),
                         'date_range': f"{dates.iloc[0].strftime('%Y-%m-%d')} 至 {dates.iloc[-1].strftime('%Y-%m-%d')}",
                         'risk_level': 'high' if avg_amount >= config.TIME_SERIES_HIGH_RISK_AMOUNT else 'medium',
-                        'confidence': _calculate_periodicity_confidence(cv, amount_cv, len(group))
+                        'confidence': _calculate_periodicity_confidence(cv, amount_cv, len(group)),
+                        # 【审计溯源】原始文件和行号（取第一条记录）
+                        'source_file': first_record.get('数据来源', f'cleaned_data/个人/{person}_合并流水.xlsx'),
+                        'source_row_index': first_record.get('source_row_index', None)
                     })
     
     # 按金额排序
@@ -250,7 +256,10 @@ def detect_sudden_changes(
                     'z_score': round(z_score, 2),
                     'avg_before': round(row['income_ma'], 2),
                     'change_type': 'income_spike',
-                    'risk_level': 'high' if z_score > 5 else 'medium'
+                    'risk_level': 'high' if z_score > 5 else 'medium',
+                    # 【审计溯源】原始文件（基于日汇总，只能提供人员级别溯源）
+                    'source_file': f'cleaned_data/个人/{person}_合并流水.xlsx',
+                    'source_row_index': None  # 日汇总数据无法精确到行号
                 })
     
     # 按Z值排序
@@ -331,6 +340,9 @@ def detect_delayed_transfers(
         # 筛选符合条件的模式
         for (inc_cp, exp_cp, delay), pairs in delay_pairs.items():
             if len(pairs) >= min_pairs:
+                # 获取首次配对的日期作为参考
+                first_pair = min(pairs, key=lambda p: p['inc_date'])
+                
                 delayed_patterns.append({
                     'person': person,
                     'income_from': str(inc_cp),
@@ -339,7 +351,11 @@ def detect_delayed_transfers(
                     'occurrences': len(pairs),
                     'total_amount': sum(p['amount'] for p in pairs),
                     'avg_amount': sum(p['amount'] for p in pairs) / len(pairs),
-                    'risk_level': 'high' if len(pairs) >= 5 else 'medium'
+                    'risk_level': 'high' if len(pairs) >= 5 else 'medium',
+                    # 【审计溯源】原始文件和首次收入日期
+                    'source_file': f'cleaned_data/个人/{person}_合并流水.xlsx',
+                    'first_income_date': first_pair['inc_date'],
+                    'source_row_index': None  # 模式分析无法精确到行号
                 })
     
     delayed_patterns.sort(key=lambda x: -x['total_amount'])

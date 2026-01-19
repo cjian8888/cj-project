@@ -189,7 +189,10 @@ def _detect_bidirectional_flows(
                     counterparty_stats[cp]['income_records'].append({
                         'date': row['date'],
                         'amount': row['income'],
-                        'description': row.get('description', '')
+                        'description': row.get('description', ''),
+                        # 【审计溯源】原始文件和行号
+                        'source_file': row.get('数据来源', ''),
+                        'source_row_index': row.get('source_row_index', None)
                     })
                 
                 if row.get('expense', 0) >= min_amount:
@@ -198,7 +201,10 @@ def _detect_bidirectional_flows(
                     counterparty_stats[cp]['expense_records'].append({
                         'date': row['date'],
                         'amount': row['expense'],
-                        'description': row.get('description', '')
+                        'description': row.get('description', ''),
+                        # 【审计溯源】原始文件和行号
+                        'source_file': row.get('数据来源', ''),
+                        'source_row_index': row.get('source_row_index', None)
                     })
             
             # 筛选双向往来
@@ -215,6 +221,9 @@ def _detect_bidirectional_flows(
                     is_loan_pattern, loan_type = _calculate_loan_pattern(ratio)
                     
                     if is_loan_pattern:
+                        # 取第一条收入记录的溯源信息
+                        first_income_record = stats['income_records'][0] if stats['income_records'] else {}
+                        
                         bidirectional.append({
                             'person': person,
                             'counterparty': cp,
@@ -226,7 +235,10 @@ def _detect_bidirectional_flows(
                             'loan_type': loan_type,
                             'first_income_date': min(r['date'] for r in stats['income_records']),
                             'last_expense_date': max(r['date'] for r in stats['expense_records']),
-                            'risk_level': 'high' if stats['income_total'] >= config.LOAN_BIDIRECTIONAL_HIGH_RISK else 'medium'
+                            'risk_level': 'high' if stats['income_total'] >= config.LOAN_BIDIRECTIONAL_HIGH_RISK else 'medium',
+                            # 【溯源铁律】原始文件和行号（取第一条收入记录）
+                            'source_file': first_income_record.get('source_file', f'cleaned_data/个人/{person}_合并流水.xlsx'),
+                            'source_row_index': first_income_record.get('source_row_index', None)
                         })
     
     # 按金额排序
@@ -291,7 +303,10 @@ def _detect_online_loans(
                         'amount': amount,
                         'direction': direction,
                         'description': desc,
-                        'risk_level': 'high' if amount >= config.LOAN_HIGH_RISK_MIN else 'medium'
+                        'risk_level': 'high' if amount >= config.LOAN_HIGH_RISK_MIN else 'medium',
+                        # 【审计溯源】原始文件和行号
+                        'source_file': row.get('数据来源', f'cleaned_data/个人/{person}_合并流水.xlsx'),
+                        'source_row_index': row.get('source_row_index', None)
                     })
     
     # 按日期排序
@@ -364,6 +379,9 @@ def _detect_regular_repayments(
                                 cp_str, REPAYMENT_KEYWORDS
                             )
                             
+                            # 获取第一条记录的溯源信息
+                            first_record = cp_df[cp_df['day'] == most_common_day].iloc[0]
+                            
                             regular_repayments.append({
                                 'person': person,
                                 'counterparty': cp_str,
@@ -377,7 +395,10 @@ def _detect_regular_repayments(
                                     cp_df['date'].min(),
                                     cp_df['date'].max()
                                 ),
-                                'risk_level': 'high' if has_repayment_feature else 'medium'
+                                'risk_level': 'high' if has_repayment_feature else 'medium',
+                                # 【审计溯源】原始文件和行号（取第一条记录）
+                                'source_file': first_record.get('数据来源', f'cleaned_data/个人/{person}_合并流水.xlsx'),
+                                'source_row_index': first_record.get('source_row_index', None)
                             })
     
     # 按金额排序
@@ -459,7 +480,13 @@ def _create_loan_pair_entry(person: str, cp_str: str, income_row, expense_row,
         'risk_level': risk_level,
         'risk_reason': '; '.join(risk_reason) if risk_reason else '正常',
         'loan_desc': income_row.get('description', ''),
-        'repay_desc': expense_row.get('description', '')
+        'repay_desc': expense_row.get('description', ''),
+        # 【审计溯源】借入记录的原始文件和行号
+        'loan_source_file': income_row.get('数据来源', f'cleaned_data/个人/{person}_合并流水.xlsx'),
+        'loan_source_row': income_row.get('source_row_index', None),
+        # 【审计溯源】还款记录的原始文件和行号
+        'repay_source_file': expense_row.get('数据来源', ''),
+        'repay_source_row': expense_row.get('source_row_index', None)
     }
 
 
@@ -589,7 +616,10 @@ def _create_no_repayment_entry(person: str, cp_str: str, income_row,
         'repay_ratio': repay_ratio,
         'risk_level': risk_level,
         'description': income_row.get('description', ''),
-        'risk_reason': f'{days_since}天未还款，还款比例仅{repay_ratio*100:.1f}%'
+        'risk_reason': f'{days_since}天未还款，还款比例仅{repay_ratio*100:.1f}%',
+        # 【审计溯源】原始文件和行号
+        'source_file': income_row.get('数据来源', f'cleaned_data/个人/{person}_合并流水.xlsx'),
+        'source_row_index': income_row.get('source_row_index', None)
     }
 
 

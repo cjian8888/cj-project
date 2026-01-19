@@ -194,6 +194,9 @@ def detect_cross_entity_cash_collision(
                     'deposit_bank': dp.get('bank', '未知'),
                     'withdrawal_source': wd.get('source_file', ''),
                     'deposit_source': dp.get('source_file', ''),
+                    # 【审计溯源】取现和存现的原始行号
+                    'withdrawal_row': wd.get('source_row_index', None),
+                    'deposit_row': dp.get('source_row_index', None),
                     'time_diff_hours': round(time_diff, 2),
                     'amount_diff': round(amount_diff, 2),
                     'amount_diff_ratio': round(amount_ratio, 4),
@@ -311,7 +314,9 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
                 'amount': row['amount'],
                 'bank': str(bank_val) if bank_val and str(bank_val) != 'nan' else '',
                 'source_file': str(source_val) if source_val and str(source_val) != 'nan' else '',
-                'description': row.get('description', '')
+                'description': row.get('description', ''),
+                # 【审计溯源】添加原始行号
+                'source_row_index': row.get('source_row_index', None)
             })
         
         for _, row in deposits.iterrows():
@@ -323,7 +328,9 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
                 'amount': row['amount'],
                 'bank': str(bank_val) if bank_val and str(bank_val) != 'nan' else '',
                 'source_file': str(source_val) if source_val and str(source_val) != 'nan' else '',
-                'description': row.get('description', '')
+                'description': row.get('description', ''),
+                # 【审计溯源】添加原始行号
+                'source_row_index': row.get('source_row_index', None)
             })
     
     # ============================

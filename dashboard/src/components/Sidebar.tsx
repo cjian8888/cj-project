@@ -43,7 +43,8 @@ export function Sidebar() {
     const [expandedSections, setExpandedSections] = useState({
         dataSources: true,
         thresholds: true,
-        modules: false
+        modules: false,
+        navigation: true  // 快捷导航默认展开
     });
 
     // 文件夹选择的隐藏 input refs
@@ -361,31 +362,46 @@ export function Sidebar() {
                         </div>
                     </ConfigSection>
 
-                    {/* Navigation Section - Quick Access */}
-                    <div className="mt-6">
-                        <h3 className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-3 px-2 flex items-center gap-2">
-                            <span className="w-1 h-3 bg-gradient-to-b from-violet-500 to-fuchsia-500 rounded-full" />
-                            快捷导航
-                        </h3>
-                        <nav className="space-y-1">
-                            {navItems.map(({ id, label, icon: Icon }) => (
-                                <button
-                                    key={id}
-                                    onClick={() => setActiveTab(id)}
-                                    className={`
-                    flex items-center gap-3 w-full px-3 py-2.5 rounded-lg
-                    text-sm font-medium transition-all duration-200
-                    ${ui.activeTab === id
-                                            ? 'bg-blue-500/10 text-blue-400 border-l-2 border-blue-500'
-                                            : 'text-gray-400 hover:bg-gray-800/50 hover:text-gray-200 border-l-2 border-transparent'
-                                        }
-                  `}
-                                >
-                                    <Icon className="w-4 h-4" />
-                                    {label}
-                                </button>
-                            ))}
-                        </nav>
+                    {/* Navigation Section - Quick Access (可折叠) */}
+                    <div className="mt-6 border-t border-gray-800/50 pt-4">
+                        <button
+                            onClick={() => toggleSection('navigation')}
+                            className="w-full flex items-center justify-between py-2.5 px-2 text-left group hover:bg-gray-800/30 rounded-lg transition-colors"
+                        >
+                            <div className="flex items-center gap-2">
+                                <span className="w-1 h-3 bg-gradient-to-b from-violet-500 to-fuchsia-500 rounded-full" />
+                                <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider group-hover:text-gray-200 transition-colors">
+                                    快捷导航
+                                </span>
+                            </div>
+                            <div className="flex items-center gap-1">
+                                <span className="text-[10px] text-gray-600 group-hover:text-gray-400 transition-colors">
+                                    {expandedSections.navigation ? '收起' : '展开'}
+                                </span>
+                                <ChevronDown className={`w-4 h-4 text-gray-500 group-hover:text-gray-300 transition-all duration-200 ${expandedSections.navigation ? 'rotate-0' : '-rotate-90'}`} />
+                            </div>
+                        </button>
+                        {expandedSections.navigation && (
+                            <nav className="space-y-1 px-2 pb-2 animate-fade-in">
+                                {navItems.map(({ id, label, icon: Icon }) => (
+                                    <button
+                                        key={id}
+                                        onClick={() => setActiveTab(id)}
+                                        className={`
+                        flex items-center gap-3 w-full px-3 py-2.5 rounded-lg
+                        text-sm font-medium transition-all duration-200
+                        ${ui.activeTab === id
+                                                ? 'bg-blue-500/10 text-blue-400 border-l-2 border-blue-500'
+                                                : 'text-gray-400 hover:bg-gray-800/50 hover:text-gray-200 border-l-2 border-transparent'
+                                            }
+                      `}
+                                    >
+                                        <Icon className="w-4 h-4" />
+                                        {label}
+                                    </button>
+                                ))}
+                            </nav>
+                        )}
                     </div>
                 </div>
 

@@ -25,8 +25,19 @@
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
-import os
+# ==================== Windows asyncio 兼容性修复 ====================
+# 修复 Python 3.11+ 在 Windows 上 ProactorEventLoop 的已知 bug:
+# "AssertionError: assert f is self._write_fut" in _loop_writing
+# 参考: https://github.com/python/cpython/issues/109538
+import asyncio
 import sys
+
+if sys.platform == 'win32':
+    # 使用更稳定的 SelectorEventLoop 替代问题较多的 ProactorEventLoop
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+# ====================================================================
+
+import os
 import json
 import asyncio
 import logging
@@ -1152,6 +1163,271 @@ async def invalidate_cache():
     
     return {"message": "缓存已清除", "status": "idle"}
 
+@app.get("/api/audit-navigation")
+async def get_audit_navigation():
+    """
+    【智能审计导航】获取核查资料索引信息
+    
+    返回清洗数据目录和核查报告的完整文件列表，供前端展示"核查资料索引"
+    """
+    output_dir = _current_config.get("outputDirectory", "./output")
+    cleaned_data_dir = os.path.join(output_dir, "cleaned_data")
+    analysis_results_dir = os.path.join(output_dir, "analysis_results")
+    
+    result = {
+        "persons": [],
+        "companies": [],
+        "reports": [],
+        "outputDir": output_dir,  # 返回相对输出目录
+        "paths": {
+            # 返回相对于输出目录的路径
+            "cleanedDataPerson": "cleaned_data/个人",
+            "cleanedDataCompany": "cleaned_data/公司",
+            "analysisResults": "analysis_results",
+        }
+    }
+    
+    # 扫描个人清洗数据
+    person_dir = os.path.join(cleaned_data_dir, "个人")
+    if os.path.exists(person_dir):
+        for filename in sorted(os.listdir(person_dir)):
+            if filename.endswith('.xlsx') and not filename.startswith('~$'):
+                filepath = os.path.join(person_dir, filename)
+                try:
+                    stat = os.stat(filepath)
+                    entity_name = filename.replace('_合并流水.xlsx', '')
+                    result["persons"].append({
+                        "name": entity_name,
+                        "filename": filename,
+                        "size": stat.st_size,
+                        "sizeFormatted": f"{stat.st_size / 1024:.1f}KB",
+                        "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+                    })
+                except OSError:
+                    pass
+    
+    # 扫描公司清洗数据
+    company_dir = os.path.join(cleaned_data_dir, "公司")
+    if os.path.exists(company_dir):
+        for filename in sorted(os.listdir(company_dir)):
+            if filename.endswith('.xlsx') and not filename.startswith('~$'):
+                filepath = os.path.join(company_dir, filename)
+                try:
+                    stat = os.stat(filepath)
+                    entity_name = filename.replace('_合并流水.xlsx', '')
+                    result["companies"].append({
+                        "name": entity_name,
+                        "filename": filename,
+                        "size": stat.st_size,
+                        "sizeFormatted": f"{stat.st_size / 1024:.1f}KB",
+                        "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+                    })
+                except OSError:
+                    pass
+    
+    # 扫描核查报告（优先展示核查底稿）
+    if os.path.exists(analysis_results_dir):
+        priority_files = ['资金核查底稿.xlsx', '资金流向可视化.html']
+        other_files = []
+        
+        for filename in os.listdir(analysis_results_dir):
+            filepath = os.path.join(analysis_results_dir, filename)
+            if os.path.isfile(filepath):
+                try:
+                    stat = os.stat(filepath)
+                    file_info = {
+                        "name": filename,
+                        "size": stat.st_size,
+                        "sizeFormatted": f"{stat.st_size / 1024:.1f}KB",
+                        "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                        "isPrimary": filename in priority_files
+                    }
+                    if filename in priority_files:
+                        result["reports"].insert(0, file_info)
+                    else:
+                        other_files.append(file_info)
+                except OSError:
+                    pass
+        
+        result["reports"].extend(other_files)
+    
+    return result
+
+
+class OpenFolderRequest(BaseModel):
+    relativePath: str  # 相对于输出目录的路径，如 "cleaned_data/个人"
+
+
+@app.post("/api/open-folder")
+async def open_folder(request: OpenFolderRequest):
+    """
+    打开指定文件夹（在文件资源管理器中）
+    
+    接收相对路径，基于当前配置的输出目录拼接完整路径
+    """
+    import subprocess
+    import platform
+    
+    output_dir = _current_config.get("outputDirectory", "./output")
+    target_path = os.path.abspath(os.path.join(output_dir, request.relativePath))
+    
+    # 安全检查：确保路径在输出目录内
+    abs_output = os.path.abspath(output_dir)
+    if not target_path.startswith(abs_output):
+        raise HTTPException(status_code=400, detail="非法路径")
+    
+    if not os.path.exists(target_path):
+        raise HTTPException(status_code=404, detail=f"路径不存在: {request.relativePath}")
+    
+    try:
+        system = platform.system()
+        if system == "Windows":
+            import ctypes
+            import time
+            
+            # 先打开文件夹
+            subprocess.Popen(f'explorer "{target_path}"', shell=True)
+            
+            # 等待窗口创建（增加等待时间）
+            time.sleep(1.0)
+            
+            # 【改进】使用 Shell COM 接口精确查找并激活窗口
+            try:
+                import win32com.client
+                import pythoncom
+                
+                # 初始化 COM（在后台线程中需要）
+                pythoncom.CoInitialize()
+                logger.info(f"🔧 COM 初始化完成")
+                
+                try:
+                    shell = win32com.client.Dispatch("Shell.Application")
+                    windows = shell.Windows()
+                    
+                    logger.info(f"🔍 找到 {windows.Count} 个 Explorer 窗口")
+                    
+                    target_hwnd = None
+                    target_path_normalized = os.path.normpath(target_path).lower()
+                    logger.info(f"🎯 目标路径: {target_path_normalized}")
+                    
+                    # 枚举所有 Explorer 窗口，查找匹配的路径
+                    for i, window in enumerate(windows):
+                        try:
+                            # 获取窗口的当前文件夹路径
+                            location_url = window.LocationURL
+                            logger.debug(f"窗口 {i}: LocationURL = {location_url}")
+                            
+                            if location_url:
+                                # 转换 file:/// URL 为本地路径
+                                from urllib.parse import unquote, urlparse
+                                parsed = urlparse(location_url)
+                                if parsed.scheme == 'file':
+                                    # 处理 file:///C:/path 格式
+                                    window_path = unquote(parsed.path)
+                                    # 移除开头的 / (Windows 路径)
+                                    if window_path.startswith('/') and len(window_path) > 2 and window_path[2] == ':':
+                                        window_path = window_path[1:]
+                                    window_path_normalized = os.path.normpath(window_path).lower()
+                                    
+                                    logger.info(f"窗口 {i} 路径: {window_path_normalized}")
+                                    
+                                    if window_path_normalized == target_path_normalized:
+                                        target_hwnd = window.HWND
+                                        logger.info(f"✓ 找到匹配窗口: hwnd={target_hwnd}")
+                                        break
+                        except Exception as e:
+                            logger.debug(f"检查窗口 {i} 时出错: {e}")
+                            continue
+                    
+                    if target_hwnd:
+                        user32 = ctypes.windll.user32
+                        
+                        # 获取前台窗口的线程 ID
+                        foreground_hwnd = user32.GetForegroundWindow()
+                        foreground_thread = user32.GetWindowThreadProcessId(foreground_hwnd, None)
+                        
+                        # 获取目标窗口的线程 ID
+                        target_thread = user32.GetWindowThreadProcessId(target_hwnd, None)
+                        
+                        logger.info(f"前台线程: {foreground_thread}, 目标线程: {target_thread}")
+                        
+                        # 附加线程输入队列（绕过 Windows 前台限制的关键）
+                        if foreground_thread != target_thread:
+                            attach_result = user32.AttachThreadInput(foreground_thread, target_thread, True)
+                            logger.info(f"AttachThreadInput: {attach_result}")
+                        
+                        # 显示并激活窗口
+                        user32.ShowWindow(target_hwnd, 9)  # SW_RESTORE
+                        user32.BringWindowToTop(target_hwnd)
+                        fg_result = user32.SetForegroundWindow(target_hwnd)
+                        
+                        logger.info(f"SetForegroundWindow: {fg_result}")
+                        
+                        # 分离线程输入队列
+                        if foreground_thread != target_thread:
+                            user32.AttachThreadInput(foreground_thread, target_thread, False)
+                        
+                        logger.info(f"✅ 窗口已激活: hwnd={target_hwnd}")
+                    else:
+                        logger.warning(f"⚠️ 未找到匹配窗口，文件夹可能已在后台打开: {target_path}")
+                        
+                finally:
+                    pythoncom.CoUninitialize()
+                    
+            except ImportError:
+                # 如果没有 pywin32，回退到简单方法
+                logger.warning("pywin32 未安装，使用回退方案")
+                user32 = ctypes.windll.user32
+                folder_name = os.path.basename(target_path)
+                hwnd = user32.FindWindowW(None, folder_name)
+                if hwnd:
+                    user32.ShowWindow(hwnd, 9)
+                    user32.SetForegroundWindow(hwnd)
+            except Exception as e:
+                logger.warning(f"激活窗口时出错（文件夹已打开）: {e}")
+                
+        elif system == "Darwin":
+            # macOS: 使用 AppleScript 打开文件夹并激活 Finder 窗口
+            try:
+                # 打开文件夹并激活 Finder
+                applescript = f'''
+                tell application "Finder"
+                    activate
+                    open POSIX file "{target_path}"
+                    -- 将新打开的窗口带到最前
+                    set frontmost to true
+                end tell
+                '''
+                subprocess.run(['osascript', '-e', applescript], check=True, capture_output=True)
+                logger.info(f"✅ macOS Finder 窗口已激活: {target_path}")
+            except subprocess.CalledProcessError as e:
+                # 回退到简单的 open 命令
+                logger.warning(f"AppleScript 执行失败，回退到 open 命令: {e}")
+                subprocess.Popen(['open', target_path])
+            except Exception as e:
+                logger.warning(f"macOS 打开文件夹出错: {e}")
+                subprocess.Popen(['open', target_path])
+        else:
+            # Linux: 使用 xdg-open，并尝试使用 wmctrl 激活窗口
+            subprocess.Popen(['xdg-open', target_path])
+            try:
+                # 尝试使用 wmctrl 激活文件管理器窗口（如果已安装）
+                import shutil
+                if shutil.which('wmctrl'):
+                    import time
+                    time.sleep(0.5)
+                    folder_name = os.path.basename(target_path)
+                    subprocess.run(['wmctrl', '-a', folder_name], capture_output=True)
+            except Exception:
+                pass  # wmctrl 不可用时静默失败
+        
+        logger.info(f"📂 打开文件夹: {target_path}")
+        return {"message": "success", "path": target_path}
+    except Exception as e:
+        logger.error(f"打开文件夹失败: {e}")
+        raise HTTPException(status_code=500, detail=f"打开文件夹失败: {str(e)}")
+
+
 @app.get("/api/reports")
 async def list_reports():
     """列出可用的报告文件"""
@@ -1268,19 +1544,19 @@ async def get_graph_data():
                     "corePersonCount": len(all_persons),
                     "corePersonNames": all_persons,
                     "involvedCompanyCount": len(all_companies),
-                    "highRiskCount": len(income_results.get("details", [])),
-                    "mediumRiskCount": 0,
-                    "loanPairCount": loan_results.get("summary", {}).get("双向往来关系数", 0),
+                    "highRiskCount": len(income_results.get("high_risk", [])),
+                    "mediumRiskCount": len(income_results.get("medium_risk", [])),
+                    "loanPairCount": len(loan_results.get("bidirectional_flows", [])),
                     "noRepayCount": 0,
                     "coreEdgeCount": edge_stats.get("core", 0),
                     "companyEdgeCount": edge_stats.get("company", 0),
                     "otherEdgeCount": edge_stats.get("other", 0),
                 },
                 "report": {
-                    "loan_pairs": loan_results.get("loan_pairs", []),
+                    "loan_pairs": loan_results.get("bidirectional_flows", []),
                     "no_repayment_loans": loan_results.get("no_repayment_loans", []),
                     "high_risk_income": income_results.get("high_risk", []),
-                    "online_loans": loan_results.get("online_loans", [])
+                    "online_loans": loan_results.get("online_loan_platforms", [])
                 }
             }
         }
@@ -1523,19 +1799,19 @@ def run_analysis(analysis_config: AnalysisConfig):
                     "corePersonCount": len(all_persons),
                     "corePersonNames": all_persons,
                     "involvedCompanyCount": len(all_companies),
-                    "highRiskCount": len(income_results.get("details", [])),
-                    "mediumRiskCount": 0,
-                    "loanPairCount": loan_results.get("summary", {}).get("双向往来关系数", 0),
+                    "highRiskCount": len(income_results.get("high_risk", [])),
+                    "mediumRiskCount": len(income_results.get("medium_risk", [])),
+                    "loanPairCount": len(loan_results.get("bidirectional_flows", [])),
                     "noRepayCount": 0,
                     "coreEdgeCount": edge_stats.get("core", 0),
                     "companyEdgeCount": edge_stats.get("company", 0),
                     "otherEdgeCount": edge_stats.get("other", 0),
                 },
                 "report": {
-                    "loan_pairs": loan_results.get("loan_pairs", []),
+                    "loan_pairs": loan_results.get("bidirectional_flows", []),
                     "no_repayment_loans": loan_results.get("no_repayment_loans", []),
                     "high_risk_income": income_results.get("high_risk", []),
-                    "online_loans": loan_results.get("online_loans", [])
+                    "online_loans": loan_results.get("online_loan_platforms", [])
                 }
             }
             logger.info(f"图谱缓存生成完成: {len(sampled_nodes)} 节点, {len(sampled_edges)} 边")
@@ -1787,7 +2063,10 @@ def serialize_profiles(profiles: Dict) -> Dict:
                     "amount": float(tx.get("金额", 0)),
                     "description": str(tx.get("摘要", "")),
                     "counterparty": str(tx.get("对手方", "")),
-                    "type": str(tx.get("类型", ""))  # 取现 or 存现
+                    "type": str(tx.get("类型", "")),  # 取现 or 存现
+                    # 【溯源铁律】原始文件和行号
+                    "source_file": str(tx.get("source_file", "")),
+                    "source_row_index": tx.get("source_row_index", None)
                 }
                 for tx in fund_flow.get("cash_transactions", [])
             ],
@@ -1835,6 +2114,7 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
             "direction": str(direction),
             "bank": str(tx.get("bank", "")),
             "sourceFile": str(tx.get("source_file", "")),
+            "sourceRowIndex": tx.get("source_row_index", None),  # 【溯源铁律】添加行号
             "riskLevel": str(tx.get("risk_level", "medium")),
             "riskReason": str(tx.get("risk_reason", "")),
         })
@@ -1856,6 +2136,11 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
             "depositBank": str(collision.get("deposit_bank", "")),
             "riskLevel": str(collision.get("risk_level", "medium")),
             "riskReason": str(collision.get("risk_reason", "")),
+            # 【溯源铁律】原始文件和行号
+            "withdrawalSourceFile": str(collision.get("withdrawal_source", "")),
+            "depositSourceFile": str(collision.get("deposit_source", "")),
+            "withdrawalRowIndex": collision.get("withdrawal_row", None),
+            "depositRowIndex": collision.get("deposit_row", None),
         })
     
     # 转换现金时间点配对 (保持原有逻辑但更健壮)
@@ -1907,6 +2192,9 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
                 "amount": float(alert.get("amount", 0)),
                 "description": str(alert.get("description", "")),
                 "riskLevel": str(alert.get("risk_level", "medium")),
+                # 【溯源铁律】原始文件和行号
+                "sourceFile": str(alert.get("source_file", "")),
+                "sourceRowIndex": alert.get("source_row_index", None),
             })
     
     return result

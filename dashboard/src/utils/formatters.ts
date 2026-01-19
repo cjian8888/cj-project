@@ -22,6 +22,37 @@ export const RISK_LEVEL_COLORS: Record<string, { bg: string; text: string; borde
   unknown: { bg: 'bg-gray-500/20', text: 'text-gray-400', border: 'border-gray-500' },
 };
 
+// ==================== 通用值净化函数 ====================
+
+/**
+ * 净化任意值，将 nan、null、undefined、空字符串等无效值统一转换为占位符
+ * 这是所有格式化函数的基础，确保前端显示一致性
+ * @param value - 任意值
+ * @param placeholder - 占位符，默认 '--'
+ * @returns 净化后的字符串
+ */
+export const sanitizeValue = (value: any, placeholder: string = '--'): string => {
+  // 处理 null 和 undefined
+  if (value === null || value === undefined) {
+    return placeholder;
+  }
+  
+  // 转换为字符串
+  const strValue = String(value).trim();
+  
+  // 处理各种无效值
+  const invalidValues = [
+    'nan', 'NaN', 'null', 'undefined', 'None', '',
+    '(未知)', '未知', 'N/A', 'n/a', '-'
+  ];
+  
+  if (invalidValues.includes(strValue) || invalidValues.includes(strValue.toLowerCase())) {
+    return placeholder;
+  }
+  
+  return strValue;
+};
+
 // ==================== 风险类型/描述映射 ====================
 
 export const RISK_TYPE_MAP: Record<string, string> = {

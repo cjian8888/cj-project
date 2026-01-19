@@ -275,6 +275,9 @@ def _detect_regular_non_salary(
                                 logger.info(f'  排除疑似理财赎回: {person} - {cp_str} (摘要含理财特征)')
                                 continue
 
+                            # 取第一条记录的溯源信息
+                            first_row = cp_df.iloc[0]
+                            
                             regular_income.append({
                                 'person': person,
                                 'counterparty': cp_str,
@@ -285,7 +288,10 @@ def _detect_regular_non_salary(
                                 'cv': cv,
                                 'date_range': (min(dates), max(dates)),
                                 'possible_type': _guess_income_type(cp_str, mean_amt),
-                                'risk_level': 'high' if mean_amt >= config.INCOME_LARGE_PERSONAL_MIN else 'medium' # 调高阈值
+                                'risk_level': 'high' if mean_amt >= config.INCOME_LARGE_PERSONAL_MIN else 'medium',
+                                # 【溯源铁律】原始文件和行号（取第一条记录）
+                                'source_file': f'cleaned_data/个人/{person}_合并流水.xlsx',
+                                'source_row_index': first_row.get('source_row_index', None)
                             })
     
     # 按金额排序
@@ -358,8 +364,12 @@ def _detect_individual_income(
                     'from_individual': cp,
                     'date': row['date'],
                     'amount': row['income'],
-                    'description': row.get('description', ''),
-                    'risk_level': 'high' if row['income'] >= config.INCOME_HIGH_RISK_MIN else 'medium'
+                    # 【修复】如果原始描述为空，生成有意义的描述
+                    'description': row.get('description', '') if row.get('description') and str(row.get('description')) != 'nan' else f'来自个人: {cp}',
+                    'risk_level': 'high' if row['income'] >= config.INCOME_HIGH_RISK_MIN else 'medium',
+                    # 【行号定位】添加原始行号
+                    'source_row_index': row.get('source_row_index', None),
+                    'source_file': f'cleaned_data/个人/{person}_合并流水.xlsx'
                 })
     
     # 按金额排序
@@ -476,7 +486,9 @@ def _detect_unknown_income(
                         # 【P5 新增】追溯字段
                         'account': account_display,
                         'bank': bank,
-                        'source_file': f'cleaned_data/个人/{person}_合并流水.xlsx'
+                        'source_file': f'cleaned_data/个人/{person}_合并流水.xlsx',
+                        # 【行号定位】添加原始行号
+                        'source_row_index': row.get('source_row_index', None)
                     })
     
     # 按金额排序
@@ -672,9 +684,13 @@ def _detect_large_single_income(
                     'counterparty': cp if cp and cp != 'nan' else '(未知)',
                     'date': row['date'],
                     'amount': income,
-                    'description': desc,
+                    # 【修复】确保 description 有值，使用 income_type 作为回退
+                    'description': desc if desc and desc != 'nan' else income_type,
                     'income_type': income_type,
-                    'risk_level': risk_level
+                    'risk_level': risk_level,
+                    # 【行号定位】添加原始行号
+                    'source_row_index': row.get('source_row_index', None),
+                    'source_file': f'cleaned_data/个人/{person}_合并流水.xlsx'
                 })
     
     # 按金额排序
@@ -770,7 +786,10 @@ def _detect_same_source_multi(
                         'avg_amount': stats['total'] / stats['count'],
                         'records': stats['records'],
                         'source_type': source_type,
-                        'risk_level': risk_level
+                        'risk_level': risk_level,
+                        # 【溯源铁律】原始文件（聚合类型，无单条行号）
+                        'source_file': f'cleaned_data/个人/{person}_合并流水.xlsx',
+                        'source_row_index': None  # 聚合多条，无单一行号
                     })
     
     # 按累计金额排序
@@ -876,38 +895,52 @@ def _add_risk_entry(item: Dict, entry_type: str, item_type: str,
         medium_risk: 中风险列表
         seen_transactions: 已见交易集合
     """
-    # 生成唯一标识
+    # 生成唯一标识 + 提取日期和描述
+    date_value = None
+    description = ''
+    
     if entry_type == '规律性非工资收入':
         unique_key = f"{item['person']}|{item['counterparty']}|REGULAR|{int(item['total_amount'])}"
-        detail = f"共{item['occurrences']}次, 均额{item['avg_amount']:.0f}元"
+        description = f"共{item['occurrences']}次, 均额{item['avg_amount']:.0f}元, {item.get('possible_type', '')}"
         counterparty = item['counterparty']
         amount = item['total_amount']
+        # 尝试从 date_range 获取第一个日期
+        date_range = item.get('date_range')
+        if date_range and isinstance(date_range, (list, tuple)) and len(date_range) > 0:
+            date_value = date_range[0]
     elif entry_type == '个人大额转入':
         unique_key = _generate_unique_key(
             item['person'], item['from_individual'], item['date'], item['amount']
         )
-        detail = f"日期: {item['date']}"
+        description = str(item.get('description', '')) if item.get('description') and str(item.get('description')) != 'nan' else '个人大额转入'
         counterparty = item['from_individual']
         amount = item['amount']
+        date_value = item.get('date')
     elif entry_type == '来源不明收入':
         unique_key = _generate_unique_key(
             item['person'], item['counterparty'], item['date'], item['amount']
         )
-        detail = item['reason']
+        description = item.get('reason', '') or item.get('description', '') or '来源不明'
         counterparty = item['counterparty']
         amount = item['amount']
+        date_value = item.get('date')
     elif entry_type == '大额单笔收入':
         unique_key = _generate_unique_key(
             item['person'], item['counterparty'], item['date'], item['amount']
         )
-        detail = item['income_type']
+        description = item.get('income_type', '') or item.get('description', '') or '大额收入'
         counterparty = item['counterparty']
         amount = item['amount']
+        date_value = item.get('date')
     elif entry_type == '同源多次收入':
         unique_key = f"{item['person']}|{item['counterparty']}|MULTI|{int(item['total'])}"
-        detail = f"共{item['count']}次, 均额{item['avg_amount']:.0f}元"
+        description = f"共{item['count']}次, 均额{item['avg_amount']:.0f}元, {item.get('source_type', '')}"
         counterparty = item['counterparty']
         amount = item['total']
+        # 尝试从 records 获取第一个日期
+        records = item.get('records', [])
+        if records and len(records) > 0:
+            date_value = records[0].get('date')
     else:
         return
     
@@ -916,19 +949,24 @@ def _add_risk_entry(item: Dict, entry_type: str, item_type: str,
         return
     seen_transactions.add(unique_key)
     
-    # 创建条目
+    # 创建条目 - 【修复】添加 date 和 description 字段，统一使用 source_row_index
     entry = {
         'type': entry_type,
         'person': item['person'],
         'counterparty': counterparty,
         'amount': amount,
-        'detail': detail,
+        'date': date_value,  # 【修复】添加日期字段
+        'description': description,  # 【修复】使用 description 替代 detail
+        'detail': description,  # 保留旧字段兼容
         'risk_level': item['risk_level'],
         'confidence': _calculate_confidence_score(item, item_type),
         # 【P5 新增】复制追溯字段
         'account': item.get('account', ''),
         'bank': item.get('bank', ''),
-        'source_file': item.get('source_file', f"cleaned_data/个人/{item['person']}_合并流水.xlsx")
+        'source_file': item.get('source_file', f"cleaned_data/个人/{item['person']}_合并流水.xlsx"),
+        # 【修复】统一使用 source_row_index 供前端显示
+        'source_row_index': item.get('source_row_index', None),
+        'source_row': item.get('source_row_index', None)  # 保留旧字段兼容
     }
     
     # 添加到对应列表
@@ -1445,7 +1483,10 @@ def _detect_potential_bribe_installment(
                         'risk_score': risk_score,
                         'risk_factors': '; '.join(risk_factors),
                         'first_date': min(dates),
-                        'last_date': max(dates)
+                        'last_date': max(dates),
+                        # 【溯源铁律】原始文件和行号
+                        'source_file': f'cleaned_data/个人/{person}_合并流水.xlsx',
+                        'source_row_index': cp_df.iloc[0].get('source_row_index', None)  # 取第一条记录
                     })
     
     # 按风险分排序

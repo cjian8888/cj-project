@@ -109,7 +109,10 @@ def _analyze_direct_flows(
                         'amount': max(row.get('income', 0), row.get('expense', 0)),
                         'direction': 'receive' if row.get('income', 0) > 0 else 'pay',
                         'description': row.get('description', ''),
-                        'counterparty_raw': str(row.get('counterparty', ''))
+                        'counterparty_raw': str(row.get('counterparty', '')),
+                        # 【审计溯源】原始文件和行号
+                        'source_file': row.get('数据来源', ''),
+                        'source_row_index': row.get('source_row_index', None)
                     }
                     direct_flows.append(flow)
     
@@ -208,7 +211,10 @@ def _collect_person_flows(
                     'date': row.get('date'),
                     'amount': row['expense'],
                     'counterparty': str(row.get('counterparty', '')),
-                    'description': str(row.get('description', ''))
+                    'description': str(row.get('description', '')),
+                    # 【审计溯源】原始文件和行号
+                    'source_file': row.get('数据来源', ''),
+                    'source_row_index': row.get('source_row_index', None)
                 })
         
         # 筛选收入
@@ -219,7 +225,10 @@ def _collect_person_flows(
                     'date': row.get('date'),
                     'amount': row['income'],
                     'counterparty': str(row.get('counterparty', '')),
-                    'description': str(row.get('description', ''))
+                    'description': str(row.get('description', '')),
+                    # 【审计溯源】原始文件和行号
+                    'source_file': row.get('数据来源', ''),
+                    'source_row_index': row.get('source_row_index', None)
                 })
     
     return person_outflows, person_inflows

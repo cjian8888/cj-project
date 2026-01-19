@@ -506,7 +506,10 @@ def analyze_fund_flow(df: pd.DataFrame) -> Dict:
                     '金额': row['expense'],
                     '摘要': description,
                     '对手方': counterparty,
-                    '类型': '支出'
+                    '类型': '支出',
+                    # 【审计溯源】原始文件和行号
+                    'source_file': row.get('数据来源', row.get('source_file', '')),
+                    'source_row_index': row.get('source_row_index', None)
                 })
             if row['income'] > 0:
                 third_party_income += row['income']
@@ -515,7 +518,10 @@ def analyze_fund_flow(df: pd.DataFrame) -> Dict:
                     '金额': row['income'],
                     '摘要': description,
                     '对手方': counterparty,
-                    '类型': '收入'
+                    '类型': '收入',
+                    # 【审计溯源】原始文件和行号
+                    'source_file': row.get('数据来源', row.get('source_file', '')),
+                    'source_row_index': row.get('source_row_index', None)
                 })
         
         # 【新增】现金交易统计
@@ -527,7 +533,10 @@ def analyze_fund_flow(df: pd.DataFrame) -> Dict:
                     '金额': row['expense'],
                     '摘要': description,
                     '对手方': counterparty,
-                    '类型': '取现'
+                    '类型': '取现',
+                    # 【审计溯源】原始文件和行号
+                    'source_file': row.get('数据来源', row.get('source_file', '')),
+                    'source_row_index': row.get('source_row_index', None)
                 })
             if row['income'] > 0:
                 cash_income += row['income']
@@ -536,7 +545,10 @@ def analyze_fund_flow(df: pd.DataFrame) -> Dict:
                     '金额': row['income'],
                     '摘要': description,
                     '对手方': counterparty,
-                    '类型': '存现'
+                    '类型': '存现',
+                    # 【审计溯源】原始文件和行号
+                    'source_file': row.get('数据来源', row.get('source_file', '')),
+                    'source_row_index': row.get('source_row_index', None)
                 })
 
     # 按对手方统计
