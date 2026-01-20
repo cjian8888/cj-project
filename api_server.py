@@ -1449,6 +1449,54 @@ async def list_reports():
     
     return {"reports": reports}
 
+
+@app.get("/api/reports/subjects")
+async def get_report_subjects():
+    """
+    获取可选的嫌疑人列表
+    
+    【数据复用铁律】从 analysis_cache 中已计算的 profiles 读取，不重新扫描文件
+    """
+    import report_service
+    
+    try:
+        builder = report_service.load_report_builder(_current_config.get("outputDirectory", "./output"))
+        
+        if builder is None:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "无可用分析数据，请先运行分析", "subjects": []}
+            )
+        
+        subjects = builder.get_available_subjects()
+        
+        return {
+            "success": True,
+            "subjects": subjects,
+            "personCount": len([s for s in subjects if s.get("type") == "person"]),
+            "companyCount": len([s for s in subjects if s.get("type") == "company"])
+        }
+    except Exception as e:
+        logger.error(f"获取嫌疑人列表失败: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e), "subjects": []}
+        )
+
+
+@app.get("/api/reports/available-sections")
+async def get_available_sections():
+    """获取可用的报告模块列表"""
+    return {
+        "sections": [
+            {"id": "summary", "name": "资金概览", "description": "核心统计指标汇总"},
+            {"id": "assets", "name": "个人资产", "description": "各人员资产情况表"},
+            {"id": "risks", "name": "可疑交易", "description": "疑点交易、资金闭环、现金伴随"}
+        ],
+        "formats": ["html", "json"]
+    }
+
+
 @app.get("/api/reports/{filename}")
 async def download_report(filename: str):
     """下载报告文件"""
@@ -2397,10 +2445,13 @@ def _get_jinja_env():
 
 
 class ReportGenerateRequest(BaseModel):
-    """报告生成请求"""
+    """报告生成请求 - Protocol Omega Phase 1"""
     sections: List[str] = ["summary", "suspicious_transactions"]
     format: str = "html"  # html, json
-    case_name: str = "审计报告"
+    case_name: str = "初查报告"
+    subjects: Optional[List[str]] = None  # 选中的嫌疑人，None 表示全选
+    doc_number: Optional[str] = None  # 文号，如 "国监查 [2026] 第 12345 号"
+    thresholds: Optional[Dict[str, int]] = None  # 阈值配置，如 {"large_transfer": 50000, "large_cash": 50000}
 
 
 @app.post("/api/reports/generate")
@@ -2436,7 +2487,46 @@ async def generate_report(request: ReportGenerateRequest):
                     content={"success": False, "error": "无可用分析数据，请先运行分析"}
                 )
         
-        # 2. 构建报告数据结构
+        # 2. 【Protocol Omega】使用 report_service 生成公文格式初查报告
+        import report_service
+        
+        # 如果指定了 subjects，使用新的报告服务生成初查报告
+        if request.subjects is not None or "official" in request.sections:
+            builder = report_service.ReportDataBuilder(cached_results)
+            
+            # 确定要分析的嫌疑人
+            subjects = request.subjects or cached_results.get("persons", [])
+            
+            if request.format == "html":
+                html_report = builder.generate_html_report(
+                    subjects=subjects,
+                    case_name=request.case_name,
+                    doc_number=request.doc_number,
+                    include_assets="assets" in request.sections,
+                    include_income="summary" in request.sections,
+                    include_loan="risks" in request.sections,
+                )
+                
+                # 对中文文件名进行 RFC 5987 编码
+                import urllib.parse
+                encoded_filename = urllib.parse.quote(f"{request.case_name}.html")
+                
+                return Response(
+                    content=html_report,
+                    media_type="text/html; charset=utf-8",
+                    headers={"Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}"}
+                )
+            else:
+                # JSON 格式：返回每个嫌疑人的分析数据
+                subjects_data = [builder.build_person_report(s) for s in subjects]
+                return JSONResponse(content={
+                    "success": True,
+                    "format": "json",
+                    "case_name": request.case_name,
+                    "subjects": subjects_data
+                })
+        
+        # 3. 旧版报告生成逻辑（兼容）
         from datetime import datetime
         import report_schema
         
@@ -2639,19 +2729,6 @@ async def generate_report(request: ReportGenerateRequest):
             status_code=500,
             content={"success": False, "error": str(e)}
         )
-
-
-@app.get("/api/reports/available-sections")
-async def get_available_sections():
-    """获取可用的报告模块列表"""
-    return {
-        "sections": [
-            {"id": "summary", "name": "资金概览", "description": "核心统计指标汇总"},
-            {"id": "assets", "name": "个人资产", "description": "各人员资产情况表"},
-            {"id": "risks", "name": "可疑交易", "description": "疑点交易、资金闭环、现金伴随"}
-        ],
-        "formats": ["html", "json"]
-    }
 
 
 # ==================== 启动入口 ====================
