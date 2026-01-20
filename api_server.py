@@ -74,6 +74,26 @@ import ml_analyzer
 import time_series_analyzer
 import clue_aggregator
 
+# 🆕 Phase 6: P0级外部数据解析模块
+import pboc_account_extractor
+import aml_analyzer
+import company_info_extractor
+import credit_report_extractor
+import bank_account_info_extractor
+
+# 🆕 Phase 7: P1级外部数据解析模块
+import vehicle_extractor
+import wealth_product_extractor
+import securities_extractor
+
+# 🆕 Phase 8: P2级外部数据解析模块
+import insurance_extractor
+import immigration_extractor
+import hotel_extractor
+import cohabitation_extractor
+import railway_extractor
+import flight_extractor
+
 # ==================== 日志配置 ====================
 
 # 初始化模块级日志记录器
@@ -1725,6 +1745,12 @@ def run_analysis(analysis_config: AnalysisConfig):
         for entity, df in cleaned_data.items():
             try:
                 profiles[entity] = financial_profiler.generate_profile_report(df, entity)
+                # 🆕 Phase 5: 提取银行账户列表（仅针对个人）
+                if entity in all_persons:
+                    try:
+                        profiles[entity]['bank_accounts'] = financial_profiler.extract_bank_accounts(df)
+                    except Exception as e:
+                        logger.warning(f"提取 {entity} 银行账户失败: {e}")
             except Exception as e:
                 logger.warning(f"生成 {entity} 画像失败: {e}")
         
@@ -1748,6 +1774,10 @@ def run_analysis(analysis_config: AnalysisConfig):
         if analysis_config.modules.get("incomeAnalysis", True):
             try:
                 analysis_results["income"] = income_analyzer.detect_suspicious_income(cleaned_data, all_persons)
+                # 🆕 Phase 5: 提取大额交易明细
+                analysis_results["large_transactions"] = income_analyzer.extract_large_transactions(
+                    cleaned_data, all_persons
+                )
             except Exception as e:
                 logger.warning(f"收入分析失败: {e}")
         
@@ -1758,6 +1788,31 @@ def run_analysis(analysis_config: AnalysisConfig):
                 )
             except Exception as e:
                 logger.warning(f"关联方分析失败: {e}")
+        
+        # 🆕 调查单位往来分析（为公司报告提供数据）
+        try:
+            investigation_unit_flows = {}
+            all_entities = all_persons + all_companies
+            for entity in all_entities:
+                if entity in cleaned_data:
+                    df = cleaned_data[entity]
+                    flows = related_party_analyzer.analyze_investigation_unit_flows(df, entity)
+                    if flows.get('has_flows', False):
+                        investigation_unit_flows[entity] = {
+                            'total_amount': flows.get('total_income', 0) + flows.get('total_expense', 0),
+                            'total_income': flows.get('total_income', 0),
+                            'total_expense': flows.get('total_expense', 0),
+                            'net_flow': flows.get('net_flow', 0),
+                            'income_count': flows.get('income_count', 0),
+                            'expense_count': flows.get('expense_count', 0),
+                            'transactions': flows.get('income_details', [])[:20] + flows.get('expense_details', [])[:20],
+                            'matched_units': list(flows.get('matched_units', []))
+                        }
+            analysis_results["investigation_unit_flows"] = investigation_unit_flows
+            logger.info(f"调查单位往来分析完成: {len(investigation_unit_flows)} 个实体有往来记录")
+        except Exception as e:
+            logger.warning(f"调查单位往来分析失败: {e}")
+            analysis_results["investigation_unit_flows"] = {}
         
         if analysis_config.modules.get("multiSourceCorrelation", True):
             try:
@@ -1788,7 +1843,242 @@ def run_analysis(analysis_config: AnalysisConfig):
             except Exception as e:
                 logger.warning(f"线索汇总失败: {e}")
         
-        # 阶段 7: 生成报告
+        # 🆕 Phase 5: 计算家庭汇总
+        try:
+            import family_finance
+            family_summary_result = family_finance.calculate_family_summary(profiles, all_persons)
+            analysis_results["family_summary"] = family_summary_result
+            logger.info(f"家庭汇总计算完成: {len(family_summary_result.get('family_members', []))} 个家庭成员")
+        except Exception as e:
+            logger.warning(f"家庭汇总计算失败: {e}")
+        
+        # 🆕 Phase 6: P0级外部数据解析
+        analysis_state.update(progress=85, phase="解析外部数据源...")
+        logger.info("开始解析 P0 级外部数据源...")
+        
+        # 6.1 人民银行银行账户
+        try:
+            pboc_accounts = pboc_account_extractor.extract_pboc_accounts(data_dir)
+            analysis_results["pboc_accounts"] = pboc_accounts
+            logger.info(f"人民银行账户解析完成: {len(pboc_accounts)} 个主体")
+            # 将官方账户添加到个人画像
+            for person_id, accounts in pboc_accounts.items():
+                if person_id in profiles:
+                    profiles[person_id]["bank_accounts_official"] = accounts.get("accounts", [])
+        except Exception as e:
+            logger.warning(f"人民银行账户解析失败: {e}")
+        
+        # 6.2 人民银行反洗钱数据
+        try:
+            aml_data = aml_analyzer.extract_aml_data(data_dir)
+            aml_alerts = aml_analyzer.get_aml_alerts(data_dir)
+            analysis_results["aml_data"] = aml_data
+            if aml_alerts:
+                suspicions["aml_alerts"] = aml_alerts
+            logger.info(f"反洗钱数据解析完成: {len(aml_data)} 个主体, {len(aml_alerts)} 条预警")
+        except Exception as e:
+            logger.warning(f"反洗钱数据解析失败: {e}")
+        
+        # 6.3 市场监管总局企业登记信息
+        try:
+            company_info = company_info_extractor.extract_company_info(data_dir)
+            analysis_results["company_info"] = company_info
+            logger.info(f"企业登记信息解析完成: {len(company_info)} 个企业")
+        except Exception as e:
+            logger.warning(f"企业登记信息解析失败: {e}")
+        
+        # 6.4 征信数据
+        try:
+            credit_data = credit_report_extractor.extract_credit_data(data_dir)
+            credit_alerts = credit_report_extractor.get_credit_alerts(data_dir)
+            analysis_results["credit_data"] = credit_data
+            # 将征信信息添加到个人画像
+            for person_id, credit_info in credit_data.items():
+                if person_id in profiles:
+                    profiles[person_id]["credit_info"] = credit_info
+            if credit_alerts:
+                suspicions["credit_alerts"] = credit_alerts
+            logger.info(f"征信数据解析完成: {len(credit_data)} 个主体, {len(credit_alerts)} 条预警")
+        except Exception as e:
+            logger.warning(f"征信数据解析失败: {e}")
+        
+        # 6.5 银行业金融机构账户信息
+        try:
+            bank_account_info = bank_account_info_extractor.extract_bank_account_info(data_dir)
+            analysis_results["bank_account_info"] = bank_account_info
+            # 补充账户信息到个人画像
+            for person_id, info in bank_account_info.items():
+                if person_id in profiles:
+                    existing = profiles[person_id].get("bank_accounts_official", [])
+                    # 合并去重
+                    existing_nums = {a.get("account_number") for a in existing}
+                    for acc in info.get("accounts", []):
+                        if acc.get("account_number") not in existing_nums:
+                            existing.append(acc)
+                    profiles[person_id]["bank_accounts_official"] = existing
+            logger.info(f"银行账户信息解析完成: {len(bank_account_info)} 个主体")
+        except Exception as e:
+            logger.warning(f"银行账户信息解析失败: {e}")
+        
+        # 🆕 Phase 7: P1级外部数据解析
+        analysis_state.update(progress=87, phase="解析 P1 级外部数据源...")
+        logger.info("开始解析 P1 级外部数据源...")
+        
+        # 7.1 公安部机动车
+        try:
+            vehicle_data = vehicle_extractor.extract_vehicle_data(data_dir)
+            analysis_results["vehicle_data"] = vehicle_data
+            logger.info(f"公安部机动车解析完成: {len(vehicle_data)} 个主体")
+            # 将车辆信息添加到个人画像
+            for person_id, vehicles in vehicle_data.items():
+                if person_id in profiles:
+                    profiles[person_id]["vehicles"] = vehicles
+        except Exception as e:
+            logger.warning(f"公安部机动车解析失败: {e}")
+        
+        # 7.2 银行理财产品
+        try:
+            wealth_product_data = wealth_product_extractor.extract_wealth_product_data(data_dir)
+            analysis_results["wealth_product_data"] = wealth_product_data
+            logger.info(f"银行理财产品解析完成: {len(wealth_product_data)} 个主体")
+            # 将理财信息添加到个人画像
+            for person_id, wealth_info in wealth_product_data.items():
+                if person_id in profiles:
+                    profiles[person_id]["wealth_products"] = wealth_info.get("products", [])
+                    profiles[person_id]["wealth_summary"] = wealth_info.get("summary", {})
+        except Exception as e:
+            logger.warning(f"银行理财产品解析失败: {e}")
+        
+        # 7.3 证券信息
+        try:
+            securities_data = securities_extractor.extract_securities_data(data_dir)
+            analysis_results["securities_data"] = securities_data
+            logger.info(f"证券信息解析完成: {len(securities_data)} 个主体")
+            # 将证券信息添加到个人画像
+            for person_id, sec_info in securities_data.items():
+                if person_id in profiles:
+                    profiles[person_id]["securities"] = sec_info
+        except Exception as e:
+            logger.warning(f"证券信息解析失败: {e}")
+        
+        # 7.4 自然资源部精准查询
+        try:
+            import asset_extractor
+            precise_property_data = asset_extractor.extract_precise_property_info(data_dir)
+            analysis_results["precise_property_data"] = precise_property_data
+            logger.info(f"自然资源部精准查询解析完成: {len(precise_property_data)} 个主体")
+            # 将精准查询不动产添加到个人画像
+            for person_id, properties in precise_property_data.items():
+                if person_id in profiles:
+                    profiles[person_id]["properties_precise"] = properties
+        except Exception as e:
+            logger.warning(f"自然资源部精准查询解析失败: {e}")
+        
+        # 7.5 统一社会信用代码
+        try:
+            credit_code_info = company_info_extractor.extract_credit_code_info(data_dir)
+            if credit_code_info:
+                # 合并到现有企业信息
+                existing_company_info = analysis_results.get("company_info", {})
+                merged_info = company_info_extractor.merge_company_info(existing_company_info, credit_code_info)
+                analysis_results["company_info"] = merged_info
+                logger.info(f"统一社会信用代码解析完成: {len(credit_code_info)} 个企业")
+        except Exception as e:
+            logger.warning(f"统一社会信用代码解析失败: {e}")
+        
+        # 🆕 Phase 8: P2级外部数据解析
+        analysis_state.update(progress=88, phase="解析 P2 级外部数据源...")
+        logger.info("开始解析 P2 级外部数据源...")
+        
+        # 8.1 保险信息
+        try:
+            insurance_data = insurance_extractor.extract_insurance_data(data_dir)
+            analysis_results["insurance_data"] = insurance_data
+            logger.info(f"保险信息解析完成: {len(insurance_data)} 个主体")
+            # 将保险信息添加到个人画像
+            for entity_id, ins_info in insurance_data.items():
+                if entity_id in profiles:
+                    profiles[entity_id]["insurance"] = ins_info
+        except Exception as e:
+            logger.warning(f"保险信息解析失败: {e}")
+        
+        # 8.2 公安部出入境记录
+        try:
+            immigration_data = immigration_extractor.extract_immigration_data(data_dir)
+            analysis_results["immigration_data"] = immigration_data
+            logger.info(f"公安部出入境记录解析完成: {len(immigration_data)} 个主体")
+            # 将出入境记录添加到个人画像
+            for person_id, records in immigration_data.items():
+                if person_id in profiles:
+                    profiles[person_id]["immigration_records"] = records
+        except Exception as e:
+            logger.warning(f"公安部出入境记录解析失败: {e}")
+        
+        # 8.3 公安部旅馆住宿
+        try:
+            hotel_data = hotel_extractor.extract_hotel_data(data_dir)
+            analysis_results["hotel_data"] = hotel_data
+            # 同住分析
+            cohabitation_analysis = hotel_extractor.analyze_cohabitation(data_dir)
+            analysis_results["hotel_cohabitation"] = cohabitation_analysis
+            logger.info(f"公安部旅馆住宿解析完成: {len(hotel_data)} 个主体")
+            # 将住宿记录添加到个人画像
+            for person_id, records in hotel_data.items():
+                if person_id in profiles:
+                    profiles[person_id]["hotel_records"] = records
+        except Exception as e:
+            logger.warning(f"公安部旅馆住宿解析失败: {e}")
+        
+        # 8.4 公安部同住址/同车违章
+        try:
+            coaddress_data = cohabitation_extractor.extract_coaddress_data(data_dir)
+            coviolation_data = cohabitation_extractor.extract_coviolation_data(data_dir)
+            relationship_graph = cohabitation_extractor.get_relationship_graph(data_dir)
+            analysis_results["coaddress_data"] = coaddress_data
+            analysis_results["coviolation_data"] = coviolation_data
+            analysis_results["relationship_graph"] = relationship_graph
+            logger.info(f"公安部同住址/同车违章解析完成: {len(coaddress_data)} + {len(coviolation_data)} 个主体")
+            # 将关系添加到个人画像
+            for person_id, records in coaddress_data.items():
+                if person_id in profiles:
+                    profiles[person_id]["coaddress_persons"] = records
+            for person_id, records in coviolation_data.items():
+                if person_id in profiles:
+                    profiles[person_id]["coviolation_vehicles"] = records
+        except Exception as e:
+            logger.warning(f"公安部同住址/同车违章解析失败: {e}")
+        
+        # 8.5 铁路票面信息
+        try:
+            railway_data = railway_extractor.extract_railway_data(data_dir)
+            railway_timeline = railway_extractor.get_travel_timeline(data_dir)
+            analysis_results["railway_data"] = railway_data
+            analysis_results["railway_timeline"] = railway_timeline
+            logger.info(f"铁路票面信息解析完成: {len(railway_data)} 个主体")
+            # 将铁路出行记录添加到个人画像
+            for person_id, data in railway_data.items():
+                if person_id in profiles:
+                    profiles[person_id]["railway_tickets"] = data.get("tickets", [])
+        except Exception as e:
+            logger.warning(f"铁路票面信息解析失败: {e}")
+        
+        # 8.6 中航信航班进出港信息
+        try:
+            flight_data = flight_extractor.extract_flight_data(data_dir)
+            flight_timeline = flight_extractor.get_flight_timeline(data_dir)
+            analysis_results["flight_data"] = flight_data
+            analysis_results["flight_timeline"] = flight_timeline
+            logger.info(f"中航信航班进出港信息解析完成: {len(flight_data)} 个主体")
+            # 将航班记录添加到个人画像
+            for person_id, data in flight_data.items():
+                if person_id in profiles:
+                    profiles[person_id]["flight_records"] = {
+                        "completed": data.get("completed", []),
+                        "cancelled": data.get("cancelled", [])
+                    }
+        except Exception as e:
+            logger.warning(f"中航信航班进出港信息解析失败: {e}")
+
         analysis_state.update(progress=90, phase="生成审计报告...")
         logger.info("生成分析报告...")
         
@@ -2123,6 +2413,12 @@ def serialize_profiles(profiles: Dict) -> Dict:
             "maxTransaction": float(max_transaction),
             "salaryRatio": float(salary_ratio),
             "salaryTotal": float(salary_total),  # 工资收入金额
+            # 🆕 Phase 2 新增：年度工资统计
+            "yearlySalary": profile.get("yearly_salary", {}),
+            # 🆕 Phase 4 新增：收入来源分类
+            "incomeClassification": profile.get("income_classification", {}),
+            # 🆕 Phase 1/5 新增：银行账户列表
+            "bankAccounts": profile.get("bank_accounts", []),
         }
     return result
 
@@ -2725,6 +3021,171 @@ async def generate_report(request: ReportGenerateRequest):
     
     except Exception as e:
         logger.error(f"报告生成失败: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+
+# ==================== 初查报告 API (2026-01-20 新增) ====================
+
+class InvestigationReportRequest(BaseModel):
+    """初查报告生成请求"""
+    primary_person: str                          # 核查对象（必填）
+    doc_number: Optional[str] = None             # 文号
+    case_background: Optional[str] = None        # 案件背景
+    data_scope: Optional[str] = None             # 数据范围
+    include_companies: Optional[List[str]] = None  # 需要包含的公司列表
+
+
+@app.get("/api/investigation-report/subjects")
+async def get_investigation_subjects():
+    """
+    获取可选的核查对象和公司列表
+    
+    返回:
+    {
+        "success": true,
+        "persons": ["张三", "李四"],
+        "companies": ["公司A", "公司B"]
+    }
+    """
+    try:
+        from investigation_report_builder import load_investigation_report_builder
+        
+        builder = load_investigation_report_builder(config.OUTPUT_DIR)
+        if builder is None:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "无可用分析数据，请先运行分析"}
+            )
+        
+        return JSONResponse(content={
+            "success": True,
+            "persons": builder.get_available_primary_persons(),
+            "companies": builder.get_available_companies()
+        })
+    
+    except Exception as e:
+        logger.error(f"获取核查对象列表失败: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+
+@app.post("/api/investigation-report/generate")
+async def generate_investigation_report(request: InvestigationReportRequest):
+    """
+    生成初查报告 (JSON 格式)
+    
+    请求体:
+    {
+        "primary_person": "张三",
+        "doc_number": "国监查 [2026] 第 12345 号",
+        "case_background": "依据相关线索...",
+        "include_companies": ["公司A", "公司B"]
+    }
+    
+    返回:
+    {
+        "success": true,
+        "report": {
+            "meta": {...},
+            "family": {...},
+            "member_details": [...],
+            "companies": [...],
+            "conclusion": {...}
+        }
+    }
+    """
+    try:
+        from investigation_report_builder import load_investigation_report_builder
+        
+        builder = load_investigation_report_builder(config.OUTPUT_DIR)
+        if builder is None:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "无可用分析数据，请先运行分析"}
+            )
+        
+        # 验证核查对象
+        available_persons = builder.get_available_primary_persons()
+        if request.primary_person not in available_persons:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False, 
+                    "error": f"核查对象 '{request.primary_person}' 不存在",
+                    "available_persons": available_persons
+                }
+            )
+        
+        # 生成报告
+        report = builder.build_complete_report(
+            primary_person=request.primary_person,
+            doc_number=request.doc_number,
+            case_background=request.case_background,
+            data_scope=request.data_scope,
+            include_companies=request.include_companies
+        )
+        
+        # 保存报告到文件
+        import json
+        from datetime import datetime
+        report_filename = f"investigation_report_{request.primary_person}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        report_path = os.path.join(config.OUTPUT_DIR, 'reports', report_filename)
+        os.makedirs(os.path.dirname(report_path), exist_ok=True)
+        
+        with open(report_path, 'w', encoding='utf-8') as f:
+            json.dump(report, f, ensure_ascii=False, indent=2, default=str)
+        
+        logger.info(f"[初查报告] 报告已生成: {report_path}")
+        
+        return JSONResponse(content={
+            "success": True,
+            "report": report,
+            "report_file": report_filename
+        })
+    
+    except Exception as e:
+        logger.error(f"初查报告生成失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+
+@app.get("/api/investigation-report/{filename}")
+async def download_investigation_report(filename: str):
+    """
+    下载生成的初查报告文件
+    """
+    try:
+        report_path = os.path.join(config.OUTPUT_DIR, 'reports', filename)
+        
+        if not os.path.exists(report_path):
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "error": "报告文件不存在"}
+            )
+        
+        with open(report_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        import urllib.parse
+        encoded_filename = urllib.parse.quote(filename)
+        
+        return Response(
+            content=content,
+            media_type="application/json; charset=utf-8",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"}
+        )
+    
+    except Exception as e:
+        logger.error(f"下载报告失败: {e}")
         return JSONResponse(
             status_code=500,
             content={"success": False, "error": str(e)}

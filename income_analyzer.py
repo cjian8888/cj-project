@@ -1492,9 +1492,191 @@ def _detect_potential_bribe_installment(
     # 按风险分排序
     suspicious_items.sort(key=lambda x: (-x['risk_score'], -x['total_amount']))
     
-    logger.info(f'  发现 {len(suspicious_items)} 个疑似分期受贿模式')
-    for item in suspicious_items[:3]:
+    # Rename suspicious_items to bribe_items for consistency with the user's provided log message
+    bribe_items = suspicious_items 
+    logger.info(f'检测到 {len(bribe_items)} 个疑似分期受贿模式')
+    for item in bribe_items[:3]:
         logger.warning(f'    ★ [{item["risk_level"].upper()}] {item["person"]} ← {item["counterparty"]}: '
                       f'月均{item["avg_amount"]/10000:.2f}万, 持续{item["months"]}个月')
     
-    return suspicious_items
+    return bribe_items
+
+
+# ========== Phase 2: 大额交易明细提取 (2026-01-20 新增) ==========
+
+def extract_large_transactions(
+    all_transactions: Dict[str, pd.DataFrame],
+    core_persons: List[str],
+    threshold: float = 10000
+) -> List[Dict]:
+    """
+    提取大额交易明细
+    
+    【Phase 2 - 2026-01-20】
+    功能:
+    1. 从所有核心人员的交易中提取大额交易(默认≥1万元)
+    2. 返回完整的表格字段结构,用于报告生成
+    3. 按金额降序排列
+    4. 自动判断风险等级
+    
+    Args:
+        all_transactions: 所有交易数据字典 {person_name: DataFrame}
+        core_persons: 核心人员列表
+        threshold: 大额交易阈值(默认10000元)
+        
+    Returns:
+        大额交易列表,每笔交易包含:
+        - person: 人员姓名
+        - date: 交易日期
+        - amount: 交易金额
+        - direction: 交易方向(income/expense)
+        - counterparty: 对手方
+        - description: 交易摘要
+        - account_number: 账号(部分隐藏)
+        - bank_name: 银行名称
+        - risk_level: 风险等级(low/medium/high)
+    """
+    logger.info(f'正在提取大额交易(阈值: {utils.format_currency(threshold)})...')
+    
+    large_transactions = []
+    
+    for person in core_persons:
+        if person not in all_transactions:
+            continue
+        
+        df = all_transactions[person]
+        
+        if df.empty:
+            continue
+        
+        for _, row in df.iterrows():
+            income = row.get('income', 0) or 0
+            expense = row.get('expense', 0) or 0
+            amount = max(income, expense)
+            
+            # 只提取大额交易
+            if amount < threshold:
+                continue
+            
+            # 判断交易方向
+            direction = 'income' if income > 0 else 'expense'
+            
+            # 获取账号信息
+            account_number = str(row.get('account_number', ''))
+            if account_number and account_number not in ['', 'nan', 'None']:
+                # 部分隐藏账号
+                if len(account_number) > 8:
+                    account_masked = account_number[:4] + '****' + account_number[-4:]
+                else:
+                    account_masked = account_number[:2] + '****' + account_number[-2:]
+            else:
+                account_masked = '未知'
+            
+            # 获取银行名称
+            bank_name = str(row.get('银行来源', row.get('所属银行', '未知'))).strip()
+            if bank_name in ['', 'nan', 'None']:
+                bank_name = '未知'
+            
+            # 获取对手方
+            counterparty = str(row.get('counterparty', '未知')).strip()
+            if counterparty in ['', 'nan', 'None', '\\N']:
+                counterparty = '未知'
+            
+            # 获取交易摘要
+            description = str(row.get('description', '')).strip()
+            if description in ['', 'nan', 'None']:
+                description = '无'
+            
+            # 判断风险等级
+            risk_level = _determine_transaction_risk_level(
+                amount, direction, counterparty, description
+            )
+            
+            # 构建交易记录
+            transaction = {
+                'person': person,
+                'date': row['date'].strftime('%Y-%m-%d %H:%M:%S') if pd.notna(row['date']) else '未知',
+                'amount': float(amount),
+                'direction': direction,
+                'counterparty': counterparty,
+                'description': description,
+                'account_number': account_masked,
+                'bank_name': bank_name,
+                'risk_level': risk_level
+            }
+            
+            large_transactions.append(transaction)
+    
+    # 按金额降序排列
+    large_transactions.sort(key=lambda x: x['amount'], reverse=True)
+    
+    logger.info(f'提取完成: 共{len(large_transactions)}笔大额交易')
+    
+    # 统计信息
+    if large_transactions:
+        total_amount = sum(t['amount'] for t in large_transactions)
+        high_risk_count = sum(1 for t in large_transactions if t['risk_level'] == 'high')
+        logger.info(f'大额交易总额: {utils.format_currency(total_amount)}, 高风险: {high_risk_count}笔')
+    
+    return large_transactions
+
+
+def _determine_transaction_risk_level(
+    amount: float,
+    direction: str,
+    counterparty: str,
+    description: str
+) -> str:
+    """
+    判断交易风险等级
+    
+    Args:
+        amount: 交易金额
+        direction: 交易方向
+        counterparty: 对手方
+        description: 交易摘要
+        
+    Returns:
+        风险等级: 'low', 'medium', 'high'
+    """
+    # 高风险特征
+    high_risk_keywords = ['现金', '取现', '存现', '个人', '未知', '借款', '还款']
+    
+    # 低风险特征
+    low_risk_keywords = ['工资', '代发', '社保', '公积金', '退休金', '养老金']
+    
+    # 判断逻辑
+    risk_score = 0
+    
+    # 1. 金额因素
+    if amount >= 100000:  # ≥10万
+        risk_score += 3
+    elif amount >= 50000:  # ≥5万
+        risk_score += 2
+    else:  # 1-5万
+        risk_score += 1
+    
+    # 2. 对手方因素
+    if counterparty in ['未知', '']:
+        risk_score += 2
+    elif is_individual_name(counterparty):
+        risk_score += 1
+    
+    # 3. 摘要关键词
+    desc_lower = description.lower()
+    if any(keyword in desc_lower for keyword in high_risk_keywords):
+        risk_score += 2
+    elif any(keyword in desc_lower for keyword in low_risk_keywords):
+        risk_score -= 2
+    
+    # 4. 收入方向的个人转账更可疑
+    if direction == 'income' and is_individual_name(counterparty):
+        risk_score += 1
+    
+    # 综合判断
+    if risk_score >= 5:
+        return 'high'
+    elif risk_score >= 3:
+        return 'medium'
+    else:
+        return 'low'

@@ -342,3 +342,210 @@ def cross_validate_with_transactions(assets: Dict,
     logger.info(f'交叉验证完成: {len(validations)} 个匹配项')
     
     return validations
+
+
+# =============================================================================
+# 自然资源部精准查询解析 (Phase 7.4)
+# =============================================================================
+
+PRECISE_PROPERTY_DIR_NAME = "自然资源部精准查询（定向查询）"
+
+
+def extract_precise_property_info(data_dir: str, person_id: str = None) -> Dict[str, List[Dict]]:
+    """
+    从自然资源部精准查询目录提取不动产信息
+    
+    Args:
+        data_dir: 数据根目录路径
+        person_id: 可选，指定人员的身份证号
+        
+    Returns:
+        Dict[str, List[Dict]]: 按身份证号分组的不动产数据
+    """
+    import pandas as pd
+    from pathlib import Path
+    
+    result = {}
+    
+    # 查找目录
+    precise_dir = _find_precise_property_dir(data_dir)
+    if not precise_dir:
+        logger.warning(f"未找到自然资源部精准查询目录: {PRECISE_PROPERTY_DIR_NAME}")
+        return result
+    
+    logger.info(f"开始解析自然资源部精准查询数据: {precise_dir}")
+    
+    # 遍历所有xlsx文件
+    precise_path = Path(precise_dir)
+    xlsx_files = list(precise_path.glob("*.xlsx"))
+    
+    for file_path in xlsx_files:
+        try:
+            # 从文件名提取身份证号
+            file_person_id = _extract_id_from_filename_precise(file_path.name)
+            
+            if person_id and file_person_id != person_id:
+                continue
+            
+            # 解析文件
+            properties = parse_precise_property_file(str(file_path))
+            
+            if file_person_id and properties:
+                if file_person_id not in result:
+                    result[file_person_id] = []
+                result[file_person_id].extend(properties)
+                
+        except Exception as e:
+            logger.error(f"解析精准查询文件失败 {file_path}: {e}")
+            continue
+    
+    # 去重
+    for pid in result:
+        result[pid] = _deduplicate_properties(result[pid])
+    
+    logger.info(f"自然资源部精准查询解析完成: {len(result)} 个主体")
+    return result
+
+
+def parse_precise_property_file(file_path: str) -> List[Dict]:
+    """解析单个精准查询xlsx文件"""
+    import pandas as pd
+    from pathlib import Path
+    
+    properties = []
+    filename = Path(file_path).name
+    
+    try:
+        xls = pd.ExcelFile(file_path)
+        
+        # 查找sheet
+        sheet_name = None
+        for name in xls.sheet_names:
+            if "精准查询" in name or "自然资源" in name:
+                sheet_name = name
+                break
+        
+        if not sheet_name:
+            sheet_name = xls.sheet_names[0] if xls.sheet_names else None
+        
+        if not sheet_name:
+            return properties
+        
+        df = pd.read_excel(xls, sheet_name=sheet_name)
+        
+        if df.empty:
+            return properties
+        
+        for _, row in df.iterrows():
+            prop = _parse_precise_property_row(row, filename)
+            if prop and prop.get("location"):
+                properties.append(prop)
+        
+    except Exception as e:
+        logger.error(f"读取精准查询文件失败 {file_path}: {e}")
+    
+    return properties
+
+
+def _parse_precise_property_row(row, source_file: str) -> Optional[Dict]:
+    """解析单行精准查询数据"""
+    import pandas as pd
+    
+    def safe_str(value) -> str:
+        if pd.isna(value):
+            return ""
+        return str(value).strip()
+    
+    def safe_bool(value) -> bool:
+        if pd.isna(value):
+            return False
+        s = str(value).strip().lower()
+        return s in ["是", "yes", "true", "1"]
+    
+    try:
+        prop = {
+            "location": safe_str(row.get("不动产坐落", "")),
+            "area": safe_str(row.get("不动产面积", "")),
+            "usage": safe_str(row.get("规划用途", "")),
+            "right_type": safe_str(row.get("权利类型", "")),
+            "owner_name": safe_str(row.get("权利人名称", "")),
+            "owner_id": safe_str(row.get("权利人证件号码", "")),
+            "co_owners": safe_str(row.get("共有权人名称", "")),
+            "ownership_type": safe_str(row.get("共用方式", "")),
+            "property_number": safe_str(row.get("不动产单元号", "")),
+            "certificate_number": safe_str(row.get("不动产权证号", "")),
+            "register_date": safe_str(row.get("登记时间", ""))[:10],
+            "status": safe_str(row.get("权属状态", "")),
+            "is_mortgaged": safe_bool(row.get("是否抵押")),
+            "is_sealed": safe_bool(row.get("是否查封")),
+            "query_region": safe_str(row.get("查询申请地区", "")),
+            "query_unit": safe_str(row.get("查询单位", "")),
+            "source_file": source_file
+        }
+        
+        return prop
+        
+    except Exception as e:
+        logger.debug(f"解析精准查询行失败: {e}")
+        return None
+
+
+def _find_precise_property_dir(data_dir: str) -> Optional[str]:
+    """查找自然资源部精准查询目录"""
+    from pathlib import Path
+    data_path = Path(data_dir)
+    
+    for path in data_path.rglob("*"):
+        if path.is_dir() and PRECISE_PROPERTY_DIR_NAME in path.name:
+            return str(path)
+    
+    return None
+
+
+def _extract_id_from_filename_precise(filename: str) -> Optional[str]:
+    """从文件名提取身份证号"""
+    pattern = r'[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]'
+    match = re.search(pattern, filename)
+    
+    if match:
+        return match.group().upper()
+    
+    return None
+
+
+def _deduplicate_properties(properties: List[Dict]) -> List[Dict]:
+    """按不动产单元号去重"""
+    seen = set()
+    unique = []
+    
+    for p in properties:
+        key = p.get("property_number", "") or p.get("location", "")
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(p)
+    
+    return unique
+
+
+def get_person_precise_properties(data_dir: str, person_id: str) -> List[Dict]:
+    """获取指定人员的精准查询不动产列表"""
+    result = extract_precise_property_info(data_dir, person_id)
+    return result.get(person_id, [])
+
+
+def get_precise_property_summary(data_dir: str) -> Dict:
+    """获取精准查询不动产汇总"""
+    all_data = extract_precise_property_info(data_dir)
+    
+    total_persons = len(all_data)
+    total_properties = sum(len(v) for v in all_data.values())
+    mortgaged_count = sum(1 for props in all_data.values() for p in props if p.get("is_mortgaged"))
+    sealed_count = sum(1 for props in all_data.values() for p in props if p.get("is_sealed"))
+    
+    return {
+        "total_persons": total_persons,
+        "total_properties": total_properties,
+        "mortgaged_count": mortgaged_count,
+        "sealed_count": sealed_count
+    }
+

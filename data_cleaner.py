@@ -444,6 +444,150 @@ def standardize_bank_fields(df: pd.DataFrame, bank_name: str = None) -> pd.DataF
     else:
         normalized['account_number'] = ''
     
+    # ========== Phase 1: 账户类型识别 (2026-01-20 新增) ==========
+    
+    # 7.1 账户类型识别 (借记卡/信用卡/理财账户/证券账户)
+    def classify_account_type(account_num: str, description: str, bank_name: str) -> str:
+        """
+        识别账户类型
+        
+        Args:
+            account_num: 账号
+            description: 交易摘要
+            bank_name: 银行名称
+            
+        Returns:
+            账户类型: 借记卡/信用卡/理财账户/证券账户
+        """
+        account_str = str(account_num).strip()
+        desc_str = str(description).upper()
+        bank_str = str(bank_name).upper()
+        
+        # 1. 基于账号长度和特征判断
+        account_len = len(account_str.replace(' ', ''))
+        
+        # 理财账户/证券账户特征
+        if any(kw in desc_str for kw in ['理财', '基金', '证券', '股票', '债券']):
+            if any(kw in bank_str for kw in ['证券', '基金']):
+                return '证券账户'
+            return '理财账户'
+        
+        # 基于账号长度判断
+        if 16 <= account_len <= 19:
+            # 标准银行卡长度
+            # 信用卡通常以特定数字开头
+            if account_str.startswith(('4', '5', '6')):
+                # 进一步通过摘要判断
+                if any(kw in desc_str for kw in ['信用卡', '贷记卡', 'CREDIT', '透支', '还款']):
+                    return '信用卡'
+                return '借记卡'
+            return '借记卡'
+        elif account_len < 16:
+            # 短账号可能是理财或证券账户
+            if any(kw in desc_str for kw in ['证券', '股票']):
+                return '证券账户'
+            return '理财账户'
+        else:
+            # 超长账号
+            return '其他'
+    
+    # 7.2 账户类别识别 (个人/对公/联名)
+    def classify_account_category(account_num: str, counterparty: str, description: str) -> str:
+        """
+        识别账户类别
+        
+        Args:
+            account_num: 账号
+            counterparty: 对手方
+            description: 交易摘要
+            
+        Returns:
+            账户类别: 个人账户/对公账户/联名账户
+        """
+        desc_str = str(description).upper()
+        cp_str = str(counterparty).upper()
+        
+        # 对公账户特征
+        if any(kw in desc_str for kw in ['对公', '公司', '企业', '单位']):
+            return '对公账户'
+        if any(kw in cp_str for kw in ['公司', '企业', '有限', '股份', '集团']):
+            return '对公账户'
+        
+        # 联名账户特征
+        if any(kw in desc_str for kw in ['联名', '共同', '夫妻']):
+            return '联名账户'
+        
+        # 默认为个人账户
+        return '个人账户'
+    
+    # 7.3 真实银行卡识别 (过滤基金/理财/证券账户)
+    def is_real_bank_card(account_num: str, account_type: str, bank_name: str) -> bool:
+        """
+        判断是否为真实银行卡
+        
+        Args:
+            account_num: 账号
+            account_type: 账户类型
+            bank_name: 银行名称
+            
+        Returns:
+            是否为真实银行卡
+        """
+        account_str = str(account_num).strip()
+        bank_str = str(bank_name).upper()
+        
+        # 排除条件1: 账户类型为理财或证券
+        if account_type in ['理财账户', '证券账户']:
+            return False
+        
+        # 排除条件2: 账号长度异常 (非16-19位)
+        account_len = len(account_str.replace(' ', ''))
+        if account_len < 16 or account_len > 19:
+            return False
+        
+        # 排除条件3: 银行名称包含基金/证券关键词
+        if any(kw in bank_str for kw in ['基金', '证券', '资管', '信托']):
+            return False
+        
+        # 排除条件4: 账号包含特殊关键词
+        if any(kw in account_str.upper() for kw in ['FUND', 'SEC', '基金', '理财']):
+            return False
+        
+        return True
+    
+    # 应用账户类型识别
+    normalized['account_type'] = normalized.apply(
+        lambda row: classify_account_type(
+            row['account_number'],
+            row['description'],
+            row.get('银行来源', bank_name or '')
+        ),
+        axis=1
+    )
+    
+    # 应用账户类别识别
+    normalized['account_category'] = normalized.apply(
+        lambda row: classify_account_category(
+            row['account_number'],
+            row['counterparty'],
+            row['description']
+        ),
+        axis=1
+    )
+    
+    # 应用真实银行卡识别
+    normalized['is_real_bank_card'] = normalized.apply(
+        lambda row: is_real_bank_card(
+            row['account_number'],
+            row['account_type'],
+            row.get('银行来源', bank_name or '')
+        ),
+        axis=1
+    )
+    
+    logger.info(f'账户类型识别完成: {normalized["is_real_bank_card"].sum()}张真实银行卡, '
+                f'{(~normalized["is_real_bank_card"]).sum()}个非银行卡账户')
+    
     # 8. 交易流水号(用于精确去重)
     tx_id_col = None
     for col_name in config.BANK_FIELD_MAPPING.get('transaction_id', []):
@@ -497,12 +641,13 @@ def standardize_bank_fields(df: pd.DataFrame, bank_name: str = None) -> pd.DataF
     
     # 文本列：转为 category 类型节省内存（这是内存优化的关键）
     for col in ['description', 'counterparty', '数据来源', '银行来源', 'account_number', 'transaction_id',
-                'transaction_channel', 'sensitive_keywords']:  # Phase 0.1 新增字段
+                'transaction_channel', 'sensitive_keywords',
+                'account_type', 'account_category']:  # Phase 1 新增 account_type, account_category
         if col in normalized.columns:
             normalized[col] = normalized[col].astype('category')
     
     # 布尔列：转为 bool 类型
-    for col in ['is_cash', 'is_balance_zeroed']:  # Phase 0.1 新增 is_balance_zeroed
+    for col in ['is_cash', 'is_balance_zeroed', 'is_real_bank_card']:  # Phase 1 新增 is_real_bank_card
         if col in normalized.columns:
             normalized[col] = normalized[col].astype('bool')
     

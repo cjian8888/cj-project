@@ -262,3 +262,299 @@ def translate_risk_level(level: str) -> str:
         "info": "信息提示"
     }
     return level_map.get(level, level)
+
+
+# ============================================================
+# 初查报告结构定义 (2026-01-20 新增)
+# ============================================================
+
+@dataclass
+class InvestigationMeta:
+    """初查报告元信息"""
+    doc_number: str = ""                    # 文号，如 "国监查 [2026] 第 XXXXXX 号"
+    case_background: str = ""               # 案件背景
+    data_scope: str = ""                    # 数据范围，如 "2020年1月至2025年9月银行流水数据"
+    generated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    version: str = "1.0.0"
+    generator: str = "穿云审计初查报告引擎"
+
+
+@dataclass
+class FamilyMember:
+    """家庭成员"""
+    name: str = ""
+    relation: str = ""                      # 本人/配偶/子女/父/母/其他
+    has_data: bool = False                  # 是否有流水数据
+    id_number: str = ""                     # 身份证号（可选）
+
+
+@dataclass
+class FamilyAssetsSummary:
+    """家庭资产汇总"""
+    real_estate_count: int = 0              # 房产套数
+    real_estate_value: float = 0.0          # 房产价值（万元）
+    vehicle_count: int = 0                  # 车辆数量
+    deposits: float = 0.0                   # 存款总额（万元）
+    wealth_holdings: float = 0.0            # 理财持仓（万元）
+    total_assets: float = 0.0               # 总资产（万元）
+
+
+@dataclass
+class FamilySummary:
+    """家庭汇总"""
+    total_income: float = 0.0               # 家庭总收入
+    total_expense: float = 0.0              # 家庭总支出
+    net_income: float = 0.0                 # 家庭净收入（剔除互转）
+    net_expense: float = 0.0                # 家庭净支出（剔除互转）
+    internal_transfers: float = 0.0         # 家庭成员间互转总额
+    assets: FamilyAssetsSummary = field(default_factory=FamilyAssetsSummary)
+
+
+@dataclass
+class InvestigationFamily:
+    """初查报告家庭部分"""
+    primary_person: str = ""                # 核查对象（户主）
+    members: List[FamilyMember] = field(default_factory=list)
+    summary: FamilySummary = field(default_factory=FamilySummary)
+
+
+@dataclass
+class BankAccountInfo:
+    """银行账户信息"""
+    bank_name: str = ""                     # 银行名称
+    account_number: str = ""                # 账号（完整）
+    account_type: str = ""                  # 账户类别：个人账户/对公账户
+    card_type: str = ""                     # 卡类型：借记卡/信用卡/工资卡
+    status: str = ""                        # 账户状态：正常/冻结/注销
+    balance: float = 0.0                    # 当前余额
+    last_transaction_date: str = ""         # 最后交易日期
+
+
+@dataclass
+class YearlySalaryStats:
+    """年度工资统计"""
+    year: str = ""
+    total: float = 0.0
+    months: int = 0
+    avg_monthly: float = 0.0
+    transaction_count: int = 0
+
+
+@dataclass
+class PersonAssets:
+    """个人资产板块"""
+    # 工资
+    salary_total: float = 0.0               # 工资总额
+    salary_ratio: float = 0.0               # 工资占收入比例
+    yearly_salary: List[YearlySalaryStats] = field(default_factory=list)
+    
+    # 理财
+    wealth_total: float = 0.0               # 理财交易总额
+    wealth_holding: float = 0.0             # 估算持仓
+    
+    # 银行账户
+    bank_accounts: List[BankAccountInfo] = field(default_factory=list)
+    bank_account_count: int = 0
+
+
+@dataclass
+class IncomeGapAnalysis:
+    """收支匹配分析"""
+    total_income: float = 0.0
+    salary_income: float = 0.0
+    ratio: float = 0.0                      # 工资占比
+    verdict: str = ""                       # 判定结论
+
+
+@dataclass
+class LargeCashAnalysis:
+    """大额现金分析"""
+    total_amount: float = 0.0
+    deposit_amount: float = 0.0             # 存现总额
+    withdraw_amount: float = 0.0            # 取现总额
+    count: int = 0
+    transactions: List[Dict] = field(default_factory=list)
+
+
+@dataclass
+class LargeTransferAnalysis:
+    """大额转账分析"""
+    threshold: float = 50000.0              # 阈值（元）
+    count: int = 0
+    total_amount: float = 0.0
+    transactions: List[Dict] = field(default_factory=list)
+
+
+@dataclass
+class CounterpartyFlow:
+    """按对手方的资金流向"""
+    counterparty: str = ""                  # 对手方名称
+    total_amount: float = 0.0               # 总金额
+    count: int = 0                          # 交易笔数
+    percentage: float = 0.0                 # 占比
+    category: str = ""                      # 分类：工资/理财/个人转账/来源不明等
+
+
+@dataclass
+class InflowAnalysis:
+    """资金流入分析"""
+    total_inflow: float = 0.0               # 总流入（剔除内部互转）
+    top_sources: List[CounterpartyFlow] = field(default_factory=list)  # Top来源
+    category_summary: Dict[str, float] = field(default_factory=dict)   # 按类别汇总
+    unknown_source_amount: float = 0.0      # 来源不明金额
+    unknown_source_ratio: float = 0.0       # 来源不明占比
+    # 三类收入分类（新增）
+    legitimate_income: float = 0.0          # 合法收入金额
+    legitimate_ratio: float = 0.0           # 合法收入占比
+    suspicious_income: float = 0.0          # 可疑收入金额
+    suspicious_ratio: float = 0.0           # 可疑收入占比
+
+
+@dataclass
+class OutflowAnalysis:
+    """资金流出分析"""
+    total_outflow: float = 0.0              # 总流出（剔除内部互转）
+    top_destinations: List[CounterpartyFlow] = field(default_factory=list)  # Top去向
+    category_summary: Dict[str, float] = field(default_factory=dict)   # 按类别汇总
+    large_single_payments: List[Dict] = field(default_factory=list)    # 大额单笔支出
+
+
+@dataclass
+class ExternalDataPlaceholder:
+    """外部数据占位（需外部数据源支持）"""
+    available: bool = False                 # 是否有数据
+    message: str = "需要外部数据源支持"     # 提示信息
+    data: Dict = field(default_factory=dict)  # 实际数据（如有）
+
+
+@dataclass
+class PersonAnalysis:
+    """个人分析板块"""
+    income_gap: IncomeGapAnalysis = field(default_factory=IncomeGapAnalysis)
+    inflow_analysis: InflowAnalysis = field(default_factory=InflowAnalysis)      # 新增：资金流入分析
+    outflow_analysis: OutflowAnalysis = field(default_factory=OutflowAnalysis)   # 新增：资金流出分析
+    large_cash: LargeCashAnalysis = field(default_factory=LargeCashAnalysis)
+    large_transfers: LargeTransferAnalysis = field(default_factory=LargeTransferAnalysis)
+    third_party_total: float = 0.0          # 第三方支付总额
+    suspicious_count: int = 0               # 可疑交易笔数
+    # 外部数据占位
+    identity_info: ExternalDataPlaceholder = field(default_factory=lambda: ExternalDataPlaceholder(message="基本身份信息需外部数据源"))
+    property_info: ExternalDataPlaceholder = field(default_factory=lambda: ExternalDataPlaceholder(message="房产信息需不动产数据"))
+    vehicle_info: ExternalDataPlaceholder = field(default_factory=lambda: ExternalDataPlaceholder(message="车辆信息需外部数据源"))
+
+
+@dataclass
+class MemberDetails:
+    """家庭成员详情"""
+    name: str = ""
+    relation: str = ""                      # 与核查对象关系
+    total_income: float = 0.0
+    total_expense: float = 0.0
+    transaction_count: int = 0
+    assets: PersonAssets = field(default_factory=PersonAssets)
+    analysis: PersonAnalysis = field(default_factory=PersonAnalysis)
+
+
+@dataclass
+class InvestigationUnitFlows:
+    """与调查单位资金往来"""
+    has_flows: bool = False
+    total_amount: float = 0.0
+    percentage: float = 0.0                 # 占公司总流水比例
+    transactions: List[Dict] = field(default_factory=list)
+
+
+@dataclass
+class KeyPersonTransfers:
+    """与关键人员关联交易"""
+    has_transfers: bool = False
+    total_amount: float = 0.0
+    transfer_count: int = 0
+    unique_persons: int = 0
+    details: List[Dict] = field(default_factory=list)
+
+
+@dataclass
+class CompanyCashAnalysis:
+    """公司现金交易分析"""
+    has_cash: bool = False
+    total_amount: float = 0.0
+    deposit_amount: float = 0.0
+    withdraw_amount: float = 0.0
+    deposit_count: int = 0
+    withdraw_count: int = 0
+
+
+@dataclass
+class CompanyReport:
+    """公司报告"""
+    company_name: str = ""
+    
+    # 资金规模
+    total_income: float = 0.0
+    total_expense: float = 0.0
+    transaction_count: int = 0
+    account_count: int = 0
+    
+    # 与调查单位往来
+    investigation_unit_flows: InvestigationUnitFlows = field(default_factory=InvestigationUnitFlows)
+    
+    # 与关键人员关联
+    key_person_transfers: KeyPersonTransfers = field(default_factory=KeyPersonTransfers)
+    
+    # 现金交易
+    cash_analysis: CompanyCashAnalysis = field(default_factory=CompanyCashAnalysis)
+    
+    # 银行账户
+    bank_accounts: List[BankAccountInfo] = field(default_factory=list)
+
+
+@dataclass
+class IssueItem:
+    """问题条目"""
+    person: str = ""                        # 涉及人员/公司
+    issue_type: str = ""                    # 问题类型：收支不抵/异常资金往来/资金来源不明
+    description: str = ""                   # 问题描述
+    severity: str = "medium"                # 严重程度：high/medium/low
+    # 审计专业分类（新增）
+    verification_status: str = "need_verification"  # confirmed(基本确认)/highly_suspicious(高度可疑)/need_verification(需核实)/normal(正常)
+    amount: float = 0.0                     # 涉及金额
+    evidence_refs: List[str] = field(default_factory=list)
+
+
+@dataclass
+class InvestigationConclusion:
+    """综合研判"""
+    summary_text: str = ""                  # 研判意见
+    issues: List[IssueItem] = field(default_factory=list)
+    next_steps: List[str] = field(default_factory=list)
+    high_risk_count: int = 0
+    medium_risk_count: int = 0
+    low_risk_count: int = 0
+    # 按确认程度统计（新增）
+    confirmed_count: int = 0                # 基本确认
+    highly_suspicious_count: int = 0        # 高度可疑
+    need_verification_count: int = 0        # 需核实
+    total_amount: float = 0.0               # 问题涉及总金额
+
+
+@dataclass
+class InvestigationReport:
+    """
+    初查报告完整结构
+    
+    按照 report_guidelines.md 定义的标准格式
+    """
+    meta: InvestigationMeta = field(default_factory=InvestigationMeta)
+    family: InvestigationFamily = field(default_factory=InvestigationFamily)
+    member_details: List[MemberDetails] = field(default_factory=list)
+    companies: List[CompanyReport] = field(default_factory=list)
+    conclusion: InvestigationConclusion = field(default_factory=InvestigationConclusion)
+    
+    def to_dict(self) -> Dict:
+        """转换为字典"""
+        return asdict(self)
+    
+    def to_json(self, indent: int = 2) -> str:
+        """转换为 JSON 字符串"""
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent, default=str)

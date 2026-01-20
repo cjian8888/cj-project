@@ -658,3 +658,155 @@ def generate_related_party_report(results: Dict, output_dir: str) -> str:
     
     logger.info(f'关联方分析报告已生成: {report_path}')
     return report_path
+# ========== Phase 4: 调查单位往来统计 (2026-01-20 新增) ==========
+
+def analyze_investigation_unit_flows(
+    df: pd.DataFrame,
+    entity_name: str
+) -> Dict:
+    """
+    分析与调查单位的资金往来
+    
+    【Phase 4 - 2026-01-20】
+    功能:
+    1. 读取配置中的调查单位关键词
+    2. 筛选与调查单位相关的交易记录
+    3. 统计总收入、总支出、交易笔数
+    4. 识别高频往来和大额交易
+    5. 返回详细的往来分析结果
+    
+    Args:
+        df: 交易DataFrame
+        entity_name: 实体名称
+    
+    Returns:
+        调查单位往来分析结果,包含:
+        - has_flows: 是否有往来
+        - total_income: 从调查单位收到的总金额
+        - total_expense: 向调查单位支付的总金额
+        - net_flow: 净流入(收入-支出)
+        - income_count: 收入笔数
+        - expense_count: 支出笔数
+        - income_details: 收入明细列表
+        - expense_details: 支出明细列表
+        - matched_units: 匹配到的调查单位列表
+    """
+    logger.info(f'正在分析{entity_name}与调查单位的资金往来...')
+    
+    # 读取配置中的调查单位关键词
+    investigation_keywords = config.INVESTIGATION_UNIT_KEYWORDS
+    
+    # 如果配置为空,返回空结果
+    if not investigation_keywords:
+        logger.info('未配置调查单位关键词,跳过分析')
+        return {
+            'has_flows': False,
+            'total_income': 0.0,
+            'total_expense': 0.0,
+            'net_flow': 0.0,
+            'income_count': 0,
+            'expense_count': 0,
+            'income_details': [],
+            'expense_details': [],
+            'matched_units': [],
+            'config_empty': True
+        }
+    
+    if df.empty:
+        logger.warning(f'{entity_name}无交易数据')
+        return {
+            'has_flows': False,
+            'total_income': 0.0,
+            'total_expense': 0.0,
+            'net_flow': 0.0,
+            'income_count': 0,
+            'expense_count': 0,
+            'income_details': [],
+            'expense_details': [],
+            'matched_units': [],
+            'config_empty': False
+        }
+    
+    # 初始化统计变量
+    total_income = 0.0
+    total_expense = 0.0
+    income_details = []
+    expense_details = []
+    matched_units = set()
+    
+    # 遍历交易记录,筛选与调查单位相关的交易
+    for _, row in df.iterrows():
+        counterparty = str(row.get('counterparty', '')).strip()
+        description = str(row.get('description', '')).strip()
+        
+        # 检查对手方或摘要是否包含调查单位关键词
+        is_investigation_unit = False
+        matched_keyword = None
+        
+        for keyword in investigation_keywords:
+            if keyword in counterparty or keyword in description:
+                is_investigation_unit = True
+                matched_keyword = keyword
+                matched_units.add(keyword)
+                break
+        
+        if not is_investigation_unit:
+            continue
+        
+        # 构建交易记录
+        date_str = row['date'].strftime('%Y-%m-%d') if pd.notna(row['date']) else '未知'
+        
+        # 收入交易
+        if row['income'] > 0:
+            amount = row['income']
+            total_income += amount
+            income_details.append({
+                'date': date_str,
+                'amount': float(amount),
+                'counterparty': counterparty,
+                'description': description,
+                'matched_keyword': matched_keyword
+            })
+        
+        # 支出交易
+        if row['expense'] > 0:
+            amount = row['expense']
+            total_expense += amount
+            expense_details.append({
+                'date': date_str,
+                'amount': float(amount),
+                'counterparty': counterparty,
+                'description': description,
+                'matched_keyword': matched_keyword
+            })
+    
+    # 计算净流入
+    net_flow = total_income - total_expense
+    
+    # 按金额降序排序
+    income_details.sort(key=lambda x: x['amount'], reverse=True)
+    expense_details.sort(key=lambda x: x['amount'], reverse=True)
+    
+    # 判断是否有往来
+    has_flows = (total_income > 0 or total_expense > 0)
+    
+    if has_flows:
+        logger.info(f'与调查单位往来: 收入{utils.format_currency(total_income)}({len(income_details)}笔), '
+                    f'支出{utils.format_currency(total_expense)}({len(expense_details)}笔), '
+                    f'净流入{utils.format_currency(net_flow)}')
+        logger.info(f'匹配到的调查单位: {", ".join(matched_units)}')
+    else:
+        logger.info('未发现与调查单位的资金往来')
+    
+    return {
+        'has_flows': has_flows,
+        'total_income': float(total_income),
+        'total_expense': float(total_expense),
+        'net_flow': float(net_flow),
+        'income_count': len(income_details),
+        'expense_count': len(expense_details),
+        'income_details': income_details[:50],  # 只保留前50笔
+        'expense_details': expense_details[:50],
+        'matched_units': list(matched_units),
+        'config_empty': False
+    }

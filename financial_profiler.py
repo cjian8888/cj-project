@@ -1247,6 +1247,13 @@ def generate_profile_report(df: pd.DataFrame, entity_name: str) -> Dict:
 
     # 交易分类
     categories = categorize_transactions(df)
+    
+    # 【Phase 2 新增】年度工资统计
+    yearly_salary = calculate_yearly_salary(df, entity_name=entity_name)
+    
+    # 【Phase 4 新增】收入来源分类
+    income_df = df[df['income'] > 0].copy()
+    income_classification = classify_income_sources(income_df, entity_name=entity_name)
 
     # 计算真实收入/支出
     real_income, real_expense = _calculate_real_income_expense(income_structure, wealth_management, fund_flow)
@@ -1262,6 +1269,8 @@ def generate_profile_report(df: pd.DataFrame, entity_name: str) -> Dict:
         'wealth_management': wealth_management,
         'large_cash': large_cash,
         'categories': categories,
+        'yearly_salary': yearly_salary,  # Phase 2 新增字段
+        'income_classification': income_classification,  # Phase 4 新增字段
         'summary': summary
     }
 
@@ -1383,3 +1392,667 @@ def categorize_transactions(df: pd.DataFrame) -> Dict[str, List[Dict]]:
             categories['large_amount'].append(record)
 
     return categories
+
+
+# ========== Phase 1: 银行账户提取 (2026-01-20 新增) ==========
+
+def extract_bank_accounts(df: pd.DataFrame) -> List[Dict]:
+    """
+    从清洗后的流水数据中提取唯一银行账户列表
+    
+    【Phase 1 - 2026-01-20】
+    功能:
+    1. 提取所有唯一的银行账户
+    2. 账户去重(同一账号只保留一条)
+    3. 合并多银行信息
+    4. 判断账户状态(正常/停用)
+    5. 过滤非真实银行卡
+    
+    Args:
+        df: 清洗后的交易DataFrame
+        
+    Returns:
+        银行账户列表,每个账户包含:
+        - 账号(部分隐藏)
+        - 银行名称
+        - 账户类型(借记卡/信用卡/理财账户/证券账户)
+        - 账户类别(个人账户/对公账户/联名账户)
+        - 账户状态(正常/停用)
+        - 最后交易时间
+        - 是否为真实银行卡
+    """
+    logger.info('正在提取银行账户列表...')
+    
+    if df.empty:
+        logger.warning('数据为空,无法提取账户')
+        return []
+    
+    # 检查必需字段
+    required_fields = ['account_number', 'date']
+    if not all(field in df.columns for field in required_fields):
+        logger.error(f'缺少必需字段: {required_fields}')
+        return []
+    
+    # 按账号分组,提取账户信息
+    accounts_dict = {}
+    
+    for _, row in df.iterrows():
+        account_num = str(row['account_number']).strip()
+        
+        # 跳过空账号
+        if not account_num or account_num in ['', 'nan', 'None', 'NaN']:
+            continue
+        
+        # 如果账号已存在,更新信息
+        if account_num in accounts_dict:
+            # 更新最后交易时间
+            if pd.notna(row['date']) and row['date'] > accounts_dict[account_num]['last_transaction_date']:
+                accounts_dict[account_num]['last_transaction_date'] = row['date']
+            
+            # 合并银行名称(如果不同)
+            bank_name = str(row.get('银行来源', row.get('所属银行', ''))).strip()
+            if bank_name and bank_name not in accounts_dict[account_num]['banks']:
+                accounts_dict[account_num]['banks'].append(bank_name)
+        else:
+            # 新账号,创建记录
+            accounts_dict[account_num] = {
+                'account_number': account_num,
+                'account_number_masked': _mask_account_number(account_num),
+                'banks': [str(row.get('银行来源', row.get('所属银行', ''))).strip()],
+                'account_type': row.get('account_type', '未知'),
+                'account_category': row.get('account_category', '个人账户'),
+                'is_real_bank_card': row.get('is_real_bank_card', True),
+                'first_transaction_date': row['date'] if pd.notna(row['date']) else None,
+                'last_transaction_date': row['date'] if pd.notna(row['date']) else None
+            }
+    
+    # 转换为列表并判断账户状态
+    accounts_list = []
+    current_time = pd.Timestamp.now()
+    
+    for account_num, account_info in accounts_dict.items():
+        # 判断账户状态
+        if account_info['last_transaction_date']:
+            days_since_last = (current_time - account_info['last_transaction_date']).days
+            # 超过180天无交易视为停用
+            account_status = '停用' if days_since_last > 180 else '正常'
+        else:
+            account_status = '未知'
+        
+        # 合并银行名称
+        bank_names = ', '.join([b for b in account_info['banks'] if b and b != 'nan'])
+        
+        accounts_list.append({
+            '账号': account_info['account_number_masked'],
+            '完整账号': account_info['account_number'],  # 用于内部处理
+            '银行名称': bank_names or '未知',
+            '账户类型': account_info['account_type'],
+            '账户类别': account_info['account_category'],
+            '账户状态': account_status,
+            '首次交易时间': account_info['first_transaction_date'],
+            '最后交易时间': account_info['last_transaction_date'],
+            '是否真实银行卡': account_info['is_real_bank_card']
+        })
+    
+    # 按最后交易时间降序排序
+    accounts_list.sort(key=lambda x: x['最后交易时间'] if x['最后交易时间'] else pd.Timestamp.min, reverse=True)
+    
+    # 统计信息
+    total_accounts = len(accounts_list)
+    real_bank_cards = sum(1 for a in accounts_list if a['是否真实银行卡'])
+    active_accounts = sum(1 for a in accounts_list if a['账户状态'] == '正常')
+    
+    logger.info(f'账户提取完成: 共{total_accounts}个账户, 其中真实银行卡{real_bank_cards}张, 正常状态{active_accounts}个')
+    
+    return accounts_list
+
+
+def _mask_account_number(account_num: str) -> str:
+    """
+    账号部分隐藏(保留前4位和后4位)
+    
+    Args:
+        account_num: 完整账号
+        
+    Returns:
+        部分隐藏的账号
+    """
+    account_str = str(account_num).strip()
+    
+    if len(account_str) <= 8:
+        # 账号太短,只隐藏中间部分
+        return account_str[:2] + '****' + account_str[-2:]
+    else:
+        # 标准隐藏:保留前4位和后4位
+        return account_str[:4] + '****' + account_str[-4:]
+
+
+# ========== Phase 2: 年度工资统计 (2026-01-20 新增) ==========
+
+def calculate_yearly_salary(df: pd.DataFrame, entity_name: str = None) -> Dict:
+    """
+    计算年度工资统计
+    
+    【Phase 2 - 2026-01-20】
+    功能:
+    1. 自动识别数据中的所有年份
+    2. 按年份分组统计工资收入
+    3. 计算每年的月度工资明细
+    4. 返回结构化的年度工资数据
+    
+    Args:
+        df: 交易DataFrame
+        entity_name: 实体名称(用于工资识别)
+        
+    Returns:
+        年度工资统计字典,包含:
+        - yearly_stats: 按年统计 {year: {total, months, avg_monthly}}
+        - monthly_details: 月度明细列表
+        - total_salary: 总工资收入
+        - year_range: 年份范围
+    """
+    logger.info(f'正在计算{entity_name}的年度工资统计...')
+    
+    if df.empty:
+        logger.warning('数据为空,无法计算年度工资')
+        return {
+            'yearly_stats': {},
+            'monthly_details': [],
+            'total_salary': 0.0,
+            'year_range': None
+        }
+    
+    # 先调用现有的收支结构分析获取工资明细
+    income_structure = calculate_income_structure(df, entity_name=entity_name)
+    salary_details = income_structure.get('salary_details', [])
+    
+    if not salary_details:
+        logger.warning(f'{entity_name}无工资性收入')
+        return {
+            'yearly_stats': {},
+            'monthly_details': [],
+            'total_salary': 0.0,
+            'year_range': None
+        }
+    
+    # 转换为DataFrame便于处理
+    salary_df = pd.DataFrame(salary_details)
+    
+    # 确保日期列是datetime类型
+    salary_df['日期'] = pd.to_datetime(salary_df['日期'])
+    
+    # 提取年份和月份
+    salary_df['年份'] = salary_df['日期'].dt.year
+    salary_df['月份'] = salary_df['日期'].dt.month
+    
+    # 按年份统计
+    yearly_stats = {}
+    years = sorted(salary_df['年份'].unique())
+    
+    for year in years:
+        year_data = salary_df[salary_df['年份'] == year]
+        total_amount = year_data['金额'].sum()
+        month_count = year_data['月份'].nunique()  # 有工资记录的月份数
+        avg_monthly = total_amount / month_count if month_count > 0 else 0
+        
+        yearly_stats[int(year)] = {
+            'total': float(total_amount),
+            'months': int(month_count),
+            'avg_monthly': float(avg_monthly),
+            'transaction_count': len(year_data)
+        }
+    
+    # 构建月度明细
+    monthly_details = []
+    for _, row in salary_df.iterrows():
+        monthly_details.append({
+            'year': int(row['年份']),
+            'month': int(row['月份']),
+            'date': row['日期'].strftime('%Y-%m-%d'),
+            'amount': float(row['金额']),
+            'payer': row['对手方'],
+            'description': row['摘要'],
+            'reason': row['判定依据']
+        })
+    
+    # 按日期排序
+    monthly_details.sort(key=lambda x: x['date'])
+    
+    # 计算总工资和年份范围
+    total_salary = float(salary_df['金额'].sum())
+    year_range = (int(years[0]), int(years[-1])) if years else None
+    
+    logger.info(f'年度工资统计完成: {len(years)}个年份, 总工资{utils.format_currency(total_salary)}')
+    logger.info(f'年份范围: {year_range[0]}-{year_range[1]}' if year_range else '无数据')
+    
+    return {
+        'yearly_stats': yearly_stats,
+        'monthly_details': monthly_details,
+        'total_salary': total_salary,
+        'year_range': year_range
+    }
+
+
+# ========== Phase 2: 公司画像构建 (2026-01-20 新增) ==========
+
+def build_company_profile(df: pd.DataFrame, entity_name: str) -> Dict:
+    """
+    构建公司资金画像
+    
+    【Phase 2 - 2026-01-20】
+    功能:
+    1. 复用现有的画像生成逻辑
+    2. 移除不适用于公司的字段(如工资统计)
+    3. 添加公司特有的分析维度
+    
+    Args:
+        df: 交易DataFrame
+        entity_name: 公司名称
+        
+    Returns:
+        公司资金画像字典,包含:
+        - entity_type: 'company'
+        - 基础画像数据(复用个人画像结构)
+        - company_specific: 公司特有分析
+    """
+    logger.info(f'正在为公司 {entity_name} 生成资金画像...')
+    
+    if df.empty:
+        logger.warning(f'{entity_name} 无交易数据')
+        return {
+            'entity_name': entity_name,
+            'entity_type': 'company',
+            'has_data': False
+        }
+    
+    # 复用现有的画像生成逻辑
+    # 注意: 不传入entity_name参数,因为公司不需要工资识别
+    income_structure = calculate_income_structure(df, entity_name=None)
+    fund_flow = analyze_fund_flow(df)
+    wealth_management = analyze_wealth_management(df, entity_name=None)
+    large_cash = extract_large_cash(df)
+    categories = categorize_transactions(df)
+    
+    # 计算真实收入/支出
+    real_income, real_expense = _calculate_real_income_expense(income_structure, wealth_management, fund_flow)
+    
+    # 公司特有分析
+    company_specific = _analyze_company_specific(df, entity_name)
+    
+    # 构建公司画像摘要(移除工资相关字段)
+    summary = {
+        'total_income': income_structure['total_income'],
+        'total_expense': income_structure['total_expense'],
+        'net_flow': income_structure['net_flow'],
+        'real_income': real_income,
+        'real_expense': real_expense,
+        'cash_ratio': (fund_flow['cash_income'] + fund_flow['cash_expense']) / (income_structure['total_income'] + income_structure['total_expense']) if (income_structure['total_income'] + income_structure['total_expense']) > 0 else 0,
+        'third_party_ratio': fund_flow['third_party_ratio'],
+        'large_cash_count': len(large_cash),
+        'wealth_transactions': wealth_management['total_transactions'],
+        'transaction_count': len(df),
+        'date_range': income_structure['date_range']
+    }
+    
+    profile = {
+        'entity_name': entity_name,
+        'entity_type': 'company',  # 标识为公司实体
+        'has_data': True,
+        'income_structure': income_structure,
+        'fund_flow': fund_flow,
+        'wealth_management': wealth_management,
+        'large_cash': large_cash,
+        'categories': categories,
+        'company_specific': company_specific,  # 公司特有分析
+        'summary': summary
+    }
+    
+    logger.info(f'{entity_name} 公司画像生成完成')
+    
+    # 【内存优化】强制执行垃圾回收
+    import gc
+    gc.collect()
+    
+    return profile
+
+
+def _analyze_company_specific(df: pd.DataFrame, company_name: str) -> Dict:
+    """
+    公司特有分析
+    
+    Args:
+        df: 交易DataFrame
+        company_name: 公司名称
+        
+    Returns:
+        公司特有分析字典,包含:
+        - to_individual_transfers: 公转私统计
+        - cash_withdrawal_pattern: 现金提取模式
+    """
+    logger.info(f'正在分析{company_name}的公司特有维度...')
+    
+    # 1. 公转私统计(向个人账户的转账)
+    to_individual_transfers = _analyze_to_individual_transfers(df)
+    
+    # 2. 现金提取模式分析
+    cash_withdrawal_pattern = _analyze_cash_withdrawal_pattern(df)
+    
+    return {
+        'to_individual_transfers': to_individual_transfers,
+        'cash_withdrawal_pattern': cash_withdrawal_pattern
+    }
+
+
+def _analyze_to_individual_transfers(df: pd.DataFrame) -> Dict:
+    """
+    分析公转私交易(公司向个人账户的转账)
+    
+    Args:
+        df: 交易DataFrame
+        
+    Returns:
+        公转私统计字典
+    """
+    import re
+    
+    # 筛选支出交易
+    expense_df = df[df['expense'] > 0].copy()
+    
+    if expense_df.empty:
+        return {
+            'total_amount': 0.0,
+            'count': 0,
+            'recipients': []
+        }
+    
+    # 识别个人姓名(2-4个汉字)
+    individual_transfers = []
+    total_amount = 0.0
+    
+    for _, row in expense_df.iterrows():
+        counterparty = str(row.get('counterparty', '')).strip()
+        
+        # 判断是否为个人姓名
+        if re.match(r'^[\u4e00-\u9fa5]{2,4}$', counterparty):
+            amount = row.get('expense', 0)
+            individual_transfers.append({
+                'recipient': counterparty,
+                'amount': float(amount),
+                'date': row['date'].strftime('%Y-%m-%d') if pd.notna(row['date']) else '未知',
+                'description': str(row.get('description', ''))
+            })
+            total_amount += amount
+    
+    # 按收款人分组统计
+    from collections import defaultdict
+    recipient_stats = defaultdict(lambda: {'count': 0, 'total': 0.0})
+    
+    for transfer in individual_transfers:
+        recipient = transfer['recipient']
+        recipient_stats[recipient]['count'] += 1
+        recipient_stats[recipient]['total'] += transfer['amount']
+    
+    # 转换为列表并排序
+    recipients = [
+        {
+            'name': name,
+            'count': stats['count'],
+            'total_amount': stats['total']
+        }
+        for name, stats in recipient_stats.items()
+    ]
+    recipients.sort(key=lambda x: x['total_amount'], reverse=True)
+    
+    logger.info(f'公转私统计: 共{len(individual_transfers)}笔, 总额{utils.format_currency(total_amount)}')
+    
+    return {
+        'total_amount': float(total_amount),
+        'count': len(individual_transfers),
+        'recipients': recipients[:20],  # 只保留前20个收款人
+        'details': individual_transfers[:100]  # 只保留前100笔明细
+    }
+
+
+def _analyze_cash_withdrawal_pattern(df: pd.DataFrame) -> Dict:
+    """
+    分析现金提取模式
+    
+    Args:
+        df: 交易DataFrame
+        
+    Returns:
+        现金提取模式字典
+    """
+    # 筛选现金支出
+    cash_expense_df = df[(df['expense'] > 0) & (df.get('is_cash', False) == True)].copy()
+    
+    if cash_expense_df.empty:
+        # 尝试通过关键词识别
+        cash_expense_df = df[df['expense'] > 0].copy()
+        cash_expense_df = cash_expense_df[
+            cash_expense_df['description'].str.contains('现金|取现|提现|支取', case=False, na=False)
+        ]
+    
+    if cash_expense_df.empty:
+        return {
+            'total_amount': 0.0,
+            'count': 0,
+            'avg_amount': 0.0,
+            'max_amount': 0.0,
+            'frequency': '无'
+        }
+    
+    total_amount = cash_expense_df['expense'].sum()
+    count = len(cash_expense_df)
+    avg_amount = total_amount / count if count > 0 else 0
+    max_amount = cash_expense_df['expense'].max()
+    
+    # 判断频率
+    if count >= 20:
+        frequency = '频繁'
+    elif count >= 10:
+        frequency = '较多'
+    elif count >= 5:
+        frequency = '一般'
+    else:
+        frequency = '较少'
+    
+    logger.info(f'现金提取: 共{count}笔, 总额{utils.format_currency(total_amount)}')
+    
+    return {
+        'total_amount': float(total_amount),
+        'count': int(count),
+        'avg_amount': float(avg_amount),
+        'max_amount': float(max_amount),
+        'frequency': frequency
+    }
+
+# ========== Phase 4: 收入来源分类 (2026-01-20 新增) ==========
+
+def classify_income_sources(income_df: pd.DataFrame, entity_name: str = None) -> Dict:
+    """
+    对收入来源进行分类
+    
+    【Phase 4 - 2026-01-20】
+    功能:
+    1. 将收入分为三类: 合法收入、不明收入、可疑收入
+    2. 计算各类占比
+    3. 提供详细的分类依据
+    
+    分类标准:
+    - **合法收入**: 工资、政府机关转账、已知合规来源
+    - **不明收入**: 个人转账、无法识别来源的收入
+    - **可疑收入**: 借贷平台、高频小额、疑似洗钱模式
+    
+    Args:
+        income_df: 收入交易DataFrame (只包含收入记录)
+        entity_name: 实体名称
+    
+    Returns:
+        收入来源分类结果字典,包含:
+        - legitimate_income: 合法收入总额
+        - unknown_income: 不明收入总额
+        - suspicious_income: 可疑收入总额
+        - legitimate_ratio: 合法收入占比
+        - unknown_ratio: 不明收入占比
+        - suspicious_ratio: 可疑收入占比
+        - legitimate_details: 合法收入明细列表
+        - unknown_details: 不明收入明细列表
+        - suspicious_details: 可疑收入明细列表
+    """
+    logger.info('正在对收入来源进行分类...')
+    
+    if income_df.empty:
+        logger.warning('无收入数据,无法分类')
+        return {
+            'legitimate_income': 0.0,
+            'unknown_income': 0.0,
+            'suspicious_income': 0.0,
+            'legitimate_ratio': 0.0,
+            'unknown_ratio': 0.0,
+            'suspicious_ratio': 0.0,
+            'legitimate_details': [],
+            'unknown_details': [],
+            'suspicious_details': []
+        }
+    
+    # 初始化分类容器
+    legitimate_income = 0.0
+    unknown_income = 0.0
+    suspicious_income = 0.0
+    
+    legitimate_details = []
+    unknown_details = []
+    suspicious_details = []
+    
+    # 总收入
+    total_income = income_df['income'].sum()
+    
+    # 遍历每笔收入进行分类
+    for _, row in income_df.iterrows():
+        amount = row['income']
+        counterparty = str(row.get('counterparty', '')).strip()
+        description = str(row.get('description', '')).strip()
+        date_str = row['date'].strftime('%Y-%m-%d') if pd.notna(row['date']) else '未知'
+        
+        # 构建记录
+        record = {
+            'date': date_str,
+            'amount': float(amount),
+            'counterparty': counterparty,
+            'description': description,
+            'reason': ''  # 分类依据
+        }
+        
+        # 分类逻辑
+        classified = False
+        
+        # 1. 合法收入识别
+        # 1.1 工资性收入
+        if utils.contains_keywords(description, config.SALARY_STRONG_KEYWORDS):
+            legitimate_income += amount
+            record['reason'] = '工资性收入'
+            legitimate_details.append(record)
+            classified = True
+        
+        # 1.2 政府机关转账
+        elif utils.contains_keywords(counterparty, config.GOVERNMENT_AGENCY_KEYWORDS) or \
+             utils.contains_keywords(description, config.GOVERNMENT_AGENCY_KEYWORDS):
+            legitimate_income += amount
+            record['reason'] = '政府机关转账'
+            legitimate_details.append(record)
+            classified = True
+        
+        # 1.3 已知发薪单位
+        elif utils.contains_keywords(counterparty, config.KNOWN_SALARY_PAYERS) or \
+             utils.contains_keywords(counterparty, config.USER_DEFINED_SALARY_PAYERS):
+            legitimate_income += amount
+            record['reason'] = '已知发薪单位'
+            legitimate_details.append(record)
+            classified = True
+        
+        # 1.4 人力资源公司
+        elif utils.contains_keywords(counterparty, config.HR_COMPANY_KEYWORDS):
+            legitimate_income += amount
+            record['reason'] = '人力资源公司'
+            legitimate_details.append(record)
+            classified = True
+        
+        # 1.5 理财赎回/收益
+        elif utils.contains_keywords(description, config.WEALTH_REDEMPTION_KEYWORDS):
+            legitimate_income += amount
+            record['reason'] = '理财赎回/收益'
+            legitimate_details.append(record)
+            classified = True
+        
+        # 2. 可疑收入识别
+        if not classified:
+            # 2.1 借贷平台
+            if utils.contains_keywords(counterparty, config.LOAN_PLATFORM_KEYWORDS) or \
+               utils.contains_keywords(description, config.LOAN_PLATFORM_KEYWORDS):
+                suspicious_income += amount
+                record['reason'] = '借贷平台'
+                suspicious_details.append(record)
+                classified = True
+            
+            # 2.2 第三方支付大额转入(可能是洗钱)
+            elif utils.contains_keywords(counterparty, config.THIRD_PARTY_PAYMENT_KEYWORDS):
+                if amount >= config.INCOME_HIGH_RISK_MIN:  # 5万以上
+                    suspicious_income += amount
+                    record['reason'] = '第三方支付大额转入'
+                    suspicious_details.append(record)
+                    classified = True
+            
+            # 2.3 现金大额存入
+            elif utils.contains_keywords(description, config.CASH_KEYWORDS):
+                if amount >= config.LARGE_CASH_THRESHOLD:
+                    suspicious_income += amount
+                    record['reason'] = '大额现金存入'
+                    suspicious_details.append(record)
+                    classified = True
+        
+        # 3. 不明收入(兜底分类)
+        if not classified:
+            # 3.1 个人转账(2-4个汉字的对手方)
+            import re
+            if re.match(r'^[\u4e00-\u9fa5]{2,4}$', counterparty):
+                unknown_income += amount
+                record['reason'] = '个人转账'
+                unknown_details.append(record)
+                classified = True
+            
+            # 3.2 其他无法识别的收入
+            else:
+                unknown_income += amount
+                record['reason'] = '来源不明'
+                unknown_details.append(record)
+                classified = True
+    
+    # 计算占比
+    legitimate_ratio = legitimate_income / total_income if total_income > 0 else 0
+    unknown_ratio = unknown_income / total_income if total_income > 0 else 0
+    suspicious_ratio = suspicious_income / total_income if total_income > 0 else 0
+    
+    # 按金额降序排序
+    legitimate_details.sort(key=lambda x: x['amount'], reverse=True)
+    unknown_details.sort(key=lambda x: x['amount'], reverse=True)
+    suspicious_details.sort(key=lambda x: x['amount'], reverse=True)
+    
+    logger.info(f'收入分类完成: 合法{utils.format_currency(legitimate_income)}({legitimate_ratio:.1%}), '
+                f'不明{utils.format_currency(unknown_income)}({unknown_ratio:.1%}), '
+                f'可疑{utils.format_currency(suspicious_income)}({suspicious_ratio:.1%})')
+    
+    return {
+        'legitimate_income': float(legitimate_income),
+        'unknown_income': float(unknown_income),
+        'suspicious_income': float(suspicious_income),
+        'legitimate_ratio': float(legitimate_ratio),
+        'unknown_ratio': float(unknown_ratio),
+        'suspicious_ratio': float(suspicious_ratio),
+        'legitimate_count': len(legitimate_details),
+        'unknown_count': len(unknown_details),
+        'suspicious_count': len(suspicious_details),
+        'legitimate_details': legitimate_details[:50],  # 只保留前50笔
+        'unknown_details': unknown_details[:50],
+        'suspicious_details': suspicious_details[:50]
+    }
