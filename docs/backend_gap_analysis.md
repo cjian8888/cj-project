@@ -144,46 +144,48 @@
   - 添加 `account_type` 列
   - 添加过滤非真实银行卡的逻辑
   
-- [ ] 1.2 增加账户提取函数 (`financial_profiler.py`)
+- [x] 1.2 增加账户提取函数 (`financial_profiler.py`) ✅
   - 新增 `extract_bank_accounts()` 函数
   - 返回去重后的银行账户列表
 
 ### Phase 2: 计算模块补全 (P0)
 
-- [ ] 2.1 年度工资统计 (`financial_profiler.py`)
+- [x] 2.1 年度工资统计 (`financial_profiler.py`) ✅
   - 新增 `calculate_yearly_salary()` 函数
   - 更新 `profiles.json` 结构
 
-- [ ] 2.2 大额交易明细 (`income_analyzer.py`)
+- [x] 2.2 大额交易明细 (`income_analyzer.py`) ✅
   - 确保输出包含完整表格字段
   - 更新 `derived_data.json` 结构
 
-- [ ] 2.3 公司画像构建
+- [x] 2.3 公司画像构建 ✅ (2026-01-21)
   - 新增 `build_company_profile()` 函数
   - 确保与个人画像格式一致
+  - 集成到 `regenerate_cache.py`
 
 ### Phase 3: 家庭汇总 (P0)
 
-- [ ] 3.1 家庭汇总计算 (`family_finance.py`)
+- [x] 3.1 家庭汇总计算 (`family_finance.py`) ✅
   - 整合 `calculate_family_total_assets()` 到缓存
   - 剔除家庭成员间互转
 
 ### Phase 4: 配置与增强 (P1)
 
-- [ ] 4.1 配置项补充 (`config.py`)
+- [x] 4.1 配置项补充 (`config.py`) ✅
   - `INVESTIGATION_UNIT_KEYWORDS`
   - `BANK_ACCOUNT_EXCLUDE_KEYWORDS`
 
-- [ ] 4.2 收入来源分类
-  - 在 `financial_profiler.py` 中实现
+- [x] 4.2 收入来源分类 ✅
+  - 在 `financial_profiler.py` 中实现 `classify_income_sources()`
 
-- [ ] 4.3 与调查单位往来统计
-  - 在 `related_party_analyzer.py` 中实现
+- [x] 4.3 与调查单位往来统计 ✅
+  - 在 `related_party_analyzer.py` 中实现 `analyze_investigation_unit_flows()`
 
 ### Phase 5: 缓存重生成
 
-- [ ] 5.1 更新 `regenerate_cache.py`
-  - 确保新增字段写入缓存
+- [x] 5.1 更新 `regenerate_cache.py` ✅
+  - 已集成: bankAccounts, yearlySalary, largeTransactions, familySummary, companySpecific
+  - 已集成: incomeClassifications, investigationUnitFlows
 
 - [ ] 5.2 验证缓存完整性
 
@@ -195,79 +197,112 @@
 
 ### Phase 6: P0 级外部数据解析
 
-- [ ] 6.1 人民银行银行账户解析 (`bank_account_extractor.py` - 新建)
+- [x] 6.1 人民银行银行账户解析 (`pboc_account_extractor.py`) ✅ (2026-01-21)
   - 解析 `中国人民银行银行账户（定向查询）/*.xlsx`
   - 提取：银行名称、完整卡号、账户类型、账户状态、当前余额
-  - 输出到 `profiles.json` → `bank_accounts_official`
+  - 输出到 `profiles.json` → `pbocAccounts`
 
-- [ ] 6.2 人民银行反洗钱数据解析 (`aml_analyzer.py` - 新建)
+- [x] 6.2 人民银行反洗钱数据解析 (`aml_analyzer.py`) ✅ (2026-01-21)
   - 解析 `中国人民银行反洗钱（定向查询）/*.xlsx`
   - 提取：可疑交易记录、大额交易报告
-  - 输出到 `suspicions.json` → `aml_alerts`
+  - 输出到 `suspicions.json` → `amlData`
 
-- [ ] 6.3 市场监管总局企业登记解析 (`company_info_extractor.py` - 新建)
+- [x] 6.3 市场监管总局企业登记解析 (`company_info_extractor.py`) ✅ (2026-01-21)
   - 解析 `市场监管总局企业登记信息（定向查询）/*.xlsx`
   - 提取：公司名称、注册资本、法人、股东、经营范围
-  - 输出到新文件 `company_info.json`
+  - 输出到 `companyRegistry`
 
-- [ ] 6.4 征信数据解析 (`credit_report_extractor.py` - 新建)
+- [x] 6.4 征信数据解析 (`credit_report_extractor.py`) ✅ (2026-01-21)
   - 解析 `征信（定向查询）/*.xlsx`
   - 提取：信用评分、负债情况、贷款记录
-  - 输出到 `profiles.json` → `credit_info`
+  - 输出到 `profiles.json` → `creditData`
 
-- [ ] 6.5 银行业金融机构账户信息解析
+- [x] 6.5 银行业金融机构账户信息解析 ✅ (2026-01-21)
   - 解析 `银行业金融机构账户信息（定向查询）/*.xlsx`
   - 与 6.1 合并或补充
+  - 输出到 `bankAccountInfo`
 
 ### Phase 7: P1 级外部数据解析
 
-- [ ] 7.1 公安部机动车解析 (`vehicle_extractor.py` - 增强)
+- [x] 7.1 公安部机动车解析 (`vehicle_extractor.py`) ✅ (2026-01-21)
   - 解析 `公安部机动车（定向查询）/*.xlsx`
   - 提取：车牌号、品牌型号、购买时间、估价
-  - 输出到 `assets.json` → `vehicles`
+  - 输出到 `vehicleData`
 
-- [ ] 7.2 银行理财产品详情解析
+- [x] 7.2 银行理财产品详情解析 (`wealth_product_extractor.py`) ✅ (2026-01-21)
   - 解析 `银行业金融机构金融理财（定向查询）/*.xlsx`
   - 解析 `理财产品（定向查询）/*.xlsx`
   - 提取：产品名称、持有金额、到期日
-  - 与 `financial_profiler.py` 的理财分析合并
+  - 输出到 `wealthProductData`
 
-- [ ] 7.3 证券信息解析 (`securities_extractor.py` - 新建)
+- [x] 7.3 证券信息解析 (`securities_extractor.py`) ✅ (2026-01-21)
   - 解析 `证券信息（定向查询）/*.xlsx`
   - 提取：证券公司、持仓股票、市值
-  - 输出到 `assets.json` → `securities`
+  - 输出到 `securitiesData`
 
-- [ ] 7.4 自然资源部精准查询解析
+- [x] 7.4 自然资源部精准查询解析 (`asset_extractor.py`) ✅ (2026-01-21)
   - 解析 `自然资源部精准查询（定向查询）/*.xlsx`
   - 与现有不动产解析合并
+  - 输出到 `precisePropertyData`
 
-- [ ] 7.5 统一社会信用代码解析
+- [x] 7.5 统一社会信用代码解析 (`company_info_extractor.py`) ✅ (2026-01-21)
   - 解析 `市场监管总局统一社会信用代码（定向查询）/*.xlsx`
   - 补充公司信息
+  - 输出到 `creditCodeData`
 
 ### Phase 8: P2 级外部数据解析
 
-- [ ] 8.1 保险信息解析 (`insurance_extractor.py` - 新建)
+- [x] 8.1 保险信息解析 (`insurance_extractor.py`) ✅ (2026-01-21)
   - 解析 `保险信息（定向查询）/*.xlsx`
   - 提取：保险公司、险种、保额
+  - 输出到 `insuranceData`
 
-- [ ] 8.2 公安部出入境记录解析
+- [x] 8.2 公安部出入境记录解析 (`immigration_extractor.py`) ✅ (2026-01-21)
   - 解析 `公安部出入境记录（定向查询）/*.xlsx`
   - 提取：出入境时间、目的地
-  - 用于时间线分析
+  - 输出到 `immigrationData`
 
-- [ ] 8.3 公安部旅馆住宿解析 (`hotel_analyzer.py` - 新建)
+- [x] 8.3 公安部旅馆住宿解析 (`hotel_extractor.py`) ✅ (2026-01-21)
   - 解析 `公安部旅馆住宿（定向查询）/*.xlsx`
   - 提取：入住时间、同住人
-  - 用于同住分析
+  - 输出到 `hotelData`
 
-- [ ] 8.4 公安部同住址/同车违章解析
+- [x] 8.4 公安部同住址/同车违章解析 (`cohabitation_extractor.py`) ✅ (2026-01-21)
   - 解析相关文件
   - 用于关系图谱补充
+  - 输出到 `cohabitationData`
 
-- [ ] 8.5 铁路票面信息解析
+- [x] 8.5 铁路票面信息解析 (`railway_extractor.py`) ✅ (2026-01-21)
   - 解析 `铁路总公司票面信息（定向查询）/*.xlsx`
   - 提取：出行时间线
+  - 输出到 `railwayData`
+
+- [x] 8.6 航班进出港信息解析 (`flight_extractor.py`) ✅ (2026-01-21)
+  - 解析 `中航信航班进出港信息（定向查询）/*.xlsx`
+  - 提取：航班号、起降时间、机场
+  - 输出到 `flightData`
+
+### Phase 9: P3 级外部数据解析
+
+- [x] 9.1 公安部驾驶证解析 (`p3_data_extractor.py`) ✅ (2026-01-21)
+  - 解析 `公安部驾驶证（定向查询）/*.xlsx`
+  - 提取：准驾车型、有效期
+  - 输出到 `p3Data.driverLicenses`
+
+- [x] 9.2 公安部交通违法解析 (`p3_data_extractor.py`) ✅ (2026-01-21)
+  - 解析 `公安部交通违法（定向查询）/*.xlsx`
+  - 提取：违法时间、地点、罚款、扣分
+  - 输出到 `p3Data.trafficViolations`
+
+- [x] 9.3 公安部出国（境）证件解析 (`p3_data_extractor.py`) ✅ (2026-01-21)
+  - 解析 `公安部出国（境）证件（定向查询）/*.xlsx`
+  - 提取：证件类型、号码、有效期
+  - 输出到 `p3Data.exitDocuments`
+
+- [x] 9.4 铁路总公司互联网注册信息解析 (`p3_data_extractor.py`) ✅ (2026-01-21)
+  - 解析 `铁路总公司互联网注册信息（定向查询）/*.xlsx`
+  - 提取：12306用户名、手机号、邮箱
+  - 输出到 `p3Data.railwayRegistrations`
 
 ---
 

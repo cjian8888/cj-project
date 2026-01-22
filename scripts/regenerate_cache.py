@@ -18,6 +18,29 @@ import data_cleaner
 import flow_visualizer
 import loan_analyzer
 import income_analyzer
+import financial_profiler  # Phase 2.1: 银行账户提取和工资统计
+import family_finance      # Phase 3: 家庭汇总计算
+import related_party_analyzer  # Phase 5: 调查单位往来统计
+# Phase 6: P0 外部数据源解析
+import pboc_account_extractor    # 6.1 人民银行银行账户
+import aml_analyzer              # 6.2 人民银行反洗钱
+import company_info_extractor    # 6.3 市场监管总局企业登记
+import credit_report_extractor   # 6.4 征信数据
+import bank_account_info_extractor  # 6.5 银行业金融机构账户
+# Phase 7: P1 外部数据源解析
+import vehicle_extractor            # 7.1 公安部机动车
+import wealth_product_extractor     # 7.2 银行理财产品
+import securities_extractor         # 7.3 证券信息
+import asset_extractor              # 7.4 精准房产查询
+# Phase 8: P2 外部数据源解析
+import insurance_extractor          # 8.1 保险信息
+import immigration_extractor        # 8.2 出入境记录
+import hotel_extractor              # 8.3 旅馆住宿
+import cohabitation_extractor       # 8.4 同住址/同车违章
+import railway_extractor            # 8.5 铁路票面信息
+import flight_extractor             # 8.6 航班进出港信息
+# Phase 9: P3级外部数据源解析
+import p3_data_extractor            # 9.1-9.4 驾驶证/交通违法/出境证件/12306注册
 import gc
 
 def main():
@@ -72,7 +95,59 @@ def main():
     
     profiles = {}
     for entity, df in cleaned_data.items():
+        # Phase 2.3: 区分个人和公司实体
+        is_company = entity in companies
+        
         try:
+            if is_company:
+                # Phase 2.3: 公司实体使用专用画像生成函数
+                print(f"  [公司] 生成 {entity} 画像...")
+                try:
+                    company_profile = financial_profiler.build_company_profile(df, entity)
+                    
+                    # 转换为缓存格式（与个人画像保持一致的字段结构）
+                    summary = company_profile.get('summary', {})
+                    company_specific = company_profile.get('company_specific', {})
+                    
+                    profiles[entity] = {
+                        "entityName": entity,
+                        "entityType": "company",  # 标识为公司实体
+                        "totalIncome": summary.get('total_income', 0),
+                        "totalExpense": summary.get('total_expense', 0),
+                        "transactionCount": summary.get('transaction_count', len(df)),
+                        # 审计关键字段
+                        "cashTotal": (company_profile.get('fund_flow', {}).get('cash_income', 0) + 
+                                     company_profile.get('fund_flow', {}).get('cash_expense', 0)),
+                        "thirdPartyTotal": (company_profile.get('fund_flow', {}).get('third_party_income', 0) + 
+                                           company_profile.get('fund_flow', {}).get('third_party_expense', 0)),
+                        "wealthTotal": company_profile.get('wealth_management', {}).get('total_amount', 0),
+                        "maxTransaction": 0,  # 公司画像中暂不计算
+                        "salaryRatio": 0.0,  # 公司不适用
+                        # 公司不需要银行账户和工资统计
+                        "bankAccounts": [],
+                        "yearlySalary": {},
+                        # Phase 2.3: 公司特有分析
+                        "companySpecific": company_specific,
+                        # Phase 3: 家庭汇总所需字段
+                        "has_data": company_profile.get('has_data', True),
+                        "summary": summary,
+                    }
+                    print(f"  [公司] {entity} 画像生成完成")
+                except Exception as e:
+                    print(f"  [公司] {entity} 画像生成失败: {e}")
+                    # 回退到简化逻辑
+                    profiles[entity] = {
+                        "entityName": entity,
+                        "entityType": "company",
+                        "totalIncome": 0,
+                        "totalExpense": 0,
+                        "transactionCount": len(df),
+                        "has_data": False,
+                        "summary": {},
+                    }
+                continue
+            
+            # 个人实体使用现有逻辑
             # 处理金额字段
             if '金额' in df.columns:
                 amounts = df['金额']
@@ -87,13 +162,27 @@ def main():
                 income = float(amounts[amounts > 0].sum())
                 expense = float(abs(amounts[amounts < 0].sum()))
             
-            # 计算现金交易总额
+            # 计算现金交易总额和明细列表
             cash_total = 0
+            cash_transactions = []  # 🆕 现金交易明细列表
             if 'description' in df.columns and amounts is not None:
                 cash_mask = df['description'].apply(lambda x: contains_keywords(x, CASH_KEYWORDS))
                 if cash_mask.any():
+                    cash_df = df[cash_mask].copy()
                     cash_amounts = amounts[cash_mask]
                     cash_total = float(cash_amounts[cash_amounts > 0].sum() + abs(cash_amounts[cash_amounts < 0].sum()))
+                    
+                    # 🆕 构建现金交易明细（取金额最大的前20条）
+                    cash_df['_amount'] = cash_amounts.abs()
+                    cash_df = cash_df.nlargest(20, '_amount')
+                    for _, row in cash_df.iterrows():
+                        cash_transactions.append({
+                            "date": str(row.get('date', ''))[:10] if row.get('date') else '',
+                            "amount": float(row.get('_amount', 0)),
+                            "description": str(row.get('description', ''))[:50],
+                            "counterparty": str(row.get('counterparty', ''))[:30],
+                            "source_file": str(row.get('数据来源', ''))[:30],
+                        })
             
             # 计算第三方支付交易总额
             third_party_total = 0
@@ -116,17 +205,48 @@ def main():
             if amounts is not None and len(amounts) > 0:
                 max_transaction = float(amounts.abs().max())
             
+            # Phase 2.1: 提取银行账户信息
+            try:
+                bank_accounts = financial_profiler.extract_bank_accounts(df, entity)
+            except Exception as e:
+                print(f"  提取 {entity} 银行账户失败: {e}")
+                bank_accounts = []
+            
+            # Phase 2.1: 计算年度工资统计
+            try:
+                yearly_salary = financial_profiler.calculate_yearly_salary(df, entity)
+            except Exception as e:
+                print(f"  计算 {entity} 年度工资失败: {e}")
+                yearly_salary = {}
+            
+            # 🆕 计算工资总额和工资占比
+            salary_total = yearly_salary.get('summary', {}).get('total', 0) if yearly_salary else 0
+            salary_ratio = salary_total / income if income > 0 else 0.0
+            
             profiles[entity] = {
                 "entityName": entity,
+                "entityType": "person",  # 标识为个人实体
                 "totalIncome": income,
                 "totalExpense": expense,
                 "transactionCount": len(df),
                 # 新增审计关键字段
                 "cashTotal": cash_total,
+                "cashTransactions": cash_transactions,  # 🆕 现金交易明细
                 "thirdPartyTotal": third_party_total,
                 "wealthTotal": wealth_total,
                 "maxTransaction": max_transaction,
-                "salaryRatio": 0.0,  # 简化版不计算工资占比
+                "salaryTotal": salary_total,  # 🆕 工资总额
+                "salaryRatio": salary_ratio,  # 🆕 正确计算工资占比
+                # Phase 2.1: 银行账户和年度工资
+                "bankAccounts": bank_accounts,
+                "yearlySalary": yearly_salary,
+                # Phase 3: 家庭汇总所需字段
+                "has_data": True,
+                "summary": {
+                    "total_income": income,
+                    "total_expense": expense,
+                    "net_flow": income - expense,
+                },
             }
         except Exception as e:
             print(f"  生成 {entity} 画像失败: {e}")
@@ -204,7 +324,228 @@ def main():
         print(f"  收入分析失败: {e}")
         income_results = {"summary": {}, "regular_non_salary": []}
     
-    # 7. 序列化分析结果（与 api_server 相同的逻辑）
+    # 6.5 Phase 2.2: 提取大额交易明细
+    print("提取大额交易明细...")
+    try:
+        large_transactions = income_analyzer.extract_large_transactions(cleaned_data, persons)
+        print(f"  发现 {len(large_transactions)} 笔大额交易")
+    except Exception as e:
+        print(f"  大额交易提取失败: {e}")
+        large_transactions = []
+    
+    # 6.6 Phase 3: 家庭汇总计算
+    print("计算家庭汇总...")
+    try:
+        family_summary = family_finance.calculate_family_summary(profiles, persons)
+        print(f"  家庭成员: {len(family_summary.get('family_members', []))} 人")
+    except Exception as e:
+        print(f"  家庭汇总计算失败: {e}")
+        family_summary = {}
+    
+    # 6.7 Phase 5: 收入来源分类
+    print("计算收入来源分类...")
+    income_classifications = {}
+    for entity, df in cleaned_data.items():
+        if entity in companies:  # 公司不计算收入分类
+            continue
+        try:
+            classification = financial_profiler.classify_income_sources(df, entity)
+            income_classifications[entity] = classification
+        except Exception as e:
+            print(f"  {entity} 收入分类失败: {e}")
+    print(f"  完成 {len(income_classifications)} 个人员的收入分类")
+    
+    # 6.8 Phase 5: 调查单位往来统计
+    print("统计调查单位往来...")
+    investigation_unit_flows = {}
+    if config.INVESTIGATION_UNIT_KEYWORDS:  # 只有配置了关键词才执行
+        for entity, df in cleaned_data.items():
+            try:
+                flows = related_party_analyzer.analyze_investigation_unit_flows(df, entity)
+                if flows and flows.get('total_amount', 0) > 0:
+                    investigation_unit_flows[entity] = flows
+            except Exception as e:
+                print(f"  {entity} 调查单位往来统计失败: {e}")
+        print(f"  发现 {len(investigation_unit_flows)} 个实体与调查单位有往来")
+    else:
+        print("  未配置调查单位关键词，跳过")
+    
+    # ============================================
+    # Phase 6: P0 外部数据源解析
+    # ============================================
+    
+    # 6.1 人民银行银行账户
+    print("提取人民银行账户信息 (6.1)...")
+    try:
+        pboc_accounts = pboc_account_extractor.extract_pboc_accounts(data_dir)
+        print(f"  发现 {len(pboc_accounts)} 人的官方账户信息")
+    except Exception as e:
+        print(f"  人民银行账户提取失败: {e}")
+        pboc_accounts = {}
+    
+    # 6.2 人民银行反洗钱数据
+    print("提取反洗钱数据 (6.2)...")
+    try:
+        aml_data = aml_analyzer.extract_aml_data(data_dir)
+        print(f"  发现 {len(aml_data)} 人的反洗钱信息")
+    except Exception as e:
+        print(f"  反洗钱数据提取失败: {e}")
+        aml_data = {}
+    
+    # 6.3 市场监管总局企业登记
+    print("提取企业登记信息 (6.3)...")
+    try:
+        company_registry = company_info_extractor.extract_company_info(data_dir)
+        print(f"  发现 {len(company_registry)} 个企业登记信息")
+    except Exception as e:
+        print(f"  企业登记信息提取失败: {e}")
+        company_registry = {}
+    
+    # 6.4 征信数据
+    print("提取征信数据 (6.4)...")
+    try:
+        credit_data = credit_report_extractor.extract_credit_data(data_dir)
+        print(f"  发现 {len(credit_data)} 人的征信信息")
+    except Exception as e:
+        print(f"  征信数据提取失败: {e}")
+        credit_data = {}
+    
+    # 6.5 银行业金融机构账户信息
+    print("提取银行账户信息 (6.5)...")
+    try:
+        bank_account_info = bank_account_info_extractor.extract_bank_account_info(data_dir)
+        print(f"  发现 {len(bank_account_info)} 人的银行账户信息")
+    except Exception as e:
+        print(f"  银行账户信息提取失败: {e}")
+        bank_account_info = {}
+    
+    # ============================================
+    # Phase 7: P1 外部数据源解析
+    # ============================================
+    
+    # 7.1 公安部机动车
+    print("提取机动车信息 (7.1)...")
+    try:
+        vehicle_data = vehicle_extractor.extract_vehicle_data(data_dir)
+        print(f"  发现 {len(vehicle_data)} 人的机动车信息")
+    except Exception as e:
+        print(f"  机动车信息提取失败: {e}")
+        vehicle_data = {}
+    
+    # 7.2 银行理财产品
+    print("提取理财产品信息 (7.2)...")
+    try:
+        wealth_product_data = wealth_product_extractor.extract_wealth_product_data(data_dir)
+        print(f"  发现 {len(wealth_product_data)} 人的理财产品信息")
+    except Exception as e:
+        print(f"  理财产品信息提取失败: {e}")
+        wealth_product_data = {}
+    
+    # 7.3 证券信息
+    print("提取证券信息 (7.3)...")
+    try:
+        securities_data = securities_extractor.extract_securities_data(data_dir)
+        print(f"  发现 {len(securities_data)} 人的证券信息")
+    except Exception as e:
+        print(f"  证券信息提取失败: {e}")
+        securities_data = {}
+    
+    # 7.4 精准房产查询
+    print("提取精准房产查询 (7.4)...")
+    try:
+        precise_property_data = asset_extractor.extract_precise_property_info(data_dir)
+        print(f"  发现 {len(precise_property_data)} 人的精准房产信息")
+    except Exception as e:
+        print(f"  精准房产查询提取失败: {e}")
+        precise_property_data = {}
+    
+    # 7.5 统一社会信用代码
+    print("提取统一社会信用代码 (7.5)...")
+    try:
+        credit_code_data = company_info_extractor.extract_credit_code_info(data_dir)
+        print(f"  发现 {len(credit_code_data)} 个企业信用代码信息")
+    except Exception as e:
+        print(f"  统一社会信用代码提取失败: {e}")
+        credit_code_data = {}
+    
+    # ============================================
+    # Phase 8: P2 外部数据源解析
+    # ============================================
+    
+    # 8.1 保险信息
+    print("提取保险信息 (8.1)...")
+    try:
+        insurance_data = insurance_extractor.extract_insurance_data(data_dir)
+        print(f"  发现 {len(insurance_data)} 人/公司的保险信息")
+    except Exception as e:
+        print(f"  保险信息提取失败: {e}")
+        insurance_data = {}
+    
+    # 8.2 出入境记录
+    print("提取出入境记录 (8.2)...")
+    try:
+        immigration_data = immigration_extractor.extract_immigration_data(data_dir)
+        print(f"  发现 {len(immigration_data)} 人的出入境记录")
+    except Exception as e:
+        print(f"  出入境记录提取失败: {e}")
+        immigration_data = {}
+    
+    # 8.3 旅馆住宿
+    print("提取旅馆住宿记录 (8.3)...")
+    try:
+        hotel_data = hotel_extractor.extract_hotel_data(data_dir)
+        print(f"  发现 {len(hotel_data)} 人的旅馆住宿记录")
+    except Exception as e:
+        print(f"  旅馆住宿记录提取失败: {e}")
+        hotel_data = {}
+    
+    # 8.4 同住址/同车违章
+    print("提取同住址/同车违章 (8.4)...")
+    try:
+        coaddress_data = cohabitation_extractor.extract_coaddress_data(data_dir)
+        coviolation_data = cohabitation_extractor.extract_coviolation_data(data_dir)
+        cohabitation_data = {
+            "coaddress": coaddress_data,
+            "coviolation": coviolation_data
+        }
+        print(f"  发现 {len(coaddress_data)} 人的同住址信息, {len(coviolation_data)} 人的同车违章")
+    except Exception as e:
+        print(f"  同住址/同车违章提取失败: {e}")
+        cohabitation_data = {"coaddress": {}, "coviolation": {}}
+    
+    # 8.5 铁路票面信息
+    print("提取铁路票面信息 (8.5)...")
+    try:
+        railway_data = railway_extractor.extract_railway_data(data_dir)
+        print(f"  发现 {len(railway_data)} 人的铁路出行信息")
+    except Exception as e:
+        print(f"  铁路票面信息提取失败: {e}")
+        railway_data = {}
+    
+    # 8.6 航班进出港信息
+    print("提取航班进出港信息 (8.6)...")
+    try:
+        flight_data = flight_extractor.extract_flight_data(data_dir)
+        print(f"  发现 {len(flight_data)} 人的航班出行信息")
+    except Exception as e:
+        print(f"  航班进出港信息提取失败: {e}")
+        flight_data = {}
+    
+    # ============================================
+    # Phase 9: P3 级外部数据源解析
+    # ============================================
+    
+    print("提取P3级数据 (9.1-9.4)...")
+    try:
+        p3_data = p3_data_extractor.extract_all_p3_data(data_dir)
+        print(f"  驾驶证: {len(p3_data.get('driverLicenses', {}))} 人")
+        print(f"  交通违法: {len(p3_data.get('trafficViolations', {}))} 人")
+        print(f"  出境证件: {len(p3_data.get('exitDocuments', {}))} 人")
+        print(f"  12306注册: {len(p3_data.get('railwayRegistrations', {}))} 人")
+    except Exception as e:
+        print(f"  P3级数据提取失败: {e}")
+        p3_data = {}
+    
     def serialize_analysis_results(loan_data, income_data):
         """序列化分析结果为前端期望的格式"""
         result = {
@@ -290,7 +631,32 @@ def main():
             "cashCollisions": []
         },
         "analysisResults": analysis_results,
-        "graphData": graph_data
+        "graphData": graph_data,
+        "largeTransactions": large_transactions,  # Phase 2.2: 大额交易明细
+        "familySummary": family_summary,  # Phase 3: 家庭汇总
+        "incomeClassifications": income_classifications,  # Phase 5: 收入来源分类
+        "investigationUnitFlows": investigation_unit_flows,  # Phase 5: 调查单位往来
+        # Phase 6: P0 外部数据源
+        "pbocAccounts": pboc_accounts,         # 6.1 人民银行官方账户
+        "amlData": aml_data,                   # 6.2 反洗钱数据
+        "companyRegistry": company_registry,   # 6.3 企业登记信息
+        "creditData": credit_data,             # 6.4 征信数据
+        "bankAccountInfo": bank_account_info,  # 6.5 银行账户信息
+        # Phase 7: P1 外部数据源
+        "vehicleData": vehicle_data,           # 7.1 机动车信息
+        "wealthProductData": wealth_product_data,  # 7.2 理财产品
+        "securitiesData": securities_data,     # 7.3 证券信息
+        "precisePropertyData": precise_property_data,  # 7.4 精准房产查询
+        "creditCodeData": credit_code_data,    # 7.5 统一社会信用代码
+        # Phase 8: P2 外部数据源
+        "insuranceData": insurance_data,       # 8.1 保险信息
+        "immigrationData": immigration_data,   # 8.2 出入境记录
+        "hotelData": hotel_data,               # 8.3 旅馆住宿
+        "cohabitationData": cohabitation_data, # 8.4 同住址/同车违章
+        "railwayData": railway_data,           # 8.5 铁路票面信息
+        "flightData": flight_data,             # 8.6 航班进出港信息
+        # Phase 9: P3 外部数据源
+        "p3Data": p3_data,                     # 9.x 驾驶证/交通违法/出境证件/12306
     }
     
     # 10. 保存到文件（使用自定义编码器处理日期）

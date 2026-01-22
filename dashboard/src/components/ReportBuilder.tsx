@@ -65,7 +65,7 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
 
     const [caseName, setCaseName] = useState('初查报告');
     const [docNumber, setDocNumber] = useState('');
-    const [format, setFormat] = useState<'html' | 'json'>('html');
+    const [format, setFormat] = useState<'html' | 'json' | 'v3'>('v3');  // 默认使用 v3 格式
     const [isGenerating, setIsGenerating] = useState(false);
     const [previewHtml, setPreviewHtml] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -122,7 +122,7 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
         }
 
         const selectedSections = sections.filter(s => s.checked).map(s => s.id);
-        if (selectedSections.length === 0) {
+        if (selectedSections.length === 0 && format !== 'v3') {
             setError('请至少选择一个报告模块');
             return;
         }
@@ -146,7 +146,10 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
                     thresholds: {
                         large_transfer: thresholds.largeTransfer,
                         large_cash: thresholds.largeCash
-                    }
+                    },
+                    // v3.0 特有参数
+                    primary_person: selectedSubjects[0] || null,
+                    case_background: caseName,
                 }),
             });
 
@@ -158,6 +161,15 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
             if (format === 'html') {
                 const html = await response.text();
                 setPreviewHtml(html);
+            } else if (format === 'v3') {
+                // v3.0 格式返回 JSON，转换为专业的 HTML 预览
+                const data = await response.json();
+                if (data.success && data.report) {
+                    const v3Html = renderV3ReportToHtml(data.report);
+                    setPreviewHtml(v3Html);
+                } else {
+                    throw new Error(data.error || 'v3.0 报告生成失败');
+                }
             } else {
                 const data = await response.json();
                 setPreviewHtml(`<pre style="white-space: pre-wrap; font-family: monospace; padding: 20px; color: #333;">${JSON.stringify(data, null, 2)}</pre>`);
@@ -169,14 +181,229 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
         }
     }, [sections, format, caseName, selectedSubjects, docNumber, thresholds]);
 
+    // v3.0 报告转 HTML 预览
+    const renderV3ReportToHtml = (report: any): string => {
+        const meta = report.meta || {};
+        const family = report.family || {};
+        const memberDetails = report.member_details || [];
+        const companies = report.companies || [];
+        const conclusion = report.conclusion || {};
+        
+        // 格式化金额（分转万元）
+        const formatWan = (amount: number) => ((amount || 0) / 10000).toFixed(2);
+        const formatCurrency = (amount: number) => (amount || 0).toLocaleString('zh-CN');
+        
+        // 计算家庭总银行卡数
+        const totalBankAccounts = memberDetails.reduce((sum: number, m: any) => 
+            sum + (m.assets?.bank_account_count || m.assets?.bank_accounts?.length || 0), 0);
+
+        return `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>${meta.doc_number || '初查报告'}</title>
+    <style>
+        body { font-family: 'SimSun', 'Microsoft YaHei', serif; margin: 40px; line-height: 1.8; color: #333; background: #fff; }
+        .header { text-align: center; margin-bottom: 40px; }
+        .header h1 { font-size: 22px; margin-bottom: 10px; }
+        .header .doc-number { color: #666; font-size: 14px; }
+        .section { margin: 30px 0; }
+        .section h2 { font-size: 16px; border-bottom: 2px solid #333; padding-bottom: 8px; margin-bottom: 20px; }
+        .section h3 { font-size: 14px; margin: 20px 0 10px 0; color: #444; }
+        table { width: 100%; border-collapse: collapse; margin: 15px 0; }
+        th, td { border: 1px solid #ddd; padding: 10px; text-align: left; font-size: 13px; }
+        th { background: #f5f5f5; font-weight: bold; }
+        .highlight { background: #fff3cd; padding: 2px 6px; border-radius: 3px; }
+        .warning { color: #dc3545; font-weight: bold; }
+        .amount { text-align: right; font-family: 'Consolas', monospace; }
+        .summary-box { background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; }
+        .issue-item { padding: 10px; border-left: 4px solid #dc3545; background: #fff5f5; margin: 10px 0; }
+        .issue-high { border-left-color: #dc3545; }
+        .issue-medium { border-left-color: #ffc107; background: #fffbeb; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>资金穿透核查初查报告</h1>
+        <div class="doc-number">${meta.doc_number || ''}</div>
+        <div style="font-size: 12px; color: #888; margin-top: 10px;">
+            数据范围：${meta.data_scope || '见数据源'} | 生成时间：${meta.generated_at ? new Date(meta.generated_at).toLocaleDateString('zh-CN') : new Date().toLocaleDateString('zh-CN')}
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>一、案源及核查背景</h2>
+        <p>${meta.case_background || '根据相关线索，对被核查人进行资金流水穿透分析。'}</p>
+    </div>
+
+    <div class="section">
+        <h2>二、家庭单元概览</h2>
+        <h3>2.1 核心关系人</h3>
+        <table>
+            <tr><th>关系</th><th>姓名</th><th>数据状态</th></tr>
+            ${(family.members || []).map((m: any) => `
+                <tr>
+                    <td>${m.relation || '成员'}</td>
+                    <td>${m.name || '-'}</td>
+                    <td>${m.has_data ? '✅ 有数据' : '❌ 无数据'}</td>
+                </tr>
+            `).join('')}
+        </table>
+        
+        <div class="summary-box">
+            <strong>家庭资产汇总</strong><br>
+            房产 ${family.summary?.assets?.real_estate_count || 0} 套 | 
+            车辆 ${family.summary?.assets?.vehicle_count || 0} 辆 | 
+            银行卡 ${totalBankAccounts} 张 | 
+            资金总流入 ¥${formatWan(family.summary?.total_income || 0)} 万元 |
+            资金总流出 ¥${formatWan(family.summary?.total_expense || 0)} 万元
+        </div>
+    </div>
+
+    ${memberDetails.map((member: any, idx: number) => `
+    <div class="section">
+        <h2>三、${member.name || '成员'}（${member.relation || '成员'}）资金分析</h2>
+        
+        <h3>3.1 资金载体</h3>
+        <table>
+            <tr><th>银行</th><th>卡号</th><th>类型</th><th>余额</th></tr>
+            ${(member.assets?.bank_accounts || []).slice(0, 10).map((acc: any) => `
+                <tr>
+                    <td>${acc.bank_name || acc.bank || '-'}</td>
+                    <td>${acc.account_number || '-'}</td>
+                    <td>${acc.account_type || acc.type || '-'}</td>
+                    <td class="amount">¥${formatCurrency(acc.balance || 0)}</td>
+                </tr>
+            `).join('')}
+        </table>
+        ${(member.assets?.bank_accounts || []).length > 10 ? `<p style="color: #888; font-size: 12px;">（仅显示前10条，共${member.assets?.bank_accounts?.length}张卡）</p>` : ''}
+        
+        <h3>3.2 收支概况</h3>
+        <table>
+            <tr><th>指标</th><th>数值</th><th>备注</th></tr>
+            <tr>
+                <td>资金流入总额</td>
+                <td class="amount">¥${formatWan(member.total_income || member.analysis?.inflow_analysis?.total_inflow || 0)} 万元</td>
+                <td>-</td>
+            </tr>
+            <tr>
+                <td>资金流出总额</td>
+                <td class="amount">¥${formatWan(member.total_expense || member.analysis?.outflow_analysis?.total_outflow || 0)} 万元</td>
+                <td>-</td>
+            </tr>
+            <tr>
+                <td>交易笔数</td>
+                <td class="amount">${(member.transaction_count || 0).toLocaleString()} 笔</td>
+                <td>-</td>
+            </tr>
+            <tr>
+                <td>工资收入总额</td>
+                <td class="amount">¥${formatWan(member.assets?.salary_total || 0)} 万元</td>
+                <td>-</td>
+            </tr>
+            <tr>
+                <td>工资收入占比</td>
+                <td class="amount">${(member.analysis?.income_gap?.ratio || 0).toFixed(1)}%</td>
+                <td>${(member.analysis?.income_gap?.ratio || 0) < 50 ? '<span class="warning">低于50%，需核实</span>' : '正常'}</td>
+            </tr>
+            <tr>
+                <td>来源不明收入</td>
+                <td class="amount">¥${formatWan(member.analysis?.inflow_analysis?.unknown_source_amount || 0)} 万元</td>
+                <td>${(member.analysis?.inflow_analysis?.unknown_source_ratio || 0) > 0.3 ? '<span class="warning">占比较高</span>' : '-'}</td>
+            </tr>
+        </table>
+        
+        ${(member.analysis?.income_gap?.ratio || 0) < 50 ? `
+        <div class="issue-item issue-medium">
+            ⚠ ${member.analysis?.income_gap?.verdict || '工资收入占比不足，需核实其他收入来源'}
+        </div>
+        ` : ''}
+        
+        ${(member.analysis?.large_transfers?.transactions || []).length > 0 ? `
+        <h3>3.3 大额转账明细（前10笔）</h3>
+        <table>
+            <tr><th>日期</th><th>金额</th><th>方向</th><th>交易对手</th><th>摘要</th></tr>
+            ${(member.analysis?.large_transfers?.transactions || []).slice(0, 10).map((tx: any) => `
+                <tr>
+                    <td>${tx.date ? tx.date.substring(0, 10) : '-'}</td>
+                    <td class="amount">¥${formatCurrency(tx.amount || 0)}</td>
+                    <td>${tx.direction === 'income' ? '收入' : '支出'}</td>
+                    <td>${tx.counterparty || '-'}</td>
+                    <td>${(tx.description || '-').substring(0, 20)}</td>
+                </tr>
+            `).join('')}
+        </table>
+        ` : ''}
+    </div>
+    `).join('')}
+
+    ${companies.length > 0 ? `
+    <div class="section">
+        <h2>四、涉案公司分析</h2>
+        ${companies.map((company: any) => `
+        <div style="margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 8px;">
+            <h3 style="margin-top: 0;">${company.name || '未知公司'}</h3>
+            <table>
+                <tr><th>指标</th><th>数值</th></tr>
+                <tr><td>资金规模</td><td class="amount">¥${formatWan(company.fund_scale?.total_income || 0)} 万元</td></tr>
+                <tr><td>交易笔数</td><td class="amount">${(company.fund_scale?.transaction_count || 0).toLocaleString()} 笔</td></tr>
+                <tr><td>与核心人员往来</td><td class="amount">¥${formatWan(company.related_person_transfers?.total_amount || 0)} 万元</td></tr>
+            </table>
+        </div>
+        `).join('')}
+    </div>
+    ` : ''}
+
+    <div class="section">
+        <h2>五、综合研判与建议</h2>
+        
+        <div class="summary-box">
+            <strong>研判结论</strong><br>
+            ${conclusion.summary_text || '经分析，详见各模块具体内容。'}
+        </div>
+        
+        <h3>5.1 问题清单</h3>
+        ${(conclusion.issues || []).length > 0 ? `
+        <table>
+            <tr><th>人员</th><th>问题类型</th><th>说明</th><th>金额(万元)</th><th>风险等级</th></tr>
+            ${(conclusion.issues || []).map((issue: any) => `
+                <tr>
+                    <td>${issue.person || '-'}</td>
+                    <td>${issue.issue_type || '-'}</td>
+                    <td>${issue.description || '-'}</td>
+                    <td class="amount">${formatWan(issue.amount || 0)}</td>
+                    <td><span class="${issue.severity === 'high' ? 'warning' : ''}">${issue.severity === 'high' ? '高' : issue.severity === 'medium' ? '中' : '低'}</span></td>
+                </tr>
+            `).join('')}
+        </table>
+        ` : '<p>未发现明显异常问题。</p>'}
+        
+        <h3>5.2 下一步工作建议</h3>
+        <ol>
+            ${(conclusion.next_steps || ['对相关人员进行进一步核实', '调取工商登记信息核实公司关系', '进一步核实大额资金来源']).map((step: string) => `<li>${step}</li>`).join('')}
+        </ol>
+    </div>
+
+    <div style="margin-top: 60px; text-align: center; color: #888; font-size: 12px;">
+        本报告由资金穿透审计系统自动生成，仅供参考
+    </div>
+</body>
+</html>
+        `;
+    };
+
     const downloadReport = useCallback(() => {
         if (!previewHtml) return;
 
-        const blob = new Blob([previewHtml], { type: format === 'html' ? 'text/html' : 'application/json' });
+        const mimeType = format === 'html' || format === 'v3' ? 'text/html' : 'application/json';
+        const extension = format === 'json' ? 'json' : 'html';
+        
+        const blob = new Blob([previewHtml], { type: mimeType });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `${caseName}.${format === 'html' ? 'html' : 'json'}`;
+        a.download = `${caseName}.${extension}`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -340,6 +567,15 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
                 <div style={styles.formGroup}>
                     <label style={styles.label}>输出格式</label>
                     <div style={styles.formatButtons}>
+                        <button
+                            onClick={() => setFormat('v3')}
+                            style={{
+                                ...styles.formatButton,
+                                ...(format === 'v3' ? styles.formatButtonActive : styles.formatButtonInactive)
+                            }}
+                        >
+                            📋 v3.0 初查报告
+                        </button>
                         <button
                             onClick={() => setFormat('html')}
                             style={{

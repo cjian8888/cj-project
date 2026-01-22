@@ -468,8 +468,11 @@ BALANCE_COLUMNS = [
 
 # ============== 文件路径配置 ==============
 
-# 输出文件名
+# 输出目录
 DATA_DIR = './data'
+OUTPUT_DIR = './output'  # 输出根目录
+
+# 输出文件名
 OUTPUT_EXCEL_FILE = '资金核查底稿.xlsx'
 OUTPUT_REPORT_FILE = '核查结果分析报告.docx'
 OUTPUT_LOG_FILE = 'audit_system.log'

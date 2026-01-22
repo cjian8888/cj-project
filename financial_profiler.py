@@ -452,6 +452,370 @@ def calculate_income_structure(df: pd.DataFrame, entity_name: str = None) -> Dic
     return result
 
 
+# ========== Phase 1.2: 银行账户提取 (2026-01-21 新增) ==========
+
+def extract_bank_accounts(df: pd.DataFrame, entity_name: str = None) -> List[Dict]:
+    """
+    从清洗后的流水数据中提取唯一银行账户列表
+    
+    【Phase 1.2 - 2026-01-21】【Phase 1.3 - 2026-01-22 增强余额提取】
+    此函数用于从交易记录中提取去重后的银行账户信息，
+    支持区分真实银行卡和理财/证券账户。
+    
+    【余额提取逻辑】
+    使用每个账户最后一笔交易的余额作为账户当前余额。
+    支持多种余额列名格式：余额、余额(元)、交易余额、账户余额、当前余额、balance等。
+    
+    Args:
+        df: 清洗后的交易DataFrame (含 account_number, account_type, is_real_bank_card 列)
+        entity_name: 实体名称（可选，用于标注账户归属）
+        
+    Returns:
+        银行账户列表，每个账户包含：
+        - account_number: 账号
+        - bank_name: 银行名称
+        - account_type: 账户类型 (借记卡/信用卡/理财账户/证券账户)
+        - account_category: 账户类别 (个人账户/对公账户)
+        - is_real_bank_card: 是否为真实银行卡
+        - first_transaction_date: 首次交易日期
+        - last_transaction_date: 最后交易日期
+        - transaction_count: 交易笔数
+        - total_income: 总收入
+        - total_expense: 总支出
+        - last_balance: 最后一笔交易的余额（账户当前余额）
+    """
+    logger.info('正在提取银行账户列表...')
+    
+    if df.empty:
+        logger.warning('输入数据为空，无法提取银行账户')
+        return []
+    
+    # 确保必要列存在
+    account_col = None
+    for col in ['account_number', '本方账号', '账号', '卡号']:
+        if col in df.columns:
+            account_col = col
+            break
+    
+    if not account_col:
+        logger.warning('未找到账号列，无法提取银行账户')
+        return []
+    
+    # 【新增】识别余额列 - 支持多种列名格式
+    balance_col = None
+    BALANCE_COLUMN_VARIANTS = ['余额(元)', 'balance', '余额', '交易余额', '账户余额', '当前余额', '结余']
+    for col in BALANCE_COLUMN_VARIANTS:
+        if col in df.columns:
+            balance_col = col
+            logger.info(f'检测到余额列: {col}')
+            break
+    
+    if not balance_col:
+        logger.info('未检测到余额列，将使用净流入估算余额')
+    
+    # 按账号分组统计
+    accounts = {}
+    
+    for idx, row in df.iterrows():
+        account_num = str(row.get(account_col, '')).strip()
+        
+        # 跳过空账号
+        if not account_num or account_num in ['', 'nan', 'None']:
+            continue
+        
+        # 获取银行名称
+        bank_name = ''
+        for col in ['银行来源', 'bank_source', '所属银行']:
+            if col in row.index and pd.notna(row[col]):
+                bank_name = str(row[col])
+                break
+        
+        # 获取账户类型（如果已有）
+        account_type = '借记卡'  # 默认
+        if 'account_type' in row.index and pd.notna(row['account_type']):
+            account_type = str(row['account_type'])
+        
+        # 获取账户类别（如果已有）
+        account_category = '个人账户'  # 默认
+        if 'account_category' in row.index and pd.notna(row['account_category']):
+            account_category = str(row['account_category'])
+        
+        # 获取是否为真实银行卡（如果已有）
+        is_real_bank_card = True  # 默认
+        if 'is_real_bank_card' in row.index:
+            is_real_bank_card = bool(row['is_real_bank_card'])
+        
+        # 获取交易日期
+        tx_date = row.get('date')
+        
+        # 获取金额
+        income = float(row.get('income', 0) or 0)
+        expense = float(row.get('expense', 0) or 0)
+        
+        # 【新增】获取余额
+        balance = 0.0
+        if balance_col:
+            raw_balance = row.get(balance_col)
+            if pd.notna(raw_balance):
+                try:
+                    balance = float(raw_balance)
+                except (ValueError, TypeError):
+                    balance = 0.0
+        
+        # 初始化或更新账户记录
+        if account_num not in accounts:
+            accounts[account_num] = {
+                'account_number': account_num,
+                'bank_name': bank_name,
+                'account_type': account_type,
+                'account_category': account_category,
+                'is_real_bank_card': is_real_bank_card,
+                'first_transaction_date': tx_date,
+                'last_transaction_date': tx_date,
+                'transaction_count': 1,
+                'total_income': income,
+                'total_expense': expense,
+                'entity_name': entity_name or '',
+                # 【新增】余额字段
+                'last_balance': balance,  # 最后一笔交易的余额
+                '_last_balance_date': tx_date  # 内部字段，用于比较日期
+            }
+        else:
+            # 更新日期范围
+            if tx_date and (accounts[account_num]['first_transaction_date'] is None or 
+                           tx_date < accounts[account_num]['first_transaction_date']):
+                accounts[account_num]['first_transaction_date'] = tx_date
+            
+            # 【修改】更新最后交易日期，并同时更新余额
+            if tx_date and (accounts[account_num]['last_transaction_date'] is None or 
+                           tx_date > accounts[account_num]['last_transaction_date']):
+                accounts[account_num]['last_transaction_date'] = tx_date
+                # 【关键】当遇到更晚的交易时，更新余额为该笔交易的余额
+                if balance_col and balance != 0:
+                    accounts[account_num]['last_balance'] = balance
+                    accounts[account_num]['_last_balance_date'] = tx_date
+            elif tx_date and tx_date == accounts[account_num]['last_transaction_date']:
+                # 同一天的多笔交易，取有值的余额（非零优先）
+                if balance_col and balance != 0 and accounts[account_num]['last_balance'] == 0:
+                    accounts[account_num]['last_balance'] = balance
+            
+            # 累加统计
+            accounts[account_num]['transaction_count'] += 1
+            accounts[account_num]['total_income'] += income
+            accounts[account_num]['total_expense'] += expense
+            
+            # 更新银行名称（如果之前为空）
+            if not accounts[account_num]['bank_name'] and bank_name:
+                accounts[account_num]['bank_name'] = bank_name
+    
+    # 转换为列表，并移除内部字段
+    account_list = []
+    for acc in accounts.values():
+        # 移除内部字段
+        acc.pop('_last_balance_date', None)
+        
+        # 【2026-01-22 修正】不使用净流入估算余额（净流入≠余额）
+        # 如果没有真实余额数据，标记为无数据，保持 last_balance = 0
+        if acc['last_balance'] == 0 and not balance_col:
+            acc['has_balance_data'] = False  # 无余额数据
+        else:
+            acc['has_balance_data'] = True   # 有真实余额数据
+        
+        account_list.append(acc)
+    
+    # 按交易笔数排序（活跃账户优先）
+    account_list.sort(key=lambda x: x['transaction_count'], reverse=True)
+    
+    # 统计信息
+    real_bank_cards = [a for a in account_list if a['is_real_bank_card']]
+    other_accounts = [a for a in account_list if not a['is_real_bank_card']]
+    total_balance = sum(a['last_balance'] for a in account_list)
+    
+    logger.info(f'银行账户提取完成: 共{len(account_list)}个账户，'
+               f'其中真实银行卡{len(real_bank_cards)}张，其他账户{len(other_accounts)}个，'
+               f'总余额{total_balance/10000:.2f}万元')
+    
+    return account_list
+
+
+def calculate_yearly_salary(df: pd.DataFrame, entity_name: str = None) -> Dict:
+    """
+    按年分组统计工资收入
+    
+    【Phase 2.1 - 2026-01-21】
+    此函数用于生成年度工资统计报表，便于生成审计报告的工资表格。
+    依赖 calculate_income_structure 函数的工资识别结果。
+    
+    Args:
+        df: 包含 is_salary 标记的交易DataFrame，
+            或原始交易DataFrame（将自动调用工资识别）
+        entity_name: 实体名称（用于工资识别）
+        
+    Returns:
+        年度工资统计字典:
+        {
+            "summary": {
+                "total": 总工资收入,
+                "years_count": 跨越年数,
+                "avg_yearly": 年均工资,
+                "avg_monthly": 月均工资
+            },
+            "yearly": {
+                "2024": {
+                    "total": 年度工资总额,
+                    "transaction_count": 工资笔数,
+                    "monthly_avg": 月均,
+                    "months": {
+                        "01": {"total": 金额, "count": 笔数},
+                        ...
+                    }
+                },
+                ...
+            },
+            "details": [
+                {
+                    "date": 日期,
+                    "amount": 金额,
+                    "counterparty": 对手方,
+                    "description": 摘要,
+                    "reason": 判定依据
+                },
+                ...
+            ]
+        }
+    """
+    logger.info('正在计算年度工资统计...')
+    
+    if df.empty:
+        logger.warning('输入数据为空，无法计算年度工资')
+        return {
+            'summary': {'total': 0, 'years_count': 0, 'avg_yearly': 0, 'avg_monthly': 0},
+            'yearly': {},
+            'details': []
+        }
+    
+    # 检查是否已有工资标记，没有则调用工资识别
+    if 'is_salary' not in df.columns:
+        logger.info('数据缺少工资标记，正在进行工资识别...')
+        income_structure = calculate_income_structure(df, entity_name)
+        salary_details = income_structure.get('salary_details', [])
+    else:
+        # 已有工资标记，直接提取
+        salary_df = df[df.get('is_salary', False) == True].copy()
+        salary_details = []
+        for _, row in salary_df.iterrows():
+            salary_details.append({
+                '日期': row.get('date'),
+                '金额': row.get('income', 0),
+                '对手方': row.get('counterparty', ''),
+                '摘要': row.get('description', ''),
+                '判定依据': row.get('salary_reason', '已标记为工资')
+            })
+    
+    if not salary_details:
+        logger.info('未识别到工资收入')
+        return {
+            'summary': {'total': 0, 'years_count': 0, 'avg_yearly': 0, 'avg_monthly': 0},
+            'yearly': {},
+            'details': []
+        }
+    
+    # 按年份分组统计
+    yearly_stats = {}
+    total_salary = 0.0
+    all_months = set()
+    
+    for detail in salary_details:
+        date = detail.get('日期')
+        amount = float(detail.get('金额', 0) or 0)
+        
+        if not date or not amount:
+            continue
+        
+        # 获取年份和月份
+        try:
+            if hasattr(date, 'year'):
+                year = str(date.year)
+                month = f"{date.month:02d}"
+            else:
+                # 尝试解析字符串日期
+                import datetime
+                if isinstance(date, str):
+                    dt = pd.to_datetime(date)
+                    year = str(dt.year)
+                    month = f"{dt.month:02d}"
+                else:
+                    continue
+        except Exception:
+            continue
+        
+        # 记录月份用于计算跨月数
+        all_months.add(f"{year}-{month}")
+        
+        # 初始化年份
+        if year not in yearly_stats:
+            yearly_stats[year] = {
+                'total': 0.0,
+                'transaction_count': 0,
+                'months': {}
+            }
+        
+        # 初始化月份
+        if month not in yearly_stats[year]['months']:
+            yearly_stats[year]['months'][month] = {
+                'total': 0.0,
+                'count': 0
+            }
+        
+        # 累加
+        yearly_stats[year]['total'] += amount
+        yearly_stats[year]['transaction_count'] += 1
+        yearly_stats[year]['months'][month]['total'] += amount
+        yearly_stats[year]['months'][month]['count'] += 1
+        total_salary += amount
+    
+    # 计算月均
+    for year in yearly_stats:
+        months_with_salary = len(yearly_stats[year]['months'])
+        if months_with_salary > 0:
+            yearly_stats[year]['monthly_avg'] = yearly_stats[year]['total'] / months_with_salary
+        else:
+            yearly_stats[year]['monthly_avg'] = 0.0
+    
+    # 汇总统计
+    years_count = len(yearly_stats)
+    months_count = len(all_months)
+    
+    summary = {
+        'total': total_salary,
+        'years_count': years_count,
+        'avg_yearly': total_salary / years_count if years_count > 0 else 0.0,
+        'avg_monthly': total_salary / months_count if months_count > 0 else 0.0
+    }
+    
+    # 格式化详情列表
+    formatted_details = []
+    for detail in salary_details:
+        formatted_details.append({
+            'date': detail.get('日期'),
+            'amount': detail.get('金额', 0),
+            'counterparty': detail.get('对手方', ''),
+            'description': detail.get('摘要', ''),
+            'reason': detail.get('判定依据', '')
+        })
+    
+    result = {
+        'summary': summary,
+        'yearly': yearly_stats,
+        'details': formatted_details
+    }
+    
+    logger.info(f'年度工资统计完成: 总额{utils.format_currency(total_salary)}, '
+               f'跨{years_count}年{months_count}个月, 月均{utils.format_currency(summary["avg_monthly"])}')
+    
+    return result
+
+
 def analyze_fund_flow(df: pd.DataFrame) -> Dict:
     """
     分析资金去向
@@ -1392,245 +1756,6 @@ def categorize_transactions(df: pd.DataFrame) -> Dict[str, List[Dict]]:
             categories['large_amount'].append(record)
 
     return categories
-
-
-# ========== Phase 1: 银行账户提取 (2026-01-20 新增) ==========
-
-def extract_bank_accounts(df: pd.DataFrame) -> List[Dict]:
-    """
-    从清洗后的流水数据中提取唯一银行账户列表
-    
-    【Phase 1 - 2026-01-20】
-    功能:
-    1. 提取所有唯一的银行账户
-    2. 账户去重(同一账号只保留一条)
-    3. 合并多银行信息
-    4. 判断账户状态(正常/停用)
-    5. 过滤非真实银行卡
-    
-    Args:
-        df: 清洗后的交易DataFrame
-        
-    Returns:
-        银行账户列表,每个账户包含:
-        - 账号(部分隐藏)
-        - 银行名称
-        - 账户类型(借记卡/信用卡/理财账户/证券账户)
-        - 账户类别(个人账户/对公账户/联名账户)
-        - 账户状态(正常/停用)
-        - 最后交易时间
-        - 是否为真实银行卡
-    """
-    logger.info('正在提取银行账户列表...')
-    
-    if df.empty:
-        logger.warning('数据为空,无法提取账户')
-        return []
-    
-    # 检查必需字段
-    required_fields = ['account_number', 'date']
-    if not all(field in df.columns for field in required_fields):
-        logger.error(f'缺少必需字段: {required_fields}')
-        return []
-    
-    # 按账号分组,提取账户信息
-    accounts_dict = {}
-    
-    for _, row in df.iterrows():
-        account_num = str(row['account_number']).strip()
-        
-        # 跳过空账号
-        if not account_num or account_num in ['', 'nan', 'None', 'NaN']:
-            continue
-        
-        # 如果账号已存在,更新信息
-        if account_num in accounts_dict:
-            # 更新最后交易时间
-            if pd.notna(row['date']) and row['date'] > accounts_dict[account_num]['last_transaction_date']:
-                accounts_dict[account_num]['last_transaction_date'] = row['date']
-            
-            # 合并银行名称(如果不同)
-            bank_name = str(row.get('银行来源', row.get('所属银行', ''))).strip()
-            if bank_name and bank_name not in accounts_dict[account_num]['banks']:
-                accounts_dict[account_num]['banks'].append(bank_name)
-        else:
-            # 新账号,创建记录
-            accounts_dict[account_num] = {
-                'account_number': account_num,
-                'account_number_masked': _mask_account_number(account_num),
-                'banks': [str(row.get('银行来源', row.get('所属银行', ''))).strip()],
-                'account_type': row.get('account_type', '未知'),
-                'account_category': row.get('account_category', '个人账户'),
-                'is_real_bank_card': row.get('is_real_bank_card', True),
-                'first_transaction_date': row['date'] if pd.notna(row['date']) else None,
-                'last_transaction_date': row['date'] if pd.notna(row['date']) else None
-            }
-    
-    # 转换为列表并判断账户状态
-    accounts_list = []
-    current_time = pd.Timestamp.now()
-    
-    for account_num, account_info in accounts_dict.items():
-        # 判断账户状态
-        if account_info['last_transaction_date']:
-            days_since_last = (current_time - account_info['last_transaction_date']).days
-            # 超过180天无交易视为停用
-            account_status = '停用' if days_since_last > 180 else '正常'
-        else:
-            account_status = '未知'
-        
-        # 合并银行名称
-        bank_names = ', '.join([b for b in account_info['banks'] if b and b != 'nan'])
-        
-        accounts_list.append({
-            '账号': account_info['account_number_masked'],
-            '完整账号': account_info['account_number'],  # 用于内部处理
-            '银行名称': bank_names or '未知',
-            '账户类型': account_info['account_type'],
-            '账户类别': account_info['account_category'],
-            '账户状态': account_status,
-            '首次交易时间': account_info['first_transaction_date'],
-            '最后交易时间': account_info['last_transaction_date'],
-            '是否真实银行卡': account_info['is_real_bank_card']
-        })
-    
-    # 按最后交易时间降序排序
-    accounts_list.sort(key=lambda x: x['最后交易时间'] if x['最后交易时间'] else pd.Timestamp.min, reverse=True)
-    
-    # 统计信息
-    total_accounts = len(accounts_list)
-    real_bank_cards = sum(1 for a in accounts_list if a['是否真实银行卡'])
-    active_accounts = sum(1 for a in accounts_list if a['账户状态'] == '正常')
-    
-    logger.info(f'账户提取完成: 共{total_accounts}个账户, 其中真实银行卡{real_bank_cards}张, 正常状态{active_accounts}个')
-    
-    return accounts_list
-
-
-def _mask_account_number(account_num: str) -> str:
-    """
-    账号部分隐藏(保留前4位和后4位)
-    
-    Args:
-        account_num: 完整账号
-        
-    Returns:
-        部分隐藏的账号
-    """
-    account_str = str(account_num).strip()
-    
-    if len(account_str) <= 8:
-        # 账号太短,只隐藏中间部分
-        return account_str[:2] + '****' + account_str[-2:]
-    else:
-        # 标准隐藏:保留前4位和后4位
-        return account_str[:4] + '****' + account_str[-4:]
-
-
-# ========== Phase 2: 年度工资统计 (2026-01-20 新增) ==========
-
-def calculate_yearly_salary(df: pd.DataFrame, entity_name: str = None) -> Dict:
-    """
-    计算年度工资统计
-    
-    【Phase 2 - 2026-01-20】
-    功能:
-    1. 自动识别数据中的所有年份
-    2. 按年份分组统计工资收入
-    3. 计算每年的月度工资明细
-    4. 返回结构化的年度工资数据
-    
-    Args:
-        df: 交易DataFrame
-        entity_name: 实体名称(用于工资识别)
-        
-    Returns:
-        年度工资统计字典,包含:
-        - yearly_stats: 按年统计 {year: {total, months, avg_monthly}}
-        - monthly_details: 月度明细列表
-        - total_salary: 总工资收入
-        - year_range: 年份范围
-    """
-    logger.info(f'正在计算{entity_name}的年度工资统计...')
-    
-    if df.empty:
-        logger.warning('数据为空,无法计算年度工资')
-        return {
-            'yearly_stats': {},
-            'monthly_details': [],
-            'total_salary': 0.0,
-            'year_range': None
-        }
-    
-    # 先调用现有的收支结构分析获取工资明细
-    income_structure = calculate_income_structure(df, entity_name=entity_name)
-    salary_details = income_structure.get('salary_details', [])
-    
-    if not salary_details:
-        logger.warning(f'{entity_name}无工资性收入')
-        return {
-            'yearly_stats': {},
-            'monthly_details': [],
-            'total_salary': 0.0,
-            'year_range': None
-        }
-    
-    # 转换为DataFrame便于处理
-    salary_df = pd.DataFrame(salary_details)
-    
-    # 确保日期列是datetime类型
-    salary_df['日期'] = pd.to_datetime(salary_df['日期'])
-    
-    # 提取年份和月份
-    salary_df['年份'] = salary_df['日期'].dt.year
-    salary_df['月份'] = salary_df['日期'].dt.month
-    
-    # 按年份统计
-    yearly_stats = {}
-    years = sorted(salary_df['年份'].unique())
-    
-    for year in years:
-        year_data = salary_df[salary_df['年份'] == year]
-        total_amount = year_data['金额'].sum()
-        month_count = year_data['月份'].nunique()  # 有工资记录的月份数
-        avg_monthly = total_amount / month_count if month_count > 0 else 0
-        
-        yearly_stats[int(year)] = {
-            'total': float(total_amount),
-            'months': int(month_count),
-            'avg_monthly': float(avg_monthly),
-            'transaction_count': len(year_data)
-        }
-    
-    # 构建月度明细
-    monthly_details = []
-    for _, row in salary_df.iterrows():
-        monthly_details.append({
-            'year': int(row['年份']),
-            'month': int(row['月份']),
-            'date': row['日期'].strftime('%Y-%m-%d'),
-            'amount': float(row['金额']),
-            'payer': row['对手方'],
-            'description': row['摘要'],
-            'reason': row['判定依据']
-        })
-    
-    # 按日期排序
-    monthly_details.sort(key=lambda x: x['date'])
-    
-    # 计算总工资和年份范围
-    total_salary = float(salary_df['金额'].sum())
-    year_range = (int(years[0]), int(years[-1])) if years else None
-    
-    logger.info(f'年度工资统计完成: {len(years)}个年份, 总工资{utils.format_currency(total_salary)}')
-    logger.info(f'年份范围: {year_range[0]}-{year_range[1]}' if year_range else '无数据')
-    
-    return {
-        'yearly_stats': yearly_stats,
-        'monthly_details': monthly_details,
-        'total_salary': total_salary,
-        'year_range': year_range
-    }
 
 
 # ========== Phase 2: 公司画像构建 (2026-01-20 新增) ==========

@@ -1917,7 +1917,13 @@ function AuditReportTab() {
         try {
             setPreviewLoading(true);
             const blob = await api.downloadReport(filename);
-            const content = await blob.text();
+            
+            // 【P0 修复】使用 TextDecoder 明确指定 UTF-8 编码
+            // 解决中文乱码问题
+            const arrayBuffer = await blob.arrayBuffer();
+            const decoder = new TextDecoder('utf-8');
+            const content = decoder.decode(arrayBuffer);
+            
             setPreviewFile({
                 name: filename,
                 content,

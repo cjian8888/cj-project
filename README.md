@@ -6,7 +6,7 @@
   <p>Fund Penetration & Association Screening</p>
   
   <p>
-    <img src="https://img.shields.io/badge/version-4.5.0-blue" alt="Version" />
+    <img src="https://img.shields.io/badge/version-4.5.3-blue" alt="Version" />
     <img src="https://img.shields.io/badge/Python-3.9+-3776AB?logo=python&logoColor=white" alt="Python" />
     <img src="https://img.shields.io/badge/React-19.2-61DAFB?logo=react&logoColor=white" alt="React" />
     <img src="https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
@@ -20,6 +20,47 @@
 </div>
 
 ---
+
+## 🏗️ 系统架构
+
+```mermaid
+graph TD
+    subgraph Data_Layer [数据层]
+        Raw_Files[原始Excel流水] --> Data_Cleaner[清洗引擎]
+        Data_Cleaner --> Cleaned_Data[🏆 成品数据\n(cleaned_data)]
+        Cleaned_Data -.-> Iron_Rule[🚨 数据源铁律]
+    end
+
+    subgraph Analysis_Engine [分析引擎]
+        Cleaned_Data --> Profiler[资金画像]
+        Cleaned_Data --> Suspicion[疑点检测]
+        Cleaned_Data --> Loan[借贷分析]
+        Cleaned_Data --> Income[收入分析]
+        Cleaned_Data --> TimeSeries[时序分析]
+        Cleaned_Data --> GraphAlgo[资金穿透]
+        Cleaned_Data --> ML_Model[ML风险预测]
+        
+        Raw_Files --> External_Parsers[外部数据解析器\n(P0-P2)]
+    end
+
+    subgraph Storage_Layer [缓存层]
+        Profiler & Suspicion & Loan & Income & TimeSeries & GraphAlgo & ML_Model & External_Parsers --> Aggregator[线索聚合]
+        Aggregator --> Results_Cache[📦 分析缓存\n(analysis_cache)]
+    end
+
+    subgraph Presentation_Layer [展现层]
+        Results_Cache --> API_Server[FastAPI 服务]
+        Results_Cache --> Report_Gen[报告生成器]
+        
+        API_Server --> Dashboard[React 仪表盘]
+        Report_Gen --> Excel_Report[核查底稿.xlsx]
+        Report_Gen --> HTML_Report[综合报告.html]
+    end
+    
+    style Cleaned_Data fill:#f9f,stroke:#333,stroke-width:2px,color:black
+    style Results_Cache fill:#bbf,stroke:#333,stroke-width:2px,color:black
+    style Iron_Rule fill:#f00,stroke:#333,stroke-width:2px,color:white
+```
 
 ## ✨ 功能特性
 
@@ -88,7 +129,7 @@ cd ..
 
 ### 启动系统
 
-**推荐方式：Dashboard 可视化界面**
+> ⚠️ **唯一入口**：`api_server.py` 是本系统的唯一程序入口，`main.py` 已废弃。
 
 ```bash
 # 终端 1：启动后端 API 服务
@@ -99,13 +140,10 @@ cd dashboard
 npm run dev
 ```
 
-访问 **http://localhost:5173** 打开 Dashboard。
+访问 **http://localhost:5173** 打开 Dashboard，点击"开始分析"运行完整分析流程。
 
-**命令行方式**
+后端 API 文档：**http://localhost:8000/docs**
 
-```bash
-python main.py --input ./data --output ./output
-```
 
 ---
 
@@ -127,8 +165,8 @@ cj-project/
 │   │   └── 公司/           # 公司合并流水 Excel
 │   ├── analysis_cache/     # 分析缓存 (加速加载)
 │   └── analysis_results/   # 报告输出
-├── api_server.py           # FastAPI 后端服务
-├── main.py                 # 命令行入口
+├── api_server.py           # ⭐ 唯一程序入口 - FastAPI 后端服务
+├── main.py                 # [已废弃] 历史代码，请勿使用
 ├── config.py               # 配置参数
 ├── data_cleaner.py         # 数据清洗
 ├── financial_profiler.py   # 资金画像

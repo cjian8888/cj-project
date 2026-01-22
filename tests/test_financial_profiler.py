@@ -17,7 +17,9 @@ from financial_profiler import (
     _calculate_stable_cv, calculate_income_structure,
     analyze_fund_flow, analyze_wealth_management,
     generate_profile_report, extract_large_cash,
-    categorize_transactions, analyze_wealth_holdings
+    categorize_transactions, analyze_wealth_holdings,
+    extract_bank_accounts, calculate_yearly_salary,  # Phase 1.2/2.1 新增
+    build_company_profile  # Phase 2.3 新增
 )
 
 
@@ -495,6 +497,234 @@ class TestCategorizeTransactions:
                         'large_amount', 'property', 'vehicle', 'other']
         for key in expected_keys:
             assert key in result
+
+
+# ========== Phase 1.2/2.1 新增测试 (2026-01-21) ==========
+
+class TestExtractBankAccounts:
+    """测试银行账户提取函数"""
+    
+    def test_extract_bank_accounts_empty_dataframe(self):
+        """测试空DataFrame"""
+        df = pd.DataFrame(columns=['date', 'income', 'expense', 'account_number'])
+        result = extract_bank_accounts(df)
+        assert result == []
+    
+    def test_extract_bank_accounts_single_account(self):
+        """测试单个账户"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03']),
+            'income': [1000, 2000, 0],
+            'expense': [0, 0, 500],
+            'account_number': ['6222021234567890', '6222021234567890', '6222021234567890'],
+            '银行来源': ['工商银行', '工商银行', '工商银行']
+        })
+        result = extract_bank_accounts(df, '张伟')
+        assert len(result) == 1
+        assert result[0]['account_number'] == '6222021234567890'
+        assert result[0]['transaction_count'] == 3
+        assert result[0]['total_income'] == 3000
+        assert result[0]['total_expense'] == 500
+    
+    def test_extract_bank_accounts_multiple_accounts(self):
+        """测试多个账户"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03']),
+            'income': [1000, 2000, 3000],
+            'expense': [0, 0, 0],
+            'account_number': ['6222021234567890', '6228480001234567', '6222021234567890'],
+            '银行来源': ['工商银行', '建设银行', '工商银行']
+        })
+        result = extract_bank_accounts(df, '张伟')
+        assert len(result) == 2
+        # 按交易笔数排序，工商银行账户有2笔在前
+        assert result[0]['transaction_count'] == 2
+        assert result[1]['transaction_count'] == 1
+    
+    def test_extract_bank_accounts_with_account_type(self):
+        """测试账户类型识别"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02']),
+            'income': [1000, 2000],
+            'expense': [0, 0],
+            'account_number': ['6222021234567890', 'LCT001234'],
+            'account_type': ['借记卡', '理财账户'],
+            'is_real_bank_card': [True, False],
+            '银行来源': ['工商银行', '工商银行']
+        })
+        result = extract_bank_accounts(df)
+        assert len(result) == 2
+        real_cards = [a for a in result if a['is_real_bank_card']]
+        other_accounts = [a for a in result if not a['is_real_bank_card']]
+        assert len(real_cards) == 1
+        assert len(other_accounts) == 1
+    
+    def test_extract_bank_accounts_date_range(self):
+        """测试日期范围"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-06-15', '2024-12-31']),
+            'income': [1000, 2000, 3000],
+            'expense': [0, 0, 0],
+            'account_number': ['6222021234567890', '6222021234567890', '6222021234567890']
+        })
+        result = extract_bank_accounts(df)
+        assert len(result) == 1
+        assert result[0]['first_transaction_date'].year == 2024
+        assert result[0]['first_transaction_date'].month == 1
+        assert result[0]['last_transaction_date'].month == 12
+
+
+class TestCalculateYearlySalary:
+    """测试年度工资统计函数"""
+    
+    def test_calculate_yearly_salary_empty_dataframe(self):
+        """测试空DataFrame"""
+        df = pd.DataFrame(columns=['date', 'income', 'expense', 'counterparty', 'description'])
+        result = calculate_yearly_salary(df)
+        assert result['summary']['total'] == 0
+        assert result['yearly'] == {}
+        assert result['details'] == []
+    
+    def test_calculate_yearly_salary_single_year(self):
+        """测试单年度"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-15', '2024-02-15', '2024-03-15']),
+            'income': [10000, 12000, 11000],
+            'expense': [0, 0, 0],
+            'counterparty': ['公司', '公司', '公司'],
+            'description': ['工资', '工资', '工资']
+        })
+        result = calculate_yearly_salary(df, '张伟')
+        assert '2024' in result['yearly']
+        assert result['yearly']['2024']['total'] == 33000
+        assert result['yearly']['2024']['transaction_count'] == 3
+        assert result['summary']['years_count'] == 1
+    
+    def test_calculate_yearly_salary_multiple_years(self):
+        """测试多年度"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2023-12-15', '2024-01-15', '2024-02-15']),
+            'income': [10000, 12000, 11000],
+            'expense': [0, 0, 0],
+            'counterparty': ['公司', '公司', '公司'],
+            'description': ['工资', '工资', '工资']
+        })
+        result = calculate_yearly_salary(df, '张伟')
+        assert result['summary']['years_count'] >= 1
+    
+    def test_calculate_yearly_salary_monthly_breakdown(self):
+        """测试月度明细"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-15', '2024-01-25', '2024-02-15']),
+            'income': [5000, 3000, 10000],
+            'expense': [0, 0, 0],
+            'counterparty': ['公司', '公司', '公司'],
+            'description': ['工资', '奖金', '工资']
+        })
+        result = calculate_yearly_salary(df, '张伟')
+        if '2024' in result['yearly']:
+            months = result['yearly']['2024'].get('months', {})
+            if '01' in months:
+                assert months['01']['count'] >= 1
+    
+    def test_calculate_yearly_salary_summary(self):
+        """测试汇总统计"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-15', '2024-02-15']),
+            'income': [10000, 10000],
+            'expense': [0, 0],
+            'counterparty': ['公司', '公司'],
+            'description': ['工资', '工资']
+        })
+        result = calculate_yearly_salary(df, '张伟')
+        summary = result['summary']
+        assert 'total' in summary
+        assert 'years_count' in summary
+        assert 'avg_yearly' in summary
+        assert 'avg_monthly' in summary
+
+
+# ========== Phase 2.3 公司画像测试 (2026-01-21) ==========
+
+class TestBuildCompanyProfile:
+    """测试公司画像生成函数"""
+    
+    def test_build_company_profile_empty_dataframe(self):
+        """测试空DataFrame"""
+        df = pd.DataFrame(columns=['date', 'income', 'expense', 'counterparty', 'description'])
+        result = build_company_profile(df, '测试公司')
+        assert result['entity_name'] == '测试公司'
+        assert result['entity_type'] == 'company'
+        assert result['has_data'] is False
+    
+    def test_build_company_profile_basic(self):
+        """测试基础公司画像生成"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03']),
+            'income': [100000, 50000, 0],
+            'expense': [0, 0, 30000],
+            'counterparty': ['客户A', '客户B', '供应商C'],
+            'description': ['货款', '销售收入', '采购支付']
+        })
+        result = build_company_profile(df, '测试公司')
+        assert result['entity_name'] == '测试公司'
+        assert result['entity_type'] == 'company'
+        assert result['has_data'] is True
+        assert 'income_structure' in result
+        assert 'fund_flow' in result
+        assert 'summary' in result
+    
+    def test_build_company_profile_company_specific(self):
+        """测试公司特有分析字段"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03']),
+            'income': [100000, 0, 0],
+            'expense': [0, 50000, 30000],
+            'counterparty': ['客户公司', '张三', '银行ATM'],
+            'description': ['货款', '转账给个人', '现金取款']
+        })
+        result = build_company_profile(df, '测试公司')
+        assert 'company_specific' in result
+        company_specific = result['company_specific']
+        assert 'to_individual_transfers' in company_specific
+        assert 'cash_withdrawal_pattern' in company_specific
+    
+    def test_build_company_profile_result_structure(self):
+        """测试结果结构完整性"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01']),
+            'income': [100000],
+            'expense': [0],
+            'counterparty': ['客户'],
+            'description': ['货款']
+        })
+        result = build_company_profile(df, '测试公司')
+        expected_keys = [
+            'entity_name', 'entity_type', 'has_data',
+            'income_structure', 'fund_flow', 'wealth_management',
+            'large_cash', 'categories', 'company_specific', 'summary'
+        ]
+        for key in expected_keys:
+            assert key in result, f"缺少字段: {key}"
+    
+    def test_build_company_profile_summary(self):
+        """测试汇总信息"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02']),
+            'income': [100000, 0],
+            'expense': [0, 30000],
+            'counterparty': ['客户', '供应商'],
+            'description': ['货款', '采购']
+        })
+        result = build_company_profile(df, '测试公司')
+        summary = result['summary']
+        assert 'total_income' in summary
+        assert 'total_expense' in summary
+        assert 'net_flow' in summary
+        assert 'real_income' in summary
+        assert 'real_expense' in summary
+        assert summary['total_income'] == 100000
+        assert summary['total_expense'] == 30000
 
 
 if __name__ == "__main__":

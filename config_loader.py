@@ -469,3 +469,155 @@ UNIT_WAN = 10000
 
 # 动态阈值配置
 DYNAMIC_THRESHOLD_CONFIG = lambda: _get_config_value('cash.dynamic_threshold', {})
+
+
+# ==================== v3.0 主核查配置加载 ====================
+# 以下函数用于加载 investigation_config.yaml
+
+import config
+from report_schema import (
+    InvestigationConfig, PrimarySubjectConfig, 
+    CollisionTarget, SensitivePerson
+)
+
+
+def load_investigation_config(config_path: str = None) -> Optional['InvestigationConfig']:
+    """
+    加载主核查配置
+    
+    Args:
+        config_path: 配置文件路径，默认为 ./config/investigation_config.yaml
+        
+    Returns:
+        InvestigationConfig 对象，如无配置则返回空配置
+    """
+    if config_path is None:
+        config_path = os.path.join(os.path.dirname(__file__), 'config', 'investigation_config.yaml')
+    
+    # 如果配置文件不存在，返回空配置
+    if not os.path.exists(config_path):
+        logger.info(f"[配置加载] 配置文件不存在，使用默认空配置: {config_path}")
+        return InvestigationConfig()
+    
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            raw_config = yaml.safe_load(f) or {}
+        
+        logger.info(f"[配置加载] 已加载配置文件: {config_path}")
+        return _parse_investigation_config(raw_config)
+        
+    except Exception as e:
+        logger.warning(f"[配置加载] 配置文件解析失败: {e}")
+        return InvestigationConfig()
+
+
+def _parse_investigation_config(raw_config: Dict) -> 'InvestigationConfig':
+    """解析原始 YAML 配置为 InvestigationConfig 对象"""
+    
+    # 解析主核查对象
+    primary_subject_raw = raw_config.get('primary_subject', {}) or {}
+    primary_subject = PrimarySubjectConfig(
+        name=primary_subject_raw.get('name', '') or '',
+        id_number=primary_subject_raw.get('id_number', '') or '',
+        position=primary_subject_raw.get('position', '') or '',
+        employer=primary_subject_raw.get('employer', '') or '',
+        entry_date=primary_subject_raw.get('entry_date', '') or '',
+        promotion_date=primary_subject_raw.get('promotion_date', '') or '',
+        verified_monthly_income=primary_subject_raw.get('verified_monthly_income', 0) or 0
+    )
+    
+    # 解析调查单位
+    investigation_unit_raw = raw_config.get('investigation_unit', {}) or {}
+    investigation_unit_name = investigation_unit_raw.get('name', '') or ''
+    investigation_unit_keywords = investigation_unit_raw.get('keywords', []) or []
+    
+    # 解析白名单
+    excluded_companies = raw_config.get('excluded_companies', []) or []
+    
+    # 解析碰撞目标
+    collision_targets_raw = raw_config.get('collision_targets', []) or []
+    collision_targets = []
+    for target in collision_targets_raw:
+        if isinstance(target, dict):
+            collision_targets.append(CollisionTarget(
+                name=target.get('name', '') or '',
+                type=target.get('type', '') or '',
+                risk_level=target.get('risk_level', 'medium') or 'medium',
+                note=target.get('note', '') or ''
+            ))
+    
+    # 解析敏感人员
+    sensitive_persons_raw = raw_config.get('sensitive_persons', []) or []
+    sensitive_persons = []
+    for person in sensitive_persons_raw:
+        if isinstance(person, dict):
+            sensitive_persons.append(SensitivePerson(
+                name=person.get('name', '') or '',
+                relation=person.get('relation', '') or ''
+            ))
+    
+    # 解析数据范围
+    data_scope_raw = raw_config.get('data_scope', {}) or {}
+    data_scope_auto = data_scope_raw.get('auto_detect', True)
+    data_scope_start = data_scope_raw.get('start_date', '') or ''
+    data_scope_end = data_scope_raw.get('end_date', '') or ''
+    
+    # 解析报告元信息
+    report_meta_raw = raw_config.get('report_meta', {}) or {}
+    doc_number = report_meta_raw.get('doc_number', '') or ''
+    case_source = report_meta_raw.get('case_source', '') or ''
+    
+    return InvestigationConfig(
+        primary_subject=primary_subject,
+        basic_info_supplement=raw_config.get('basic_info_supplement', []) or [],
+        family_members=raw_config.get('family_members', []) or [],
+        investigation_unit_name=investigation_unit_name,
+        investigation_unit_keywords=investigation_unit_keywords,
+        excluded_companies=excluded_companies,
+        collision_targets=collision_targets,
+        sensitive_persons=sensitive_persons,
+        data_scope_auto_detect=data_scope_auto,
+        data_scope_start=data_scope_start,
+        data_scope_end=data_scope_end,
+        doc_number=doc_number,
+        case_source=case_source
+    )
+
+
+def apply_investigation_config_to_runtime(investigation_config: 'InvestigationConfig'):
+    """
+    将配置应用到运行时 config.py
+    
+    仅覆盖非空配置项，保持默认值不变
+    """
+    # 应用调查单位关键词
+    if investigation_config.investigation_unit_keywords:
+        config.INVESTIGATION_UNIT_KEYWORDS = investigation_config.investigation_unit_keywords
+        logger.info(f"[配置应用] INVESTIGATION_UNIT_KEYWORDS = {investigation_config.investigation_unit_keywords}")
+    
+    # 应用白名单
+    if investigation_config.excluded_companies:
+        if hasattr(config, 'EXCLUDED_COMPANIES'):
+            config.EXCLUDED_COMPANIES = investigation_config.excluded_companies
+        else:
+            setattr(config, 'EXCLUDED_COMPANIES', investigation_config.excluded_companies)
+        logger.info(f"[配置应用] EXCLUDED_COMPANIES = {len(investigation_config.excluded_companies)} 项")
+    
+    # 应用敏感人员
+    if investigation_config.sensitive_persons:
+        sensitive_names = [p.name for p in investigation_config.sensitive_persons]
+        if hasattr(config, 'SENSITIVE_PERSON_KEYWORDS'):
+            config.SENSITIVE_PERSON_KEYWORDS = sensitive_names
+        else:
+            setattr(config, 'SENSITIVE_PERSON_KEYWORDS', sensitive_names)
+        logger.info(f"[配置应用] SENSITIVE_PERSON_KEYWORDS = {sensitive_names}")
+    
+    # 应用碰撞目标公司
+    if investigation_config.collision_targets:
+        target_names = [t.name for t in investigation_config.collision_targets]
+        if hasattr(config, 'COLLISION_TARGET_COMPANIES'):
+            config.COLLISION_TARGET_COMPANIES = target_names
+        else:
+            setattr(config, 'COLLISION_TARGET_COMPANIES', target_names)
+        logger.info(f"[配置应用] COLLISION_TARGET_COMPANIES = {target_names}")
+

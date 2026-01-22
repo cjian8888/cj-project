@@ -3,7 +3,19 @@
 """
 资金穿透审计系统 - FastAPI 后端服务
 
-提供 RESTful API 和 WebSocket 实时日志推送，连接 React 前端与 Python 分析引擎
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║                     🚨🚨🚨 唯一程序入口声明 🚨🚨🚨                             ║
+# ╠══════════════════════════════════════════════════════════════════════════════╣
+# ║                                                                              ║
+# ║  本文件 (api_server.py) 是资金穿透审计系统的【唯一入口】                      ║
+# ║                                                                              ║
+# ║  启动方式: python api_server.py                                              ║
+# ║  访问地址: http://localhost:8000 (后端API)                                   ║
+# ║            http://localhost:5173 (前端界面，需另行启动 npm run dev)          ║
+# ║                                                                              ║
+# ║  ⚠️  main.py 已废弃，请勿使用！其功能已完全整合到本文件中。                  ║
+# ║                                                                              ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║                        🚨🚨🚨 数据来源铁律 🚨🚨🚨                              ║
@@ -19,11 +31,12 @@
 # ║  执行口号：Excel 里有什么，界面就显示什么；Excel 里没有的，界面绝不许瞎编。   ║
 # ║                                                                              ║
 # ║  数据流：                                                                    ║
-# ║    main.py (后端) → 读取 data/ → 清洗 → 保存 cleaned_data/*.xlsx            ║
-# ║    api_server.py (前端API) → 只读取 cleaned_data/*.xlsx → 返回给界面        ║
+# ║    前端点击"开始分析" → api_server.py 的 run_analysis()                      ║
+# ║    → 读取 data/ → 清洗 → 保存 cleaned_data/*.xlsx → 生成所有分析报告         ║
 # ║                                                                              ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 """
+
 
 # ==================== Windows asyncio 兼容性修复 ====================
 # 修复 Python 3.11+ 在 Windows 上 ProactorEventLoop 的已知 bug:
@@ -46,6 +59,7 @@ from typing import Dict, List, Optional, Any
 from contextlib import asynccontextmanager
 import threading
 import queue
+import pandas as pd
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -619,7 +633,6 @@ def _get_directory_fingerprint(directory: str) -> Dict:
 
 # ==================== 🚨 成品库读取层 (铁律核心实现) ====================
 
-import pandas as pd
 from typing import Tuple
 
 # 【铁律】智能匹配 Excel 列名 - 使用 config.py 中的统一配置
@@ -1519,15 +1532,33 @@ async def get_available_sections():
 
 @app.get("/api/reports/{filename}")
 async def download_report(filename: str):
-    """下载报告文件"""
+    """下载报告文件
+    
+    【P0 修复】根据文件扩展名设置正确的 media_type，确保中文编码正确显示
+    """
     filepath = os.path.join("./output/analysis_results", filename)
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="文件不存在")
     
+    # 根据文件扩展名设置正确的 media_type
+    ext = filename.lower().split('.')[-1] if '.' in filename else ''
+    
+    media_type_map = {
+        'txt': 'text/plain; charset=utf-8',
+        'html': 'text/html; charset=utf-8',
+        'htm': 'text/html; charset=utf-8',
+        'json': 'application/json; charset=utf-8',
+        'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'xls': 'application/vnd.ms-excel',
+        'md': 'text/markdown; charset=utf-8',
+    }
+    
+    media_type = media_type_map.get(ext, 'application/octet-stream')
+    
     return FileResponse(
         filepath, 
         filename=filename,
-        media_type="application/octet-stream"
+        media_type=media_type
     )
 
 @app.head("/api/reports/{filename}")
@@ -2089,7 +2120,162 @@ def run_analysis(analysis_config: AnalysisConfig):
                 os.path.join(output_dirs['analysis_results'], config.OUTPUT_EXCEL_FILE)
             )
         except Exception as e:
-            logger.warning(f"生成报告失败: {e}")
+            logger.warning(f"生成Excel报告失败: {e}")
+        
+        # ==================== 新增：生成完整 TXT 报告 ====================
+        analysis_state.update(progress=92, phase="生成分析报告...")
+        
+        # 5.6 资金穿透分析报告
+        try:
+            personal_data = {name: df for name, df in cleaned_data.items() if name in all_persons}
+            company_data = {name: df for name, df in cleaned_data.items() if name in all_companies}
+            penetration_results = fund_penetration.analyze_fund_penetration(
+                personal_data, company_data, all_persons, all_companies
+            )
+            analysis_results["penetration"] = penetration_results
+            penetration_report_path = fund_penetration.generate_penetration_report(
+                penetration_results, output_dirs['analysis_results']
+            )
+            logger.info(f"资金穿透报告已生成: {penetration_report_path}")
+        except Exception as e:
+            logger.warning(f"资金穿透报告生成失败: {e}")
+        
+        # 5.7 关联方资金分析报告
+        try:
+            related_party_results = related_party_analyzer.analyze_related_party_flows(
+                cleaned_data, all_persons
+            )
+            analysis_results["related_party"] = related_party_results
+            related_party_report_path = related_party_analyzer.generate_related_party_report(
+                related_party_results, output_dirs['analysis_results']
+            )
+            logger.info(f"关联方分析报告已生成: {related_party_report_path}")
+        except Exception as e:
+            logger.warning(f"关联方分析报告生成失败: {e}")
+        
+        # 5.8 多源数据碰撞分析报告
+        try:
+            correlation_results = multi_source_correlator.run_all_correlations(
+                data_dir, cleaned_data, all_persons
+            )
+            analysis_results["correlation"] = correlation_results
+            correlation_report_path = multi_source_correlator.generate_correlation_report(
+                correlation_results, output_dirs['analysis_results']
+            )
+            logger.info(f"多源碰撞报告已生成: {correlation_report_path}")
+        except Exception as e:
+            logger.warning(f"多源碰撞报告生成失败: {e}")
+        
+        analysis_state.update(progress=94, phase="生成借贷与收入分析报告...")
+        
+        # 5.9 借贷行为分析报告
+        try:
+            loan_results = loan_analyzer.analyze_loan_behaviors(cleaned_data, all_persons)
+            analysis_results["loan"] = loan_results
+            loan_report_path = loan_analyzer.generate_loan_report(
+                loan_results, output_dirs['analysis_results']
+            )
+            logger.info(f"借贷分析报告已生成: {loan_report_path}")
+        except Exception as e:
+            logger.warning(f"借贷分析报告生成失败: {e}")
+        
+        # 5.10 异常收入来源分析报告
+        try:
+            income_results = income_analyzer.detect_suspicious_income(cleaned_data, all_persons)
+            analysis_results["income"] = income_results
+            income_report_path = income_analyzer.generate_suspicious_income_report(
+                income_results, output_dirs['analysis_results']
+            )
+            logger.info(f"异常收入报告已生成: {income_report_path}")
+        except Exception as e:
+            logger.warning(f"异常收入报告生成失败: {e}")
+        
+        analysis_state.update(progress=96, phase="生成高级分析报告...")
+        
+        # 5.12 机器学习风险预测报告
+        try:
+            ml_results = ml_analyzer.run_ml_analysis(cleaned_data, all_persons, all_companies)
+            analysis_results["ml"] = ml_results
+            ml_report_path = ml_analyzer.generate_ml_report(ml_results, output_dirs['analysis_results'])
+            logger.info(f"机器学习预测报告已生成: {ml_report_path}")
+        except Exception as e:
+            logger.warning(f"机器学习预测报告生成失败: {e}")
+        
+        # 5.13 时间序列分析报告
+        try:
+            ts_results = time_series_analyzer.analyze_time_series(cleaned_data, all_persons)
+            analysis_results["time_series"] = ts_results
+            ts_report_path = time_series_analyzer.generate_time_series_report(
+                ts_results, output_dirs['analysis_results']
+            )
+            logger.info(f"时序分析报告已生成: {ts_report_path}")
+        except Exception as e:
+            logger.warning(f"时序分析报告生成失败: {e}")
+        
+        # 5.14 线索聚合报告
+        try:
+            aggregator = clue_aggregator.aggregate_all_results(
+                core_persons=all_persons,
+                companies=all_companies,
+                penetration_results=analysis_results.get("penetration", {}),
+                ml_results=analysis_results.get("ml", {}),
+                ts_results=analysis_results.get("time_series", {}),
+                related_party_results=analysis_results.get("related_party", {}),
+                loan_results=analysis_results.get("loan", {})
+            )
+            agg_report_path = clue_aggregator.generate_aggregation_report(
+                aggregator, output_dirs['analysis_results']
+            )
+            logger.info(f"线索聚合报告已生成: {agg_report_path}")
+        except Exception as e:
+            logger.warning(f"线索聚合报告生成失败: {e}")
+        
+        # 5.15 行为特征画像报告
+        try:
+            behavioral_results = behavioral_profiler.analyze_behavioral_patterns(cleaned_data, all_persons)
+            sedimentation_results = behavioral_profiler.analyze_fund_sedimentation(cleaned_data, all_persons)
+            behavioral_results['sedimentation'] = sedimentation_results
+            analysis_results["behavioral"] = behavioral_results
+            behavioral_report_path = behavioral_profiler.generate_behavioral_report(
+                behavioral_results, output_dirs['analysis_results']
+            )
+            logger.info(f"行为特征分析报告已生成: {behavioral_report_path}")
+        except Exception as e:
+            logger.warning(f"行为特征分析报告生成失败: {e}")
+        
+        # 数据验证报告
+        try:
+            transaction_validations = {}
+            for entity, df in cleaned_data.items():
+                validation_result = data_validator.validate_transaction_data(df, entity)
+                transaction_validations[entity] = validation_result
+            property_validations = []
+            validation_report = data_validator.generate_validation_report(
+                transaction_validations, property_validations
+            )
+            validation_report_path = os.path.join(output_dirs['analysis_results'], '数据验证报告.txt')
+            with open(validation_report_path, 'w', encoding='utf-8') as f:
+                f.write(validation_report)
+            logger.info(f"数据验证报告已生成: {validation_report_path}")
+        except Exception as e:
+            logger.warning(f"数据验证报告生成失败: {e}")
+        
+        # 公文格式报告
+        try:
+            official_report_path = report_generator.generate_official_report(
+                profiles, suspicions, all_persons, all_companies,
+                os.path.join(output_dirs['analysis_results'], config.OUTPUT_REPORT_FILE.replace('.docx', '.txt')),
+                family_summary=analysis_results.get("family_summary", {}),
+                family_assets={},
+                cleaned_data=cleaned_data
+            )
+            logger.info(f"公文报告已生成: {official_report_path}")
+        except Exception as e:
+            logger.warning(f"公文报告生成失败: {e}")
+        
+        analysis_state.update(progress=98, phase="保存分析缓存...")
+        # ==================== TXT 报告生成完成 ====================
+        
         
         # 完成
         analysis_state.update(progress=100, phase="分析完成")
@@ -2419,6 +2605,16 @@ def serialize_profiles(profiles: Dict) -> Dict:
             "incomeClassification": profile.get("income_classification", {}),
             # 🆕 Phase 1/5 新增：银行账户列表
             "bankAccounts": profile.get("bank_accounts", []),
+            # 🆕 Phase 6/7/8 外部资产信息 (补全审计报告所需字段)
+            "vehicles": profile.get("vehicles", []),
+            "properties": profile.get("properties_precise", []) or profile.get("properties", []),
+            "wealthManagement": {
+                "products": profile.get("wealth_products", []),
+                "summary": profile.get("wealth_summary", {}),
+                "estimated_holding": wealth_total  # 使用计算出的总额作为估算
+            },
+            "insurance": profile.get("insurance", {}),
+            "securities": profile.get("securities", {}),
         }
     return result
 
@@ -2741,13 +2937,23 @@ def _get_jinja_env():
 
 
 class ReportGenerateRequest(BaseModel):
-    """报告生成请求 - Protocol Omega Phase 1"""
+    """报告生成请求 - Protocol Omega Phase 1
+    
+    支持的 format 值：
+    - "html": 旧版 HTML 格式报告
+    - "json": 旧版 JSON 格式报告
+    - "v3" 或 "investigation": v3.0 初查报告结构（使用 InvestigationReportBuilder）
+    """
     sections: List[str] = ["summary", "suspicious_transactions"]
-    format: str = "html"  # html, json
+    format: str = "html"  # html, json, v3, investigation
     case_name: str = "初查报告"
     subjects: Optional[List[str]] = None  # 选中的嫌疑人，None 表示全选
     doc_number: Optional[str] = None  # 文号，如 "国监查 [2026] 第 12345 号"
     thresholds: Optional[Dict[str, int]] = None  # 阈值配置，如 {"large_transfer": 50000, "large_cash": 50000}
+    primary_person: Optional[str] = None  # v3.0 初查报告：核查对象（户主）
+    case_background: Optional[str] = None  # v3.0 初查报告：案件背景
+    data_scope: Optional[str] = None  # v3.0 初查报告：数据范围
+    include_companies: Optional[List[str]] = None  # v3.0 初查报告：需要包含的公司列表
 
 
 @app.post("/api/reports/generate")
@@ -2783,7 +2989,59 @@ async def generate_report(request: ReportGenerateRequest):
                     content={"success": False, "error": "无可用分析数据，请先运行分析"}
                 )
         
-        # 2. 【Protocol Omega】使用 report_service 生成公文格式初查报告
+        # 2. 【v3.0 新增】检查是否请求 v3.0/investigation 格式报告
+        if request.format in ("v3", "investigation") or "investigation" in request.sections:
+            from investigation_report_builder import load_investigation_report_builder
+            
+            builder = load_investigation_report_builder(config.OUTPUT_DIR)
+            if builder is None:
+                return JSONResponse(
+                    status_code=400,
+                    content={"success": False, "error": "无可用分析数据，请先运行分析"}
+                )
+            
+            # 确定核查对象：优先使用 primary_person，否则使用 subjects 的第一个，最后从可用人员中选
+            primary_person = request.primary_person
+            if not primary_person and request.subjects:
+                primary_person = request.subjects[0]
+            if not primary_person:
+                available_persons = builder.get_available_primary_persons()
+                if not available_persons:
+                    return JSONResponse(
+                        status_code=400,
+                        content={"success": False, "error": "无可用核查对象"}
+                    )
+                primary_person = available_persons[0]
+            
+            # 生成 v3.0 报告
+            from datetime import datetime
+            report = builder.build_complete_report(
+                primary_person=primary_person,
+                doc_number=request.doc_number or f"国监查 [{datetime.now().year}] 第 {datetime.now().strftime('%Y%m%d%H%M')} 号",
+                case_background=request.case_background or request.case_name,
+                data_scope=request.data_scope,
+                include_companies=request.include_companies or request.subjects
+            )
+            
+            # 保存报告到文件
+            import json as json_module
+            report_filename = f"v3_report_{primary_person}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            report_path = os.path.join(config.OUTPUT_DIR, 'reports', report_filename)
+            os.makedirs(os.path.dirname(report_path), exist_ok=True)
+            
+            with open(report_path, 'w', encoding='utf-8') as f:
+                json_module.dump(report, f, ensure_ascii=False, indent=2, default=str)
+            
+            logger.info(f"[v3.0报告] 报告已生成: {report_path}")
+            
+            return JSONResponse(content={
+                "success": True,
+                "format": "v3",
+                "report": report,
+                "report_file": report_filename
+            })
+        
+        # 3. 【Protocol Omega】使用 report_service 生成公文格式初查报告
         import report_service
         
         # 如果指定了 subjects，使用新的报告服务生成初查报告
@@ -2822,7 +3080,7 @@ async def generate_report(request: ReportGenerateRequest):
                     "subjects": subjects_data
                 })
         
-        # 3. 旧版报告生成逻辑（兼容）
+        # 4. 旧版报告生成逻辑（兼容）
         from datetime import datetime
         import report_schema
         
@@ -2837,7 +3095,7 @@ async def generate_report(request: ReportGenerateRequest):
             "modules": {}
         }
         
-        # 3. 按请求的 sections 填充模块数据
+        # 4.1 按请求的 sections 填充模块数据
         profiles = cached_results.get("profiles", {})
         suspicions = cached_results.get("suspicions", {})
         analysis_results = cached_results.get("analysisResults", {})
@@ -2967,41 +3225,24 @@ async def generate_report(request: ReportGenerateRequest):
             })
         
         elif request.format == "html":
-            # 使用 Jinja2 渲染
-            env = _get_jinja_env()
+            # 【铁律修复】使用统一的 report_service 引擎生成 HTML (V2.0)
+            # 只有这样才能启用区分 "公司/个人" 的新模板逻辑
             
-            # 动态选择模板
-            html_parts = []
+            # 🔧 修复：确保 builder 被创建（如果之前未创建）
+            builder = report_service.ReportDataBuilder(cached_results)
             
-            # 渲染基础模板头部
-            base_template = env.get_template("base_report.html")
+            # 确定要分析的嫌疑人
+            subjects = request.subjects or cached_results.get("persons", []) + cached_results.get("companies", [])
             
-            # 为每个请求的 section 渲染内容
-            section_templates = {
-                "summary": "summary.html",
-                "assets": "assets.html",
-                "risks": "risks.html"
-            }
-            
-            content_html = ""
-            for section in request.sections:
-                template_name = section_templates.get(section)
-                if template_name:
-                    try:
-                        section_template = env.get_template(template_name)
-                        content_html += section_template.render(
-                            metadata=report_data["metadata"],
-                            modules=report_data["modules"]
-                        )
-                    except Exception as e:
-                        logger.warning(f"模板渲染失败 {template_name}: {e}")
-                        content_html += f"<p>模块 {section} 渲染失败: {e}</p>"
-            
-            # 渲染完整 HTML
-            full_html = base_template.render(
-                metadata=report_data["metadata"],
-                modules=report_data["modules"]
-            ).replace("{% block content %}{% endblock %}", content_html)
+            # 生成 HTML 字符串
+            full_html = builder.generate_html_report(
+                subjects=subjects,
+                case_name=request.case_name,
+                doc_number=f"国监查 [{datetime.now().year}] 第 {datetime.now().strftime('%Y%m%d%H%M')} 号",
+                include_assets=True,  # 强制包含，保证内容的完整性
+                include_income=True,
+                include_loan=True
+            )
             
             # 对中文文件名进行 RFC 5987 编码
             import urllib.parse
