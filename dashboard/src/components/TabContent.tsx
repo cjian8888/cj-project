@@ -1946,17 +1946,17 @@ function AuditReportTab() {
                     onClick={() => setPreviewFile(null)}
                 >
                     <div
-                        className="theme-bg-base border border-cyan-500/30 rounded-2xl shadow-2xl w-full max-w-5xl h-[85vh] flex flex-col overflow-hidden"
+                        className="theme-bg-base border theme-border rounded-2xl shadow-2xl w-full max-w-5xl h-[85vh] flex flex-col overflow-hidden"
                         onClick={e => e.stopPropagation()}
                     >
                         {/* Modal Header */}
-                        <div className="flex items-center justify-between p-4 border-b border-white/10 bg-gradient-to-r from-cyan-500/10 to-blue-500/10 flex-shrink-0">
+                        <div className="flex items-center justify-between p-4 border-b theme-border theme-bg-muted/50 flex-shrink-0">
                             <div className="flex items-center gap-3">
-                                <div className="p-2 rounded-lg bg-cyan-500/20">
-                                    <FileText className="w-5 h-5 text-cyan-400" />
+                                <div className="p-2 rounded-lg bg-blue-500/10">
+                                    <FileText className="w-5 h-5 text-blue-500" />
                                 </div>
                                 <div>
-                                    <h3 className="font-semibold text-white">{previewFile.name}</h3>
+                                    <h3 className="font-semibold theme-text">{previewFile.name}</h3>
                                     <p className="text-xs theme-text-muted">
                                         {previewFile.type === 'html' ? 'HTML 格式报告' : '文本报告'}
                                     </p>
@@ -1965,14 +1965,14 @@ function AuditReportTab() {
                             <div className="flex items-center gap-2">
                                 <button
                                     onClick={() => handleDownload(previewFile.name)}
-                                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium border theme-border-strong theme-text-muted hover:text-blue-400 hover:border-blue-500 hover:bg-blue-500/10 transition-colors"
+                                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium border theme-border theme-text-muted hover:text-blue-500 hover:border-blue-500 hover:bg-blue-500/10 transition-colors"
                                 >
                                     <Download className="w-4 h-4" />
                                     下载
                                 </button>
                                 <button
                                     onClick={() => setPreviewFile(null)}
-                                    className="p-2 hover:bg-white/10 rounded-lg transition-colors"
+                                    className="p-2 hover:theme-bg-muted rounded-lg transition-colors"
                                 >
                                     <X className="w-5 h-5 theme-text-muted" />
                                 </button>
@@ -1980,7 +1980,7 @@ function AuditReportTab() {
                         </div>
 
                         {/* Modal Content */}
-                        <div className="flex-1 overflow-auto bg-white">
+                        <div className={`flex-1 overflow-auto ${previewFile.type === 'html' ? 'bg-white' : 'theme-bg-base'}`}>
                             {previewFile.type === 'html' ? (
                                 <iframe
                                     srcDoc={previewFile.content}

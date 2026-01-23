@@ -20,6 +20,7 @@ import loan_analyzer
 import income_analyzer
 import financial_profiler  # Phase 2.1: 银行账户提取和工资统计
 import family_finance      # Phase 3: 家庭汇总计算
+import family_analyzer     # Phase 3: 家庭关系分析（真实关系）
 import related_party_analyzer  # Phase 5: 调查单位往来统计
 # Phase 6: P0 外部数据源解析
 import pboc_account_extractor    # 6.1 人民银行银行账户
@@ -333,13 +334,93 @@ def main():
         print(f"  大额交易提取失败: {e}")
         large_transactions = []
     
-    # 6.6 Phase 3: 家庭汇总计算
-    print("计算家庭汇总...")
+    # 6.6 Phase 3: 家庭汇总计算（使用真实家庭关系）
+    print("分析家庭关系...")
     try:
-        family_summary = family_finance.calculate_family_summary(profiles, persons)
-        print(f"  家庭成员: {len(family_summary.get('family_members', []))} 人")
+        # 步骤1: 使用 family_analyzer 获取真实的家庭关系
+        family_tree = family_analyzer.build_family_tree(persons, data_dir)
+        family_relations = family_analyzer.get_family_summary(family_tree)
+        
+        # 步骤2: 识别独立的家庭单元（基于同户关系）
+        family_groups = {}  # person -> group_id
+        group_members = {}  # group_id -> {address, members}
+        
+        next_group_id = 0
+        for person, members in family_tree.items():
+            # 获取该人员的户籍地
+            person_address = None
+            for member in members:
+                if member.get('姓名') == person:
+                    person_address = member.get('户籍地', '')
+                    break
+            if not person_address and members:
+                person_address = members[0].get('户籍地', '')
+            
+            # 查找是否有已存在的家庭组使用相同地址
+            found_group = None
+            for gid in group_members.keys():
+                gaddr = group_members[gid].get('address', '')
+                if gaddr and person_address and gaddr == person_address:
+                    found_group = gid
+                    break
+            
+            if found_group is not None:
+                family_groups[person] = found_group
+                if person not in group_members[found_group]['members']:
+                    group_members[found_group]['members'].append(person)
+            else:
+                family_groups[person] = next_group_id
+                group_members[next_group_id] = {'address': person_address, 'members': [person]}
+                next_group_id += 1
+        
+        # 步骤3: 构建家庭单元信息
+        family_units = []
+        for gid, group_info in group_members.items():
+            members_list = group_info['members']
+            members_with_data = [m for m in members_list if m in profiles]
+            if members_with_data:
+                anchor = members_with_data[0]
+                for m in members_with_data:
+                    if m in family_tree:
+                        for mi in family_tree[m]:
+                            if mi.get('姓名') == m and mi.get('与户主关系') == '户主':
+                                anchor = m
+                                break
+                family_units.append({
+                    'group_id': gid, 'anchor': anchor,
+                    'members': members_with_data, 'address': group_info['address'],
+                    'relations': {m: family_relations.get(m, {}) for m in members_with_data}
+                })
+        
+        print(f"  发现 {len(family_units)} 个独立家庭单元")
+        for unit in family_units:
+            print(f"    - 家庭 {unit['group_id']+1}: {unit['anchor']}(户主), 成员: {unit['members']}")
+        
+        # 步骤4: 构建 family_summary
+        all_family_members = []
+        for unit in family_units:
+            all_family_members.extend(unit['members'])
+        all_family_members = list(set(all_family_members))
+        
+        family_summary = {
+            'family_tree': {p: [{'姓名': m.get('姓名',''), '与户主关系': m.get('与户主关系',''), 
+                                 '户籍地': (m.get('户籍地','') or '')[:20]} for m in mlist]
+                           for p, mlist in family_tree.items()},
+            'family_relations': family_relations,
+            'family_units': family_units,
+            'family_members': all_family_members,
+            'total_assets': {}, 'total_income_expense': {}, 'member_transfers': {}
+        }
+        
+        finance_summary = family_finance.calculate_family_summary(profiles, all_family_members)
+        family_summary['total_assets'] = finance_summary.get('total_assets', {})
+        family_summary['total_income_expense'] = finance_summary.get('total_income_expense', {})
+        family_summary['member_transfers'] = finance_summary.get('member_transfers', {})
+        print(f"  家庭成员总数: {len(all_family_members)} 人")
     except Exception as e:
+        import traceback
         print(f"  家庭汇总计算失败: {e}")
+        traceback.print_exc()
         family_summary = {}
     
     # 6.7 Phase 5: 收入来源分类

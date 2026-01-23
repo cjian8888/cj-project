@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
-import { Download, Users, Settings, FileText, ChevronDown, ChevronUp } from 'lucide-react';
+import { Download, Users, Settings, FileText, ChevronDown, ChevronUp, ArrowLeft, ArrowRight, CheckCircle } from 'lucide-react';
+import { PrimaryTargetsConfig } from './PrimaryTargetsConfig';
 
 interface ReportSection {
     id: string;
@@ -17,13 +18,48 @@ interface Subject {
     salaryRatio?: number;
 }
 
+// 归集配置类型定义
+interface AnalysisUnitMember {
+    name: string;
+    relation: string;
+    has_data: boolean;
+}
+
+interface AnalysisUnit {
+    anchor: string;
+    members: string[];
+    unit_type: 'family' | 'independent';
+    member_details?: AnalysisUnitMember[];
+    note?: string;
+}
+
+interface PrimaryTargetsConfigType {
+    version: string;
+    employer: string;
+    employer_keywords: string[];
+    analysis_units: AnalysisUnit[];
+    include_companies: string[];
+    doc_number: string;
+    case_source: string;
+    case_notes: string;
+    created_at?: string;
+    updated_at?: string;
+}
+
 interface ReportBuilderProps {
     className?: string;
 }
 
 const API_BASE_URL = 'http://localhost:8000';
 
+// 步骤定义
+type BuilderStep = 'config' | 'generate';
+
 export function ReportBuilder({ className }: ReportBuilderProps) {
+    // 步骤控制
+    const [currentStep, setCurrentStep] = useState<BuilderStep>('config');
+    const [primaryTargetsConfig, setPrimaryTargetsConfig] = useState<PrimaryTargetsConfigType | null>(null);
+    
     // 嫌疑人选择
     const [subjects, setSubjects] = useState<Subject[]>([]);
     const [selectedSubjects, setSelectedSubjects] = useState<string[]>([]);
@@ -116,7 +152,7 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
     };
 
     const generateReport = useCallback(async () => {
-        if (selectedSubjects.length === 0) {
+        if (selectedSubjects.length === 0 && format !== 'v3') {
             setError('请至少选择一个核查对象');
             return;
         }
@@ -132,37 +168,20 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
         setPreviewHtml(null);
 
         try {
-            const response = await fetch(`${API_BASE_URL}/api/reports/generate`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    sections: selectedSections,
-                    format: format,
-                    case_name: caseName,
-                    subjects: selectedSubjects,
-                    doc_number: docNumber || null,
-                    thresholds: {
-                        large_transfer: thresholds.largeTransfer,
-                        large_cash: thresholds.largeCash
+            // 【G-05】v3 格式使用新的 generate-with-config API
+            if (format === 'v3') {
+                const response = await fetch(`${API_BASE_URL}/api/investigation-report/generate-with-config`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
                     },
-                    // v3.0 特有参数
-                    primary_person: selectedSubjects[0] || null,
-                    case_background: caseName,
-                }),
-            });
+                });
 
-            if (!response.ok) {
-                const errData = await response.json();
-                throw new Error(errData.error || '报告生成失败');
-            }
+                if (!response.ok) {
+                    const errData = await response.json();
+                    throw new Error(errData.error || '报告生成失败');
+                }
 
-            if (format === 'html') {
-                const html = await response.text();
-                setPreviewHtml(html);
-            } else if (format === 'v3') {
-                // v3.0 格式返回 JSON，转换为专业的 HTML 预览
                 const data = await response.json();
                 if (data.success && data.report) {
                     const v3Html = renderV3ReportToHtml(data.report);
@@ -171,8 +190,39 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
                     throw new Error(data.error || 'v3.0 报告生成失败');
                 }
             } else {
-                const data = await response.json();
-                setPreviewHtml(`<pre style="white-space: pre-wrap; font-family: monospace; padding: 20px; color: #333;">${JSON.stringify(data, null, 2)}</pre>`);
+                // 其他格式使用原有 API
+                const response = await fetch(`${API_BASE_URL}/api/reports/generate`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        sections: selectedSections,
+                        format: format,
+                        case_name: caseName,
+                        subjects: selectedSubjects,
+                        doc_number: docNumber || null,
+                        thresholds: {
+                            large_transfer: thresholds.largeTransfer,
+                            large_cash: thresholds.largeCash
+                        },
+                        primary_person: selectedSubjects[0] || null,
+                        case_background: caseName,
+                    }),
+                });
+
+                if (!response.ok) {
+                    const errData = await response.json();
+                    throw new Error(errData.error || '报告生成失败');
+                }
+
+                if (format === 'html') {
+                    const html = await response.text();
+                    setPreviewHtml(html);
+                } else {
+                    const data = await response.json();
+                    setPreviewHtml(`<pre style="white-space: pre-wrap; font-family: monospace; padding: 20px; color: #333;">${JSON.stringify(data, null, 2)}</pre>`);
+                }
             }
         } catch (err) {
             setError(err instanceof Error ? err.message : '未知错误');
@@ -261,7 +311,7 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
         </div>
     </div>
 
-    ${memberDetails.map((member: any, idx: number) => `
+    ${memberDetails.map((member: any) => `
     <div class="section">
         <h2>三、${member.name || '成员'}（${member.relation || '成员'}）资金分析</h2>
         
@@ -411,245 +461,397 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
     }, [previewHtml, format, caseName]);
 
     return (
-        <div className={`report-builder ${className || ''}`} style={styles.container}>
-            {/* 左侧配置栏 */}
-            <div style={styles.leftPanel}>
-                <h2 style={styles.panelTitle}>📋 报告配置</h2>
-
-                {/* 案件名称 */}
-                <div style={styles.formGroup}>
-                    <label style={styles.label}>案件名称</label>
-                    <input
-                        type="text"
-                        value={caseName}
-                        onChange={(e) => setCaseName(e.target.value)}
-                        style={styles.input}
-                        placeholder="输入案件名称"
-                    />
-                </div>
-
-                {/* 文号 */}
-                <div style={styles.formGroup}>
-                    <label style={styles.label}>文号（可选）</label>
-                    <input
-                        type="text"
-                        value={docNumber}
-                        onChange={(e) => setDocNumber(e.target.value)}
-                        style={styles.input}
-                        placeholder="如：国监查 [2026] 第 12345 号"
-                    />
-                </div>
-
-                {/* 核查对象选择 */}
-                <div style={styles.formGroup}>
-                    <label style={styles.label}>
-                        <Users size={14} style={{ marginRight: 4, verticalAlign: 'middle' }} />
-                        核查对象
-                        <span style={styles.subLabel}>
-                            （已选 {selectedSubjects.length}/{subjects.length}）
-                        </span>
-                    </label>
-                    {loadingSubjects ? (
-                        <div style={styles.loading}>加载中...</div>
-                    ) : (
-                        <>
-                            <div style={styles.selectButtons}>
-                                <button onClick={selectAllSubjects} style={styles.miniButton}>全选</button>
-                                <button onClick={clearAllSubjects} style={styles.miniButton}>清空</button>
-                            </div>
-                            <div style={styles.subjectList}>
-                                {subjects.map(subject => (
-                                    <div
-                                        key={subject.name}
-                                        style={{
-                                            ...styles.subjectItem,
-                                            ...(selectedSubjects.includes(subject.name) ? styles.subjectItemChecked : {})
-                                        }}
-                                        onClick={() => toggleSubject(subject.name)}
-                                    >
-                                        <input
-                                            type="checkbox"
-                                            checked={selectedSubjects.includes(subject.name)}
-                                            onChange={() => { }}
-                                            style={styles.checkbox}
-                                        />
-                                        <div style={styles.subjectInfo}>
-                                            <span style={styles.subjectName}>{subject.name}</span>
-                                            <span style={styles.subjectType}>
-                                                {subject.type === 'person' ? '👤' : '🏢'}
-                                            </span>
-                                        </div>
-                                        {subject.salaryRatio !== undefined && subject.salaryRatio < 0.5 && (
-                                            <span style={styles.warningBadge}>⚠</span>
-                                        )}
-                                    </div>
-                                ))}
-                            </div>
-                        </>
-                    )}
-                </div>
-
-                {/* 阈值微调 */}
-                <div style={styles.formGroup}>
-                    <div 
-                        style={styles.collapseHeader} 
-                        onClick={() => setShowThresholds(!showThresholds)}
-                    >
-                        <Settings size={14} style={{ marginRight: 4 }} />
-                        阈值参数
-                        {showThresholds ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                    </div>
-                    {showThresholds && (
-                        <div style={styles.thresholdPanel}>
-                            <div style={styles.thresholdItem}>
-                                <label style={styles.thresholdLabel}>大额转账标准</label>
-                                <div style={styles.amountInput}>
-                                    <span style={styles.currencySymbol}>¥</span>
-                                    <input
-                                        type="number"
-                                        value={thresholds.largeTransfer}
-                                        onChange={(e) => setThresholds(prev => ({
-                                            ...prev,
-                                            largeTransfer: parseInt(e.target.value) || 0
-                                        }))}
-                                        style={styles.numberInput}
-                                    />
-                                </div>
-                            </div>
-                            <div style={styles.thresholdItem}>
-                                <label style={styles.thresholdLabel}>大额现金标准</label>
-                                <div style={styles.amountInput}>
-                                    <span style={styles.currencySymbol}>¥</span>
-                                    <input
-                                        type="number"
-                                        value={thresholds.largeCash}
-                                        onChange={(e) => setThresholds(prev => ({
-                                            ...prev,
-                                            largeCash: parseInt(e.target.value) || 0
-                                        }))}
-                                        style={styles.numberInput}
-                                    />
-                                </div>
-                            </div>
-                        </div>
-                    )}
-                </div>
-
-                {/* 模块选择 */}
-                <div style={styles.formGroup}>
-                    <label style={styles.label}>选择报告模块</label>
-                    <div style={styles.sectionList}>
-                        {sections.map(section => (
-                            <div
-                                key={section.id}
-                                style={{
-                                    ...styles.sectionItem,
-                                    ...(section.checked ? styles.sectionItemChecked : {})
-                                }}
-                                onClick={() => toggleSection(section.id)}
-                            >
-                                <input
-                                    type="checkbox"
-                                    checked={section.checked}
-                                    onChange={() => { }}
-                                    style={styles.checkbox}
-                                />
-                                <div>
-                                    <div style={styles.sectionName}>{section.name}</div>
-                                    <div style={styles.sectionDesc}>{section.description}</div>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-
-                {/* 格式选择 */}
-                <div style={styles.formGroup}>
-                    <label style={styles.label}>输出格式</label>
-                    <div style={styles.formatButtons}>
-                        <button
-                            onClick={() => setFormat('v3')}
-                            style={{
-                                ...styles.formatButton,
-                                ...(format === 'v3' ? styles.formatButtonActive : styles.formatButtonInactive)
-                            }}
-                        >
-                            📋 v3.0 初查报告
-                        </button>
-                        <button
-                            onClick={() => setFormat('html')}
-                            style={{
-                                ...styles.formatButton,
-                                ...(format === 'html' ? styles.formatButtonActive : styles.formatButtonInactive)
-                            }}
-                        >
-                            HTML 报告
-                        </button>
-                        <button
-                            onClick={() => setFormat('json')}
-                            style={{
-                                ...styles.formatButton,
-                                ...(format === 'json' ? styles.formatButtonActive : styles.formatButtonInactive)
-                            }}
-                        >
-                            JSON 数据
-                        </button>
-                    </div>
-                </div>
-
-                {/* 生成按钮 */}
+        <div className={`report-builder flex flex-col h-[700px] ${className || ''}`}>
+            {/* 步骤导航栏 */}
+            <div className="flex items-center justify-center gap-4 mb-4 p-3 theme-bg-muted rounded-xl border theme-border">
                 <button
-                    onClick={generateReport}
-                    disabled={isGenerating}
-                    style={{
-                        ...styles.generateButton,
-                        ...(isGenerating ? styles.generateButtonDisabled : {})
-                    }}
+                    onClick={() => setCurrentStep('config')}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                        currentStep === 'config'
+                            ? 'bg-blue-500 text-white'
+                            : 'theme-bg-base theme-text-muted hover:theme-bg-hover'
+                    }`}
                 >
-                    {isGenerating ? '⏳ 生成中...' : '🚀 生成报告'}
+                    <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${
+                        currentStep === 'config' ? 'bg-white/20' : 'bg-gray-600'
+                    }`}>1</span>
+                    归集配置
+                    {primaryTargetsConfig && primaryTargetsConfig.analysis_units.length > 0 && (
+                        <CheckCircle size={14} className="text-green-400" />
+                    )}
                 </button>
-
-                {/* 下载按钮 */}
-                {previewHtml && (
-                    <button onClick={downloadReport} style={styles.downloadButton}>
-                        <Download size={16} style={{ marginRight: '6px' }} />
-                        下载报告
-                    </button>
-                )}
-
-                {/* 错误提示 */}
-                {error && (
-                    <div style={styles.error}>
-                        ❌ {error}
-                    </div>
-                )}
+                
+                <ArrowRight size={16} className="theme-text-dim" />
+                
+                <button
+                    onClick={() => setCurrentStep('generate')}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                        currentStep === 'generate'
+                            ? 'bg-blue-500 text-white'
+                            : 'theme-bg-base theme-text-muted hover:theme-bg-hover'
+                    }`}
+                >
+                    <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${
+                        currentStep === 'generate' ? 'bg-white/20' : 'bg-gray-600'
+                    }`}>2</span>
+                    报告生成
+                </button>
             </div>
 
-            {/* 右侧预览区 - A4仿真，使用 iframe 隔离样式 */}
-            <div style={styles.rightPanel}>
-                <h2 style={styles.panelTitle}>👁️ 报告预览</h2>
-                <div style={styles.previewContainer}>
-                    {previewHtml ? (
-                        <div style={styles.a4Wrapper}>
-                            {/* 使用 iframe 隔离样式，防止污染主页面 */}
-                            <iframe
-                                srcDoc={previewHtml}
-                                style={styles.previewIframe}
-                                title="报告预览"
-                                sandbox="allow-same-origin"
+            {/* 步骤内容区域 */}
+            <div className="flex-1 flex gap-4 min-h-0">
+                {currentStep === 'config' ? (
+                    /* 步骤1: 归集配置 */
+                    <>
+                        <div className="w-[400px] theme-bg-muted rounded-xl p-4 shadow-lg overflow-auto border theme-border">
+                            <PrimaryTargetsConfig 
+                                onConfigChange={setPrimaryTargetsConfig}
                             />
                         </div>
-                    ) : (
-                        <div style={styles.previewPlaceholder}>
-                            <FileText size={48} style={{ color: '#ccc', marginBottom: 16 }} />
-                            <p style={styles.placeholderText}>选择核查对象和模块</p>
-                            <p style={styles.placeholderText}>点击"生成报告"预览</p>
-                            <p style={styles.placeholderSubtext}>
-                                报告将使用公文格式生成，支持在线编辑
-                            </p>
+                        
+                        <div className="flex-1 theme-bg-muted rounded-xl p-4 shadow-lg flex flex-col border theme-border">
+                            <h2 className="text-base font-semibold mb-4 theme-text">📊 配置预览</h2>
+                            <div className="flex-1 overflow-auto theme-bg-surface rounded-lg p-4">
+                                {primaryTargetsConfig ? (
+                                    <div className="space-y-4">
+                                        {/* 分析单元预览 */}
+                                        <div>
+                                            <h3 className="text-sm font-medium theme-text-muted mb-2">分析单元 ({primaryTargetsConfig.analysis_units.length})</h3>
+                                            <div className="space-y-2">
+                                                {primaryTargetsConfig.analysis_units.map((unit, idx) => (
+                                                    <div key={idx} className={`p-3 rounded-lg border ${
+                                                        unit.unit_type === 'family' 
+                                                            ? 'bg-blue-500/10 border-blue-500/30' 
+                                                            : 'bg-purple-500/10 border-purple-500/30'
+                                                    }`}>
+                                                        <div className="flex items-center gap-2 mb-2">
+                                                            <span className={`px-2 py-0.5 text-xs rounded ${
+                                                                unit.unit_type === 'family'
+                                                                    ? 'bg-blue-500/30 text-blue-300'
+                                                                    : 'bg-purple-500/30 text-purple-300'
+                                                            }`}>
+                                                                {unit.unit_type === 'family' ? '核心家庭' : '独立单元'}
+                                                            </span>
+                                                            <span className="text-sm font-medium theme-text">{unit.anchor || '(未设置锚点)'}</span>
+                                                        </div>
+                                                        <div className="flex flex-wrap gap-1">
+                                                            {unit.member_details?.map(member => (
+                                                                <span key={member.name} className={`px-2 py-0.5 text-xs rounded ${
+                                                                    member.has_data 
+                                                                        ? 'bg-green-500/20 text-green-400' 
+                                                                        : 'bg-gray-500/20 text-gray-400'
+                                                                }`}>
+                                                                    {member.name} ({member.relation})
+                                                                </span>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                                {primaryTargetsConfig.analysis_units.length === 0 && (
+                                                    <div className="text-center py-8 theme-text-dim">
+                                                        <Users size={32} className="mx-auto mb-2 opacity-40" />
+                                                        <p>请在左侧添加分析单元</p>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                        
+                                        {/* 涉案公司预览 */}
+                                        {primaryTargetsConfig.include_companies.length > 0 && (
+                                            <div>
+                                                <h3 className="text-sm font-medium theme-text-muted mb-2">涉案公司 ({primaryTargetsConfig.include_companies.length})</h3>
+                                                <div className="flex flex-wrap gap-1">
+                                                    {primaryTargetsConfig.include_companies.map(company => (
+                                                        <span key={company} className="px-2 py-1 text-xs bg-orange-500/20 text-orange-400 rounded">
+                                                            {company}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                        
+                                        {/* 下一步按钮 */}
+                                        <div className="pt-4 border-t border-white/10">
+                                            <button
+                                                onClick={() => setCurrentStep('generate')}
+                                                disabled={!primaryTargetsConfig || primaryTargetsConfig.analysis_units.length === 0}
+                                                className={`w-full py-3 rounded-lg text-sm font-medium flex items-center justify-center gap-2 ${
+                                                    primaryTargetsConfig && primaryTargetsConfig.analysis_units.length > 0
+                                                        ? 'bg-blue-500 text-white hover:bg-blue-600'
+                                                        : 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                                                }`}
+                                            >
+                                                下一步：生成报告
+                                                <ArrowRight size={16} />
+                                            </button>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="flex flex-col items-center justify-center h-full theme-text-dim">
+                                        <FileText size={48} className="mb-4 opacity-40" />
+                                        <p>加载配置中...</p>
+                                    </div>
+                                )}
+                            </div>
                         </div>
-                    )}
-                </div>
+                    </>
+                ) : (
+                    /* 步骤2: 报告生成 */
+                    <>
+                        {/* 左侧配置栏 */}
+                        <div className="w-80 theme-bg-muted rounded-xl p-4 shadow-lg overflow-auto border theme-border">
+                            <div className="flex items-center justify-between mb-4">
+                                <h2 className="text-base font-semibold theme-text">📋 报告配置</h2>
+                                <button
+                                    onClick={() => setCurrentStep('config')}
+                                    className="flex items-center gap-1 px-2 py-1 text-xs theme-text-muted hover:theme-bg-hover rounded"
+                                >
+                                    <ArrowLeft size={12} />
+                                    返回归集
+                                </button>
+                            </div>
+
+                            {/* 案件名称 */}
+                            <div className="mb-3.5">
+                                <label className="block text-sm font-medium theme-text-muted mb-1.5">案件名称</label>
+                                <input
+                                    type="text"
+                                    value={caseName}
+                                    onChange={(e) => setCaseName(e.target.value)}
+                                    className="w-full px-3 py-2.5 border theme-border rounded-md text-sm outline-none theme-bg-base theme-text"
+                                    placeholder="输入案件名称"
+                                />
+                            </div>
+
+                            {/* 文号 */}
+                            <div className="mb-3.5">
+                                <label className="block text-sm font-medium theme-text-muted mb-1.5">文号（可选）</label>
+                                <input
+                                    type="text"
+                                    value={docNumber}
+                                    onChange={(e) => setDocNumber(e.target.value)}
+                                    className="w-full px-3 py-2.5 border theme-border rounded-md text-sm outline-none theme-bg-base theme-text"
+                                    placeholder="如：国监查 [2026] 第 12345 号"
+                                />
+                            </div>
+
+                            {/* 核查对象选择 */}
+                            <div className="mb-3.5">
+                                <label className="block text-sm font-medium theme-text-muted mb-1.5">
+                                    <Users size={14} className="inline mr-1 align-middle" />
+                                    核查对象
+                                    <span className="text-xs font-normal theme-text-dim ml-1.5">
+                                        （已选 {selectedSubjects.length}/{subjects.length}）
+                                    </span>
+                                </label>
+                                {loadingSubjects ? (
+                                    <div className="p-4 text-center theme-text-dim">加载中...</div>
+                                ) : (
+                                    <>
+                                        <div className="flex gap-1.5 mb-1.5">
+                                            <button onClick={selectAllSubjects} className="px-2.5 py-1 text-xs border theme-border rounded theme-bg-base theme-text-muted hover:theme-bg-hover">全选</button>
+                                            <button onClick={clearAllSubjects} className="px-2.5 py-1 text-xs border theme-border rounded theme-bg-base theme-text-muted hover:theme-bg-hover">清空</button>
+                                        </div>
+                                        <div className="flex flex-col gap-1 max-h-40 overflow-auto">
+                                            {subjects.map(subject => (
+                                                <div
+                                                    key={subject.name}
+                                                    className={`flex items-center gap-2 px-2.5 py-2 border rounded-md cursor-pointer text-sm transition-colors
+                                                        ${selectedSubjects.includes(subject.name) 
+                                                            ? 'border-blue-500 bg-blue-500/15' 
+                                                            : 'theme-border theme-bg-base hover:theme-bg-hover'}`}
+                                                    onClick={() => toggleSubject(subject.name)}
+                                                >
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={selectedSubjects.includes(subject.name)}
+                                                        onChange={() => { }}
+                                                        className="mt-0.5 cursor-pointer accent-blue-500"
+                                                    />
+                                                    <div className="flex-1 flex items-center gap-1.5">
+                                                        <span className="font-medium theme-text">{subject.name}</span>
+                                                        <span className="text-xs">
+                                                            {subject.type === 'person' ? '👤' : '🏢'}
+                                                        </span>
+                                                    </div>
+                                                    {subject.salaryRatio !== undefined && subject.salaryRatio < 0.5 && (
+                                                        <span className="text-xs text-yellow-500">⚠</span>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+
+                            {/* 阈值微调 */}
+                            <div className="mb-3.5">
+                                <div 
+                                    className="flex items-center justify-between py-2 cursor-pointer text-sm font-medium theme-text-muted"
+                                    onClick={() => setShowThresholds(!showThresholds)}
+                                >
+                                    <span className="flex items-center gap-1">
+                                        <Settings size={14} />
+                                        阈值参数
+                                    </span>
+                                    {showThresholds ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                                </div>
+                                {showThresholds && (
+                                    <div className="p-3 border theme-border rounded-md theme-bg-base">
+                                        <div className="flex justify-between items-center mb-2 text-xs">
+                                            <label className="theme-text-muted">大额转账标准</label>
+                                            <div className="flex items-center gap-1">
+                                                <span className="theme-text-dim">¥</span>
+                                                <input
+                                                    type="number"
+                                                    value={thresholds.largeTransfer}
+                                                    onChange={(e) => setThresholds(prev => ({
+                                                        ...prev,
+                                                        largeTransfer: parseInt(e.target.value) || 0
+                                                    }))}
+                                                    className="w-24 px-2 py-1.5 border theme-border rounded text-xs text-right theme-bg-muted theme-text"
+                                                />
+                                            </div>
+                                        </div>
+                                        <div className="flex justify-between items-center text-xs">
+                                            <label className="theme-text-muted">大额现金标准</label>
+                                            <div className="flex items-center gap-1">
+                                                <span className="theme-text-dim">¥</span>
+                                                <input
+                                                    type="number"
+                                                    value={thresholds.largeCash}
+                                                    onChange={(e) => setThresholds(prev => ({
+                                                        ...prev,
+                                                        largeCash: parseInt(e.target.value) || 0
+                                                    }))}
+                                                    className="w-24 px-2 py-1.5 border theme-border rounded text-xs text-right theme-bg-muted theme-text"
+                                                />
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* 模块选择 */}
+                            <div className="mb-3.5">
+                                <label className="block text-sm font-medium theme-text-muted mb-1.5">选择报告模块</label>
+                                <div className="flex flex-col gap-1.5">
+                                    {sections.map(section => (
+                                        <div
+                                            key={section.id}
+                                            className={`flex items-start gap-2 p-2.5 border rounded-lg cursor-pointer transition-colors
+                                                ${section.checked 
+                                                    ? 'border-blue-500 bg-blue-500/15' 
+                                                    : 'theme-border theme-bg-base hover:theme-bg-hover'}`}
+                                            onClick={() => toggleSection(section.id)}
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                checked={section.checked}
+                                                onChange={() => { }}
+                                                className="mt-0.5 cursor-pointer accent-blue-500"
+                                            />
+                                            <div>
+                                                <div className="text-sm font-medium theme-text">{section.name}</div>
+                                                <div className="text-xs theme-text-dim mt-0.5">{section.description}</div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* 格式选择 */}
+                            <div className="mb-3.5">
+                                <label className="block text-sm font-medium theme-text-muted mb-1.5">输出格式</label>
+                                <div style={styles.formatButtons}>
+                                    <button
+                                        onClick={() => setFormat('v3')}
+                                        style={{
+                                            ...styles.formatButton,
+                                            ...(format === 'v3' ? styles.formatButtonActive : styles.formatButtonInactive)
+                                        }}
+                                    >
+                                        📋 v3.0 初查报告
+                                    </button>
+                                    <button
+                                        onClick={() => setFormat('html')}
+                                        style={{
+                                            ...styles.formatButton,
+                                            ...(format === 'html' ? styles.formatButtonActive : styles.formatButtonInactive)
+                                        }}
+                                    >
+                                        HTML 报告
+                                    </button>
+                                    <button
+                                        onClick={() => setFormat('json')}
+                                        style={{
+                                            ...styles.formatButton,
+                                            ...(format === 'json' ? styles.formatButtonActive : styles.formatButtonInactive)
+                                        }}
+                                    >
+                                        JSON 数据
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* 生成按钮 */}
+                            <button
+                                onClick={generateReport}
+                                disabled={isGenerating}
+                                className={`w-full py-3 rounded-lg text-sm font-medium transition-colors mt-2
+                                    ${isGenerating 
+                                        ? 'bg-gray-500 cursor-not-allowed text-gray-300' 
+                                        : 'bg-blue-500 hover:bg-blue-600 text-white cursor-pointer'}`}
+                            >
+                                {isGenerating ? '⏳ 生成中...' : '🚀 生成报告'}
+                            </button>
+
+                            {/* 下载按钮 */}
+                            {previewHtml && (
+                                <button 
+                                    onClick={downloadReport} 
+                                    className="w-full py-2.5 mt-2 rounded-lg text-sm border border-green-500 text-green-500 hover:bg-green-500/10 flex items-center justify-center gap-1.5 transition-colors"
+                                >
+                                    <Download size={16} />
+                                    下载报告
+                                </button>
+                            )}
+
+                            {/* 错误提示 */}
+                            {error && (
+                                <div className="mt-3 p-2.5 bg-red-500/10 border border-red-500/30 rounded-md text-red-500 text-xs">
+                                    ❌ {error}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* 右侧预览区 */}
+                        <div className="flex-1 theme-bg-muted rounded-xl p-4 shadow-lg flex flex-col border theme-border">
+                            <h2 className="text-base font-semibold mb-4 theme-text">👁️ 报告预览</h2>
+                            <div className="flex-1 overflow-hidden theme-bg-surface rounded-lg">
+                                {previewHtml ? (
+                                    <div className="h-full w-full overflow-auto p-4 box-border">
+                                        <iframe
+                                            srcDoc={previewHtml}
+                                            className="w-full h-full min-h-[500px] border-none rounded bg-white"
+                                            title="报告预览"
+                                            sandbox="allow-same-origin"
+                                        />
+                                    </div>
+                                ) : (
+                                    <div className="flex flex-col items-center justify-center h-full min-h-[300px] theme-text-dim text-center">
+                                        <FileText size={48} className="mb-4 opacity-40" />
+                                        <p className="theme-text-muted mb-1">选择核查对象和模块</p>
+                                        <p className="theme-text-muted">点击"生成报告"预览</p>
+                                        <p className="text-xs theme-text-dim mt-3">
+                                            报告将按归集配置组织章节结构
+                                        </p>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </>
+                )}
             </div>
         </div>
     );

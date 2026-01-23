@@ -4,3 +4,5 @@ export { MainContent } from './MainContent';
 export { KPICards } from './KPICards';
 export { TabContent } from './TabContent';
 export { LogConsole } from './LogConsole';
+export { ReportBuilder } from './ReportBuilder';
+export { PrimaryTargetsConfig } from './PrimaryTargetsConfig';

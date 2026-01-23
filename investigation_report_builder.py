@@ -37,6 +37,12 @@ from report_schema import (
     InvestigationConfig, PrimarySubjectConfig, CollisionTarget, SensitivePerson
 )
 
+# 归集配置模块
+from report_config.primary_targets_schema import (
+    PrimaryTargetsConfig, AnalysisUnit, AnalysisUnitMember
+)
+from report_config.primary_targets_service import PrimaryTargetsService
+
 logger = utils.setup_logger(__name__)
 
 
@@ -108,7 +114,7 @@ class InvestigationReportBuilder:
                                data_scope: str = None,
                                include_companies: List[str] = None) -> Dict:
         """
-        生成完整初查报告
+        生成完整初查报告（兼容旧接口）
         
         Args:
             primary_person: 核查对象（户主）
@@ -151,6 +157,309 @@ class InvestigationReportBuilder:
         
         return report.to_dict()
     
+    # ==================== G-05: 按归集配置生成报告 ====================
+    
+    def build_report_with_config(self,
+                                  config: PrimaryTargetsConfig,
+                                  case_background: str = None,
+                                  data_scope: str = None) -> Dict:
+        """
+        【G-05】按归集配置生成报告（新接口）
+        
+        根据 primary_targets.json 中的分析单元配置组织报告章节：
+        - 核心家庭单元（family）: 聚合成员数据，生成合并章节
+        - 独立关联单元（independent）: 每个成员独立成章
+        
+        Args:
+            config: 归集配置对象
+            case_background: 案件背景
+            data_scope: 数据范围
+            
+        Returns:
+            完整报告字典，包含按分析单元组织的章节
+        """
+        logger.info(f"[初查报告] 开始按归集配置生成报告，{len(config.analysis_units)} 个分析单元")
+        
+        # 1. 构建元信息
+        meta = self._build_meta(config.doc_number, case_background, data_scope)
+        
+        # 2. 按分析单元组织章节
+        unit_sections = []  # 分析单元章节
+        all_member_details = []  # 保留兼容性的成员详情列表
+        
+        for unit in config.analysis_units:
+            unit_section = self._build_analysis_unit_section(unit)
+            unit_sections.append(unit_section)
+            
+            # 将成员详情添加到旧格式兼容列表
+            for member in unit_section.get('member_details', []):
+                all_member_details.append(member)
+        
+        # 3. 构建公司报告
+        companies_to_include = config.include_companies or self._companies
+        company_reports = [self._build_company_report(c) for c in companies_to_include]
+        
+        # 4. 构建 family 结构（取第一个家庭单元作为主家庭，兼容旧前端）
+        primary_family_unit = config.get_family_units()[0] if config.get_family_units() else None
+        if primary_family_unit:
+            family = self._build_family_section_from_unit(primary_family_unit)
+        else:
+            # 无家庭单元时，使用第一个分析单元的锚点
+            first_anchor = config.analysis_units[0].anchor if config.analysis_units else ''
+            family = self._build_family_section(first_anchor)
+        
+        # 5. 生成综合研判
+        # 将 unit_sections 中的 member_details 转换为 MemberDetails 对象
+        member_details_objs = self._convert_to_member_details_objs(all_member_details)
+        conclusion = self._build_conclusion(member_details_objs, company_reports)
+        
+        # 组装完整报告 - 新增 analysis_units 字段
+        report_dict = {
+            "meta": asdict(meta) if hasattr(meta, '__dataclass_fields__') else meta.to_dict() if hasattr(meta, 'to_dict') else meta,
+            "family": family.to_dict() if hasattr(family, 'to_dict') else asdict(family),
+            # 新增：按分析单元组织的章节
+            "analysis_units": unit_sections,
+            # 兼容旧格式
+            "member_details": [self._member_details_to_dict(m) for m in member_details_objs],
+            "companies": [c.to_dict() if hasattr(c, 'to_dict') else asdict(c) for c in company_reports],
+            "conclusion": asdict(conclusion) if hasattr(conclusion, '__dataclass_fields__') else conclusion.to_dict() if hasattr(conclusion, 'to_dict') else conclusion,
+        }
+        
+        logger.info(f"[初查报告] 按配置生成完成，{len(unit_sections)} 个分析单元，{len(company_reports)} 个公司")
+        
+        return report_dict
+    
+    def _build_analysis_unit_section(self, unit: AnalysisUnit) -> Dict:
+        """
+        【G-05】构建单个分析单元章节
+        
+        Args:
+            unit: 分析单元配置
+            
+        Returns:
+            分析单元章节字典
+        """
+        section = {
+            "anchor": unit.anchor,
+            "unit_type": unit.unit_type,
+            "members": unit.members,
+            "note": unit.note,
+        }
+        
+        if unit.unit_type == "family":
+            # 核心家庭单元：聚合成员数据
+            section["aggregated_data"] = self._aggregate_family_unit_data(unit.members)
+            section["member_details"] = [self._build_member_details_dict(m) for m in unit.members if m in self.profiles]
+            section["unit_summary"] = self._build_family_unit_summary(unit.members)
+        else:
+            # 独立单元：仅包含锚点成员详情
+            section["member_details"] = [self._build_member_details_dict(unit.anchor)] if unit.anchor in self.profiles else []
+            section["unit_summary"] = None
+        
+        return section
+    
+    def _aggregate_family_unit_data(self, members: List[str]) -> Dict:
+        """
+        【G-05】聚合核心家庭单元成员数据
+        
+        将家庭成员的收支、资产等数据合并计算。
+        
+        Args:
+            members: 家庭成员姓名列表
+            
+        Returns:
+            聚合数据字典
+        """
+        # 收支聚合
+        total_income = 0.0
+        total_expense = 0.0
+        salary_total = 0.0
+        cash_total = 0.0
+        transaction_count = 0
+        
+        # 资产聚合
+        bank_accounts_count = 0
+        wealth_total = 0.0
+        
+        # 成员相关数据
+        member_profiles = []
+        
+        for name in members:
+            profile = self.profiles.get(name, {})
+            if not profile:
+                continue
+            
+            member_profiles.append({
+                "name": name,
+                "total_income": profile.get('totalIncome', 0) or 0,
+                "total_expense": profile.get('totalExpense', 0) or 0,
+            })
+            
+            total_income += profile.get('totalIncome', 0) or 0
+            total_expense += profile.get('totalExpense', 0) or 0
+            salary_total += profile.get('salaryTotal', 0) or 0
+            cash_total += profile.get('cashTotal', 0) or 0
+            transaction_count += profile.get('transactionCount', 0) or 0
+            
+            # 银行账户
+            bank_accounts = profile.get('bankAccounts', []) or profile.get('bank_accounts', []) or []
+            bank_accounts_count += len(bank_accounts)
+            
+            # 理财
+            wealth_total += profile.get('wealthTotal', 0) or 0
+        
+        # 计算派生指标
+        salary_ratio = (salary_total / total_income * 100) if total_income > 0 else 0
+        net_balance = total_income - total_expense
+        
+        return {
+            "total_income": total_income,
+            "total_expense": total_expense,
+            "net_balance": net_balance,
+            "salary_total": salary_total,
+            "salary_ratio": salary_ratio,
+            "cash_total": cash_total,
+            "transaction_count": transaction_count,
+            "bank_accounts_count": bank_accounts_count,
+            "wealth_total": wealth_total,
+            "member_count": len(member_profiles),
+            "member_breakdown": member_profiles,
+        }
+    
+    def _build_family_unit_summary(self, members: List[str]) -> Dict:
+        """
+        【G-05】构建家庭单元汇总
+        
+        Args:
+            members: 成员列表
+            
+        Returns:
+            汇总数据字典
+        """
+        # 获取 family_summary 中的数据（如果有）
+        family_summary_data = self.derived_data.get('family_summary', {})
+        
+        # 计算成员间内部转账
+        internal_transfers = family_summary_data.get('internal_transfers_total', 0)
+        
+        # 净收支（已剔除互转）
+        net_income = family_summary_data.get('total_net_income', 0)
+        net_expense = family_summary_data.get('total_net_expense', 0)
+        
+        return {
+            "internal_transfers": internal_transfers,
+            "net_income": net_income,
+            "net_expense": net_expense,
+        }
+    
+    def _build_member_details_dict(self, name: str) -> Dict:
+        """
+        【G-05】构建成员详情字典（用于分析单元章节）
+        
+        Args:
+            name: 成员姓名
+            
+        Returns:
+            成员详情字典
+        """
+        profile = self.profiles.get(name, {})
+        
+        # 获取成员关系（尝试从 member_details 或推断）
+        relation = self._infer_relation_from_config(name)
+        
+        # 复用现有的 _build_member_details 方法
+        member_details = self._build_member_details(name, relation)
+        
+        # 转换为字典
+        return self._member_details_to_dict(member_details)
+    
+    def _member_details_to_dict(self, member: MemberDetails) -> Dict:
+        """
+        【G-05】将 MemberDetails 对象转换为字典
+        """
+        if hasattr(member, 'to_dict'):
+            return member.to_dict()
+        elif hasattr(member, '__dataclass_fields__'):
+            return asdict(member)
+        else:
+            # 手动转换
+            return {
+                "name": member.name,
+                "relation": member.relation,
+                "total_income": member.total_income,
+                "total_expense": member.total_expense,
+                "transaction_count": member.transaction_count,
+                "assets": asdict(member.assets) if hasattr(member.assets, '__dataclass_fields__') else member.assets,
+                "analysis": asdict(member.analysis) if hasattr(member.analysis, '__dataclass_fields__') else member.analysis,
+            }
+    
+    def _infer_relation_from_config(self, name: str) -> str:
+        """
+        【G-05】从配置推断成员关系
+        
+        尝试从 derived_data 中的 family_summary 获取关系信息
+        """
+        family_summary = self.derived_data.get('family_summary', {})
+        relations = family_summary.get('member_relations', {})
+        return relations.get(name, '家庭成员')
+    
+    def _build_family_section_from_unit(self, unit: AnalysisUnit) -> InvestigationFamily:
+        """
+        【G-05】从分析单元构建家庭部分（兼容旧前端）
+        
+        Args:
+            unit: 核心家庭分析单元
+            
+        Returns:
+            InvestigationFamily 对象
+        """
+        members = []
+        for name in unit.members:
+            # 尝试从 member_details 获取关系
+            relation = "家庭成员"
+            for md in unit.member_details:
+                if md.name == name:
+                    relation = md.relation or "家庭成员"
+                    break
+            
+            if name == unit.anchor:
+                relation = "本人"
+            
+            members.append(FamilyMember(
+                name=name,
+                relation=relation,
+                has_data=name in self.profiles
+            ))
+        
+        # 构建家庭汇总
+        family_summary_data = self.derived_data.get('family_summary', {})
+        summary = self._build_family_summary(unit.members, family_summary_data)
+        
+        return InvestigationFamily(
+            primary_person=unit.anchor,
+            members=members,
+            summary=summary
+        )
+    
+    def _convert_to_member_details_objs(self, member_dicts: List[Dict]) -> List[MemberDetails]:
+        """
+        【G-05】将成员详情字典列表转换为 MemberDetails 对象列表
+        
+        用于兼容 _build_conclusion 方法
+        """
+        # 直接从 profiles 构建，避免复杂的反序列化
+        result = []
+        seen_names = set()
+        
+        for md in member_dicts:
+            name = md.get('name', '')
+            if name and name not in seen_names and name in self.profiles:
+                seen_names.add(name)
+                relation = md.get('relation', '家庭成员')
+                result.append(self._build_member_details(name, relation))
+        
+        return result
+    
     # ==================== Meta 构建 ====================
     
     def _build_meta(self, doc_number: str, case_background: str, data_scope: str) -> InvestigationMeta:
@@ -176,26 +485,54 @@ class InvestigationReportBuilder:
     # ==================== 家庭部分构建 ====================
     
     def _build_family_section(self, primary_person: str) -> InvestigationFamily:
-        """构建家庭部分"""
-        # 获取家庭成员
+        """
+        构建家庭部分
+        
+        支持新的 family_units 格式（2026-01-23+）：
+        - 优先从 family_units 中查找 primary_person 所属的家庭单元
+        - 从 family_relations 获取成员间的真实关系
+        """
+        # 获取家庭数据
         family_summary_data = self.derived_data.get('family_summary', {})
+        family_units = family_summary_data.get('family_units', [])
+        family_relations = family_summary_data.get('family_relations', {})
         
         members = []
         family_members_names = []
         
-        # 方法1: 从 family_summary.family_members 列表获取
-        cached_members = family_summary_data.get('family_members', [])
-        
-        # 方法2: 如果没有，从 member_transfers 字典的 keys 获取
-        if not cached_members:
-            member_transfers = family_summary_data.get('member_transfers', {})
-            cached_members = list(member_transfers.keys())
-        
-        # 方法3: 如果还没有，从 profiles 中获取所有个人（非公司）
-        if not cached_members:
-            cached_members = self._core_persons.copy()
-        
-        logger.info(f"[初查报告] 家庭成员列表: {cached_members}")
+        # ========== 优先使用 family_units ==========
+        if family_units:
+            # 查找 primary_person 所属的家庭单元
+            target_unit = None
+            for unit in family_units:
+                if primary_person in unit.get('members', []):
+                    target_unit = unit
+                    break
+            
+            if target_unit:
+                # 使用该家庭单元的成员
+                cached_members = target_unit.get('members', [])
+                logger.info(f"[初查报告] 使用 family_unit {target_unit.get('group_id', 0)+1}: "
+                           f"户主={target_unit.get('anchor')}, 成员={cached_members}")
+            else:
+                # primary_person 不在任何家庭单元中，使用独立模式
+                cached_members = [primary_person]
+                logger.warning(f"[初查报告] {primary_person} 不在任何家庭单元中，使用独立模式")
+        else:
+            # ========== 回退到旧逻辑 ==========
+            # 方法1: 从 family_summary.family_members 列表获取
+            cached_members = family_summary_data.get('family_members', [])
+            
+            # 方法2: 如果没有，从 member_transfers 字典的 keys 获取
+            if not cached_members:
+                member_transfers = family_summary_data.get('member_transfers', {})
+                cached_members = list(member_transfers.keys())
+            
+            # 方法3: 如果还没有，从 profiles 中获取所有个人（非公司）
+            if not cached_members:
+                cached_members = self._core_persons.copy()
+            
+            logger.info(f"[初查报告] 使用旧格式家庭成员列表: {cached_members}")
         
         # 先添加核查对象本人
         if primary_person in cached_members:
@@ -209,7 +546,8 @@ class InvestigationReportBuilder:
         # 添加其他家庭成员
         for name in cached_members:
             if name != primary_person and name not in family_members_names:
-                relation = self._infer_relation(primary_person, name)
+                # 使用真实的关系数据
+                relation = self._infer_relation(primary_person, name, family_relations)
                 members.append(FamilyMember(
                     name=name,
                     relation=relation,
@@ -228,9 +566,49 @@ class InvestigationReportBuilder:
             summary=summary
         )
     
-    def _infer_relation(self, primary: str, member: str) -> str:
-        """推断成员关系（简化版）"""
-        # TODO: 可以从 family_analyzer 的结果中获取更准确的关系
+    def _infer_relation(self, primary: str, member: str, family_relations: Dict = None) -> str:
+        """
+        推断成员关系
+        
+        优先从 family_relations 中获取真实关系，回退到默认值
+        
+        Args:
+            primary: 核查对象姓名
+            member: 家庭成员姓名
+            family_relations: 家庭关系字典 {person: {配偶: [...], 子女: [...], ...}}
+            
+        Returns:
+            关系字符串
+        """
+        if not family_relations:
+            # 尝试从 derived_data 获取
+            family_summary = self.derived_data.get('family_summary', {})
+            family_relations = family_summary.get('family_relations', {})
+        
+        if not family_relations:
+            return "家庭成员"
+        
+        # 检查 primary 的关系数据中是否包含 member
+        primary_rels = family_relations.get(primary, {})
+        if isinstance(primary_rels, dict):
+            for rel_type, rel_members in primary_rels.items():
+                if isinstance(rel_members, list) and member in rel_members:
+                    return rel_type
+        
+        # 检查 member 的关系数据中是否包含 primary（反向关系）
+        member_rels = family_relations.get(member, {})
+        if isinstance(member_rels, dict):
+            for rel_type, rel_members in member_rels.items():
+                if isinstance(rel_members, list) and primary in rel_members:
+                    # 返回反向关系
+                    reverse_map = {
+                        '配偶': '配偶', '夫妻': '配偶',
+                        '父亲': '子女', '母亲': '子女', '父母': '子女',
+                        '儿子': '父母', '女儿': '父母', '子女': '父母',
+                        '兄弟': '兄弟姐妹', '姐妹': '兄弟姐妹', '兄弟姐妹': '兄弟姐妹'
+                    }
+                    return reverse_map.get(rel_type, '家庭成员')
+        
         return "家庭成员"
     
     def _build_family_summary(self, members: List[str], family_summary_data: Dict) -> FamilySummary:

@@ -1103,17 +1103,54 @@ def _group_into_households(core_persons, family_summary):
     """
     将核心人员按家庭关系分组
     
+    支持两种 family_summary 格式：
+    1. 新格式 (2026-01-23+): 包含 family_units 列表，直接使用预计算的家庭分组
+    2. 旧格式: 每人 -> {配偶: [...], 子女: [...], ...}，需要动态计算分组
+    
     Args:
         core_persons: 核心人员列表
-        family_summary: 家庭关系摘要
+        family_summary: 家庭关系摘要（可以是新格式 dict 或旧格式 dict）
         
     Returns:
-        家庭分组列表
+        家庭分组列表，每个元素是一个家庭成员姓名列表
     """
+    if not family_summary:
+        # 无家庭数据，每人独立成组
+        return [[p] for p in core_persons]
+    
+    # ========== 优先使用新格式 family_units ==========
+    family_units = family_summary.get('family_units', [])
+    if family_units:
+        modules = []
+        used_persons = set()
+        
+        for unit in family_units:
+            # 过滤出属于 core_persons 的成员
+            unit_members = unit.get('members', [])
+            filtered_members = [m for m in unit_members if m in core_persons]
+            
+            if filtered_members:
+                modules.append(sorted(filtered_members))
+                used_persons.update(filtered_members)
+        
+        # 将未被分配的 core_persons 添加为独立单元
+        for p in core_persons:
+            if p not in used_persons:
+                modules.append([p])
+        
+        return modules
+    
+    # ========== 回退到旧格式 family_relations ==========
+    # 从 family_summary 中获取 family_relations（如果存在）
+    relations_data = family_summary.get('family_relations', family_summary)
+    
     adj = {p: set() for p in core_persons}
-    if family_summary:
-        for p, rels in family_summary.items():
-            if p not in core_persons: continue
+    if relations_data and isinstance(relations_data, dict):
+        for p, rels in relations_data.items():
+            if p not in core_persons: 
+                continue
+            if not isinstance(rels, dict):
+                continue
             direct_names = []
             for k in ['配偶', '子女', '父母', '夫妻', '儿子', '女儿', '父亲', '母亲']:
                 if k in rels:
@@ -1121,7 +1158,10 @@ def _group_into_households(core_persons, family_summary):
             for d in direct_names:
                 if d in core_persons:
                     adj[p].add(d)
-                    if d in adj: adj[d].add(p)
+                    if d in adj: 
+                        adj[d].add(p)
+    
+    # BFS 找连通分量
     modules = []
     visited = set()
     for p in core_persons:

@@ -44,10 +44,16 @@
 # 参考: https://github.com/python/cpython/issues/109538
 import asyncio
 import sys
+import warnings
 
 if sys.platform == 'win32':
     # 使用更稳定的 SelectorEventLoop 替代问题较多的 ProactorEventLoop
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    # 注意: asyncio.set_event_loop_policy() 在 Python 3.11+ 中已弃用，将在 3.16 移除
+    # 但在 Python 3.11-3.15 中仍需使用此方法修复 Windows asyncio bug
+    # 未来 Python 3.16+ 需要寻找替代方案
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=DeprecationWarning, module="asyncio")
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 # ====================================================================
 
 import os
@@ -1883,6 +1889,25 @@ def run_analysis(analysis_config: AnalysisConfig):
         except Exception as e:
             logger.warning(f"家庭汇总计算失败: {e}")
         
+        # 🆕 BUG-01/BUG-02 修复：生成完整的家庭关系数据
+        # family_analyzer 生成 family_tree, family_units, family_relations
+        try:
+            family_tree = family_analyzer.build_family_tree(all_persons, data_dir)
+            family_summary = family_analyzer.get_family_summary(family_tree)
+            
+            # 构建完整的家庭数据结构（供 primary_targets_service 使用）
+            analysis_results["family_tree"] = family_tree
+            analysis_results["family_units"] = family_summary  # 包含配偶、子女、父母等分类
+            analysis_results["family_relations"] = family_tree  # 原始家族成员数据
+            
+            logger.info(f"家庭关系分析完成: {len(family_tree)} 个核心人员")
+        except Exception as e:
+            logger.warning(f"家庭关系分析失败: {e}")
+            # 提供空结构避免后续代码出错
+            analysis_results["family_tree"] = {}
+            analysis_results["family_units"] = {}
+            analysis_results["family_relations"] = {}
+        
         # 🆕 Phase 6: P0级外部数据解析
         analysis_state.update(progress=85, phase="解析外部数据源...")
         logger.info("开始解析 P0 级外部数据源...")
@@ -3399,6 +3424,105 @@ async def generate_investigation_report(request: InvestigationReportRequest):
         )
 
 
+@app.post("/api/investigation-report/generate-with-config")
+async def generate_investigation_report_with_config():
+    """
+    【G-05】使用归集配置生成初查报告
+    
+    从 primary_targets.json 读取配置，按分析单元组织报告章节：
+    - 核心家庭单元（family）: 聚合成员数据，生成合并章节
+    - 独立关联单元（independent）: 每个成员独立成章
+    
+    返回:
+    {
+        "success": true,
+        "report": {
+            "meta": {...},
+            "family": {...},
+            "analysis_units": [...],  // 新增：按分析单元组织的章节
+            "member_details": [...],  // 兼容旧格式
+            "companies": [...],
+            "conclusion": {...}
+        },
+        "report_file": "investigation_report_xxx.json"
+    }
+    """
+    try:
+        from investigation_report_builder import load_investigation_report_builder
+        from report_config.primary_targets_schema import PrimaryTargetsConfig
+        
+        # 1. 加载报告构建器
+        builder = load_investigation_report_builder(config.OUTPUT_DIR)
+        if builder is None:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "无可用分析数据，请先运行分析"}
+            )
+        
+        # 2. 加载归集配置
+        service = PrimaryTargetsService(
+            data_dir=_current_config.get("inputDirectory", "./data"),
+            output_dir=_current_config.get("outputDirectory", "./output")
+        )
+        
+        targets_config, msg = service.load_config()
+        if targets_config is None:
+            # 尝试生成默认配置
+            targets_config, msg = service.generate_default_config()
+            if targets_config is None:
+                return JSONResponse(
+                    status_code=400,
+                    content={"success": False, "error": f"无归集配置: {msg}"}
+                )
+        
+        # 3. 验证配置中至少有一个分析单元
+        if not targets_config.analysis_units:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "归集配置中没有分析单元，请先配置"}
+            )
+        
+        # 4. 使用归集配置生成报告
+        report = builder.build_report_with_config(
+            config=targets_config,
+            case_background=targets_config.case_notes or "",
+            data_scope=None  # 自动从 metadata 中获取
+        )
+        
+        # 5. 保存报告到文件
+        import json
+        from datetime import datetime
+        
+        # 使用配置中的文号或第一个分析单元的锚点命名
+        anchor_name = targets_config.analysis_units[0].anchor if targets_config.analysis_units else "unknown"
+        report_filename = f"investigation_report_{anchor_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        report_path = os.path.join(config.OUTPUT_DIR, 'reports', report_filename)
+        os.makedirs(os.path.dirname(report_path), exist_ok=True)
+        
+        with open(report_path, 'w', encoding='utf-8') as f:
+            json.dump(report, f, ensure_ascii=False, indent=2, default=str)
+        
+        logger.info(f"[初查报告] 报告已按归集配置生成: {report_path}")
+        logger.info(f"[初查报告] 包含 {len(report.get('analysis_units', []))} 个分析单元")
+        
+        return JSONResponse(content={
+            "success": True,
+            "report": report,
+            "report_file": report_filename,
+            "analysis_units_count": len(report.get('analysis_units', [])),
+            "companies_count": len(report.get('companies', []))
+        })
+    
+    except Exception as e:
+        logger.error(f"按归集配置生成报告失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+
 @app.get("/api/investigation-report/{filename}")
 async def download_investigation_report(filename: str):
     """
@@ -3427,6 +3551,204 @@ async def download_investigation_report(filename: str):
     
     except Exception as e:
         logger.error(f"下载报告失败: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+
+# ==================== 归集配置 API（Phase -1: G-03 实现）====================
+
+# 导入归集配置服务（延迟导入避免循环依赖）
+from report_config.primary_targets_service import PrimaryTargetsService
+
+# 归集配置请求模型
+class PrimaryTargetsRequest(BaseModel):
+    """归集配置保存请求"""
+    employer: str = ""
+    employer_keywords: List[str] = []
+    analysis_units: List[Dict[str, Any]] = []
+    include_companies: List[str] = []
+    doc_number: str = ""
+    case_source: str = ""
+    case_notes: str = ""
+
+
+@app.get("/api/primary-targets")
+async def get_primary_targets():
+    """
+    获取归集配置
+    
+    如果配置文件存在则返回已保存的配置，否则返回从 analysis_cache 生成的默认配置
+    """
+    try:
+        # 获取服务实例
+        service = PrimaryTargetsService(
+            data_dir=_current_config.get("inputDirectory", "./data"),
+            output_dir=_current_config.get("outputDirectory", "./output")
+        )
+        
+        # 获取或生成配置
+        config, msg, is_new = service.get_or_create_config()
+        
+        if config is None:
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "error": msg}
+            )
+        
+        return {
+            "success": True,
+            "is_new": is_new,
+            "config": config.to_dict(),
+            "config_path": service.get_config_path()
+        }
+    except Exception as e:
+        logger.error(f"获取归集配置失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+
+@app.post("/api/primary-targets")
+async def save_primary_targets(request: PrimaryTargetsRequest):
+    """
+    保存归集配置
+    """
+    try:
+        from report_config.primary_targets_schema import (
+            PrimaryTargetsConfig,
+            AnalysisUnit,
+            AnalysisUnitMember,
+        )
+        
+        # 获取服务实例
+        service = PrimaryTargetsService(
+            data_dir=_current_config.get("inputDirectory", "./data"),
+            output_dir=_current_config.get("outputDirectory", "./output")
+        )
+        
+        # 构建配置对象
+        analysis_units = []
+        for unit_data in request.analysis_units:
+            # 解析成员详情
+            member_details = []
+            for md in unit_data.get('member_details', []):
+                member_details.append(AnalysisUnitMember(
+                    name=md.get('name', ''),
+                    relation=md.get('relation', ''),
+                    has_data=md.get('has_data', False),
+                    id_number=md.get('id_number', ''),
+                ))
+            
+            analysis_units.append(AnalysisUnit(
+                anchor=unit_data.get('anchor', ''),
+                members=unit_data.get('members', []),
+                unit_type=unit_data.get('unit_type', 'family'),
+                member_details=member_details,
+                note=unit_data.get('note', ''),
+            ))
+        
+        config = PrimaryTargetsConfig(
+            employer=request.employer,
+            employer_keywords=request.employer_keywords,
+            analysis_units=analysis_units,
+            include_companies=request.include_companies,
+            doc_number=request.doc_number,
+            case_source=request.case_source,
+            case_notes=request.case_notes,
+        )
+        
+        # 保存配置
+        success, msg = service.save_config(config)
+        
+        if not success:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": msg}
+            )
+        
+        return {
+            "success": True,
+            "message": "配置已保存",
+            "config_path": service.get_config_path()
+        }
+    except Exception as e:
+        logger.error(f"保存归集配置失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+
+@app.get("/api/primary-targets/entities")
+async def get_available_entities():
+    """
+    获取可用于归集配置的实体列表
+    
+    从 analysis_cache 读取人员和公司列表，包含数据可用性状态
+    """
+    try:
+        service = PrimaryTargetsService(
+            data_dir=_current_config.get("inputDirectory", "./data"),
+            output_dir=_current_config.get("outputDirectory", "./output")
+        )
+        
+        result = service.get_entities_with_data_status()
+        
+        if "error" in result:
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "error": result["error"]}
+            )
+        
+        return {
+            "success": True,
+            "persons": result["persons"],
+            "companies": result["companies"],
+            "family_summary": result.get("family_summary")
+        }
+    except Exception as e:
+        logger.error(f"获取实体列表失败: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+
+@app.post("/api/primary-targets/generate-default")
+async def generate_default_config():
+    """
+    强制重新生成默认归集配置（不保存）
+    
+    用于用户想要重置配置时
+    """
+    try:
+        service = PrimaryTargetsService(
+            data_dir=_current_config.get("inputDirectory", "./data"),
+            output_dir=_current_config.get("outputDirectory", "./output")
+        )
+        
+        config, msg = service.generate_default_config()
+        
+        if config is None:
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "error": msg}
+            )
+        
+        return {
+            "success": True,
+            "config": config.to_dict(),
+            "message": "已生成默认配置（未保存）"
+        }
+    except Exception as e:
+        logger.error(f"生成默认配置失败: {e}")
         return JSONResponse(
             status_code=500,
             content={"success": False, "error": str(e)}
