@@ -70,10 +70,10 @@
     "generator": "穿云审计初查报告引擎"
   },
   "family": {
-    "primary_person": "张三",
+    "primary_person": "甲某某",
     "members": [
-      {"name": "张三", "relation": "本人", "has_data": true},
-      {"name": "李四", "relation": "配偶", "has_data": true}
+      {"name": "甲某某", "relation": "本人", "has_data": true},
+      {"name": "乙某某", "relation": "配偶", "has_data": true}
     ],
     "summary": {
       "total_income": 11012646.95,
@@ -83,7 +83,7 @@
   },
   "member_details": [
     {
-      "name": "张三",
+      "name": "甲某某",
       "relation": "本人",
       "assets": {
         "salary_total": 3459922.74,
@@ -133,7 +133,7 @@ curl http://localhost:8000/api/investigation-report/subjects
 # 生成报告
 curl -X POST http://localhost:8000/api/investigation-report/generate \
   -H "Content-Type: application/json" \
-  -d '{"primary_person": "滕雳", "doc_number": "国监查 [2026] 第 000001 号"}'
+  -d '{"primary_person": "甲某某", "doc_number": "国监查 [2026] 第 XXXXXX 号"}'
 ```
 
 ---

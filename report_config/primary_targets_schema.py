@@ -425,29 +425,29 @@ def get_example_config() -> PrimaryTargetsConfig:
         employer_keywords=["XX单位", "XX局"],
         analysis_units=[
             AnalysisUnit(
-                anchor="施灵",
-                members=["施灵", "滕雳", "施育"],
+                anchor="甲某某",
+                members=["甲某某", "乙某某", "甲小某"],
                 unit_type="family",
                 member_details=[
-                    AnalysisUnitMember(name="施灵", relation="本人", has_data=True),
-                    AnalysisUnitMember(name="滕雳", relation="配偶", has_data=True),
-                    AnalysisUnitMember(name="施育", relation="子女", has_data=True),
+                    AnalysisUnitMember(name="甲某某", relation="本人", has_data=True),
+                    AnalysisUnitMember(name="乙某某", relation="配偶", has_data=True),
+                    AnalysisUnitMember(name="甲小某", relation="子女", has_data=True),
                 ],
                 note="核心家庭单元"
             ),
             AnalysisUnit(
-                anchor="施承天",
-                members=["施承天"],
+                anchor="甲大某",
+                members=["甲大某"],
                 unit_type="independent",
                 member_details=[
-                    AnalysisUnitMember(name="施承天", relation="父亲", has_data=True),
+                    AnalysisUnitMember(name="甲大某", relation="父亲", has_data=True),
                 ],
                 note="独立关联单元"
             ),
         ],
         include_companies=[
-            "上海派尼科技实业股份有限公司",
-            "上海派尼斯机电技术有限公司",
+            "XX科技有限公司",
+            "YY科技有限公司",
         ],
         doc_number="国监查 [2026] 第 XXXXXX 号",
         case_source="群众举报",

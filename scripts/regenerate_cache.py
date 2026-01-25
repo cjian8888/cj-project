@@ -403,9 +403,20 @@ def main():
         all_family_members = list(set(all_family_members))
         
         family_summary = {
-            'family_tree': {p: [{'姓名': m.get('姓名',''), '与户主关系': m.get('与户主关系',''), 
-                                 '户籍地': (m.get('户籍地','') or '')[:20]} for m in mlist]
-                           for p, mlist in family_tree.items()},
+            # 保留完整户籍信息（用于报告生成）
+            'family_tree': {p: [{
+                '姓名': m.get('姓名', ''),
+                '与户主关系': m.get('与户主关系', ''),
+                '户籍地': m.get('户籍地', ''),
+                '性别': m.get('性别', ''),
+                '出生日期': m.get('出生日期', ''),
+                '身份证号': m.get('身份证号', ''),
+                '民族': m.get('民族', ''),
+                '籍贯': m.get('籍贯', ''),
+                '从业单位': m.get('从业单位', ''),
+                '文化程度': m.get('文化程度', ''),
+                '婚姻状况': m.get('婚姻状况', ''),
+            } for m in mlist] for p, mlist in family_tree.items()},
             'family_relations': family_relations,
             'family_units': family_units,
             'family_members': all_family_members,
@@ -739,6 +750,102 @@ def main():
         # Phase 9: P3 外部数据源
         "p3Data": p3_data,                     # 9.x 驾驶证/交通违法/出境证件/12306
     }
+    
+    # ============================================
+    # Phase 10: 合并外部数据到 profiles
+    # ============================================
+    print("合并外部数据到画像...")
+    
+    # 步骤1: 从户籍数据构建身份证号->姓名的映射
+    id_to_name_map = {}
+    name_to_id_map = {}
+    
+    # 从 family_relations 直接提取映射 (结构: {person_name: [list of member dicts]})
+    for person_name, members in family_relations.items():
+        if isinstance(members, list):
+            for m in members:
+                if isinstance(m, dict):
+                    member_name = m.get('姓名', '')
+                    id_num = m.get('身份证号')
+                    if member_name and id_num:
+                        # 处理科学计数法表示的身份证号
+                        if isinstance(id_num, float):
+                            id_str = str(int(id_num))
+                        else:
+                            id_str = str(id_num)
+                        id_to_name_map[id_str] = member_name
+                        name_to_id_map[member_name] = id_str
+    
+    # 从 family_tree 补充映射
+    if family_tree:
+        for person_name, members in family_tree.items():
+            if isinstance(members, list):
+                for m in members:
+                    if isinstance(m, dict):
+                        member_name = m.get('姓名', '')
+                        id_num = m.get('身份证号')
+                        if member_name and id_num and member_name not in name_to_id_map:
+                            if isinstance(id_num, float):
+                                id_str = str(int(id_num))
+                            else:
+                                id_str = str(id_num)
+                            id_to_name_map[id_str] = member_name
+                            name_to_id_map[member_name] = id_str
+
+    
+    print(f"  构建身份证映射: {len(id_to_name_map)} 个映射")
+    
+    # 步骤2: 合并房产数据到 profiles
+    property_merged = 0
+    for person_id, properties in precise_property_data.items():
+        person_id_str = str(int(person_id)) if isinstance(person_id, float) else str(person_id)
+        person_name = id_to_name_map.get(person_id_str)
+        if person_name and person_name in profiles:
+            profiles[person_name]['properties'] = properties
+            property_merged += 1
+    print(f"  合并房产数据: {property_merged} 人")
+    
+    # 步骤3: 合并车辆数据到 profiles
+    vehicle_merged = 0
+    for person_id, vehicles in vehicle_data.items():
+        person_id_str = str(int(person_id)) if isinstance(person_id, float) else str(person_id)
+        person_name = id_to_name_map.get(person_id_str)
+        if person_name and person_name in profiles:
+            profiles[person_name]['vehicles'] = vehicles
+            vehicle_merged += 1
+    print(f"  合并车辆数据: {vehicle_merged} 人")
+    
+    # 步骤4: 合并保险数据到 profiles
+    insurance_merged = 0
+    for person_id, insurance in insurance_data.items():
+        person_id_str = str(int(person_id)) if isinstance(person_id, float) else str(person_id)
+        person_name = id_to_name_map.get(person_id_str)
+        if person_name and person_name in profiles:
+            profiles[person_name]['insurance'] = insurance
+            insurance_merged += 1
+    print(f"  合并保险数据: {insurance_merged} 人/公司")
+    
+    # 步骤5: 合并证券数据到 profiles
+    securities_merged = 0
+    for person_id, securities in securities_data.items():
+        person_id_str = str(int(person_id)) if isinstance(person_id, float) else str(person_id)
+        person_name = id_to_name_map.get(person_id_str)
+        if person_name and person_name in profiles:
+            profiles[person_name]['securities'] = securities
+            securities_merged += 1
+    print(f"  合并证券数据: {securities_merged} 人")
+    
+    # 步骤6: 合并征信数据到 profiles
+    credit_merged = 0
+    for person_id, credit in credit_data.items():
+        person_id_str = str(int(person_id)) if isinstance(person_id, float) else str(person_id)
+        person_name = id_to_name_map.get(person_id_str)
+        if person_name and person_name in profiles:
+            profiles[person_name]['creditInfo'] = credit
+            credit_merged += 1
+    print(f"  合并征信数据: {credit_merged} 人")
+    
+    print(f"  总计合并: 房产{property_merged}+车辆{vehicle_merged}+保险{insurance_merged}+证券{securities_merged}+征信{credit_merged}")
     
     # 10. 保存到文件（使用自定义编码器处理日期）
     import pandas as pd

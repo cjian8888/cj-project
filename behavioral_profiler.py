@@ -27,6 +27,68 @@ logger = utils.setup_logger(__name__)
 
 
 # ============================================================
+# 理财产品识别
+# ============================================================
+
+def is_financial_product_transaction(transaction: pd.Series) -> bool:
+    """
+    判断是否为理财产品相关交易
+    
+    Args:
+        transaction: 交易记录（Series）
+    
+    Returns:
+        True表示是理财交易，False表示不是
+    """
+    # 理财产品关键词
+    keywords = [
+        '理财', '基金', '证券', '申购', '赎回',
+        '存管', '清算', '产品', '结构性存款',
+        '申万宏源', '万联证券', '长信基金',
+        '华泰证券', '国泰君安', '海通证券',
+        '招商证券', '中信证券', '广发证券',
+        '银河证券', '光大证券', '东方证券',
+        '兴业证券', '长江证券', '中金公司',
+        '汇添富', '易方达', '华夏基金', '嘉实基金',
+        '南方基金', '博时基金', '富国基金',
+        '债券', '股票', '期货', '期权',
+        '理财产品', '基金产品', '证券账户',
+        '银证转账', '第三方存管', '资金清算'
+    ]
+    
+    counterparty = str(transaction.get('counterparty', ''))
+    description = str(transaction.get('description', ''))
+    
+    # 检查关键词
+    for keyword in keywords:
+        if keyword in counterparty or keyword in description:
+            return True
+    
+    return False
+
+
+def filter_financial_transactions(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    过滤掉理财产品相关交易
+    
+    Args:
+        df: 交易DataFrame
+    
+    Returns:
+        过滤后的DataFrame
+    """
+    if df.empty:
+        return df
+    
+    # 标记理财交易
+    df_filtered = df.copy()
+    df_filtered['is_financial'] = df_filtered.apply(is_financial_product_transaction, axis=1)
+    
+    # 返回非理财交易
+    return df_filtered[~df_filtered['is_financial']].copy()
+
+
+# ============================================================
 # 配置参数
 # ============================================================
 
@@ -54,7 +116,8 @@ def detect_fast_in_out(
     df: pd.DataFrame,
     time_window_hours: int = FAST_IN_OUT_TIME_WINDOW_HOURS,
     min_amount: float = FAST_IN_OUT_MIN_AMOUNT,
-    balance_threshold: float = None
+    balance_threshold: float = None,
+    exclude_financial: bool = True
 ) -> List[Dict]:
     """
     检测资金快进快出模式（洗钱/过桥资金典型特征）
@@ -69,6 +132,7 @@ def detect_fast_in_out(
         time_window_hours: 时间窗口（小时）
         min_amount: 触发检测的最低金额
         balance_threshold: 余额归零阈值（None则不检查）
+        exclude_financial: 是否排除理财产品交易
         
     Returns:
         快进快出模式列表
@@ -81,6 +145,12 @@ def detect_fast_in_out(
     
     # 确保按时间排序
     df = df.sort_values('date').reset_index(drop=True)
+    
+    # 排除理财产品交易
+    if exclude_financial:
+        df = filter_financial_transactions(df)
+        if df.empty:
+            return []
     
     patterns = []
     
@@ -95,11 +165,11 @@ def detect_fast_in_out(
         if not isinstance(income_date, (datetime, pd.Timestamp)):
             continue
         
-        # 查找时间窗口内的支出
+        # 查找时间窗口内的支出（包含边界）
         window_end = income_date + timedelta(hours=time_window_hours)
         
         expense_mask = (
-            (df['date'] > income_date) &
+            (df['date'] >= income_date) &
             (df['date'] <= window_end) &
             (df['expense'].fillna(0) >= min_amount * FAST_IN_OUT_AMOUNT_RATIO)
         )
@@ -110,6 +180,10 @@ def detect_fast_in_out(
             expense_amount = expense_row['expense']
             balance_after = expense_row.get('balance', None)
             
+            # 处理NaN余额值
+            if pd.isna(balance_after):
+                balance_after = None
+            
             # 检查金额匹配（支出应接近收入）
             amount_ratio = expense_amount / income_amount if income_amount > 0 else 0
             if amount_ratio < FAST_IN_OUT_AMOUNT_RATIO or amount_ratio > 1.2:
@@ -117,7 +191,7 @@ def detect_fast_in_out(
             
             # 检查余额归零（可选）
             balance_zeroed = False
-            if balance_after is not None and pd.notna(balance_after):
+            if balance_after is not None:
                 balance_zeroed = balance_after < balance_threshold
             
             # 计算时间差
@@ -153,7 +227,8 @@ def detect_structuring(
     df: pd.DataFrame,
     min_large_amount: float = 50000,
     min_split_count: int = STRUCTURING_MIN_SPLIT_COUNT,
-    time_window_days: int = STRUCTURING_TIME_WINDOW_DAYS
+    time_window_days: int = STRUCTURING_TIME_WINDOW_DAYS,
+    exclude_financial: bool = True
 ) -> List[Dict]:
     """
     检测资金拆分/归集模式（规避监管特征）
@@ -166,6 +241,7 @@ def detect_structuring(
         min_large_amount: 大额交易阈值
         min_split_count: 最少拆分笔数
         time_window_days: 时间窗口（天）
+        exclude_financial: 是否排除理财产品交易
         
     Returns:
         资金拆分/归集模式列表
@@ -174,6 +250,12 @@ def detect_structuring(
         return []
     
     df = df.sort_values('date').reset_index(drop=True)
+    
+    # 排除理财产品交易
+    if exclude_financial:
+        df = filter_financial_transactions(df)
+        if df.empty:
+            return []
     patterns = []
     
     # --- 检测整进散出 (Large-In, Split-Out) ---
@@ -187,11 +269,11 @@ def detect_structuring(
         if not isinstance(income_date, (datetime, pd.Timestamp)):
             continue
         
-        # 查找时间窗口内的多笔支出
+        # 查找时间窗口内的多笔支出（包含边界）
         window_end = income_date + timedelta(days=time_window_days)
         
         expense_mask = (
-            (df['date'] > income_date) &
+            (df['date'] >= income_date) &
             (df['date'] <= window_end) &
             (df['expense'].fillna(0) > 0) &
             (df['expense'].fillna(0) < income_amount * 0.6)  # 单笔小于大额的60%
@@ -229,12 +311,12 @@ def detect_structuring(
         if not isinstance(expense_date, (datetime, pd.Timestamp)):
             continue
         
-        # 查找时间窗口内之前的多笔收入
+        # 查找时间窗口内之前的多笔收入（包含边界）
         window_start = expense_date - timedelta(days=time_window_days)
         
         income_mask = (
             (df['date'] >= window_start) &
-            (df['date'] < expense_date) &
+            (df['date'] <= expense_date) &
             (df['income'].fillna(0) > 0) &
             (df['income'].fillna(0) < expense_amount * 0.6)  # 单笔小于大额的60%
         )
@@ -308,11 +390,19 @@ def detect_dormant_activation(
         
         # 检查是否有足够长的休眠期
         if days_gap >= dormant_min_days:
-            # 检查激活后是否有大额交易
-            amount = max(row.get('income', 0) or 0, row.get('expense', 0) or 0)
+            # 检查激活后是否有大额交易（使用fillna处理NaN）
+            income_val = row.get('income', 0)
+            expense_val = row.get('expense', 0)
+            # 处理NaN值
+            if pd.isna(income_val):
+                income_val = 0
+            if pd.isna(expense_val):
+                expense_val = 0
+            
+            amount = max(income_val, expense_val)
             
             if amount >= activation_min_amount:
-                direction = '收入' if (row.get('income', 0) or 0) > (row.get('expense', 0) or 0) else '支出'
+                direction = '收入' if income_val > expense_val else '支出'
                 
                 patterns.append({
                     'type': 'dormant_activation',
@@ -340,7 +430,8 @@ def detect_dormant_activation(
 
 def analyze_behavioral_patterns(
     all_transactions: Dict[str, pd.DataFrame],
-    core_persons: List[str]
+    core_persons: List[str],
+    exclude_financial: bool = True
 ) -> Dict:
     """
     综合行为特征画像分析
@@ -348,18 +439,22 @@ def analyze_behavioral_patterns(
     Args:
         all_transactions: 所有交易数据 {entity_name: DataFrame}
         core_persons: 核心人员列表
+        exclude_financial: 是否排除理财产品交易
         
     Returns:
         行为特征分析结果
     """
     logger.info('='*60)
     logger.info('开始行为特征画像分析 (Phase 0.2)')
+    if exclude_financial:
+        logger.info('已启用理财产品交易过滤')
     logger.info('='*60)
     
     results = {
         'fast_in_out': [],
         'structuring': [],
         'dormant_activation': [],
+        'financial_transactions_count': 0,
         'summary': {}
     }
     
@@ -369,14 +464,22 @@ def analyze_behavioral_patterns(
         
         logger.info(f"分析 {entity} 的行为特征...")
         
+        # 统计理财交易数量
+        if exclude_financial:
+            financial_mask = df.apply(is_financial_product_transaction, axis=1)
+            financial_count = financial_mask.sum()
+            results['financial_transactions_count'] += financial_count
+            if financial_count > 0:
+                logger.info(f"  - 排除 {financial_count} 笔理财产品交易")
+        
         # 1. 快进快出检测
-        fifo_patterns = detect_fast_in_out(df)
+        fifo_patterns = detect_fast_in_out(df, exclude_financial=exclude_financial)
         for p in fifo_patterns:
             p['entity'] = entity
         results['fast_in_out'].extend(fifo_patterns)
         
         # 2. 整进散出/散进整出检测
-        structuring_patterns = detect_structuring(df)
+        structuring_patterns = detect_structuring(df, exclude_financial=exclude_financial)
         for p in structuring_patterns:
             p['entity'] = entity
         results['structuring'].extend(structuring_patterns)
@@ -403,21 +506,36 @@ def analyze_behavioral_patterns(
     logger.info(f"  - 快进快出: {results['summary']['fast_in_out_count']} 个")
     logger.info(f"  - 整进散出/散进整出: {results['summary']['structuring_count']} 个")
     logger.info(f"  - 休眠激活: {results['summary']['dormant_activation_count']} 个")
+    if exclude_financial:
+        logger.info(f"  - 已排除理财交易: {results['financial_transactions_count']} 笔")
     
     return results
 
 
-def generate_behavioral_report(results: Dict, output_dir: str) -> str:
+def generate_behavioral_report(results: Dict, output_dir: str, report_timestamp: str = None) -> str:
     """
     生成行为特征画像报告
+    
+    Args:
+        results: 行为特征分析结果
+        output_dir: 输出目录
+        report_timestamp: 报告时间戳（可选，默认使用全局时间戳）
+    
+    Returns:
+        报告文件路径
     """
     import os
+    
+    # 使用统一的时间戳
+    if report_timestamp is None:
+        report_timestamp = utils.get_global_report_timestamp()
+    
     report_path = os.path.join(output_dir, '行为特征画像报告.txt')
     
     with open(report_path, 'w', encoding='utf-8') as f:
         f.write('行为特征画像分析报告\n')
         f.write('='*60 + '\n')
-        f.write(f'生成时间: {datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")}\n\n')
+        f.write(f'生成时间: {report_timestamp}\n\n')
         
         # 快进快出
         f.write('一、快进快出模式（洗钱/过桥资金特征）\n')

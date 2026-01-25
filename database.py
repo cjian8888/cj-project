@@ -74,6 +74,46 @@ class DatabaseManager:
         conn.row_factory = sqlite3.Row  # 支持字典式访问
         return conn
     
+    def transaction(self):
+        """
+        事务上下文管理器
+        
+        用法:
+            with db.transaction():
+                # 多个数据库操作
+                db.insert_transactions(...)
+                db.upsert_profile(...)
+                # 如果发生异常，自动回滚
+                # 否则自动提交
+        """
+        class TransactionContext:
+            def __init__(self, db_manager):
+                self.db_manager = db_manager
+                self.conn = None
+                self.cursor = None
+            
+            def __enter__(self):
+                self.conn = self.db_manager._get_connection()
+                self.cursor = self.conn.cursor()
+                # 开始事务（SQLite默认是自动提交模式，需要显式关闭）
+                self.conn.execute('BEGIN')
+                return self.conn, self.cursor
+            
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                if exc_type is None:
+                    # 没有异常，提交事务
+                    self.conn.commit()
+                    logger.debug('事务提交成功')
+                else:
+                    # 有异常，回滚事务
+                    self.conn.rollback()
+                    logger.warning(f'事务回滚: {exc_type.__name__}: {exc_val}')
+                self.conn.close()
+                # 返回False表示不抑制异常
+                return False
+        
+        return TransactionContext(self)
+    
     def _init_database(self):
         """初始化数据库表结构"""
         with self._get_connection() as conn:
@@ -201,11 +241,39 @@ class DatabaseManager:
             ''')
             
             # 创建索引
+            # entities 表索引
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type)')
+            
+            # transactions 表索引
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_entity ON transactions(entity_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_income ON transactions(income)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_expense ON transactions(expense)')
+            
+            # profiles 表索引（entity_id 有 UNIQUE 约束，自动创建索引）
+            
+            # suspicions 表索引
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_suspicions_entity ON suspicions(entity_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_suspicions_risk ON suspicions(risk_level)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_suspicions_created_at ON suspicions(created_at)')
+            
+            # analysis_results 表索引
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_analysis_results_entity ON analysis_results(entity_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_analysis_results_type ON analysis_results(analysis_type)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_analysis_results_created_at ON analysis_results(created_at)')
+            
+            # assets 表索引
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_assets_entity ON assets(entity_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_assets_type ON assets(asset_type)')
+            
+            # relationships 表索引
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_relationships_entity ON relationships(entity_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_relationships_related_entity ON relationships(related_entity_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_relationships_type ON relationships(relationship_type)')
+            
+            # analysis_history 表索引
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_analysis_history_type ON analysis_history(analysis_type)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_analysis_history_started_at ON analysis_history(started_at)')
             
             conn.commit()
             logger.info(f'数据库初始化完成: {self.db_path}')
@@ -886,7 +954,7 @@ def save_to_database(cleaned_data: Dict[str, pd.DataFrame],
                     all_persons: List[str],
                     all_companies: List[str]) -> Dict:
     """
-    将分析结果保存到数据库
+    将分析结果保存到数据库（使用事务保证原子性）
     
     Args:
         cleaned_data: 清洗后的交易数据
@@ -897,9 +965,12 @@ def save_to_database(cleaned_data: Dict[str, pd.DataFrame],
         
     Returns:
         保存统计信息
+        
+    Raises:
+        Exception: 保存过程中任何错误都会导致事务回滚
     """
     logger.info('='*60)
-    logger.info('开始保存数据到数据库')
+    logger.info('开始保存数据到数据库（事务模式）')
     logger.info('='*60)
     
     db = get_db_manager()
@@ -910,40 +981,133 @@ def save_to_database(cleaned_data: Dict[str, pd.DataFrame],
         'suspicions': 0
     }
     
-    # 保存实体和交易数据
-    for entity_name, df in cleaned_data.items():
-        entity_type = 'person' if entity_name in all_persons else 'company'
+    try:
+        # 使用事务上下文管理器
+        with db.transaction() as (conn, cursor):
+            # 1. 保存实体和交易数据
+            for entity_name, df in cleaned_data.items():
+                entity_type = 'person' if entity_name in all_persons else 'company'
+                
+                # 获取或创建实体ID
+                cursor.execute('SELECT id FROM entities WHERE name = ?', (entity_name,))
+                row = cursor.fetchone()
+                if row:
+                    entity_id = row['id']
+                else:
+                    cursor.execute('''
+                        INSERT INTO entities (name, type, updated_at)
+                        VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ''', (entity_name, entity_type))
+                    entity_id = cursor.lastrowid
+                
+                # 准备交易数据
+                if not df.empty:
+                    records = []
+                    for _, row_data in df.iterrows():
+                        record = (
+                            entity_id,
+                            str(row_data.get('date', '')),
+                            float(row_data.get('income', 0)),
+                            float(row_data.get('expense', 0)),
+                            float(row_data.get('balance', 0)) if pd.notna(row_data.get('balance')) else None,
+                            str(row_data.get('counterparty', '')),
+                            str(row_data.get('description', '')),
+                            str(row_data.get('account', '')),
+                            str(row_data.get('transaction_type', '')),
+                            str(row_data.get('source_file', ''))
+                        )
+                        records.append(record)
+                    
+                    # 批量插入交易数据
+                    cursor.executemany('''
+                        INSERT INTO transactions
+                        (entity_id, date, income, expense, balance, counterparty,
+                         description, account, transaction_type, source_file)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', records)
+                    
+                    count = cursor.rowcount
+                    stats['transactions'] += count
+                    stats['entities'] += 1
+                    logger.info(f'保存 {entity_name}: {count} 条交易记录')
+            
+            # 2. 保存资金画像
+            for entity_name, profile in profiles.items():
+                # 获取实体ID
+                cursor.execute('SELECT id FROM entities WHERE name = ?', (entity_name,))
+                row = cursor.fetchone()
+                if row:
+                    entity_id = row['id']
+                else:
+                    # 如果实体不存在，创建它
+                    cursor.execute('''
+                        INSERT INTO entities (name, type, updated_at)
+                        VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ''', (entity_name, 'person'))
+                    entity_id = cursor.lastrowid
+                
+                # 插入或更新画像
+                cursor.execute('''
+                    INSERT OR REPLACE INTO profiles
+                    (entity_id, total_income, total_expense, net_income,
+                     transaction_count, income_sources, expense_targets,
+                     profile_data, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (
+                    entity_id,
+                    profile.get('total_income', 0),
+                    profile.get('total_expense', 0),
+                    profile.get('net_income', 0),
+                    profile.get('transaction_count', 0),
+                    profile.get('income_sources', 0),
+                    profile.get('expense_targets', 0),
+                    json.dumps(profile, ensure_ascii=False)
+                ))
+                
+                stats['profiles'] += 1
+            
+            # 3. 保存疑点
+            for entity_name, entity_suspicions in suspicions.items():
+                # 获取实体ID
+                cursor.execute('SELECT id FROM entities WHERE name = ?', (entity_name,))
+                row = cursor.fetchone()
+                if row:
+                    entity_id = row['id']
+                else:
+                    # 如果实体不存在，创建它
+                    cursor.execute('''
+                        INSERT INTO entities (name, type, updated_at)
+                        VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ''', (entity_name, 'person'))
+                    entity_id = cursor.lastrowid
+                
+                # 插入疑点
+                for suspicion_type, suspicion_list in entity_suspicions.items():
+                    if isinstance(suspicion_list, list):
+                        for suspicion in suspicion_list:
+                            cursor.execute('''
+                                INSERT INTO suspicions
+                                (entity_id, suspicion_type, risk_level, description, details)
+                                VALUES (?, ?, ?, ?, ?)
+                            ''', (
+                                entity_id,
+                                suspicion_type,
+                                suspicion.get('risk_level', 'medium'),
+                                suspicion.get('description', ''),
+                                json.dumps(suspicion, ensure_ascii=False) if suspicion else None
+                            ))
+                            stats['suspicions'] += 1
         
-        # 插入交易数据
-        count = db.insert_transactions(entity_name, df, entity_type)
-        stats['transactions'] += count
-        stats['entities'] += 1
+        # 事务成功提交
+        logger.info(f'数据库保存完成（事务已提交）:')
+        logger.info(f'  实体数: {stats["entities"]}')
+        logger.info(f'  交易记录: {stats["transactions"]}')
+        logger.info(f'  资金画像: {stats["profiles"]}')
+        logger.info(f'  疑点记录: {stats["suspicions"]}')
         
-        logger.info(f'保存 {entity_name}: {count} 条交易记录')
-    
-    # 保存资金画像
-    for entity_name, profile in profiles.items():
-        db.upsert_profile(entity_name, profile)
-        stats['profiles'] += 1
-    
-    # 保存疑点
-    for entity_name, entity_suspicions in suspicions.items():
-        for suspicion_type, suspicion_list in entity_suspicions.items():
-            if isinstance(suspicion_list, list):
-                for suspicion in suspicion_list:
-                    db.insert_suspicion(
-                        entity_name,
-                        suspicion_type,
-                        suspicion.get('risk_level', 'medium'),
-                        suspicion.get('description', ''),
-                        suspicion
-                    )
-                    stats['suspicions'] += 1
-    
-    logger.info(f'数据库保存完成:')
-    logger.info(f'  实体数: {stats["entities"]}')
-    logger.info(f'  交易记录: {stats["transactions"]}')
-    logger.info(f'  资金画像: {stats["profiles"]}')
-    logger.info(f'  疑点记录: {stats["suspicions"]}')
+    except Exception as e:
+        # 事务会自动回滚
+        logger.error(f'数据库保存失败，事务已回滚: {e}')
+        raise
     
     return stats

@@ -432,8 +432,11 @@ class InvestigationMeta:
     case_background: str = ""               # 案件背景
     data_scope: str = ""                    # 数据范围，如 "2020年1月至2025年9月银行流水数据"
     generated_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    version: str = "1.0.0"
+    version: str = "3.0.0"
     generator: str = "穿云审计初查报告引擎"
+    core_persons: List[str] = field(default_factory=list)  # 核心人员列表
+    companies: List[str] = field(default_factory=list)     # 涉及公司列表
+    data_range: Dict[str, str] = field(default_factory=dict)  # 数据时间范围
 
 
 @dataclass
@@ -481,10 +484,17 @@ class BankAccountInfo:
     bank_name: str = ""                     # 银行名称
     account_number: str = ""                # 账号（完整）
     account_type: str = ""                  # 账户类别：个人账户/对公账户
+    account_category: str = ""              # 账户分类：个人账户/联名账户/对公账户
     card_type: str = ""                     # 卡类型：借记卡/信用卡/工资卡
+    is_real_bank_card: bool = True          # 是否真实银行卡
     status: str = ""                        # 账户状态：正常/冻结/注销
-    balance: float = 0.0                    # 当前余额
+    balance: float = 0.0                    # 当前余额（last_balance）
+    balance_is_estimated: bool = False      # 余额是否为估算值
     last_transaction_date: str = ""         # 最后交易日期
+    first_transaction_date: str = ""        # 首次交易日期
+    transaction_count: int = 0              # 交易笔数
+    total_income: float = 0.0               # 该账户总收入
+    total_expense: float = 0.0              # 该账户总支出
 
 
 @dataclass
@@ -495,6 +505,29 @@ class YearlySalaryStats:
     months: int = 0
     avg_monthly: float = 0.0
     transaction_count: int = 0
+
+
+@dataclass
+class PropertyInfo:
+    """房产信息"""
+    address: str = ""                       # 地址
+    area: float = 0.0                       # 面积（平方米）
+    value: float = 0.0                      # 估值（元）
+    registration_date: str = ""             # 登记日期
+    owner: str = ""                         # 产权人
+    certificate_number: str = ""            # 证号
+    data_source: str = ""                   # 数据来源
+
+
+@dataclass
+class VehicleInfo:
+    """车辆信息"""
+    plate_number: str = ""                  # 车牌号
+    brand: str = ""                         # 品牌型号
+    purchase_date: str = ""                 # 购置时间
+    estimated_value: float = 0.0            # 估价（元）
+    owner: str = ""                         # 登记人
+    data_source: str = ""                   # 数据来源
 
 
 @dataclass
@@ -512,6 +545,12 @@ class PersonAssets:
     # 银行账户
     bank_accounts: List[BankAccountInfo] = field(default_factory=list)
     bank_account_count: int = 0
+    
+    # 不动产
+    properties: List[PropertyInfo] = field(default_factory=list)
+    
+    # 车辆
+    vehicles: List[VehicleInfo] = field(default_factory=list)
 
 
 @dataclass
@@ -585,13 +624,22 @@ class ExternalDataPlaceholder:
 
 
 @dataclass
+class RelatedPartyTransactions:
+    """关联交易排查"""
+    total_count: int = 0                    # 总笔数
+    total_amount: float = 0.0               # 总金额
+    by_company: List[Dict] = field(default_factory=list)  # 按公司分组
+
+
+@dataclass
 class PersonAnalysis:
     """个人分析板块"""
     income_gap: IncomeGapAnalysis = field(default_factory=IncomeGapAnalysis)
-    inflow_analysis: InflowAnalysis = field(default_factory=InflowAnalysis)      # 新增：资金流入分析
-    outflow_analysis: OutflowAnalysis = field(default_factory=OutflowAnalysis)   # 新增：资金流出分析
+    inflow_analysis: InflowAnalysis = field(default_factory=InflowAnalysis)      # 资金流入分析
+    outflow_analysis: OutflowAnalysis = field(default_factory=OutflowAnalysis)   # 资金流出分析
     large_cash: LargeCashAnalysis = field(default_factory=LargeCashAnalysis)
     large_transfers: LargeTransferAnalysis = field(default_factory=LargeTransferAnalysis)
+    related_party_transactions: RelatedPartyTransactions = field(default_factory=RelatedPartyTransactions)  # 关联交易排查
     third_party_total: float = 0.0          # 第三方支付总额
     suspicious_count: int = 0               # 可疑交易笔数
     # 外部数据占位
@@ -696,16 +744,29 @@ class InvestigationConclusion:
 
 
 @dataclass
+class AnalysisUnit:
+    """分析单元（循环体）"""
+    anchor: str = ""                        # 锚点人员
+    unit_type: str = "family"               # 单元类型：family/independent
+    unit_name: str = ""                     # 单元名称
+    members: List[str] = field(default_factory=list)  # 成员列表
+    aggregated_data: Dict = field(default_factory=dict)  # 聚合数据
+    member_details: List[MemberDetails] = field(default_factory=list)  # 成员详情
+
+
+@dataclass
 class InvestigationReport:
     """
-    初查报告完整结构
+    初查报告完整结构（v3.0）
     
-    按照 report_guidelines.md 定义的标准格式
+    按照 report_data_contract.md 定义的标准格式
+    支持三段式结构：前言 + 分析单元循环体 + 综合研判
     """
     meta: InvestigationMeta = field(default_factory=InvestigationMeta)
     family: InvestigationFamily = field(default_factory=InvestigationFamily)
-    member_details: List[MemberDetails] = field(default_factory=list)
-    companies: List[CompanyReport] = field(default_factory=list)
+    analysis_units: List[AnalysisUnit] = field(default_factory=list)  # 分析单元（新增）
+    member_details: List[MemberDetails] = field(default_factory=list)  # 保留兼容性
+    company_reports: List[CompanyReport] = field(default_factory=list)  # 公司报告（重命名）
     conclusion: InvestigationConclusion = field(default_factory=InvestigationConclusion)
     
     def to_dict(self) -> Dict:

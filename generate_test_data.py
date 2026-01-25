@@ -23,13 +23,13 @@ def generate_test_clue_txt(output_dir: str = '.'):
     text_content = """举报信
 
 举报人反映:
-张伟(某局副局长)疑似收受贿赂,与华信科技有限公司存在利益往来。
-李明(某局财务科科长)多次大额现金交易,疑似隐瞒资产。
-王芳(某局采购科科长)名下有多处房产,与申报不符。
+甲某某(某局副局长)疑似收受贿赂,与XX科技有限公司存在利益往来。
+乙某某(某局财务科科长)多次大额现金交易,疑似隐瞒资产。
+丙某某(某局采购科科长)名下有多处房产,与申报不符。
 
 涉案公司:
-华信科技有限公司
-天宏投资有限公司
+XX科技有限公司
+YY科技有限公司
 
 请组织调查核实。
 """
@@ -255,19 +255,19 @@ def generate_all_test_data(output_dir: str = '.'):
     generate_test_clue_txt(output_dir)
     
     # 2. 生成人员流水(包含疑点)
-    generate_test_transaction_excel('张伟', output_dir, has_suspicion=True)
+    generate_test_transaction_excel('甲某某', output_dir, has_suspicion=True)
     
     # 3. 生成人员流水(包含疑点)
-    generate_test_transaction_excel('李明', output_dir, has_suspicion=True)
+    generate_test_transaction_excel('乙某某', output_dir, has_suspicion=True)
     
     # 4. 生成人员流水(正常)
-    generate_test_transaction_excel('王芳', output_dir, has_suspicion=False)
+    generate_test_transaction_excel('丙某某', output_dir, has_suspicion=False)
     
     # 5. 生成公司流水
-    generate_test_company_transaction_excel('华信科技有限公司', output_dir)
+    generate_test_company_transaction_excel('XX科技有限公司', output_dir)
     
     # 6. 生成公司流水
-    generate_test_company_transaction_excel('天宏投资有限公司', output_dir)
+    generate_test_company_transaction_excel('YY科技有限公司', output_dir)
     
     print('')
     print('=' * 60)

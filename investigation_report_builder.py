@@ -3,13 +3,16 @@
 """
 初查报告构建器 - 复用缓存数据生成完整报告
 
-【数据复用铁律】
-1. 本模块仅复用 analysis_cache 中已计算的分析结果
-2. 严禁直接读取 Excel 重新计算任何指标
-3. 所有数据必须来自 profiles.json, derived_data.json, suspicions.json
+【数据复用铁律】详见 docs/data_processing_principle.md
+1. 本模块从三个数据源获取数据（按优先级）:
+   - 优先级1: output/cleaned_data/ - 标准化银行流水
+   - 优先级2: output/analysis_cache/ - JSON缓存（程序首选）
+   - 优先级3: output/analysis_results/资金核查底稿.xlsx - Excel核查底稿（回退）
+2. 严禁读取原始数据目录 (data/国监查XXX) 进行重复计算
+3. JSON缓存优先，Excel作为补充数据源
 
-版本: 1.0.0
-日期: 2026-01-20
+版本: 1.1.0
+日期: 2026-01-24
 """
 
 import os
@@ -54,27 +57,38 @@ class InvestigationReportBuilder:
     """
     初查报告构建器
     
-    【铁律】仅从 analysis_cache 读取预计算数据，禁止重新读取 Excel
+    【数据复用铁律】
+    1. 严禁读取原始数据目录 (data/国监查XXX) 进行重复计算
+    2. 按优先级从以下数据源获取数据:
+       - 优先级1: output/cleaned_data/ - 标准化银行流水
+       - 优先级2: output/analysis_cache/ - JSON缓存（程序首选）
+       - 优先级3: output/analysis_results/资金核查底稿.xlsx - Excel核查底稿（回退）
     
     数据来源：
     - profiles.json: 个人/公司画像数据
     - derived_data.json: 派生分析数据（借贷、大额交易、家庭汇总）
     - suspicions.json: 可疑交易检测结果
     - graph_data.json: 关系图谱数据
+    - 资金核查底稿.xlsx: Excel格式补充数据（JSON缺失时回退）
     """
     
-    def __init__(self, analysis_cache: Dict):
+    def __init__(self, analysis_cache: Dict, output_dir: str = './output'):
         """
         初始化
         
         Args:
             analysis_cache: 由 api_server.py 的 _load_analysis_cache() 加载的完整结果
+            output_dir: 输出目录路径，用于定位核查底稿Excel
         """
+        self.output_dir = output_dir
         self.profiles = analysis_cache.get('profiles', {})
         self.derived_data = analysis_cache.get('derived_data', {})
         self.suspicions = analysis_cache.get('suspicions', {})
         self.graph_data = analysis_cache.get('graph_data', {})
         self.metadata = analysis_cache.get('metadata', {})
+        
+        # 核查底稿Excel缓存（延迟加载）
+        self._workbook_cache = {}
         
         # 缓存核心人员列表
         self._core_persons = self._extract_core_persons()
@@ -104,6 +118,67 @@ class InvestigationReportBuilder:
         """判断是否为公司"""
         company_keywords = ['公司', '集团', '有限', '股份', '企业', '中心', '事务所']
         return any(kw in name for kw in company_keywords)
+    
+    # ==================== 铁律-数据回退工具 ====================
+    
+    def _load_workbook_sheet(self, sheet_name: str) -> Optional[List[Dict]]:
+        """
+        【铁律-数据回退】从核查底稿Excel读取工作表数据
+        
+        当JSON缓存中缺失某类数据时，尝试从核查底稿Excel读取。
+        使用缓存避免重复读取同一工作表。
+        
+        Args:
+            sheet_name: 工作表名称
+            
+        Returns:
+            数据列表，如果工作表不存在则返回None
+        """
+        # 检查缓存
+        if sheet_name in self._workbook_cache:
+            return self._workbook_cache[sheet_name]
+        
+        workbook_path = os.path.join(self.output_dir, 'analysis_results', '资金核查底稿.xlsx')
+        if not os.path.exists(workbook_path):
+            logger.debug(f"[核查底稿] 文件不存在: {workbook_path}")
+            self._workbook_cache[sheet_name] = None
+            return None
+        
+        try:
+            import pandas as pd
+            df = pd.read_excel(workbook_path, sheet_name=sheet_name)
+            data = df.to_dict('records')
+            self._workbook_cache[sheet_name] = data
+            logger.info(f"[核查底稿] 从工作表'{sheet_name}'读取 {len(data)} 条记录")
+            return data
+        except ValueError as e:
+            # 工作表不存在
+            logger.debug(f"[核查底稿] 工作表'{sheet_name}'不存在: {e}")
+            self._workbook_cache[sheet_name] = None
+            return None
+        except Exception as e:
+            logger.warning(f"[核查底稿] 读取工作表'{sheet_name}'失败: {e}")
+            self._workbook_cache[sheet_name] = None
+            return None
+    
+    def _get_workbook_sheet_names(self) -> List[str]:
+        """
+        获取核查底稿Excel的所有工作表名称
+        
+        Returns:
+            工作表名称列表
+        """
+        workbook_path = os.path.join(self.output_dir, 'analysis_results', '资金核查底稿.xlsx')
+        if not os.path.exists(workbook_path):
+            return []
+        
+        try:
+            import pandas as pd
+            xl = pd.ExcelFile(workbook_path)
+            return xl.sheet_names
+        except Exception as e:
+            logger.warning(f"[核查底稿] 读取工作表列表失败: {e}")
+            return []
     
     # ==================== 主入口 ====================
     
@@ -393,15 +468,71 @@ class InvestigationReportBuilder:
                 "analysis": asdict(member.analysis) if hasattr(member.analysis, '__dataclass_fields__') else member.analysis,
             }
     
-    def _infer_relation_from_config(self, name: str) -> str:
+    def _infer_relation_from_config(self, name: str, anchor: str = None) -> str:
         """
         【G-05】从配置推断成员关系
         
-        尝试从 derived_data 中的 family_summary 获取关系信息
+        尝试从 derived_data 中的 family_summary.extended_relatives 获取关系信息
+        
+        Args:
+            name: 要查询关系的成员姓名
+            anchor: 锚点人员（核查对象），如果不提供则使用householder
         """
         family_summary = self.derived_data.get('family_summary', {})
+        
+        # 优先尝试 member_relations（如果将来有）
         relations = family_summary.get('member_relations', {})
-        return relations.get(name, '家庭成员')
+        if name in relations:
+            return relations.get(name)
+        
+        # 使用 extended_relatives 推断关系
+        extended_relatives = family_summary.get('extended_relatives', [])
+        householder = family_summary.get('householder', '')
+        
+        # 确定锚点
+        ref_person = anchor if anchor else householder
+        
+        if name == ref_person:
+            return '本人'
+        
+        # 在 extended_relatives 中查找关系
+        for rel in extended_relatives:
+            person_a = rel.get('person_a', '')
+            person_b = rel.get('person_b', '')
+            relation_text = rel.get('relation', '')
+            
+            # 匹配: ref_person -> name
+            if person_a == ref_person and person_b == name:
+                return self._parse_relation_text(relation_text, 'forward')
+            
+            # 匹配: name -> ref_person（反向关系）
+            if person_a == name and person_b == ref_person:
+                return self._parse_relation_text(relation_text, 'reverse')
+        
+        return '家庭成员'
+    
+    def _parse_relation_text(self, relation_text: str, direction: str) -> str:
+        """
+        解析关系文本，提取关系类型
+        
+        Args:
+            relation_text: 如 "施灵可能是施承天的父/母"
+            direction: 'forward' 或 'reverse'，表示查询方向
+        """
+        # 关系关键词映射
+        relation_keywords = {
+            '父/母': ('父亲', '子女'),    # forward: 父亲，reverse: 子女
+            '父母': ('父亲', '子女'),
+            '配偶': ('配偶', '配偶'),
+            '兄弟姐妹': ('兄弟姐妹', '兄弟姐妹'),
+            '可能兄弟姐妹': ('兄弟姐妹', '兄弟姐妹'),
+        }
+        
+        for keyword, (forward_rel, reverse_rel) in relation_keywords.items():
+            if keyword in relation_text:
+                return forward_rel if direction == 'forward' else reverse_rel
+        
+        return '家庭成员'
     
     def _build_family_section_from_unit(self, unit: AnalysisUnit) -> InvestigationFamily:
         """
@@ -1708,9 +1839,2387 @@ class InvestigationReportBuilder:
     def get_available_companies(self) -> List[str]:
         """获取可选的公司列表"""
         return self._companies.copy()
+    
+    # ==================== v3.0: 三段式报告生成 ====================
+    
+    def build_report_v3(self,
+                       config: PrimaryTargetsConfig,
+                       case_background: str = None,
+                       data_scope: str = None) -> Dict:
+        """
+        【v3.0】三段式报告生成
+        
+        报告结构:
+        1. 前言(章节〇) - 核查依据、数据范围、核查对象
+        2. 分析单元循环体 - 个人核查8个Section
+        3. 公司间交叉分析专章
+        4. 综合研判(章节Z) - 问题汇总、风险评级、工作建议
+        
+        Args:
+            config: 归集配置对象
+            case_background: 案件背景
+            data_scope: 数据范围
+            
+        Returns:
+            完整报告字典
+        """
+        logger.info(f"[初查报告v3] 开始生成三段式报告,{len(config.analysis_units)} 个分析单元")
+        
+        # 1. 前言章节
+        preface = self._build_preface(config, case_background, data_scope)
+        
+        # 2. 个人核查循环体(每个分析单元包含8个Section)
+        analysis_units = []
+        for unit in config.analysis_units:
+            unit_report = self._build_person_unit_report(unit)
+            analysis_units.append(unit_report)
+        
+        # 3. 公司间交叉分析专章
+        inter_company_analysis = self._build_inter_company_analysis(config)
+        
+        # 4. 综合研判
+        conclusion = self._build_comprehensive_conclusion_v3(analysis_units, inter_company_analysis)
+        
+        # 组装完整报告
+        report = {
+            "meta": {
+                "doc_number": config.doc_number or "",
+                "generated_at": datetime.now().isoformat(),
+                "version": "3.0.0",
+                "generator": "穿云审计初查报告引擎 v3.0.0",
+            },
+            "preface": preface,
+            "analysis_units": analysis_units,
+            "inter_company_analysis": inter_company_analysis,
+            "conclusion": conclusion,
+        }
+        
+        logger.info(f"[初查报告v3] 报告生成完成")
+        return report
+    
+    def build_report_v4(self,
+                       config: PrimaryTargetsConfig = None,
+                       case_background: str = None,
+                       data_scope: str = None) -> Dict:
+        """
+        【v4.0】专业模版报告生成 - 以家庭为单位
+        
+        报告结构（重构为家庭优先）：
+        1. 开篇引言 - 查询依据、查询对象、信息类型
+        2. 家庭章节(N个) - 每个家庭包含：
+           - 家庭汇总（家庭总资产、成员关系）
+           - 成员循环：
+             (一) XX家庭资产收入情况
+             (二) 数据分析(8个维度)
+        3. 公司章节(M个) - 简洁公司分析
+        4. 综合研判 - 异常情况、结论建议
+        5. 下一步工作计划 - 自动生成
+        
+        Args:
+            config: 归集配置对象（可选，默认使用缓存中的家庭成员）
+            case_background: 案件背景
+            data_scope: 数据范围
+            
+        Returns:
+            完整报告字典
+        """
+        logger.info(f"[初查报告v4] 开始生成专业模版报告（家庭优先结构）")
+        
+        # 1. 确定核查对象和家庭分组
+        if config:
+            all_persons = []
+            families = {}  # anchor -> members
+            for unit in config.analysis_units:
+                anchor = unit.anchor
+                members_in_unit = []
+                for member in unit.members:
+                    if not self._is_company(member):
+                        if member not in all_persons:
+                            all_persons.append(member)
+                        members_in_unit.append(member)
+                if members_in_unit:
+                    families[anchor] = {
+                        'anchor': anchor,
+                        'members': members_in_unit,
+                        'unit_type': unit.unit_type if hasattr(unit, 'unit_type') else 'family',
+                    }
+            include_companies = config.include_companies or self._companies
+        else:
+            all_persons = self._core_persons.copy()
+            include_companies = self._companies.copy()
+            # 无config时，尝试从family_summary构建家庭分组
+            families = self._build_families_from_cache(all_persons)
+        
+        # 2. 开篇引言
+        preface = self._build_v4_preface(all_persons, include_companies, case_background)
+        
+        # 3. 构建家庭章节（核心重构：以家庭为单位）
+        family_sections = []
+        for anchor, family_info in families.items():
+            family_section = self._build_v4_family_section(family_info)
+            family_sections.append(family_section)
+        
+        # 4. 兼容性：保留person_sections（平铺所有成员）
+        person_sections = []
+        for family in family_sections:
+            person_sections.extend(family.get('member_sections', []))
+        
+        # 5. 公司章节
+        company_sections = []
+        for company in include_companies:
+            company_section = self._build_v4_company_section(company)
+            company_sections.append(company_section)
+        
+        # 6. 综合研判
+        conclusion = self._build_v4_conclusion(person_sections, company_sections)
+        
+        # 7. 下一步工作计划（自动生成）
+        next_steps = self._build_v4_next_steps(person_sections, company_sections)
+        
+        # 组装完整报告（新增family_sections字段）
+        report = {
+            "meta": {
+                "doc_number": config.doc_number if config else "",
+                "generated_at": datetime.now().isoformat(),
+                "version": "4.1.0",  # 版本升级
+                "generator": "穿云审计初查报告引擎 v4.1.0（家庭优先）",
+            },
+            "preface": preface,
+            "family_sections": family_sections,  # 新增：家庭分组结构
+            "person_sections": person_sections,  # 保留：兼容旧模板
+            "company_sections": company_sections,
+            "conclusion": conclusion,
+            "next_steps": next_steps,
+        }
+        
+        logger.info(f"[初查报告v4] 报告生成完成，{len(family_sections)} 个家庭章节，{len(person_sections)} 个个人章节，{len(company_sections)} 个公司章节")
+        return report
+    
+    def _build_families_from_cache(self, all_persons: List[str]) -> Dict:
+        """
+        从缓存中的family_units_v2构建家庭分组（户主优先原则）
+        
+        【户主优先原则】
+        1. 优先使用 family_units_v2（来自真实户籍同户人数据）
+        2. family_units_v2 基于公安部同户人数据，准确记录了户籍关系
+        3. 只有未被 family_units_v2 覆盖的人员才使用 extended_relatives 推断
+        
+        Args:
+            all_persons: 所有核查人员列表
+            
+        Returns:
+            家庭分组字典 {anchor: {anchor, members, unit_type}}
+        """
+        families = {}
+        assigned = set()
+        
+        # ========== 优先级1: 使用 family_units_v2 或 family_units（真实户籍数据） ==========
+        # 优先使用 family_units_v2，如果为空则回退到 family_units
+        family_units_v2 = self.derived_data.get('family_units_v2', [])
+        family_units = self.derived_data.get('family_units', [])
+        
+        # 选择有数据的家庭单元
+        effective_units = family_units_v2 if family_units_v2 else family_units
+        source_name = 'family_units_v2' if family_units_v2 else 'family_units'
+        
+        if effective_units:
+            logger.info(f"[户主优先原则] 使用 {source_name} 构建家庭分组，共 {len(effective_units)} 个家庭单元")
+            
+            for unit in effective_units:
+                anchor = unit.get('anchor', '') or unit.get('householder', '')
+                members_raw = unit.get('members', [])
+                unit_type = unit.get('unit_type', 'family')
+                
+                # 只保留在 all_persons 中的成员（已查询数据的人员）
+                members = [m for m in members_raw if m in all_persons]
+                
+                if not members:
+                    continue
+                
+                # 确保 anchor 在 members 中，否则使用第一个成员作为 anchor
+                if anchor not in members:
+                    anchor = members[0]
+                
+                # 标记为已分配
+                for m in members:
+                    assigned.add(m)
+                
+                # 确定 unit_type
+                actual_unit_type = 'family' if len(members) > 1 else 'individual'
+                
+                families[anchor] = {
+                    'anchor': anchor,
+                    'members': members,
+                    'unit_type': actual_unit_type,
+                    'member_details': unit.get('member_details', []) or unit.get('relations', {}),  # 保留成员详情
+                }
+                
+                logger.info(f"[户主优先原则] 家庭 anchor={anchor}, 成员={members}, type={actual_unit_type}")
+        
+        # ========== 优先级2: 未分配的人员使用 extended_relatives 推断 ==========
+        family_summary = self.derived_data.get('family_summary', {})
+        extended_relatives = family_summary.get('extended_relatives', [])
+        
+        # 构建推断关系图
+        relation_graph = {}
+        for rel in extended_relatives:
+            a = rel.get('person_a', '')
+            b = rel.get('person_b', '')
+            relation = rel.get('relation', '')
+            
+            if a and b:
+                if a not in relation_graph:
+                    relation_graph[a] = []
+                if b not in relation_graph:
+                    relation_graph[b] = []
+                relation_graph[a].append({'name': b, 'relation': relation})
+                relation_graph[b].append({'name': a, 'relation': relation})
+        
+        # 按推断关系分组（仅处理未分配的人员）
+        for person in all_persons:
+            if person in assigned:
+                continue
+                
+            # 收集该人员相关的所有家庭成员
+            family_members = [person]
+            assigned.add(person)
+            
+            # 从关系图中获取关联人员
+            if person in relation_graph:
+                for rel in relation_graph[person]:
+                    related = rel['name']
+                    if related in all_persons and related not in assigned:
+                        family_members.append(related)
+                        assigned.add(related)
+            
+            # 以第一个人为anchor
+            anchor = family_members[0]
+            families[anchor] = {
+                'anchor': anchor,
+                'members': family_members,
+                'unit_type': 'family' if len(family_members) > 1 else 'individual',
+            }
+            
+            if len(family_members) > 1:
+                logger.info(f"[推断关系] 家庭 anchor={anchor}, 成员={family_members}")
+        
+        # ========== 处理剩余未分组的人员 ==========
+        for person in all_persons:
+            if person not in assigned:
+                families[person] = {
+                    'anchor': person,
+                    'members': [person],
+                    'unit_type': 'individual',
+                }
+                logger.info(f"[独立个人] {person}")
+        
+        return families
+    
+    def _build_v4_family_section(self, family_info: Dict) -> Dict:
+        """
+        构建家庭章节（含家庭汇总和成员分析）
+        
+        Args:
+            family_info: 家庭信息 {anchor, members, unit_type}
+            
+        Returns:
+            家庭章节字典
+        """
+        anchor = family_info.get('anchor', '')
+        members = family_info.get('members', [])
+        unit_type = family_info.get('unit_type', 'family')
+        member_details = family_info.get('member_details', [])
+        
+        # 【户主优先排序】本人 → 配偶 → 子女 → 父母 → 其他
+        sorted_members = self._sort_members_by_relation(members, anchor, member_details)
+        
+        # 1. 构建家庭汇总
+        family_summary = self._build_family_summary_v4(anchor, sorted_members)
+        
+        # 2. 构建成员分析章节（按排序后顺序）
+        member_sections = []
+        for idx, member in enumerate(sorted_members):
+            relation = self._infer_relation_from_members(member, anchor, members)
+            section = self.build_v4_person_section(member, relation)
+            section['section_index'] = idx + 1  # 添加章节序号
+            member_sections.append(section)
+        
+        return {
+            'family_name': f"{anchor}家庭" if len(sorted_members) > 1 else anchor,
+            'anchor': anchor,
+            'members': sorted_members,  # 使用排序后的成员列表
+            'member_count': len(sorted_members),
+            'unit_type': unit_type,
+            'family_summary': family_summary,
+            'member_sections': member_sections,
+        }
+    
+    def _sort_members_by_relation(self, members: List[str], anchor: str, member_details: List[Dict]) -> List[str]:
+        """
+        按户主优先原则排序成员
+        
+        排序规则：本人/户主(0) → 配偶(1) → 子女(2) → 父母(3) → 其他(99)
+        """
+        # 关系优先级映射
+        relation_order = {
+            '本人': 0, '户主': 0,
+            '妻': 1, '夫': 1, '配偶': 1,
+            '子': 2, '女': 2, '子女': 2, '儿子': 2, '女儿': 2,
+            '父': 3, '母': 3, '父亲': 3, '母亲': 3,
+            '兄': 4, '弟': 4, '姐': 4, '妹': 4,
+        }
+        
+        # 构建成员关系查找表（支持列表和字典两种格式）
+        member_relation_map = {}
+        if isinstance(member_details, list):
+            for detail in member_details:
+                if isinstance(detail, dict):
+                    name = detail.get('name', '')
+                    relation = detail.get('relation', '') or detail.get('与户主关系', '')
+                    if name:
+                        member_relation_map[name] = relation
+        elif isinstance(member_details, dict):
+            # 字典格式: {name: {relation info}}
+            for name, info in member_details.items():
+                if isinstance(info, dict):
+                    relation = info.get('relation', '') or info.get('与户主关系', '')
+                    member_relation_map[name] = relation
+                elif isinstance(info, str):
+                    member_relation_map[name] = info
+        
+        def get_order(name: str) -> int:
+            if name == anchor:
+                return 0  # 户主始终第一
+            relation = member_relation_map.get(name, '')
+            if not relation:
+                # 回退到推断
+                relation = self._infer_relation_from_members(name, anchor, members)
+            return relation_order.get(relation, 99)
+        
+        return sorted(members, key=get_order)
+    
+    def _build_family_summary_v4(self, anchor: str, members: List[str]) -> Dict:
+        """
+        构建家庭资产汇总
+        
+        Args:
+            anchor: 户主姓名
+            members: 家庭成员列表
+            
+        Returns:
+            家庭汇总字典
+        """
+        # 汇总所有成员的资产
+        total_income = 0.0
+        total_expense = 0.0
+        total_bank_balance = 0.0
+        total_salary = 0.0
+        total_wealth = 0.0
+        
+        member_relations = []
+        
+        for member in members:
+            profile = self.profiles.get(member, {})
+            total_income += profile.get('totalIncome', 0) or 0
+            total_expense += profile.get('totalExpense', 0) or 0
+            total_salary += profile.get('salaryTotal', 0) or 0
+            total_wealth += profile.get('wealthTotal', 0) or 0
+            
+            # 银行账户余额
+            accounts = profile.get('bank_accounts', [])
+            if isinstance(accounts, list):
+                for acc in accounts:
+                    total_bank_balance += acc.get('balance', 0) or acc.get('账户余额', 0) or 0
+            
+            # 成员关系
+            relation = self._infer_relation_from_members(member, anchor, members)
+            member_relations.append({
+                'name': member,
+                'relation': relation,
+                'has_data': member in self.profiles,
+            })
+        
+        # 家庭收支匹配
+        salary_ratio = (total_salary / total_income * 100) if total_income > 0 else 0
+        
+        return {
+            'anchor': anchor,
+            'member_count': len(members),
+            'member_relations': member_relations,
+            'total_income': total_income,
+            'total_income_wan': total_income / 10000,
+            'total_expense': total_expense,
+            'total_expense_wan': total_expense / 10000,
+            'total_bank_balance': total_bank_balance,
+            'total_bank_balance_wan': total_bank_balance / 10000,
+            'total_salary': total_salary,
+            'total_salary_wan': total_salary / 10000,
+            'total_wealth': total_wealth,
+            'total_wealth_wan': total_wealth / 10000,
+            'salary_ratio': salary_ratio,
+            'narrative': (
+                f"{anchor}家庭共{len(members)}人，"
+                f"家庭总资金流入{total_income/10000:.2f}万元，"
+                f"流出{total_expense/10000:.2f}万元。"
+                f"其中工资收入{total_salary/10000:.2f}万元，占比{salary_ratio:.1f}%。"
+            ),
+        }
+    
+    def _infer_relation_from_members(self, member: str, anchor: str, members: List[str]) -> str:
+        """
+        推断成员与户主的关系（户主优先原则）
+        
+        优先级：
+        1. 如果 member == anchor，返回"本人"
+        2. 从 family_units_v2.member_details 获取真实户籍关系
+        3. 从 extended_relatives 获取推断关系
+        4. 默认返回"家庭成员"
+        """
+        if member == anchor:
+            return "本人"
+        
+        # ========== 优先级1: 从 family_units_v2 获取真实户籍关系 ==========
+        family_units_v2 = self.derived_data.get('family_units_v2', [])
+        for unit in family_units_v2:
+            unit_anchor = unit.get('anchor', '') or unit.get('householder', '')
+            # 找到包含 anchor 的家庭单元
+            if unit_anchor == anchor or anchor in unit.get('members', []):
+                member_details = unit.get('member_details', [])
+                for detail in member_details:
+                    if detail.get('name') == member:
+                        relation = detail.get('relation', '')
+                        if relation and relation != '本人':
+                            return relation
+        
+        # ========== 优先级2: 从 extended_relatives 获取推断关系 ==========
+        family_summary = self.derived_data.get('family_summary', {})
+        extended_relatives = family_summary.get('extended_relatives', [])
+        
+        for rel in extended_relatives:
+            a = rel.get('person_a', '')
+            b = rel.get('person_b', '')
+            relation = rel.get('relation', '')
+            
+            if a == anchor and b == member:
+                return relation
+            if b == anchor and a == member:
+                return relation
+        
+        return "家庭成员"
+    
+    def _build_v4_preface(self, persons: List[str], companies: List[str], case_background: str = None) -> Dict:
+        """构建v4开篇引言"""
+        date_range = self.metadata.get('date_range', {})
+        start_date = date_range.get('start', '')[:10]
+        end_date = date_range.get('end', '')[:10]
+        
+        return {
+            "case_background": case_background or "根据相关线索反映，现对相关人员进行资金穿透核查。",
+            "persons_queried": persons,
+            "companies_queried": companies,
+            "data_period": f"{start_date} 至 {end_date}",
+            "information_types": [
+                "银行流水数据",
+                "不动产登记信息",
+                "机动车登记信息",
+                "反洗钱数据",
+                "出行记录",
+                "企业登记信息"
+            ],
+            "person_count": len(persons),
+            "company_count": len(companies),
+        }
+    
+    def _build_v4_company_section(self, company: str) -> Dict:
+        """构建v4公司章节（简洁版）"""
+        profile = self.profiles.get(company, {})
+        
+        total_income = profile.get('totalIncome', 0)
+        total_expense = profile.get('totalExpense', 0)
+        cash_income = profile.get('cashIncome', 0)
+        cash_expense = profile.get('cashExpense', 0)
+        transaction_count = profile.get('transactionCount', 0)
+        
+        # 简洁叙事
+        narrative = (
+            f"{company}累计资金流入{total_income/10000:.2f}万元，"
+            f"流出{total_expense/10000:.2f}万元，"
+            f"涉及交易{transaction_count}笔。"
+        )
+        if cash_income > 0 or cash_expense > 0:
+            narrative += f"其中现金收入{cash_income/10000:.2f}万元，现金支出{cash_expense/10000:.2f}万元。"
+        
+        return {
+            "company_name": company,
+            "total_income": total_income,
+            "total_expense": total_expense,
+            "cash_income": cash_income,
+            "cash_expense": cash_expense,
+            "transaction_count": transaction_count,
+            "narrative": narrative,
+        }
+    
+    def _build_v4_conclusion(self, person_sections: List[Dict], company_sections: List[Dict]) -> Dict:
+        """构建v4综合研判"""
+        issues = []
+        
+        # 从个人章节提取问题
+        for section in person_sections:
+            name = section.get('name', '')
+            analysis = section.get('data_analysis_section', {})
+            
+            # 收支匹配问题
+            income_match = analysis.get('income_match_analysis', {})
+            if income_match.get('need_further_verification', False):
+                issues.append({
+                    "person": name,
+                    "issue_type": "收支不匹配",
+                    "description": f"工资收入占比仅{income_match.get('salary_ratio', 0):.1f}%，不足以支撑日常开支",
+                    "severity": "medium",
+                })
+        
+        return {
+            "issues": issues,
+            "issue_count": len(issues),
+            "summary_narrative": self._generate_summary_text_v4(issues),
+        }
+    
+    def _generate_summary_text_v4(self, issues: List[Dict]) -> str:
+        """生成v4综合研判文本"""
+        if not issues:
+            return "经对相关人员资金流水进行穿透分析，未发现明显异常情况。"
+        
+        return f"经对相关人员资金流水进行穿透分析，发现{len(issues)}项需要进一步核实的问题。"
+    
+    def _build_v4_next_steps(self, person_sections: List[Dict], company_sections: List[Dict]) -> List[Dict]:
+        """
+        构建v4下一步工作计划（智能生成）
+        
+        基于分析发现自动生成建议：
+        1. 购房款盲区 → 建议调取配偶银行流水
+        2. 微信/支付宝占比高 → 建议调取电子支付数据
+        3. 收入不明 → 建议核实收入来源
+        """
+        next_steps = []
+        
+        for section in person_sections:
+            name = section.get('name', '')
+            asset_income = section.get('asset_income_section', {})
+            data_analysis = section.get('data_analysis_section', {})
+            
+            # 1. 购房款盲区检测
+            property_analysis = data_analysis.get('property_analysis', {})
+            if property_analysis.get('has_data') and not property_analysis.get('has_payment_record'):
+                next_steps.append({
+                    "action_type": "房款盲区",
+                    "target_name": name,
+                    "action_text": f"从{name}银行流水中未查见购房款支付记录，建议进一步调取其配偶银行流水确认资金来源",
+                    "priority": "high",
+                })
+            
+            # 2. 收支不匹配检测
+            income_match = data_analysis.get('income_match_analysis', {})
+            if income_match.get('need_further_verification'):
+                salary_ratio = income_match.get('salary_ratio', 0)
+                if salary_ratio < 30:
+                    next_steps.append({
+                        "action_type": "收入来源核实",
+                        "target_name": name,
+                        "action_text": f"{name}工资收入占比仅{salary_ratio:.1f}%，建议核实其其他收入来源的合法性",
+                        "priority": "high",
+                    })
+            
+            # 3. 电子支付盲区检测（第三方支付占比高）
+            counterparty = data_analysis.get('counterparty_analysis', {})
+            third_party = counterparty.get('inflow', {}).get('third_party', 0)
+            total_income = counterparty.get('inflow', {}).get('total', 1)
+            if third_party / total_income > 0.2 if total_income > 0 else False:
+                next_steps.append({
+                    "action_type": "电子支付盲区",
+                    "target_name": name,
+                    "action_text": f"{name}第三方支付交易占比较高，建议进一步调取微信、支付宝等电子支付账户流水",
+                    "priority": "medium",
+                })
+        
+        return next_steps
+    
+    def _build_preface(self,
+                      config: PrimaryTargetsConfig,
+                      case_background: str = None,
+                      data_scope: str = None) -> Dict:
+        """
+        构建前言章节(章节〇)
+        
+        包含:
+        1. 核查依据
+        2. 数据范围
+        3. 时间区间
+        4. 核查对象列表
+        """
+        # 提取所有核查对象
+        all_persons = []
+        for unit in config.analysis_units:
+            for member in unit.members:
+                if member not in all_persons and not self._is_company(member):
+                    all_persons.append(member)
+        
+        # 构建核查对象表格数据
+        subjects_table = []
+        anchor_map = {}  # 记录每个成员所属的anchor
+        for unit in config.analysis_units:
+            for member in unit.members:
+                if member not in anchor_map:
+                    anchor_map[member] = unit.anchor
+        
+        for person in all_persons:
+            has_data = person in self.profiles
+            anchor_for_person = anchor_map.get(person)
+            subjects_table.append({
+                "name": person,
+                "relation": self._infer_relation_from_config(person, anchor=anchor_for_person),
+                "has_data": "是" if has_data else "否(待调取)",
+            })
+        
+        # 从metadata提取时间范围
+        date_range = self.metadata.get('date_range', {})
+        start_date = date_range.get('start', '2020-01-01')
+        end_date = date_range.get('end', '2025-09-30')
+        
+        # 计算时间跨度(月数)
+        from datetime import datetime
+        try:
+            start_dt = datetime.fromisoformat(start_date[:10])
+            end_dt = datetime.fromisoformat(end_date[:10])
+            months = (end_dt.year - start_dt.year) * 12 + (end_dt.month - start_dt.month)
+        except:
+            months = 69  # 默认值
+        
+        return {
+            "case_background": case_background or "依据相关线索反映,现对相关人员进行资金穿透核查。",
+            "data_scope": {
+                "bank_transactions": f"{start_date[:10]} 至 {end_date[:10]}",
+                "real_estate": "【待调取】自然资源部精准查询",
+                "vehicles": "【待调取】公安部机动车查询",
+                "company_registration": "【待调取】市场监管总局企业登记信息",
+                "aml_data": "【待调取】中国人民银行反洗钱定向查询",
+                "travel_data": "【待调取】铁路总公司票面信息、中航信航班进出港信息",
+            },
+            "time_range": {
+                "start_date": start_date[:10],
+                "end_date": end_date[:10],
+                "months": months,
+                "description": f"{start_date[:10]} 至 {end_date[:10]}(共{months}个月)",
+            },
+            "subjects": subjects_table,
+        }
+    
+    def _build_person_unit_report(self, unit: AnalysisUnit) -> Dict:
+        """
+        构建个人分析单元报告(8个Section)
+        
+        Section I:   身份与履历
+        Section II:  资产存量分析
+        Section III: 收入来源分析
+        Section IV:  支出结构分析
+        Section V:   收支匹配度分析
+        Section VI:  异常交易分析
+        Section VII: 关联方往来分析
+        Section VIII:时空碰撞分析
+        """
+        # 获取锚点人员的profile
+        anchor = unit.anchor
+        profile = self.profiles.get(anchor, {})
+        
+        return {
+            "anchor": anchor,
+            "unit_type": unit.unit_type,
+            "members": unit.members,
+            "sections": {
+                "section_1_identity": self._build_person_section_1_identity(anchor, unit),
+                "section_2_assets": self._build_person_section_2_assets(anchor, profile),
+                "section_3_income": self._build_person_section_3_income(anchor, profile),
+                "section_4_expense": self._build_person_section_4_expense(anchor, profile),
+                "section_5_income_gap": self._build_person_section_5_income_gap(anchor, profile),
+                "section_6_abnormal_tx": self._build_person_section_6_abnormal_tx(anchor, profile),
+                "section_7_related_party": self._build_person_section_7_related_party(anchor, profile),
+                "section_8_collision": self._build_person_section_8_collision(anchor, profile),
+            }
+        }
+    
+    def _build_person_section_1_identity(self, name: str, unit: AnalysisUnit) -> Dict:
+        """
+        Section I: 身份与履历
+        
+        包含:
+        - 基本信息表格
+        - 职业履历
+        - 家庭成员关系
+        """
+        profile = self.profiles.get(name, {})
+        
+        # 基本信息
+        basic_info = {
+            "name": name,
+            "id_number": "【待调取】",
+            "gender": "【待调取】",
+            "birth_date": "【待调取】",
+            "work_unit": "【待调取】",
+            "position": "【待调取】",
+        }
+        
+        # 职业履历(从外部数据获取,这里使用占位符)
+        career_history = [
+            {
+                "period": "【待调取】",
+                "unit": "【待调取】",
+                "position": "【待调取】",
+            }
+        ]
+        
+        # 家庭成员关系
+        family_members = []
+        for member in unit.members:
+            if member != name:
+                relation = self._infer_relation_from_config(member, anchor=name)
+                family_members.append({
+                    "name": member,
+                    "relation": relation,
+                    "has_data": member in self.profiles,
+                })
+        
+        return {
+            "basic_info": basic_info,
+            "career_history": career_history,
+            "family_members": family_members,
+        }
+    
+    def _build_person_section_2_assets(self, name: str, profile: Dict) -> Dict:
+        """
+        Section II: 资产存量分析
+        
+        包含:
+        - 不动产清单
+        - 机动车清单（从外部提取器获取）
+        - 金融资产汇总
+        - 银行账户列表
+        """
+        # 银行账户
+        bank_accounts = self._build_bank_accounts(name, profile)
+        
+        # 金融资产汇总
+        financial_assets = {
+            "deposits_total": sum(acc.balance for acc in bank_accounts),
+            "wealth_holdings": profile.get('wealthTotal', 0) or 0,
+            "securities_value": 0,  # 待外部数据
+            "total": sum(acc.balance for acc in bank_accounts) + (profile.get('wealthTotal', 0) or 0),
+        }
+        
+        # 【Phase B】获取真实车辆数据（从外部提取器）
+        vehicle_info = self._build_vehicle_info_v4(name, profile)
+        vehicles = []
+        if vehicle_info.get('has_data'):
+            for v in vehicle_info.get('vehicles', []):
+                vehicles.append({
+                    "description": f"{v.get('description', '')} {v.get('plate_number', '')}",
+                    "plate_number": v.get('plate_number', ''),
+                    "registration_date": v.get('registration_date', ''),
+                })
+        else:
+            vehicles = [{"description": "未查见名下机动车登记信息"}]
+        
+        # 【Phase B】获取真实不动产数据（从外部提取器）
+        properties = self._get_external_property_data(name)
+        real_estate = []
+        if properties:
+            for p in properties:
+                real_estate.append({
+                    "location": p.get('location', '') or p.get('坐落', ''),
+                    "area": p.get('area', '') or p.get('面积', ''),
+                    "property_type": p.get('property_type', '') or p.get('用途', ''),
+                    "registration_date": p.get('registration_date', '') or p.get('登记时间', ''),
+                    "description": f"{p.get('location', p.get('坐落', ''))} {p.get('area', '')}㎡",
+                })
+        else:
+            real_estate = [{"description": "未查见名下不动产登记信息"}]
+        
+        return {
+            "real_estate": real_estate,
+            "real_estate_count": len(properties) if properties else 0,
+            "vehicles": vehicles,
+            "vehicle_count": vehicle_info.get('count', 0),
+            "vehicle_narrative": vehicle_info.get('narrative', ''),
+            "financial_assets": financial_assets,
+            "bank_accounts": [asdict(acc) for acc in bank_accounts],
+        }
+    
+    def _build_person_section_3_income(self, name: str, profile: Dict) -> Dict:
+        """
+        Section III: 收入来源分析
+        
+        包含:
+        - 工资收入统计
+        - 其他收入来源
+        - 收入分类占比(合法/不明/可疑)
+        """
+        total_income = profile.get('totalIncome', 0) or 0
+        salary_total = profile.get('salaryTotal', 0) or 0
+        salary_ratio = profile.get('salaryRatio', 0) or 0
+        
+        # 收入分类
+        income_classification = profile.get('income_classification', {})
+        
+        return {
+            "total_income": total_income,
+            "salary_income": {
+                "total": salary_total,
+                "ratio": salary_ratio,
+            },
+            "other_income": {
+                "total": total_income - salary_total,
+                "ratio": 100 - salary_ratio if salary_ratio else 0,
+            },
+            "income_classification": {
+                "legitimate": income_classification.get('legitimate_total', salary_total),
+                "unknown": income_classification.get('unknown_total', 0),
+                "suspicious": income_classification.get('suspicious_total', 0),
+            }
+        }
+    
+    def _build_person_section_4_expense(self, name: str, profile: Dict) -> Dict:
+        """
+        Section IV: 支出结构分析
+        
+        包含:
+        - 支出分类统计
+        - 大额支出明细
+        - 消费特征分析
+        """
+        total_expense = profile.get('totalExpense', 0) or 0
+        
+        # 支出分类(简化版,实际需要从流水分析)
+        expense_categories = {
+            "consumption": total_expense * 0.6,  # 消费支出
+            "investment": total_expense * 0.2,   # 投资支出
+            "transfer": total_expense * 0.2,     # 转账支出
+        }
+        
+        return {
+            "total_expense": total_expense,
+            "expense_categories": expense_categories,
+            "large_expenses": [],  # 从大额交易中提取
+            "consumption_features": "【待分析】",
+        }
+    
+    def _build_person_section_5_income_gap(self, name: str, profile: Dict) -> Dict:
+        """
+        Section V: 收支匹配度分析
+        
+        包含:
+        - 收支对比表
+        - GAP分析
+        - 风险判定
+        """
+        total_income = profile.get('totalIncome', 0) or 0
+        total_expense = profile.get('totalExpense', 0) or 0
+        salary_total = profile.get('salaryTotal', 0) or 0
+        
+        gap = total_expense - salary_total
+        gap_ratio = (gap / salary_total * 100) if salary_total > 0 else 0
+        
+        # 风险判定
+        if gap_ratio > 300:
+            risk_level = "high"
+            risk_description = f"总支出是合法收入的{gap_ratio/100:.2f}倍,存在{gap:.0f}元无法解释的支出来源"
+        elif gap_ratio > 150:
+            risk_level = "medium"
+            risk_description = f"支出超过合法收入{gap_ratio:.0f}%,需核实资金来源"
+        else:
+            risk_level = "low"
+            risk_description = "收支基本匹配"
+        
+        return {
+            "total_income": total_income,
+            "total_expense": total_expense,
+            "salary_income": salary_total,
+            "gap": gap,
+            "gap_ratio": gap_ratio,
+            "risk_level": risk_level,
+            "risk_description": risk_description,
+        }
+    
+    def _build_person_section_6_abnormal_tx(self, name: str, profile: Dict) -> Dict:
+        """
+        Section VI: 异常交易分析
+        
+        包含:
+        - 大额现金交易
+        - 大额转账交易
+        - 可疑交易模式
+        """
+        # 大额现金 - 从顶层字段获取统计数据
+        cash_deposit_total = profile.get('cashIncome', 0) or 0
+        cash_deposit_count = profile.get('cashIncomeCount', 0) or 0
+        cash_withdrawal_total = profile.get('cashExpense', 0) or 0
+        cash_withdrawal_count = profile.get('cashExpenseCount', 0) or 0
+        
+        # 大额转账(从derived_data获取)
+        large_txs = self.derived_data.get('large_transactions', [])
+        person_large_txs = [tx for tx in large_txs if tx.get('person') == name]
+        
+        return {
+            "large_cash": {
+                "deposit_count": cash_deposit_count,
+                "deposit_total": cash_deposit_total,
+                "withdrawal_count": cash_withdrawal_count,
+                "withdrawal_total": cash_withdrawal_total,
+            },
+            "large_transfers": person_large_txs[:10],  # 取前10笔
+            "suspicious_patterns": [],  # 从suspicions获取
+        }
+    
+    def _build_person_section_7_related_party(self, name: str, profile: Dict) -> Dict:
+        """
+        Section VII: 关联方往来分析
+        
+        包含:
+        - 与调查单位往来
+        - 与供应商往来（双向往来关系）
+        - 敏感人员往来
+        """
+        # 从derived_data获取关联交易数据
+        loan_data = self.derived_data.get('loan', {})
+        loan_details = loan_data.get('details', [])
+        
+        # 过滤当前人员的双向往来
+        bidirectional_relations = []
+        for item in loan_details:
+            if item.get('person') == name and item.get('_type') == 'bidirectional':
+                bidirectional_relations.append({
+                    "counterparty": item.get('counterparty', ''),
+                    "income_total": item.get('income_total', 0),
+                    "expense_total": item.get('expense_total', 0),
+                    "income_count": int(item.get('income_count', 0)),
+                    "expense_count": int(item.get('expense_count', 0)),
+                    "loan_type": item.get('loan_type', ''),
+                    "risk_level": item.get('risk_level', ''),
+                    "date_range": f"{item.get('first_income_date', '')[:10]} 至 {item.get('last_expense_date', '')[:10]}" if item.get('first_income_date') else '',
+                })
+        
+        # 从suspicions中获取资金突变预警
+        time_series_alerts = self.suspicions.get('timeSeriesAlerts', [])
+        sensitive_contacts = []
+        for alert in time_series_alerts:
+            if alert.get('entity') == name and alert.get('riskLevel') in ['high', 'critical']:
+                sensitive_contacts.append({
+                    "alert_type": alert.get('alertType', ''),
+                    "date": alert.get('date', ''),
+                    "amount": alert.get('amount', 0),
+                    "description": alert.get('description', ''),
+                    "risk_level": alert.get('riskLevel', ''),
+                    "counterparty": alert.get('counterparty', '') or '不明',
+                })
+        
+        # 从derived_data获取investigation_unit_flows
+        investigation_flows = self.derived_data.get('investigation_unit_flows', {})
+        unit_flows = []
+        if name in investigation_flows:
+            person_flows = investigation_flows.get(name, {})
+            for unit_name, flow_data in person_flows.items():
+                if isinstance(flow_data, dict):
+                    unit_flows.append({
+                        "unit_name": unit_name,
+                        "total_in": flow_data.get('total_in', 0),
+                        "total_out": flow_data.get('total_out', 0),
+                        "transaction_count": flow_data.get('count', 0),
+                    })
+        
+        return {
+            "investigation_unit_flows": unit_flows,
+            "supplier_transactions": bidirectional_relations,  # 双向往来作为"供应商"类别
+            "sensitive_person_contacts": sensitive_contacts[:10],  # 限制前10条
+        }
+    
+    def _build_person_section_8_collision(self, name: str, profile: Dict) -> Dict:
+        """
+        Section VIII: 时空碰撞分析
+        
+        包含:
+        - 资产购置时间碰撞
+        - 职务晋升时间碰撞
+        - 异常事件时间线
+        """
+        # 这部分需要外部数据支持
+        return {
+            "asset_purchase_collisions": [],
+            "promotion_collisions": [],
+            "timeline_events": [],
+        }
+    
+    def _build_inter_company_analysis(self, config: PrimaryTargetsConfig) -> Dict:
+        """
+        构建公司间交叉分析专章
+        
+        包含:
+        1. 公司间资金流向矩阵
+        2. 资金闭环识别
+        3. 共同上下游分析
+        4. 关联交易时间线碰撞
+        """
+        companies = config.include_companies or self._companies
+        
+        if not companies:
+            return {
+                "enabled": False,
+                "message": "无公司数据",
+            }
+        
+        # 1. 公司间资金流向矩阵
+        flow_matrix = self._build_company_flow_matrix(companies)
+        
+        # 2. 资金闭环识别
+        fund_cycles = self._detect_fund_cycles(companies)
+        
+        # 3. 共同上下游分析
+        common_counterparties = self._analyze_common_counterparties(companies)
+        
+        # 4. 关联交易时间线
+        timeline_collisions = self._build_company_timeline_collisions(companies)
+        
+        return {
+            "enabled": True,
+            "companies": companies,
+            "flow_matrix": flow_matrix,
+            "fund_cycles": fund_cycles,
+            "common_counterparties": common_counterparties,
+            "timeline_collisions": timeline_collisions,
+        }
+    
+    def _build_company_flow_matrix(self, companies: List[str]) -> List[Dict]:
+        """构建公司间资金流向矩阵"""
+        matrix = []
+        
+        for company_a in companies:
+            for company_b in companies:
+                if company_a != company_b:
+                    # 从graph_data或profiles查找A→B的转账
+                    flow_amount = 0  # TODO: 实际查询
+                    flow_count = 0
+                    
+                    matrix.append({
+                        "from_company": company_a,
+                        "to_company": company_b,
+                        "amount": flow_amount,
+                        "count": flow_count,
+                        "description": "无往来" if flow_count == 0 else f"{flow_count}笔,合计{flow_amount:.0f}元",
+                    })
+        
+        return matrix
+    
+    def _detect_fund_cycles(self, companies: List[str]) -> Dict:
+        """检测资金闭环"""
+        # TODO: 使用图算法检测环
+        return {
+            "detected": False,
+            "cycles": [],
+            "description": "未发现涉案公司间的资金闭环",
+        }
+    
+    def _analyze_common_counterparties(self, companies: List[str]) -> List[Dict]:
+        """分析共同上下游"""
+        # TODO: 查找多个公司的共同交易对手
+        return []
+    
+    def _build_company_timeline_collisions(self, companies: List[str]) -> List[Dict]:
+        """构建关联交易时间线碰撞"""
+        # TODO: 分析公司交易与关键事件的时间碰撞
+        return []
+    
+    def _build_comprehensive_conclusion_v3(self,
+                                          analysis_units: List[Dict],
+                                          inter_company_analysis: Dict) -> Dict:
+        """
+        构建综合研判(章节Z)
+        
+        包含:
+        1. 个人问题汇总表
+        2. 公司问题汇总表
+        3. 利益输送网络图
+        4. 综合研判意见
+        5. 风险评级
+        6. 下一步工作建议
+        """
+        # 1. 汇总个人问题
+        personal_issues = self._collect_personal_issues_v3(analysis_units)
+        
+        # 2. 汇总公司问题
+        company_issues = self._collect_company_issues_v3(inter_company_analysis)
+        
+        # 3. 生成综合研判意见
+        summary_text = self._generate_summary_text_v3(personal_issues, company_issues)
+        
+        # 4. 风险评级
+        risk_assessment = self._calculate_risk_score_v3(personal_issues, company_issues)
+        
+        # 5. 下一步工作建议
+        next_steps = self._generate_next_steps_v3(personal_issues, company_issues)
+        
+        return {
+            "personal_issues": personal_issues,
+            "company_issues": company_issues,
+            "summary_text": summary_text,
+            "risk_assessment": risk_assessment,
+            "next_steps": next_steps,
+        }
+    
+    def _collect_personal_issues_v3(self, analysis_units: List[Dict]) -> List[Dict]:
+        """收集个人问题"""
+        issues = []
+        
+        for unit in analysis_units:
+            anchor = unit.get('anchor', '')
+            sections = unit.get('sections', {})
+            
+            # 从Section V提取收支不抵问题
+            income_gap = sections.get('section_5_income_gap', {})
+            if income_gap.get('risk_level') == 'high':
+                issues.append({
+                    "category": "收支不抵",
+                    "severity": "high",
+                    "person": anchor,
+                    "description": income_gap.get('risk_description', ''),
+                })
+            
+            # 从Section VI提取异常交易问题
+            abnormal_tx = sections.get('section_6_abnormal_tx', {})
+            large_cash = abnormal_tx.get('large_cash', {})
+            if large_cash.get('deposit_total', 0) > 50000:
+                issues.append({
+                    "category": "资金来源不明",
+                    "severity": "medium",
+                    "person": anchor,
+                    "description": f"大额现金存款{large_cash.get('deposit_total', 0):.0f}元,来源不明",
+                })
+        
+        return issues
+    
+    def _collect_company_issues_v3(self, inter_company_analysis: Dict) -> List[Dict]:
+        """
+        收集公司问题
+        
+        判断逻辑：
+        1. 大额现金交易
+        2. 收支差额异常
+        3. 与核查对象的高频往来
+        4. 公司间资金闭环
+        """
+        issues = []
+        
+        companies = inter_company_analysis.get('companies', [])
+        
+        for company in companies:
+            profile = self.profiles.get(company, {})
+            if not profile:
+                continue
+            
+            total_income = profile.get('totalIncome', 0)
+            total_expense = profile.get('totalExpense', 0)
+            cash_income = profile.get('cashIncome', 0)
+            cash_expense = profile.get('cashExpense', 0)
+            cash_total = cash_income + cash_expense
+            
+            # 问题1: 大额现金交易（公司现金交易>100万）
+            if cash_total > 1000000:
+                issues.append({
+                    "category": "大额现金交易",
+                    "severity": "high",
+                    "company": company,
+                    "description": f"存在{cash_total/10000:.0f}万元现金交易，其中收入{cash_income/10000:.0f}万，支出{cash_expense/10000:.0f}万"
+                })
+            
+            # 问题2: 收支异常（收入大于支出的7%以上，且差额超过500万）
+            if total_income > 0 and total_expense > 0:
+                gap = total_income - total_expense
+                gap_ratio = gap / total_income
+                if gap_ratio > 0.07 and gap > 5000000:  # 差额超过7%且超过500万
+                    issues.append({
+                        "category": "收支差额异常",
+                        "severity": "medium",
+                        "company": company,
+                        "description": f"收入{total_income/100000000:.2f}亿，支出{total_expense/100000000:.2f}亿，差额{gap/10000:.0f}万（{gap_ratio*100:.1f}%）"
+                    })
+            
+            # 问题3: 与员工的高频大额往来（从工资数据推断）
+            salary_total = profile.get('salaryTotal', 0)
+            salary_ratio = profile.get('salaryRatio', 0)
+            if salary_ratio > 0.15 and salary_total > 1000000:  # 工资占比超过15%且超过100万
+                issues.append({
+                    "category": "人力成本偏高",
+                    "severity": "low",
+                    "company": company,
+                    "description": f"工资类支出{salary_total/10000:.0f}万，占收入{salary_ratio*100:.1f}%"
+                })
+        
+        # 问题4: 公司间资金闭环
+        fund_cycles = inter_company_analysis.get('fund_cycles', {})
+        if fund_cycles.get('detected'):
+            for cycle in fund_cycles.get('cycles', []):
+                issues.append({
+                    "category": "资金闭环",
+                    "severity": "critical",
+                    "company": "多公司",
+                    "description": cycle.get('description', '发现公司间资金闭环')
+                })
+        
+        return issues
+    
+    def _generate_summary_text_v3(self, personal_issues: List[Dict], company_issues: List[Dict]) -> str:
+        """
+        生成综合研判意见文字
+        
+        输出结构：
+        (一) 个人资金异常情况
+        (二) 涉案公司问题
+        (三) 综合评价
+        """
+        if not personal_issues and not company_issues:
+            return "经初步核查,未发现明显异常。建议持续关注。"
+        
+        parts = []
+        
+        # (一) 个人资金异常
+        if personal_issues:
+            parts.append("(一) 个人资金异常情况")
+            high_issues = [i for i in personal_issues if i.get('severity') == 'high']
+            medium_issues = [i for i in personal_issues if i.get('severity') == 'medium']
+            
+            for issue in high_issues:
+                parts.append(f"    {issue.get('person','')}存在{issue.get('category','')}问题: {issue.get('description','')}")
+            
+            if medium_issues:
+                parts.append(f"    另有{len(medium_issues)}项中度风险问题需关注。")
+        
+        # (二) 涉案公司问题
+        if company_issues:
+            parts.append("(二) 涉案公司问题")
+            for issue in company_issues:
+                severity_text = {'high': '重大', 'medium': '中度', 'low': '一般', 'critical': '严重'}.get(issue.get('severity'), '')
+                parts.append(f"    {issue.get('company','')}: {severity_text}{issue.get('category','')}。{issue.get('description','')}")
+        
+        # (三) 综合评价
+        parts.append("(三) 综合评价")
+        
+        total_issues = len(personal_issues) + len(company_issues)
+        high_count = len([i for i in personal_issues if i.get('severity') == 'high'])
+        
+        if high_count >= 2:
+            parts.append(f"    综上所述,本次核查共发现{total_issues}项异常问题,其中{high_count}项为高风险问题。相关人员资金往来存在明显异常,建议采取进一步调查措施。")
+        else:
+            parts.append(f"    综上所述,本次核查发现{total_issues}项异常问题,建议对重点疑点进一步核实。")
+        
+        return "\n".join(parts)
+    
+    def _calculate_risk_score_v3(self, personal_issues: List[Dict], company_issues: List[Dict]) -> Dict:
+        """计算风险评分"""
+        # 简化的评分逻辑
+        score = 0
+        
+        for issue in personal_issues:
+            if issue.get('severity') == 'high':
+                score += 30
+            elif issue.get('severity') == 'medium':
+                score += 15
+            else:
+                score += 5
+        
+        for issue in company_issues:
+            if issue.get('severity') == 'high':
+                score += 25
+            elif issue.get('severity') == 'medium':
+                score += 12
+            else:
+                score += 5
+        
+        score = min(score, 100)  # 最高100分
+        
+        if score >= 80:
+            risk_level = "high"
+        elif score >= 50:
+            risk_level = "medium"
+        else:
+            risk_level = "low"
+        
+        return {
+            "total_score": score,
+            "risk_level": risk_level,
+            "dimensions": {
+                "income_gap": min(score * 0.3, 30),
+                "benefit_transfer": min(score * 0.3, 30),
+                "asset_concealment": min(score * 0.2, 20),
+                "money_laundering": min(score * 0.2, 20),
+            }
+        }
+    
+    def _generate_next_steps_v3(self, personal_issues: List[Dict], company_issues: List[Dict]) -> Dict:
+        """生成下一步工作建议"""
+        return {
+            "evidence_collection": [
+                "调取银行凭证原件进行核对",
+                "调取房产、车辆登记信息",
+            ],
+            "interviews": [
+                "约谈核查对象核实资金来源",
+            ],
+            "field_investigation": [
+                "实地核查相关公司办公场所",
+            ],
+            "expansion": [
+                "调查是否还有其他隐匿资产",
+            ],
+        }
+    
+    
+    def render_html_report_v3(self, report: dict, template_dir: str = None) -> str:
+        """
+        将分析报告数据字典渲染为 HTML 格式的最终报告。
+
+        本函数使用 Jinja2 模板引擎，结合预定义的过滤器（金额格式化、风险等级样式），
+        将结构化的 JSON 报告数据转换为可视化友好的 HTML 页面。支持自定义模板目录。
+
+        Args:
+            report (dict): 由 investigation_report_builder.build_report_v3 生成的完整报告字典。
+                           必须包含 'meta', 'preface', 'analysis_units', 'conclusion' 等顶层键。
+            template_dir (str, optional): Jinja2 模板文件的所在目录路径。
+                                          如果未指定 (None)，默认使用项目根目录下的 'templates/report_v3'。
+
+        Returns:
+            str: 渲染完成的完整 HTML 源代码字符串。
+
+        Raises:
+            jinja2.TemplateNotFound: 指定的模板文件不存在时抛出。
+            jinja2.TemplateError: 模板语法错误或渲染过程中出现其他模板相关错误时抛出。
+        """
+        import jinja2
+        
+        if template_dir is None:
+            # 获取项目根目录
+            project_root = os.path.dirname(os.path.abspath(__file__))
+            template_dir = os.path.join(project_root, 'templates', 'report_v3')
+        
+        # 配置Jinja2环境
+        env = jinja2.Environment(
+            loader=jinja2.FileSystemLoader(template_dir),
+            autoescape=jinja2.select_autoescape(['html', 'xml'])
+        )
+        
+        # 添加自定义过滤器
+        def format_money(value):
+            """格式化金额显示"""
+            if value is None:
+                return "0"
+            try:
+                val = float(value)
+                if val >= 10000:
+                    return f"{val/10000:.2f}万"
+                else:
+                    return f"{val:.2f}"
+            except (ValueError, TypeError):
+                return str(value)
+        
+        def risk_class(level):
+            """根据风险等级返回CSS类名"""
+            class_map = {
+                'high': 'risk-high',
+                'medium': 'risk-medium',
+                'low': 'risk-low',
+                'critical': 'risk-high',
+            }
+            return class_map.get(level, 'risk-low')
+        
+        env.filters['format_money'] = format_money
+        env.filters['risk_class'] = risk_class
+        
+        # 加载主模板
+        template = env.get_template('report.html')
+        
+        # 渲染HTML
+        html = template.render(report=report)
+        
+        return html
+    
+    def save_html_report_v3(self, report: dict, output_path: str, template_dir: str = None):
+        """
+        将报告渲染为HTML并保存到文件
+        
+        Args:
+            report: build_report_v3() 生成的报告字典
+            output_path: 输出文件路径
+            template_dir: 模板目录路径
+        """
+        html = self.render_html_report_v3(report, template_dir)
+        
+        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(html)
+        
+        logger.info(f"[初查报告] HTML报告已保存: {output_path}")
+        return output_path
+    
+    # ==================== Phase A: 专业报告格式增强 (2026-01-24) ====================
+    
+    def build_v4_person_section(self, name: str, relation: str = "本人") -> Dict:
+        """
+        构建符合专业模版的个人章节数据
+        
+        模版结构：
+        (一) XX家庭资产收入情况
+            - 个人背景描述
+            - 1.房产情况
+            - 2.工资奖金收入（年度分拆描述）
+            - 3.银行存款情况
+            - 4.理财情况
+            - 5.车辆情况
+        (二) 数据分析
+            - 1.购房数据分析
+            - 2.家庭存款与家庭收入匹配分析
+            - 3.银行流水交易对象分析
+            - 4.大额存取现分析
+            - 5.大额转账记录分析
+            - 6.反洗钱数据分析
+            - 7.企业登记及纳税分析
+            - 8.同行人分析
+        """
+        profile = self.profiles.get(name, {})
+        
+        section = {
+            "name": name,
+            "relation": relation,
+            # (一) 资产收入情况
+            "asset_income_section": {
+                "personal_background": self._build_personal_background(name, profile),
+                "property_info": self._build_property_info_v4(name, profile),
+                "salary_income": self._build_salary_income_v4(name, profile),
+                "bank_deposits": self._build_bank_deposits_v4(name, profile),
+                "wealth_info": self._build_wealth_info_v4(name, profile),
+                "vehicle_info": self._build_vehicle_info_v4(name, profile),
+            },
+            # (二) 数据分析
+            "data_analysis_section": {
+                "property_analysis": self._build_property_analysis_v4(name, profile),
+                "income_match_analysis": self._build_income_match_analysis_v4(name, profile),
+                "counterparty_analysis": self._build_counterparty_analysis_v4(name, profile),
+                "large_cash_analysis": self._build_large_cash_analysis_v4(name, profile),
+                "large_transfer_analysis": self._build_large_transfer_analysis_v4(name, profile),
+                "aml_analysis": self._build_aml_analysis_v4(name, profile),
+                "tax_analysis": self._build_tax_analysis_v4(name, profile),
+                "travel_analysis": self._build_travel_analysis_v4(name, profile),
+            }
+        }
+        
+        return section
+    
+    def _build_personal_background(self, name: str, profile: Dict) -> Dict:
+        """
+        构建个人背景描述
+        
+        【铁律-数据优先】从 family_relations 提取真实户籍信息
+        """
+        # 优先从 family_tree 提取户籍信息（包含完整户籍字段）
+        family_tree = self.derived_data.get('family_tree', {})
+        huji_info = {}
+        
+        # 在 family_tree 中查找该人员的户籍信息
+        for person_name, members in family_tree.items():
+            if isinstance(members, list):
+                for m in members:
+                    if isinstance(m, dict) and m.get('姓名') == name:
+                        huji_info = m
+                        break
+            if huji_info:
+                break
+        
+        # 格式化出生日期
+        birth_date_raw = huji_info.get('出生日期', '')
+        if birth_date_raw:
+            # 处理 YYYYMMDD 格式
+            if isinstance(birth_date_raw, (int, float)):
+                birth_date_raw = str(int(birth_date_raw))
+            if len(str(birth_date_raw)) == 8:
+                birth_date = f"{str(birth_date_raw)[:4]}年{str(birth_date_raw)[4:6]}月{str(birth_date_raw)[6:]}日"
+            else:
+                birth_date = str(birth_date_raw)
+        else:
+            birth_date = '【待调取】'
+        
+        # 获取籍贯/出生地
+        birth_place = huji_info.get('籍贯', '') or huji_info.get('出生地', '') or '【待调取】'
+        
+        # 获取从业单位
+        employer = huji_info.get('从业单位', '') or '【待调取】'
+        
+        # 获取性别
+        gender = huji_info.get('性别', '') or '【待调取】'
+        
+        return {
+            "name": name,
+            "gender": gender,
+            "birth_date": birth_date,
+            "birth_place": birth_place,
+            "entry_date": '【待调取】',  # 入职日期需要人事档案
+            "current_position": '【待调取】',  # 职务需要人事档案
+            "employer": employer,
+            "family_members_desc": self._build_family_members_desc(name),
+            "has_complete_info": bool(huji_info.get('出生日期') and huji_info.get('从业单位')),
+        }
+    
+    def _build_family_members_desc(self, name: str) -> str:
+        """生成家庭成员描述文本"""
+        family_summary = self.derived_data.get('family_summary', {})
+        family_relations = family_summary.get('family_relations', {})
+        extended_relatives = family_summary.get('extended_relatives', [])
+        
+        # 获取该人员的关联人员
+        members_desc = []
+        for rel in extended_relatives:
+            if rel.get('person_a') == name:
+                member = rel.get('person_b', '')
+                relation = rel.get('relation', '家庭成员')
+                if member:
+                    members_desc.append(f"{relation}：{member}")
+        
+        if not members_desc:
+            return "【待调取】家庭成员信息"
+        
+        return "；".join(members_desc)
+    
+    def _build_salary_income_v4(self, name: str, profile: Dict) -> Dict:
+        """
+        构建工资奖金收入（含年度分拆描述）
+        
+        【M-02修复】改进时间范围提取逻辑
+        """
+        yearly_salary = profile.get('yearlySalary', {})
+        yearly_data = yearly_salary.get('yearly', {}) or yearly_salary.get('yearly_stats', {})
+        summary = yearly_salary.get('summary', {})
+        
+        # 生成年度分拆描述文本（如：其中2022年31.98万元，2023年34.4万元...）
+        yearly_breakdown = []
+        years_with_data = []
+        for year in sorted(yearly_data.keys()):
+            data = yearly_data[year]
+            total = data.get('total', 0)
+            if total > 0:
+                yearly_breakdown.append(f"{year}年{total/10000:.2f}万元")
+                years_with_data.append(str(year))
+        
+        yearly_description = "；".join(yearly_breakdown) if yearly_breakdown else "无工资记录"
+        
+        # 计算总额
+        total_salary = summary.get('total', 0) or profile.get('salaryTotal', 0)
+        years_count = len(years_with_data)
+        avg_yearly = (total_salary / years_count) if years_count > 0 else 0
+        avg_monthly = summary.get('avg_monthly', 0) or (total_salary / (years_count * 12) if years_count > 0 else 0)
+        
+        # 【M-02修复】查询时间范围（优先使用metadata，回退到年度数据推断）
+        date_range = self.metadata.get('date_range', {})
+        start_date = date_range.get('start', '')
+        end_date = date_range.get('end', '')
+        
+        # 从年度数据推断起止年份
+        if years_with_data:
+            start_year = min(years_with_data)
+            end_year = max(years_with_data)
+        else:
+            start_year = '【起始】'
+            end_year = '【结束】'
+        
+        # 优先使用 date_range 中的年份，回退到年度数据推断的年份
+        if start_date and len(start_date) >= 4:
+            period_start = start_date[:4]  # 提取年份
+        else:
+            period_start = start_year
+        
+        if end_date and len(end_date) >= 4:
+            period_end = end_date[:4]  # 提取年份
+        else:
+            period_end = end_year
+        
+        period_desc = f"{period_start}年至{period_end}年"
+        
+        return {
+            "period": period_desc,
+            "start_year": period_start,
+            "end_year": period_end,
+            "total": total_salary,
+            "total_wan": round(total_salary / 10000, 2),  # 【M-03修复】
+            "yearly_breakdown": yearly_breakdown,
+            "yearly_description": yearly_description,
+            "years_count": years_count,
+            "avg_yearly": avg_yearly,
+            "avg_yearly_wan": round(avg_yearly / 10000, 2),  # 【M-03修复】
+            "avg_monthly": avg_monthly,
+            "avg_monthly_wan": round(avg_monthly / 10000, 2),  # 【M-03修复】
+            "employer_name": profile.get('id_info', {}).get('employer', '【待调取】'),
+            # 专业描述文本
+            "narrative": self._generate_salary_narrative(name, total_salary, yearly_breakdown, avg_yearly, avg_monthly, period_start, period_end),
+        }
+    
+    def _generate_salary_narrative(self, name: str, total: float, yearly_breakdown: list,
+                                    avg_yearly: float, avg_monthly: float,
+                                    period_start: str = None, period_end: str = None) -> str:
+        """
+        生成工资收入叙事文本
+        
+        【M-02修复】使用传入的时间范围参数
+        """
+        # 使用传入的参数，如果没有则从metadata获取
+        if not period_start or not period_end:
+            period = self.metadata.get('date_range', {})
+            period_start = period_start or (period.get('start', '')[:4] if period.get('start') else '起始')
+            period_end = period_end or (period.get('end', '')[:4] if period.get('end') else '结束')
+        
+        if not yearly_breakdown:
+            return f"{name}{period_start}年至{period_end}年未查见工资收入记录。"
+        
+        breakdown_str = "，".join(yearly_breakdown)
+        return (f"{name}{period_start}年至{period_end}年共取得工资收入{total/10000:.2f}万元，"
+                f"其中{breakdown_str}；"
+                f"年平均收入{avg_yearly/10000:.2f}万元，"
+                f"月平均收入{avg_monthly/10000:.2f}万元。")
+    
+    def _build_bank_deposits_v4(self, name: str, profile: Dict) -> Dict:
+        """
+        构建银行存款情况（表格+汇总）
+        
+        【账户过滤规则】
+        仅统计真实物理银行卡（借记卡、信用卡、储蓄卡），排除理财子账户。
+        理财产品应在"理财情况"章节单独展示。
+        """
+        # 使用现有的银行账户构建方法
+        bank_accounts = self._build_bank_accounts(name, profile)
+        
+        # 【重要】过滤理财子账户，仅保留物理卡
+        physical_accounts = self._filter_physical_bank_accounts(bank_accounts)
+        
+        # 计算总余额（仅物理卡）
+        total_balance = sum(acc.balance for acc in physical_accounts)
+        bank_count = len(physical_accounts)
+        
+        # 转换为字典格式（供模版使用）
+        accounts_data = []
+        for i, acc in enumerate(physical_accounts, 1):
+            accounts_data.append({
+                "序号": i,
+                "反馈单位": acc.bank_name,
+                "卡号": acc.account_number,
+                "账户类别": acc.account_type or acc.card_type,
+                "账户状态": acc.status,
+                "账户余额": acc.balance,
+            })
+        
+        return {
+            "total_balance": total_balance,
+            "total_balance_wan": total_balance / 10000,
+            "bank_count": bank_count,
+            "accounts": accounts_data,
+            "narrative": f"{name}持有银行卡余额{total_balance:.2f}元，共涉及{bank_count}个银行账户。",
+        }
+    
+    def _filter_physical_bank_accounts(self, accounts: List) -> List:
+        """
+        过滤出真实物理银行卡，排除理财子账户
+        
+        【铁律-银行存款统计原则】
+        银行存款情况应只统计物理银行卡（借记卡、信用卡、储蓄卡），
+        不应包含各种理财的子账户。理财产品应在"理财情况"章节单独展示。
+        
+        保留：借记卡、信用卡、储蓄卡、活期账户、定期账户、存折
+        排除：理财账户、基金账户、证券账户、期货账户、信托账户、资管账户、托管账户
+        """
+        # 明确保留的物理卡类型关键词
+        PHYSICAL_CARD_TYPES = ['借记卡', '信用卡', '储蓄卡', '活期', '定期', '存折', '一卡通', 
+                                '银行卡', '储蓄账户', '结算账户', '个人账户']
+        
+        # 明确排除的理财/非物理卡类型
+        EXCLUDE_KEYWORDS = ['理财', '基金', '证券', '期货', '信托', '资管', '托管', '保险', 
+                           '贵金属', '外汇保证金', '结构性存款', '大额存单', '子账户',
+                           '虚拟', '电子账户', '三方存管', '保证金账户', '资金监管']
+        
+        result = []
+        for acc in accounts:
+            acc_type = getattr(acc, 'account_type', '') or getattr(acc, 'card_type', '') or ''
+            acc_type = str(acc_type)
+            acc_name = getattr(acc, 'account_name', '') or ''
+            acc_name = str(acc_name)
+            
+            # 检查内容：账户类型 + 账户名称
+            check_content = acc_type + acc_name
+            
+            # 1. 如果包含排除关键词，跳过（优先检查排除）
+            if any(kw in check_content for kw in EXCLUDE_KEYWORDS):
+                continue
+            
+            # 2. 如果明确是物理卡类型，保留
+            if any(t in check_content for t in PHYSICAL_CARD_TYPES):
+                result.append(acc)
+                continue
+            
+            # 3. 根据卡号特征判断（银行卡号通常是16-19位数字）
+            acc_num = getattr(acc, 'account_number', '') or ''
+            acc_num_clean = str(acc_num).replace(' ', '').replace('-', '')
+            if acc_num_clean and len(acc_num_clean) >= 16 and len(acc_num_clean) <= 19 and acc_num_clean.isdigit():
+                result.append(acc)
+                continue
+            
+            # 4. 默认不保留（严格模式：宁缺毋滥）
+            # 如果无法确定类型，不计入银行存款统计
+        
+        return result
+    
+    def _build_property_info_v4(self, name: str, profile: Dict) -> Dict:
+        """构建房产情况"""
+        properties = profile.get('properties', [])
+        
+        if not properties:
+            return {
+                "has_data": False,
+                "count": 0,
+                "properties": [],
+                "narrative": f"本人名下未查见房产信息。",
+            }
+        
+        # 格式化房产数据
+        property_list = []
+        for i, prop in enumerate(properties, 1):
+            property_list.append({
+                "序号": i,
+                "房地坐落": prop.get('location', '') or prop.get('address', '') or prop.get('房地坐落', ''),
+                "建筑面积": prop.get('area', 0) or prop.get('建筑面积', 0),
+                "权属状态": prop.get('status', '') or prop.get('权属状态', '现势'),
+                "登记时间": prop.get('register_date', '') or prop.get('registration_date', '') or prop.get('登记时间', ''),
+                "交易金额": prop.get('value', 0) or prop.get('交易金额', 0),
+                "共有情况": prop.get('ownership_type', '') or prop.get('co_ownership', '') or prop.get('共有情况', '单独所有'),
+                "共有人名称": prop.get('co_owners', '') or prop.get('co_owner', '') or prop.get('共有人名称', ''),
+            })
+        
+        return {
+            "has_data": True,
+            "count": len(properties),
+            "properties": property_list,
+            "narrative": f"家庭成员名下房产{len(properties)}处。",
+        }
+    
+    def _build_wealth_info_v4(self, name: str, profile: Dict) -> Dict:
+        """
+        构建理财情况（重构版）
+        
+        【铁律-理财数据统一来源】
+        理财数据全部从 wealth_product_extractor 获取（最新时点、已去重）
+        不再使用 profiles.wealthTotal（来源不明，与产品列表不一致）
+        total 直接从产品列表计算，确保数据一致性
+        """
+        # 1. 从理财提取器获取产品列表（已去重的最新时点 latest_products）
+        wealth_products = self._get_external_wealth_data(name)
+        
+        # 2. 格式化产品列表供模板使用
+        products_list = []
+        if isinstance(wealth_products, list):
+            for i, product in enumerate(wealth_products, 1):
+                # 获取金额（支持多种字段名）
+                amount = (product.get('amount', 0) or 
+                          product.get('market_value', 0) or 
+                          product.get('资产总数额', 0) or 0)
+                
+                products_list.append({
+                    "序号": i,
+                    "name": product.get('product_name', '') or product.get('name', '') or product.get('金融理财名称', ''),
+                    "产品名称": product.get('product_name', '') or product.get('name', '') or product.get('金融理财名称', ''),
+                    "type": product.get('product_type', '') or product.get('type', '') or product.get('金融理财类型', ''),
+                    "产品类型": product.get('product_type', '') or product.get('type', '') or product.get('金融理财类型', ''),
+                    "amount": amount,
+                    "持有金额": amount,
+                    "bank": product.get('bank', '') or product.get('反馈单位', ''),
+                    "反馈单位": product.get('bank', '') or product.get('反馈单位', ''),
+                })
+        
+        # 3. 从产品列表计算总额（确保 total 与 products 一致）
+        wealth_total = sum(p.get('amount', 0) for p in products_list)
+        
+        # 4. 构建返回数据
+        return {
+            "has_data": len(products_list) > 0,
+            "total": wealth_total,
+            "total_wan": round(wealth_total / 10000, 2) if wealth_total else 0,
+            "products": products_list,
+            "product_count": len(products_list),
+            "narrative": f"查见理财产品{len(products_list)}个，合计{wealth_total/10000:.2f}万元。" if products_list else "未查见名下理财产品情况。",
+        }
+    
+    def _get_external_wealth_data(self, name: str) -> List[Dict]:
+        """
+        【铁律-数据回退】从外部提取器获取理财产品数据
+        
+        数据源：wealth_product_extractor 解析的理财Excel
+        关联方式：通过 derived_data.family_tree 获取姓名→身份证映射
+        """
+        # 初始化缓存
+        if not hasattr(self, '_external_wealth_cache'):
+            self._external_wealth_cache = None
+        if not hasattr(self, '_name_to_id_map'):
+            self._name_to_id_map = None
+        
+        # 构建姓名→身份证映射（从family_tree获取）
+        if self._name_to_id_map is None:
+            self._name_to_id_map = {}
+            family_tree = self.derived_data.get('family_tree', {})
+            for anchor, members in family_tree.items():
+                if isinstance(members, list):
+                    for m in members:
+                        if isinstance(m, dict):
+                            member_name = m.get('姓名', '')
+                            member_id = m.get('公民身份号码', '') or m.get('身份证号', '')
+                            # 【关键修复】将身份证号转换为字符串（可能被Pandas解析为int）
+                            if member_id:
+                                member_id = str(member_id)
+                            if member_name and member_id:
+                                self._name_to_id_map[member_name] = member_id
+            logger.info(f"[理财关联] 建立姓名→身份证映射: {len(self._name_to_id_map)}人")
+        
+        # 加载理财产品数据
+        if self._external_wealth_cache is None:
+            try:
+                import wealth_product_extractor
+                self._external_wealth_cache = wealth_product_extractor.extract_wealth_product_data('./data')
+                logger.info(f"[外部数据] 理财产品提取器加载完成: {len(self._external_wealth_cache)} 个主体")
+            except Exception as e:
+                logger.warning(f"[外部数据] 理财产品提取器加载失败: {e}")
+                self._external_wealth_cache = {}
+        
+        # 使用姓名→身份证映射查找理财数据
+        person_id = self._name_to_id_map.get(name)
+        if person_id and person_id in self._external_wealth_cache:
+            data = self._external_wealth_cache[person_id]
+            # 返回最新时点的产品列表（latest_products用于资产统计）
+            products = data.get('latest_products', []) or data.get('products', [])
+            if products:
+                logger.debug(f"[理财关联] {name}({person_id[:6]}...): 找到{len(products)}个产品")
+            return products
+        
+        return []
+    
+    def _build_vehicle_info_v4(self, name: str, profile: Dict) -> Dict:
+        """构建车辆情况（支持缓存回退到外部提取器）"""
+        vehicles = profile.get('vehicles', [])
+        
+        # 【铁律-数据回退】缓存为空时尝试从外部提取器获取
+        if not vehicles:
+            vehicles = self._get_external_vehicle_data(name)
+        
+        if not vehicles:
+            return {
+                "has_data": False,
+                "count": 0,
+                "vehicles": [],
+                "narrative": f"未查见名下机动车。",
+            }
+        
+        vehicle_list = []
+        for v in vehicles:
+            # 【C-04/M-04修复】支持多种字段名格式
+            color = v.get('color', '') or v.get('颜色', '') or ''
+            brand = v.get('brand', '') or v.get('品牌', '') or v.get('车辆品牌', '') or ''
+            plate = v.get('plate_number', '') or v.get('车牌号', '') or v.get('号牌号码', '') or ''
+            # 购入日期支持多种字段名
+            reg_date = (
+                v.get('registration_date', '') or 
+                v.get('登记时间', '') or 
+                v.get('初次登记日期', '') or 
+                v.get('purchase_date', '') or
+                v.get('购入日期', '') or ''
+            )
+            vehicle_type = v.get('vehicle_type', '') or v.get('车辆类型', '') or ''
+            
+            desc = f"{color} {brand}".strip() or '未知品牌'
+            
+            vehicle_list.append({
+                "description": desc,
+                "brand": brand,
+                "颜色": color,
+                "color": color,
+                "plate_number": plate,
+                "车牌号": plate,
+                "registration_date": reg_date,
+                "登记时间": reg_date,
+                "vehicle_type": vehicle_type,
+            })
+        
+        # 生成描述（确保购入日期正确显示）
+        descs = []
+        for v in vehicle_list:
+            if v['plate_number']:
+                date_str = v['registration_date']
+                if date_str:
+                    descs.append(f"一辆{v['description']}，车牌号{v['plate_number']}，于{date_str}登记购入")
+                else:
+                    descs.append(f"一辆{v['description']}，车牌号{v['plate_number']}")
+        
+        narrative = f"{name}本人名下有" + "；".join(descs) + "。" if descs else "未查见名下机动车。"
+        
+        return {
+            "has_data": True,
+            "count": len(vehicles),
+            "vehicles": vehicle_list,
+            "narrative": narrative,
+        }
+    
+    def _get_external_vehicle_data(self, name: str) -> List[Dict]:
+        """
+        【铁律-数据回退】从外部提取器获取车辆数据
+        
+        使用惰性加载缓存，避免重复调用提取器
+        """
+        # 初始化外部数据缓存
+        if not hasattr(self, '_external_vehicle_cache'):
+            self._external_vehicle_cache = None
+            self._external_name_to_id_map = {}
+        
+        # 首次调用时加载所有车辆数据
+        if self._external_vehicle_cache is None:
+            try:
+                import vehicle_extractor
+                # 使用默认数据目录
+                data_dir = './data'
+                self._external_vehicle_cache = vehicle_extractor.extract_vehicle_data(data_dir)
+                
+                # 从 source_file 构建姓名到身份证的映射
+                for person_id, vehicles in self._external_vehicle_cache.items():
+                    for v in vehicles[:1]:  # 只需检查第一条
+                        src_file = v.get('source_file', '')
+                        if src_file:
+                            parts = src_file.split('_')
+                            if len(parts) >= 2:
+                                extracted_name = parts[0]
+                                self._external_name_to_id_map[extracted_name] = person_id
+                                break
+                                
+                logger.info(f"[外部数据] 车辆提取器加载完成: {len(self._external_vehicle_cache)} 个主体")
+            except Exception as e:
+                logger.warning(f"[外部数据] 车辆提取器加载失败: {e}")
+                self._external_vehicle_cache = {}
+        
+        # 根据姓名查找对应的身份证号
+        person_id = self._external_name_to_id_map.get(name)
+        if person_id:
+            return self._external_vehicle_cache.get(person_id, [])
+        
+        return []
+    
+    def _get_external_property_data(self, name: str) -> List[Dict]:
+        """
+        【铁律-数据回退】从外部提取器获取不动产数据
+        """
+        if not hasattr(self, '_external_property_cache'):
+            self._external_property_cache = None
+        
+        if self._external_property_cache is None:
+            try:
+                import asset_extractor
+                self._external_property_cache = asset_extractor.extract_precise_property_info('./data')
+                logger.info(f"[外部数据] 不动产提取器加载完成: {len(self._external_property_cache)} 个主体")
+            except Exception as e:
+                logger.warning(f"[外部数据] 不动产提取器加载失败: {e}")
+                self._external_property_cache = {}
+        
+        # 使用车辆数据建立的姓名映射
+        person_id = getattr(self, '_external_name_to_id_map', {}).get(name)
+        if person_id:
+            return self._external_property_cache.get(person_id, [])
+        return []
+    
+    def _get_external_travel_data(self, name: str) -> Dict:
+        """
+        【铁律-数据回退】从外部提取器获取出行数据（铁路+航班）
+        """
+        if not hasattr(self, '_external_travel_cache'):
+            self._external_travel_cache = {'railway': {}, 'flight': {}}
+            try:
+                import railway_extractor
+                import flight_extractor
+                self._external_travel_cache['railway'] = railway_extractor.extract_railway_data('./data')
+                self._external_travel_cache['flight'] = flight_extractor.extract_flight_data('./data')
+                logger.info(f"[外部数据] 出行数据加载完成")
+            except Exception as e:
+                logger.warning(f"[外部数据] 出行数据加载失败: {e}")
+        
+        person_id = getattr(self, '_external_name_to_id_map', {}).get(name)
+        return {
+            'railway': self._external_travel_cache.get('railway', {}).get(person_id, []) if person_id else [],
+            'flight': self._external_travel_cache.get('flight', {}).get(person_id, []) if person_id else [],
+        }
+    
+    def _get_external_aml_data(self, name: str) -> Dict:
+        """
+        【铁律-数据回退】从外部提取器获取反洗钱数据
+        """
+        if not hasattr(self, '_external_aml_cache'):
+            self._external_aml_cache = {}
+            try:
+                import aml_analyzer
+                self._external_aml_cache = aml_analyzer.extract_aml_data('./data')
+                logger.info(f"[外部数据] 反洗钱数据加载完成: {len(self._external_aml_cache)} 条记录")
+            except Exception as e:
+                logger.warning(f"[外部数据] 反洗钱数据加载失败: {e}")
+        
+        person_id = getattr(self, '_external_name_to_id_map', {}).get(name)
+        if person_id:
+            return self._external_aml_cache.get(person_id, {})
+        return {}
+    
+    def _build_income_match_analysis_v4(self, name: str, profile: Dict) -> Dict:
+        """构建家庭存款与家庭收入匹配分析"""
+        total_income = profile.get('totalIncome', 0)
+        total_expense = profile.get('totalExpense', 0)
+        net_balance = total_income - total_expense
+        
+        # 获取银行余额
+        bank_accounts = self._build_bank_accounts(name, profile)
+        bank_balance = sum(acc.balance for acc in bank_accounts)
+        
+        # 工资数据
+        salary_total = profile.get('salaryTotal', 0)
+        salary_ratio = (salary_total / total_income * 100) if total_income > 0 else 0
+        
+        # 分析判断
+        income_sufficient = salary_total >= total_expense * 0.8  # 工资能覆盖80%支出算正常
+        
+        # 生成分析文本
+        narrative_parts = [
+            f"查询{name}名下银行卡流水，",
+            f"总资金流入{total_income/10000:.2f}万元，流出{total_expense/10000:.2f}万元，",
+        ]
+        
+        if net_balance >= 0:
+            narrative_parts.append(f"资金净结余{net_balance/10000:.2f}万元；")
+        else:
+            narrative_parts.append(f"资金净流出{abs(net_balance)/10000:.2f}万元；")
+        
+        if salary_total > 0:
+            narrative_parts.append(
+                f"资金流入中仅{salary_total/10000:.2f}万元为正常工资收入，占比{salary_ratio:.1f}%，"
+            )
+            if not income_sufficient:
+                narrative_parts.append("其正常工资收入金额不足以支撑月度消费。")
+            else:
+                narrative_parts.append("收支基本相抵。")
+        
+        return {
+            "total_inflow": total_income,
+            "total_inflow_wan": round(total_income / 10000, 2),  # 【M-03修复】金额精度
+            "total_outflow": total_expense,
+            "total_outflow_wan": round(total_expense / 10000, 2),  # 【M-03修复】
+            "net_balance": net_balance,
+            "net_balance_wan": round(net_balance / 10000, 2),  # 【M-03修复】
+            "bank_balance": bank_balance,
+            "salary_total": salary_total,
+            "salary_total_wan": round(salary_total / 10000, 2),  # 【M-03修复】
+            "salary_ratio": round(salary_ratio, 1),  # 【M-03修复】保留一位小数
+            "income_sufficient": income_sufficient,
+            "balance_narrative": "资金净结余" if net_balance >= 0 else "资金净流出",
+            "narrative": "".join(narrative_parts),
+            "need_further_verification": not income_sufficient or salary_ratio < 30,
+        }
+    
+    def _build_counterparty_analysis_v4(self, name: str, profile: Dict) -> Dict:
+        """构建银行流水交易对象分析"""
+        total_income = profile.get('totalIncome', 0)
+        total_expense = profile.get('totalExpense', 0)
+        salary_total = profile.get('salaryTotal', 0)
+        cash_income = profile.get('cashIncome', 0)
+        cash_expense = profile.get('cashExpense', 0)
+        third_party = profile.get('thirdPartyTotal', 0) or 0
+        
+        # 从 derived_data 获取大额交易用于分析个人转账
+        # 【C-02修复】支持驼峰和下划线两种命名
+        large_transactions = (
+            self.derived_data.get('large_transactions', []) or
+            self.derived_data.get('largeTransactions', [])
+        )
+        personal_transfers_in = 0
+        personal_transfers_out = 0
+        personal_transfer_details_in = []
+        personal_transfer_details_out = []
+        
+        if isinstance(large_transactions, list):
+            for t in large_transactions:
+                if t.get('person') == name:
+                    cp = t.get('counterparty', '')
+                    if self._is_individual_name(cp):
+                        if t.get('direction') == 'income':
+                            personal_transfers_in += t.get('amount', 0)
+                            personal_transfer_details_in.append({
+                                'counterparty': cp,
+                                'amount': t.get('amount', 0),
+                            })
+                        else:
+                            personal_transfers_out += t.get('amount', 0)
+                            personal_transfer_details_out.append({
+                                'counterparty': cp,
+                                'amount': t.get('amount', 0),
+                            })
+        
+        # 汇总个人转账对手方
+        in_persons = {}
+        for d in personal_transfer_details_in:
+            cp = d['counterparty']
+            if cp not in in_persons:
+                in_persons[cp] = 0
+            in_persons[cp] += d['amount']
+        
+        inflow_narrative_parts = [
+            f"资金流入方面：总资金流入{total_income/10000:.2f}万元，",
+            f"主要为工资收入{salary_total/10000:.2f}万元",
+        ]
+        if cash_income > 0:
+            inflow_narrative_parts.append(f"、现金流入{cash_income/10000:.2f}万元")
+        if personal_transfers_in > 0:
+            inflow_narrative_parts.append(f"、个人转账{personal_transfers_in/10000:.2f}万元")
+        inflow_narrative_parts.append("。")
+        
+        outflow_narrative_parts = [
+            f"资金流出方面：总资金流出{total_expense/10000:.2f}万元，",
+            f"主要为生活消费",
+        ]
+        if cash_expense > 0:
+            outflow_narrative_parts.append(f"、现金流出{cash_expense/10000:.2f}万元")
+        if personal_transfers_out > 0:
+            outflow_narrative_parts.append(f"、个人转账{personal_transfers_out/10000:.2f}万元")
+        outflow_narrative_parts.append("。")
+        
+        return {
+            "inflow": {
+                "total": total_income,
+                "salary": salary_total,
+                "cash": cash_income,
+                "personal_transfers": personal_transfers_in,
+                "third_party": third_party,
+                "personal_transfer_persons": list(in_persons.keys()),
+            },
+            "outflow": {
+                "total": total_expense,
+                "cash": cash_expense,
+                "personal_transfers": personal_transfers_out,
+            },
+            "inflow_narrative": "".join(inflow_narrative_parts),
+            "outflow_narrative": "".join(outflow_narrative_parts),
+        }
+    
+    def _is_individual_name(self, name: str) -> bool:
+        """判断是否为个人姓名"""
+        if not name or len(name) > 6 or len(name) < 2:
+            return False
+        company_keywords = ['公司', '银行', '支付', '平台', '集团', '中心', '基金', '保险', '证券']
+        return not any(kw in name for kw in company_keywords)
+    
+    def _build_large_cash_analysis_v4(self, name: str, profile: Dict) -> Dict:
+        """构建大额存取现分析"""
+        cash_transactions = profile.get('cashTransactions', [])
+        cash_income = profile.get('cashIncome', 0)
+        cash_expense = profile.get('cashExpense', 0)
+        cash_total = cash_income + cash_expense
+        
+        # 判断是否与调查公司存在关联
+        include_companies = self.metadata.get('include_companies', [])
+        has_company_relation = False  # 需要进一步分析
+        
+        narrative = (
+            f"累计发生现金类收支{cash_total/10000:.2f}万元，"
+            f"其中收款{cash_income/10000:.2f}万元，支出{cash_expense/10000:.2f}万元。"
+        )
+        
+        if include_companies:
+            company_names = "、".join(include_companies[:3])
+            narrative += f"未查见与{company_names}存在关联。"
+        
+        return {
+            "total": cash_total,
+            "income": cash_income,
+            "expense": cash_expense,
+            "transaction_count": len(cash_transactions),
+            "transactions": cash_transactions[:20],
+            "has_company_relation": has_company_relation,
+            "narrative": narrative,
+        }
+    
+    def _build_large_transfer_analysis_v4(self, name: str, profile: Dict) -> Dict:
+        """
+        构建大额转账记录分析
+        
+        【C-02修复】支持多种字段名格式
+        """
+        # 【C-02修复】支持驼峰和下划线两种命名
+        large_transactions = (
+            self.derived_data.get('large_transactions', []) or
+            self.derived_data.get('largeTransactions', [])
+        )
+        
+        # 筛选该人员的大额转账（≥1万元）
+        person_transfers_in = []
+        person_transfers_out = []
+        threshold = 10000
+        
+        if isinstance(large_transactions, list):
+            for t in large_transactions:
+                if t.get('person') == name and t.get('amount', 0) >= threshold:
+                    if t.get('direction') == 'income':
+                        person_transfers_in.append(t)
+                    else:
+                        person_transfers_out.append(t)
+        
+        in_total = sum(t.get('amount', 0) for t in person_transfers_in)
+        out_total = sum(t.get('amount', 0) for t in person_transfers_out)
+        
+        # 生成分析文本
+        include_companies = self.metadata.get('include_companies', [])
+        company_clause = ""
+        if include_companies:
+            company_names = "、".join(include_companies[:3])
+            company_clause = f"未查见与{company_names}存在关联。"
+        
+        in_narrative = (
+            f"查看单笔1万元以上银行流入流水，共{len(person_transfers_in)}笔共计金额{in_total/10000:.2f}万元，"
+            f"主要是工资收入、个人转账等。{company_clause}"
+        )
+        out_narrative = (
+            f"查看单笔1万元以上银行支出流水，共{len(person_transfers_out)}笔共计金额{out_total/10000:.2f}万元，"
+            f"主要是生活消费、个人转账等。{company_clause}"
+        )
+        
+        return {
+            "threshold": threshold,
+            "inflow": {
+                "count": len(person_transfers_in),
+                "total": in_total,
+                "transactions": person_transfers_in[:20],
+            },
+            "outflow": {
+                "count": len(person_transfers_out),
+                "total": out_total,
+                "transactions": person_transfers_out[:20],
+            },
+            "inflow_narrative": in_narrative,
+            "outflow_narrative": out_narrative,
+        }
+    
+    def _build_property_analysis_v4(self, name: str, profile: Dict) -> Dict:
+        """构建购房数据分析"""
+        properties = profile.get('properties', [])
+        
+        if not properties:
+            return {
+                "has_data": False,
+                "narrative": "",  # 无房产则不生成此节
+            }
+        
+        total_value = sum(p.get('value', 0) or p.get('交易金额', 0) for p in properties)
+        
+        # TODO: 分析购房款支付记录
+        has_payment_record = False  # 需要进一步分析银行流水
+        
+        narrative = (
+            f"家庭名下房产{len(properties)}套，房产总交易价格{total_value/10000:.2f}万元。"
+        )
+        if not has_payment_record:
+            narrative += f"从{name}银行流水中未查见购房款支付记录，需进一步确认其配偶的银行流水支付情况。"
+        
+        return {
+            "has_data": True,
+            "count": len(properties),
+            "total_value": total_value,
+            "has_payment_record": has_payment_record,
+            "narrative": narrative,
+        }
+    
+    def _build_aml_analysis_v4(self, name: str, profile: Dict) -> Dict:
+        """构建反洗钱数据分析"""
+        # 从 suspicions 获取 AML 数据
+        aml_data = profile.get('aml_alerts', [])
+        aml_count = len(aml_data) if isinstance(aml_data, list) else 0
+        aml_total = sum(a.get('amount', 0) for a in aml_data) if isinstance(aml_data, list) else 0
+        
+        if aml_count == 0:
+            narrative = "未查见可疑交易记录。"
+        else:
+            narrative = (
+                f"涉及数据共{aml_count}条{aml_total/10000:.2f}万元，"
+                f"主要是单位发放工资和报销款，未查见可疑大额转账记录。"
+            )
+        
+        return {
+            "count": aml_count,
+            "total": aml_total,
+            "records": aml_data[:20] if isinstance(aml_data, list) else [],
+            "narrative": narrative,
+        }
+    
+    def _build_tax_analysis_v4(self, name: str, profile: Dict) -> Dict:
+        """构建企业登记及纳税分析"""
+        # 从 profile 获取企业登记信息
+        registered_companies = profile.get('registered_companies', [])
+        tax_records = profile.get('tax_records', [])
+        
+        has_company = len(registered_companies) > 0
+        
+        if not has_company:
+            narrative = f"{name}本人名下无登记企业，本人仅缴纳个人所得税，无其他税款缴纳记录。"
+        else:
+            company_names = "、".join([c.get('name', '') for c in registered_companies[:3]])
+            narrative = f"{name}名下有登记企业：{company_names}。"
+        
+        return {
+            "has_registered_company": has_company,
+            "registered_companies": registered_companies,
+            "tax_records": tax_records,
+            "narrative": narrative,
+        }
+    
+    def _build_travel_analysis_v4(self, name: str, profile: Dict) -> Dict:
+        """构建同行人分析"""
+        # 从 profile 获取出行数据
+        flights = profile.get('flights', [])
+        railway = profile.get('railway', [])
+        hotels = profile.get('hotels', [])
+        
+        flight_count = len(flights) if isinstance(flights, list) else 0
+        railway_count = len(railway) if isinstance(railway, list) else 0
+        
+        # 同行人分析需要交叉比对
+        cohabitation = []  # TODO: 从 cohabitation_extractor 获取
+        
+        narrative_parts = []
+        if flight_count == 0:
+            narrative_parts.append("本人无航班出行记录")
+        else:
+            narrative_parts.append(f"本人有{flight_count}条航班记录")
+        
+        if railway_count == 0:
+            narrative_parts.append("无铁路出行记录")
+        else:
+            narrative_parts.append(f"有{railway_count}条铁路出行记录")
+        
+        include_companies = self.metadata.get('include_companies', [])
+        if include_companies:
+            narrative_parts.append(f"，未查见与本次核查的三家单位存在关联关系")
+        
+        return {
+            "flight_count": flight_count,
+            "railway_count": railway_count,
+            "cohabitation": cohabitation,
+            "has_suspicious_travel": False,
+            "narrative": "；".join(narrative_parts) + "。" if narrative_parts else "【待调取】出行数据",
+        }
 
 
 # ==================== 加载器函数 ====================
+
 
 def load_investigation_report_builder(output_dir: str = './output') -> Optional[InvestigationReportBuilder]:
     """

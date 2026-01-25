@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}信息查询结果分析报告{% endblock %}</title>
+    <style>
+        /* 基础样式 - 仿公文排版 */
+        body {
+            font-family: "仿宋", "FangSong", "SimSun", "宋体", serif;
+            line-height: 1.8;
+            margin: 40px 60px;
+            font-size: 16px;
+            color: #000;
+        }
+
+        /* 报告标题 */
+        .report-title {
+            text-align: center;
+            font-size: 22px;
+            font-weight: bold;
+            font-family: "方正小标宋", "黑体", "SimHei", sans-serif;
+            margin: 30px 0 20px 0;
+        }
+
+        /* 报告开头说明段落 */
+        .report-intro {
+            text-indent: 2em;
+            margin: 20px 0;
+            line-height: 2;
+        }
+
+        /* 一级章节标题（一、二、三...） */
+        h1.section-title {
+            font-size: 18px;
+            font-weight: bold;
+            margin: 30px 0 15px 0;
+            font-family: "黑体", "SimHei", sans-serif;
+        }
+
+        /* 二级章节标题（(一)、(二)...） */
+        h2.subsection-title {
+            font-size: 16px;
+            font-weight: bold;
+            margin: 20px 0 10px 0;
+        }
+
+        /* 三级标题（1、2、3...） */
+        h3.item-title {
+            font-size: 16px;
+            font-weight: bold;
+            margin: 15px 0 8px 0;
+        }
+
+        /* 部分标题（第一部分、第二部分...） */
+        h3.part-title {
+            font-size: 16px;
+            font-weight: bold;
+            margin: 18px 0 10px 0;
+            padding-left: 1em;
+            border-left: 3px solid #333;
+        }
+
+        /* 普通段落 */
+        p {
+            text-indent: 2em;
+            margin: 8px 0;
+            line-height: 1.8;
+        }
+
+        /* 不需要缩进的段落 */
+        p.no-indent {
+            text-indent: 0;
+        }
+
+        /* 表格样式 */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+            font-size: 14px;
+        }
+
+        table,
+        th,
+        td {
+            border: 1px solid #000;
+        }
+
+        th,
+        td {
+            padding: 8px 10px;
+            text-align: center;
+        }
+
+        th {
+            background-color: #f0f0f0;
+            font-weight: bold;
+        }
+
+        td {
+            text-align: left;
+        }
+
+        /* 表格左对齐的列 */
+        td.text-left {
+            text-align: left;
+        }
+
+        /* 表格居中的列 */
+        td.text-center {
+            text-align: center;
+        }
+
+        /* 表格右对齐的列 */
+        td.text-right {
+            text-align: right;
+        }
+
+        /* 序号列居中 */
+        td.seq-col,
+        th.seq-col {
+            text-align: center;
+            width: 50px;
+        }
+
+        /* 金额列右对齐 */
+        td.money-col {
+            text-align: right;
+        }
+
+        /* 未查见提示 */
+        .no-data {
+            text-indent: 2em;
+            color: #666;
+        }
+
+        /* 重点高亮 */
+        .highlight {
+            background-color: #fff3cd;
+        }
+
+        /* 高风险提示 */
+        .risk-high {
+            color: #d9534f;
+            font-weight: bold;
+        }
+
+        /* 中风险提示 */
+        .risk-medium {
+            color: #f0ad4e;
+        }
+
+        /* 结论区块 */
+        .conclusion-block {
+            margin: 20px 0;
+            padding: 15px;
+            background-color: #f9f9f9;
+            border-left: 4px solid #5bc0de;
+        }
+
+        /* 危险提示区块 */
+        .danger-block {
+            margin: 15px 0;
+            padding: 15px;
+            background-color: #f2dede;
+            border-left: 4px solid #d9534f;
+        }
+
+        /* 分页符 */
+        .page-break {
+            page-break-after: always;
+        }
+
+        /* 有序列表 */
+        ol,
+        ul {
+            margin: 10px 0;
+            padding-left: 2em;
+        }
+
+        li {
+            margin: 5px 0;
+            line-height: 1.8;
+        }
+
+        /* 缩进列表 - 用于结论中的编号项目 */
+        .indent-list {
+            margin-left: 2em;
+        }
+
+        .indent-list li {
+            text-indent: 0;
+        }
+
+        /* 报告尾部签章区 */
+        .report-footer {
+            margin-top: 60px;
+            text-align: right;
+        }
+
+        .report-footer p {
+            text-indent: 0;
+            margin: 5px 0;
+        }
+
+        /* 打印样式 */
+        @media print {
+            body {
+                margin: 20mm 25mm;
+                font-size: 14px;
+            }
+
+            .page-break {
+                page-break-after: always;
+            }
+
+            table {
+                page-break-inside: avoid;
+            }
+        }
+
+        /* 附注样式 */
+        .footnote {
+            font-size: 14px;
+            color: #666;
+            margin-top: 10px;
+        }
+
+        /* 报告元信息 */
+        .meta-info {
+            font-size: 14px;
+            color: #666;
+            text-align: center;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+
+<body>
+    {% block content %}{% endblock %}
+</body>
+
+</html>

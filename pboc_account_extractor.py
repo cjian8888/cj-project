@@ -45,9 +45,9 @@ def extract_pboc_accounts(data_dir: str, person_id: str = None) -> Dict[str, Lis
                     "status": "正常",
                     "open_date": "2018-01-01",
                     "close_date": None,
-                    "holder_name": "施灵",
-                    "id_number": "310102196504096017",
-                    "source_file": "施灵_310102196504096017_xxx.xlsx"
+                    "holder_name": "甲某某",
+                    "id_number": "310102XXXXXXXXXXXX",
+                    "source_file": "甲某某_310102XXXXXXXXXXXX_xxx.xlsx"
                 },
                 ...
             ]
@@ -225,7 +225,7 @@ def _extract_id_from_filename(filename: str) -> Optional[str]:
     """
     从文件名中提取身份证号
     
-    文件名格式示例: 施灵_310102196504096017_国监查【2024】第020734号_人民银行账户信息.xlsx
+    文件名格式示例: 甲某某_310102XXXXXXXXXXXX_国监查【XXXX】第XXXXXX号_人民银行账户信息.xlsx
     
     Args:
         filename: 文件名

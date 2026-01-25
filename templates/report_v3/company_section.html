@@ -1,0 +1,22 @@
+{#
+公司分析章节模板 - 适配 _build_v4_company_section 返回的数据结构
+
+数据结构：
+company_data = {
+company_name, total_income, total_expense,
+cash_income, cash_expense, transaction_count, narrative
+}
+#}
+
+<p>
+    {{ company_data.narrative or (company_data.company_name ~ '累计资金流入' ~ (company_data.total_income/10000)|round(2) ~
+    '万元，流出' ~ (company_data.total_expense/10000)|round(2) ~ '万元，涉及交易' ~ company_data.transaction_count ~ '笔。') }}
+</p>
+
+{% if company_data.key_person_check %}
+<p>{{ company_data.key_person_check }}</p>
+{% endif %}
+
+{% if company_data.additional_notes %}
+<p>{{ company_data.additional_notes }}</p>
+{% endif %}

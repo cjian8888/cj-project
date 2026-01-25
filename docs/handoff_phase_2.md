@@ -175,7 +175,7 @@
   ```json
   [
       {
-          "person": "张三",
+          "person": "甲某某",
           "date": "2023-05-15 10:30:00",
           "amount": 50000,
           "direction": "income",

@@ -3,10 +3,13 @@
 """
 报告数据服务模块 - 初查报告生成引擎
 
-【数据复用铁律】
-1. 本模块仅复用 analysis_cache 中已计算的分析结果
-2. 严禁直接读取 Excel 重新计算任何指标
-3. 确保前端展示与报告数据 100% 一致
+【数据复用铁律】详见 docs/data_processing_principle.md
+1. 按优先级从三个数据源获取数据:
+   - 优先级1: output/cleaned_data/ - 标准化银行流水
+   - 优先级2: output/analysis_cache/ - JSON缓存（程序首选）
+   - 优先级3: output/analysis_results/资金核查底稿.xlsx - Excel核查底稿（回退）
+2. 严禁读取原始数据目录 (data/国监查XXX) 进行重复计算
+3. JSON缓存优先，Excel作为补充数据源
 """
 
 import os
@@ -217,7 +220,8 @@ class ReportDataBuilder:
     """
     初查报告数据构建器 - 复用已有分析结果
     
-    【铁律】仅从 analysis_cache 读取预计算数据，禁止重新计算
+    【数据复用铁律】详见 docs/data_processing_principle.md
+    按优先级从三个数据源获取: cleaned_data → analysis_cache → 核查底稿Excel
     """
     
     def __init__(self, analysis_cache: Dict):

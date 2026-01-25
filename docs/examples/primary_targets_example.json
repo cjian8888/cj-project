@@ -9,28 +9,28 @@
   ],
   "analysis_units": [
     {
-      "anchor": "施灵",
+      "anchor": "甲某某",
       "members": [
-        "施灵",
-        "滕雳",
-        "施育"
+        "甲某某",
+        "乙某某",
+        "甲小某"
       ],
       "unit_type": "family",
       "member_details": [
         {
-          "name": "施灵",
+          "name": "甲某某",
           "relation": "本人",
           "has_data": true,
           "id_number": ""
         },
         {
-          "name": "滕雳",
+          "name": "乙某某",
           "relation": "配偶",
           "has_data": true,
           "id_number": ""
         },
         {
-          "name": "施育",
+          "name": "甲小某",
           "relation": "子女",
           "has_data": true,
           "id_number": ""
@@ -39,14 +39,14 @@
       "note": "核心家庭单元"
     },
     {
-      "anchor": "施承天",
+      "anchor": "甲大某",
       "members": [
-        "施承天"
+        "甲大某"
       ],
       "unit_type": "independent",
       "member_details": [
         {
-          "name": "施承天",
+          "name": "甲大某",
           "relation": "父亲",
           "has_data": true,
           "id_number": ""
@@ -56,8 +56,8 @@
     }
   ],
   "include_companies": [
-    "上海派尼科技实业股份有限公司",
-    "上海派尼斯机电技术有限公司"
+    "XX科技有限公司",
+    "YY科技有限公司"
   ],
   "doc_number": "国监查 [2026] 第 XXXXXX 号",
   "case_source": "群众举报",

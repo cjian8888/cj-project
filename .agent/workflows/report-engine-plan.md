@@ -488,7 +488,7 @@
 | G-02 | 后端：从 analysis_cache 读取家庭关系 | ✅ 已完成 | 1h | `report_config/primary_targets_service.py` |
 | G-03 | 后端：保存/加载归集配置 API | ✅ 已完成 | 1h | `api_server.py` 新增端点：<br/>`GET/POST /api/primary-targets`<br/>`GET /api/primary-targets/entities` |
 | G-04 | 前端：归集配置UI（报告Tab） | ✅ 已完成 | 3h | `dashboard/src/components/PrimaryTargetsConfig.tsx`<br/>集成到 `ReportBuilder.tsx` 双步骤流程 |
-| G-05 | 报告生成：按归集配置组织章节 | ⬜ 待开始 | 2h | 动态聚合家庭数据 |
+| G-05 | 报告生成：按归集配置组织章节 | ✅ 已完成 | 2h | `investigation_report_builder.py`: `build_report_with_config()`<br/>`api_server.py`: `/api/investigation-report/generate-with-config`<br/>`ReportBuilder.tsx`: v3 格式集成 |
 | **BUG-01** | 🔴 家庭分析错误修复 | ✅ 已完成 | 2h | `regenerate_cache.py`: 使用 `family_analyzer` 识别独立家庭单元<br/>`primary_targets_service.py`: 使用 `family_units` 格式 |
 | **BUG-02** | 🔴 报告生成模块适配新格式 | ✅ 已完成 | 1h | `report_generator.py`: `_group_into_households()` 支持 `family_units`<br/>`investigation_report_builder.py`: `_build_family_section()` 适配新格式 |
 | **GAP-01** | 🟡 增强身份证信息利用 | ⬜ 待开始 | 3h | `family_analyzer.py`: 解析出生年月/性别，用于关系验证 |

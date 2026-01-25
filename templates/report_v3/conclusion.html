@@ -1,0 +1,25 @@
+{#
+结论章节模板 - 适配 _build_v4_conclusion 返回的数据结构
+
+数据结构：
+report.conclusion = {
+issues: [{person, issue_type, description, severity}, ...],
+issue_count, summary_narrative
+}
+#}
+
+<p>通过对查询结果分析，发现异常情况：</p>
+
+{% if report.conclusion.issues and report.conclusion.issues|length > 0 %}
+<ol class="indent-list">
+    {% for issue in report.conclusion.issues %}
+    <li>{{ issue.person }}{% if issue.issue_type %}（{{ issue.issue_type }}）{% endif %}：{{ issue.description }}</li>
+    {% endfor %}
+</ol>
+{% else %}
+<p>未发现明显异常情况。</p>
+{% endif %}
+
+{% if report.conclusion.summary_narrative %}
+<p>{{ report.conclusion.summary_narrative }}</p>
+{% endif %}

@@ -1,0 +1,629 @@
+{
+    "meta": {
+        "doc_number": "国监查 [2026] 第 XXXXXX 号",
+        "case_background": "依据相关线索反映，甲某某在担任某市XX局副局长期间，可能存在利用职务便利收受他人财物的问题。根据《中华人民共和国监察法》第十九条规定，现对甲某某及其家庭成员进行资金穿透核查。",
+        "data_scope": "2020年1月1日至2025年9月30日银行流水数据",
+        "generated_at": "2026-01-23T18:41:00.000000",
+        "version": "3.0.0",
+        "generator": "穿云审计初查报告引擎",
+        "core_persons": [
+            "甲某某",
+            "乙某某",
+            "甲小某"
+        ],
+        "companies": [
+            "XX科技有限公司",
+            "YY科技有限公司"
+        ],
+        "data_range": {
+            "start_date": "2020-01-01",
+            "end_date": "2025-09-30"
+        }
+    },
+    "family": {
+        "primary_person": "甲某某",
+        "members": [
+            {
+                "name": "甲某某",
+                "relation": "本人",
+                "has_data": true,
+                "id_number": "310230XXXXXXXXXXXX"
+            },
+            {
+                "name": "乙某某",
+                "relation": "配偶",
+                "has_data": true,
+                "id_number": "310230XXXXXXXXXXXX"
+            },
+            {
+                "name": "甲小某",
+                "relation": "子女",
+                "has_data": true,
+                "id_number": "310230XXXXXXXXXXXX"
+            },
+            {
+                "name": "甲大某",
+                "relation": "父亲",
+                "has_data": false,
+                "id_number": "310230XXXXXXXXXXXX"
+            }
+        ],
+        "summary": {
+            "total_income": 2500000.00,
+            "total_expense": 2300000.00,
+            "net_income": 2500000.00,
+            "net_expense": 2300000.00,
+            "internal_transfers": 150000.00,
+            "assets": {
+                "real_estate_count": 3,
+                "real_estate_value": 8500000.00,
+                "vehicle_count": 2,
+                "deposits": 500000.00,
+                "wealth_holdings": 200000.00,
+                "total_assets": 9200000.00
+            }
+        }
+    },
+    "analysis_units": [
+        {
+            "anchor": "甲某某",
+            "unit_type": "family",
+            "unit_name": "甲某某核心家庭",
+            "members": [
+                "甲某某",
+                "乙某某",
+                "甲小某"
+            ],
+            "note": "核心家庭单元：被核查人+配偶+未成年子女",
+            "aggregated_data": {
+                "total_income": 2200000.00,
+                "total_expense": 2100000.00,
+                "net_balance": 100000.00,
+                "salary_total": 374000.00,
+                "salary_ratio": 17.0,
+                "cash_total": 85000.00,
+                "transaction_count": 3256,
+                "bank_accounts_count": 8,
+                "wealth_total": 500000.00,
+                "member_count": 3,
+                "member_breakdown": [
+                    {
+                        "name": "甲某某",
+                        "total_income": 1500000.00,
+                        "total_expense": 1400000.00
+                    },
+                    {
+                        "name": "乙某某",
+                        "total_income": 600000.00,
+                        "total_expense": 600000.00
+                    },
+                    {
+                        "name": "甲小某",
+                        "total_income": 100000.00,
+                        "total_expense": 100000.00
+                    }
+                ]
+            },
+            "member_details": [
+                {
+                    "name": "甲某某",
+                    "relation": "本人",
+                    "total_income": 1500000.00,
+                    "total_expense": 1400000.00,
+                    "transaction_count": 2156,
+                    "assets": {
+                        "salary_total": 255000.00,
+                        "salary_ratio": 17.0,
+                        "yearly_salary": [
+                            {
+                                "year": "2020",
+                                "total": 48000.00,
+                                "months": 12,
+                                "avg_monthly": 4000.00,
+                                "transaction_count": 12
+                            },
+                            {
+                                "year": "2021",
+                                "total": 50000.00,
+                                "months": 12,
+                                "avg_monthly": 4166.67,
+                                "transaction_count": 12
+                            },
+                            {
+                                "year": "2022",
+                                "total": 52000.00,
+                                "months": 12,
+                                "avg_monthly": 4333.33,
+                                "transaction_count": 12
+                            },
+                            {
+                                "year": "2023",
+                                "total": 55000.00,
+                                "months": 12,
+                                "avg_monthly": 4583.33,
+                                "transaction_count": 12
+                            },
+                            {
+                                "year": "2024",
+                                "total": 50000.00,
+                                "months": 9,
+                                "avg_monthly": 5555.56,
+                                "transaction_count": 9
+                            }
+                        ],
+                        "wealth_total": 500000.00,
+                        "wealth_holding": 20000.00,
+                        "bank_accounts": [
+                            {
+                                "bank_name": "XX银行",
+                                "account_number": "6227XXXXXXXXXXXXXXX",
+                                "account_type": "个人账户",
+                                "card_type": "借记卡",
+                                "status": "正常",
+                                "balance": 125000.00,
+                                "balance_is_estimated": false,
+                                "last_transaction_date": "2025-09-28T14:30:00"
+                            },
+                            {
+                                "bank_name": "YY银行",
+                                "account_number": "6222XXXXXXXXXXXXXXX",
+                                "account_type": "个人账户",
+                                "card_type": "工资卡",
+                                "status": "正常",
+                                "balance": 35000.00,
+                                "balance_is_estimated": false,
+                                "last_transaction_date": "2025-09-25T10:15:00"
+                            }
+                        ],
+                        "bank_account_count": 2,
+                        "properties": [
+                            {
+                                "address": "XX市XX区XX路XX号XX室",
+                                "area": 120.5,
+                                "value": 3500000.00,
+                                "registration_date": "2018-06-15",
+                                "data_source": "【待核实】不动产登记数据"
+                            }
+                        ],
+                        "vehicles": [
+                            {
+                                "plate_number": "沪AXXXXX",
+                                "brand": "某品牌轿车",
+                                "purchase_date": "2020-03-01",
+                                "estimated_value": 350000.00,
+                                "data_source": "【待核实】机动车登记数据"
+                            }
+                        ]
+                    },
+                    "analysis": {
+                        "income_gap": {
+                            "total_income": 1500000.00,
+                            "salary_income": 255000.00,
+                            "ratio": 17.0,
+                            "verdict": "工资占比过低（17.0%），收入来源可疑"
+                        },
+                        "inflow_analysis": {
+                            "total_inflow": 1500000.00,
+                            "legitimate_income": 300000.00,
+                            "legitimate_ratio": 20.0,
+                            "unknown_source_amount": 1100000.00,
+                            "unknown_source_ratio": 73.33,
+                            "suspicious_income": 100000.00,
+                            "suspicious_ratio": 6.67,
+                            "top_sources": [
+                                {
+                                    "counterparty": "XX科技有限公司",
+                                    "total_amount": 200000.00,
+                                    "count": 4,
+                                    "percentage": 13.33,
+                                    "category": "供应商"
+                                },
+                                {
+                                    "counterparty": "丙某某",
+                                    "total_amount": 150000.00,
+                                    "count": 3,
+                                    "percentage": 10.0,
+                                    "category": "个人"
+                                }
+                            ],
+                            "category_summary": {
+                                "工资收入": 255000.00,
+                                "公积金": 45000.00,
+                                "供应商转账": 350000.00,
+                                "个人转账": 450000.00,
+                                "不明来源": 400000.00
+                            }
+                        },
+                        "outflow_analysis": {
+                            "total_outflow": 1400000.00,
+                            "top_destinations": [
+                                {
+                                    "counterparty": "乙某某",
+                                    "total_amount": 200000.00,
+                                    "count": 5,
+                                    "percentage": 14.29,
+                                    "category": "家庭成员"
+                                },
+                                {
+                                    "counterparty": "XX银行信用卡中心",
+                                    "total_amount": 180000.00,
+                                    "count": 24,
+                                    "percentage": 12.86,
+                                    "category": "还款"
+                                }
+                            ],
+                            "category_summary": {
+                                "家庭转账": 200000.00,
+                                "消费支出": 500000.00,
+                                "理财购买": 400000.00,
+                                "还款": 180000.00,
+                                "其他": 120000.00
+                            },
+                            "large_single_payments": [
+                                {
+                                    "date": "2023-05-15 10:30:00",
+                                    "amount": 500000.00,
+                                    "counterparty": "某房地产公司",
+                                    "description": "购房首付款"
+                                },
+                                {
+                                    "date": "2022-08-20 14:00:00",
+                                    "amount": 350000.00,
+                                    "counterparty": "某汽车4S店",
+                                    "description": "购车款"
+                                }
+                            ]
+                        },
+                        "large_cash": {
+                            "total_amount": 85000.00,
+                            "deposit_amount": 50000.00,
+                            "withdraw_amount": 35000.00,
+                            "count": 12,
+                            "transactions": [
+                                {
+                                    "date": "2023-02-10 11:30:00",
+                                    "amount": 20000.00,
+                                    "description": "ATM取款",
+                                    "counterparty": "",
+                                    "type": "取现",
+                                    "source_file": "甲某某_银行流水.xlsx",
+                                    "source_row_index": 156
+                                },
+                                {
+                                    "date": "2023-06-18 09:45:00",
+                                    "amount": 50000.00,
+                                    "description": "现金存款",
+                                    "counterparty": "",
+                                    "type": "存现",
+                                    "source_file": "甲某某_银行流水.xlsx",
+                                    "source_row_index": 289
+                                }
+                            ]
+                        },
+                        "large_transfers": {
+                            "threshold": 50000,
+                            "count": 28,
+                            "total_amount": 2100000.00,
+                            "transactions": [
+                                {
+                                    "person": "甲某某",
+                                    "date": "2023-03-15 10:00:00",
+                                    "amount": 200000.00,
+                                    "direction": "income",
+                                    "counterparty": "XX科技有限公司",
+                                    "description": "咨询服务费",
+                                    "account_number": "6227****XXXX",
+                                    "bank_name": "XX银行",
+                                    "risk_level": "high"
+                                },
+                                {
+                                    "person": "甲某某",
+                                    "date": "2022-11-20 15:30:00",
+                                    "amount": 100000.00,
+                                    "direction": "income",
+                                    "counterparty": "丙某某",
+                                    "description": "借款",
+                                    "account_number": "6222****XXXX",
+                                    "bank_name": "YY银行",
+                                    "risk_level": "high"
+                                }
+                            ]
+                        },
+                        "related_party_transactions": {
+                            "total_count": 15,
+                            "total_amount": 450000.00,
+                            "by_company": [
+                                {
+                                    "company_name": "XX科技有限公司",
+                                    "transaction_count": 8,
+                                    "total_amount": 350000.00,
+                                    "inflow": 350000.00,
+                                    "outflow": 0,
+                                    "risk_level": "high",
+                                    "note": "该公司2022年中标XX局采购项目"
+                                },
+                                {
+                                    "company_name": "YY科技有限公司",
+                                    "transaction_count": 7,
+                                    "total_amount": 100000.00,
+                                    "inflow": 100000.00,
+                                    "outflow": 0,
+                                    "risk_level": "medium",
+                                    "note": "该公司与被查人存在业务往来"
+                                }
+                            ]
+                        }
+                    }
+                },
+                {
+                    "name": "乙某某",
+                    "relation": "配偶",
+                    "total_income": 600000.00,
+                    "total_expense": 600000.00,
+                    "transaction_count": 856,
+                    "assets": {
+                        "salary_total": 180000.00,
+                        "salary_ratio": 30.0,
+                        "yearly_salary": [
+                            {
+                                "year": "2020",
+                                "total": 35000.00,
+                                "months": 12,
+                                "avg_monthly": 2916.67,
+                                "transaction_count": 12
+                            }
+                        ],
+                        "wealth_total": 100000.00,
+                        "wealth_holding": 15000.00,
+                        "bank_accounts": [
+                            {
+                                "bank_name": "ZZ银行",
+                                "account_number": "6212XXXXXXXXXXXXXXX",
+                                "account_type": "个人账户",
+                                "card_type": "借记卡",
+                                "status": "正常",
+                                "balance": 45000.00,
+                                "balance_is_estimated": false,
+                                "last_transaction_date": "2025-09-20T16:00:00"
+                            }
+                        ],
+                        "bank_account_count": 1
+                    },
+                    "analysis": {
+                        "income_gap": {
+                            "total_income": 600000.00,
+                            "salary_income": 180000.00,
+                            "ratio": 30.0,
+                            "verdict": "工资占比偏低（30.0%），需进一步核实"
+                        },
+                        "inflow_analysis": {
+                            "total_inflow": 600000.00,
+                            "legitimate_income": 200000.00,
+                            "legitimate_ratio": 33.33,
+                            "unknown_source_amount": 380000.00,
+                            "unknown_source_ratio": 63.33,
+                            "suspicious_income": 20000.00,
+                            "suspicious_ratio": 3.33
+                        },
+                        "large_cash": {
+                            "total_amount": 15000.00,
+                            "deposit_amount": 10000.00,
+                            "withdraw_amount": 5000.00,
+                            "count": 3
+                        }
+                    }
+                },
+                {
+                    "name": "甲小某",
+                    "relation": "子女",
+                    "total_income": 100000.00,
+                    "total_expense": 100000.00,
+                    "transaction_count": 244,
+                    "assets": {
+                        "salary_total": 0,
+                        "salary_ratio": 0,
+                        "bank_accounts": [
+                            {
+                                "bank_name": "WW银行",
+                                "account_number": "6217XXXXXXXXXXXXXXX",
+                                "account_type": "个人账户",
+                                "card_type": "借记卡",
+                                "status": "正常",
+                                "balance": 8000.00,
+                                "balance_is_estimated": false,
+                                "last_transaction_date": "2025-09-15T11:00:00"
+                            }
+                        ],
+                        "bank_account_count": 1
+                    },
+                    "analysis": {
+                        "income_gap": {
+                            "total_income": 100000.00,
+                            "salary_income": 0,
+                            "ratio": 0,
+                            "verdict": "无工资收入，资金来源为家庭转账"
+                        }
+                    }
+                }
+            ]
+        },
+        {
+            "anchor": "甲大某",
+            "unit_type": "independent",
+            "unit_name": "甲大某（父亲）",
+            "members": [
+                "甲大某"
+            ],
+            "note": "独立关联单元：被核查人父亲，需单独分析",
+            "aggregated_data": {
+                "total_income": 0,
+                "total_expense": 0,
+                "note": "暂无数据，待调取"
+            },
+            "member_details": []
+        }
+    ],
+    "company_reports": [
+        {
+            "company_name": "XX科技有限公司",
+            "total_income": 15000000.00,
+            "total_expense": 14500000.00,
+            "transaction_count": 1256,
+            "bank_accounts": [
+                {
+                    "bank_name": "XX银行",
+                    "account_number": "1100XXXXXXXXXXXXXXX",
+                    "account_type": "对公账户",
+                    "status": "正常",
+                    "balance": 350000.00
+                }
+            ],
+            "investigation_unit_flows": {
+                "has_flows": false,
+                "total_amount": 0,
+                "percentage": 0,
+                "note": "未发现与调查单位的直接资金往来"
+            },
+            "key_person_transactions": {
+                "total_count": 8,
+                "total_amount": 350000.00,
+                "persons": [
+                    {
+                        "name": "甲某某",
+                        "transaction_count": 8,
+                        "total_amount": 350000.00,
+                        "inflow_to_person": 350000.00,
+                        "outflow_from_person": 0,
+                        "transactions": [
+                            {
+                                "date": "2023-03-15",
+                                "amount": 200000.00,
+                                "direction": "公司→个人",
+                                "description": "服务费"
+                            },
+                            {
+                                "date": "2022-08-10",
+                                "amount": 80000.00,
+                                "direction": "公司→个人",
+                                "description": "咨询费"
+                            }
+                        ]
+                    }
+                ]
+            },
+            "cash_transactions": {
+                "has_cash": true,
+                "total_amount": 120000.00,
+                "deposit_count": 2,
+                "deposit_amount": 50000.00,
+                "withdraw_count": 5,
+                "withdraw_amount": 70000.00
+            },
+            "company_info": {
+                "registered_capital": "500万人民币",
+                "legal_representative": "丙某某",
+                "shareholders": [
+                    "丙某某（60%）",
+                    "丁某某（40%）"
+                ],
+                "business_scope": "软件开发、技术咨询",
+                "registration_date": "2018-05-20",
+                "data_source": "【待核实】市场监管总局企业登记信息"
+            }
+        },
+        {
+            "company_name": "YY科技有限公司",
+            "total_income": 8000000.00,
+            "total_expense": 7800000.00,
+            "transaction_count": 856,
+            "bank_accounts": [
+                {
+                    "bank_name": "ZZ银行",
+                    "account_number": "2400XXXXXXXXXXXXXXX",
+                    "account_type": "对公账户",
+                    "status": "正常",
+                    "balance": 180000.00
+                }
+            ],
+            "investigation_unit_flows": {
+                "has_flows": false,
+                "total_amount": 0,
+                "percentage": 0
+            },
+            "key_person_transactions": {
+                "total_count": 7,
+                "total_amount": 100000.00,
+                "persons": [
+                    {
+                        "name": "甲某某",
+                        "transaction_count": 7,
+                        "total_amount": 100000.00,
+                        "inflow_to_person": 100000.00,
+                        "outflow_from_person": 0
+                    }
+                ]
+            },
+            "cash_transactions": {
+                "has_cash": false,
+                "total_amount": 0
+            }
+        }
+    ],
+    "conclusion": {
+        "issues": [
+            {
+                "category": "收支不抵",
+                "severity": "high",
+                "title": "甲某某工资收入占比过低",
+                "description": "甲某某银行流水总收入150万元，其中工资收入仅25.5万元，占比17%，远低于正常比例（通常应≥50%）。需核实其他收入来源的合法性。",
+                "evidence_refs": [
+                    "甲某某银行流水第156行",
+                    "甲某某银行流水第289行"
+                ],
+                "affected_persons": [
+                    "甲某某"
+                ],
+                "recommendation": "建议调取相关银行凭证原件，核实大额收入来源"
+            },
+            {
+                "category": "异常资金往来",
+                "severity": "high",
+                "title": "与供应商存在直接资金往来",
+                "description": "XX科技有限公司共向甲某某个人账户转账8笔，合计35万元。该公司2022年曾中标甲某某分管的XX局采购项目，存在利益输送嫌疑。",
+                "evidence_refs": [
+                    "XX科技有限公司转账记录"
+                ],
+                "affected_persons": [
+                    "甲某某"
+                ],
+                "affected_companies": [
+                    "XX科技有限公司"
+                ],
+                "recommendation": "建议核实转账资金的性质及用途，并与采购合同进行比对"
+            },
+            {
+                "category": "资金来源不明",
+                "severity": "medium",
+                "title": "大额现金存款来源不明",
+                "description": "甲某某2023年6月有一笔5万元现金存款，无法追溯资金来源。其年度现金存款总额达到5万元，需进一步核实来源。",
+                "evidence_refs": [
+                    "甲某某银行流水第289行"
+                ],
+                "affected_persons": [
+                    "甲某某"
+                ],
+                "recommendation": "建议约谈核实现金来源"
+            }
+        ],
+        "summary_text": "经对甲某某家庭银行流水进行穿透分析，发现以下重点问题：（1）甲某某个人工资收入占比仅17%，与其银行流水规模明显不匹配；（2）甲某某与其分管业务范围内的供应商存在直接资金往来，累计35万元，存在利益输送嫌疑；（3）存在5万元大额现金存款来源不明。建议进一步调取相关证据，约谈核实。",
+        "risk_level": "high",
+        "risk_score": 85,
+        "next_steps": [
+            "调取甲某某2020-2025年银行凭证原件进行核对",
+            "调取XX科技有限公司中标项目档案",
+            "约谈甲某某核实35万元供应商转账性质",
+            "核实5万元现金存款来源",
+            "调取甲某某房产、车辆登记信息"
+        ]
+    }
+}

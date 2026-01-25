@@ -3,11 +3,38 @@
 """
 配置文件 - 资金穿透与关联排查系统
 定义关键参数、白名单规则和检测阈值
+
+【修复说明】
+- 问题1修复：硬编码阈值过多，难以维护
+- 解决方案：从 config_loader.py 的 YAML 配置文件读取所有阈值
+- 修改日期：2026-01-25
+- 问题18修复：配置项缺少类型注解
+- 解决方案：为所有配置项添加类型注解，提高代码可读性和IDE支持
+- 修改日期：2026-01-25
 """
 
-# ====# ========== 工资识别配置 ==========
+from typing import List, Dict, Any, Tuple, Optional, Union
+import config_loader
+
+# ============================================================
+# 从YAML配置文件加载阈值（问题1修复）
+# ============================================================
+
+# 加载配置
+_risk_config: Dict[str, Any] = config_loader.load_risk_thresholds()
+
+# 便捷函数：从配置获取值，带默认值
+def _get_config(*keys: str, default: Any = None) -> Any:
+    """从配置字典获取嵌套值"""
+    value = config_loader.get_config_value(_risk_config, *keys)
+    return value if value is not None else default
+
+# ============================================================
+# 工资识别配置
+# ============================================================
+
 # 强工资关键词（优先级最高）
-SALARY_STRONG_KEYWORDS = [
+SALARY_STRONG_KEYWORDS: List[str] = [
     '工资', '代发薪', '代发工资', '薪资', '绩效', '奖金', '代发奖金',
     '补贴', '津贴', '补助', '过节费', '防暑降温', '取暖费',
     '基本工资', '岗位工资', '年终奖', '季度奖', '安家费',
@@ -15,13 +42,13 @@ SALARY_STRONG_KEYWORDS = [
 ]
 
 # 普通工资关键词（需结合金额和频率判断）
-SALARY_KEYWORDS = [
+SALARY_KEYWORDS: List[str] = [
     '代发', '各类代发', '福利', 
     '公积金', '社保', '养老', '失业', '医疗'
 ]
 
 # 需排除的报销/差旅/退款类关键词（即使来自发薪单位也应排除）
-EXCLUDED_REIMBURSEMENT_KEYWORDS = [
+EXCLUDED_REIMBURSEMENT_KEYWORDS: List[str] = [
     '差旅', '出差', '住宿', '交通', '车贴', '垫付', 
     '报销', '退款', '退回'
 ]
@@ -30,7 +57,7 @@ EXCLUDED_REIMBURSEMENT_KEYWORDS = [
 # 注意：这里只存放通用的发薪单位特征词
 # 具体单位名称请在下方的 USER_DEFINED_SALARY_PAYERS 中配置
 # 【重要】不要在此处添加特定案件的具体单位名称
-KNOWN_SALARY_PAYERS = [
+KNOWN_SALARY_PAYERS: List[str] = [
     # 通用人力资源服务关键词
     '人力资源', '劳务派遣', '人才服务', '外服', 'FESCO',
     '劳务外包', '人事代理', '人力外包', '劳务公司', '人才中心',
@@ -41,18 +68,21 @@ KNOWN_SALARY_PAYERS = [
     '研究院', '研究所', '大学', '学院', '中心',
 ]
 
-# ========== 用户干预配置区 ==========
+# 用户干预配置区
 # 在此处填写已知发薪单位的全称或包含的关键词
 # 系统将优先把来自这些单位的收入判定为工资
 # 【重要】此列表应在具体案件分析时根据实际情况填写，代码库中保持为空
-USER_DEFINED_SALARY_PAYERS = [
+USER_DEFINED_SALARY_PAYERS: List[str] = [
    # 示例: '某某科技公司', '某某研究所'
    # 运行时请根据实际案件填写
 ]
 
-# ========== 政府机关白名单（2026-01-08 新增）==========
+# ============================================================
+# 政府机关白名单（2026-01-08 新增）
+# ============================================================
+
 # 来自这些机构的规律性收入应优先识别为合规收入（工资、补贴等），而非异常
-GOVERNMENT_AGENCY_KEYWORDS = [
+GOVERNMENT_AGENCY_KEYWORDS: List[str] = [
     # 财政局
     '财政局', '财政厅', '财政部',
     # 社保公积金
@@ -70,9 +100,12 @@ GOVERNMENT_AGENCY_KEYWORDS = [
     '研究院', '研究所', '中心', '档案馆', '图书馆', '博物馆'
 ]
 
-# ========== 理财产品对手方排除列表（2026-01-08 新增）==========
+# ============================================================
+# 理财产品对手方排除列表（2026-01-08 新增）
+# ============================================================
+
 # 这些对手方名称表明是理财产品交易，不应被识别为借贷
-WEALTH_PRODUCT_COUNTERPARTY_KEYWORDS = [
+WEALTH_PRODUCT_COUNTERPARTY_KEYWORDS: List[str] = [
     # 银行理财产品名称特征
     '理财产品', '理财', '增利', '稳健', '周周利', '月月盈',
     '天天利', '日日盈', '活期宝', '定活宝', '智能存',
@@ -87,9 +120,12 @@ WEALTH_PRODUCT_COUNTERPARTY_KEYWORDS = [
     '保险', '年金', '投连', '万能险'
 ]
 
-# ========== 知名理财产品白名单（2026-01-11 新增）==========
+# ============================================================
+# 知名理财产品白名单（2026-01-11 新增）
+# ============================================================
+
 # 这些产品/账户的收支不应被标记为"来源不明"或"疑似借贷"
-KNOWN_WEALTH_PRODUCTS = [
+KNOWN_WEALTH_PRODUCTS: List[str] = [
     # 交通银行理财
     '交银添利', '交银理财', '蕴通财富', '沃德理财', '惠享存',
     # 工商银行理财
@@ -118,17 +154,21 @@ KNOWN_WEALTH_PRODUCTS = [
     '银证通', '银证转账', '证券转银行', '银行转证券'
 ]
 
+# ============================================================
 # 人力资源/劳务派遣公司关键词
-HR_COMPANY_KEYWORDS = [
+# ============================================================
+
+HR_COMPANY_KEYWORDS: List[str] = [
     '人才服务', '人力资源', '劳务派遣', '劳务外包', '人力外包',
     '人事代理', '人力服务', '劳务服务', '人事外包', '劳务公司',
     '人才中心', '就业服务', '职业介绍'
 ]
 
-
-
+# ============================================================
 # 借贷平台关键词（用于排除）
-LOAN_PLATFORM_KEYWORDS = [
+# ============================================================
+
+LOAN_PLATFORM_KEYWORDS: List[str] = [
     '借', '贷', '信贷', '小额贷款', '消费金融', '金融服务',
     '信托', '白条', '金条', '放心借', '借呗', '花呗',
     '微粒贷', '好期贷', '任性贷', '有钱花', '安逸花',
@@ -136,33 +176,48 @@ LOAN_PLATFORM_KEYWORDS = [
     '融资租赁', '保理', '典当'
 ]
 
+# ============================================================
 # 第三方支付平台关键词
-THIRD_PARTY_PAYMENT_KEYWORDS = [
+# ============================================================
+
+THIRD_PARTY_PAYMENT_KEYWORDS: List[str] = [
     '支付宝', '微信', '财付通', '微信支付', '支付宝转账',
     '余额宝', '理财通', 'clouds', 'alipay', 'wechat',
     '京东支付', '云闪付', '银联', '快捷支付'
 ]
 
+# ============================================================
 # 疑似购房关键词
-PROPERTY_KEYWORDS = [
+# ============================================================
+
+PROPERTY_KEYWORDS: List[str] = [
     '房款', '购房', '首付', '按揭', '房地产', '置业',
     '商品房', '住房', '楼盘', '售楼', '房产', '契税'
 ]
 
+# ============================================================
 # 疑似购车关键词
-VEHICLE_KEYWORDS = [
+# ============================================================
+
+VEHICLE_KEYWORDS: List[str] = [
     '车款', '购车', '4s店', '汽车销售', '汽车', '车辆',
     '奔驰', '宝马', '奥迪', '特斯拉', '保时捷', '路虎'
 ]
 
+# ============================================================
 # 现金交易关键词
-CASH_KEYWORDS = [
+# ============================================================
+
+CASH_KEYWORDS: List[str] = [
     '取现', '存现', '现金存入', '现金支取', '支取现金', '存入现金',
     'ATM', '柜台存款', '柜台取款', '柜面取款', '柜面存款', '现钞'
 ]
 
+# ============================================================
 # 理财产品关键词（购买和赎回）
-WEALTH_MANAGEMENT_KEYWORDS = [
+# ============================================================
+
+WEALTH_MANAGEMENT_KEYWORDS: List[str] = [
     # 通用理财
     '理财', '理财产品', '理财购买', '理财赎回', '理财到期',
     '定期存款', '定存', '结构性存款', '大额存单',
@@ -194,61 +249,69 @@ WEALTH_MANAGEMENT_KEYWORDS = [
     '收益', '到期兑付', '结息', '产品赎回', '清算'
 ]
 
+# ============================================================
 # 理财产品购买关键词（支出方向）
-WEALTH_PURCHASE_KEYWORDS = [
+# ============================================================
+
+WEALTH_PURCHASE_KEYWORDS: List[str] = [
     '购买', '申购', '认购', '定投', '转入', '投资',
     '银行转证券', '银证转出', '理财购买', '基金申购'
 ]
 
+# ============================================================
 # 理财产品赎回关键词（收入方向）
-WEALTH_REDEMPTION_KEYWORDS = [
+# ============================================================
+
+WEALTH_REDEMPTION_KEYWORDS: List[str] = [
     '赎回', '到期', '兑付', '卖出', '转出', '支取',
     '证券转银行', '银证转入', '理财到期', '基金赎回',
     '收益', '分红', '利息'
 ]
 
-# ============== 检测阈值参数 ==============
+# ============================================================
+# 检测阈值参数（从YAML配置读取）
+# ============================================================
 
 # 大额现金阈值（元）- 可根据核查对象收入水平调整
-LARGE_CASH_THRESHOLD = 50000  # 5万元（默认值）
+LARGE_CASH_THRESHOLD: int = _get_config('large_cash', 'threshold', default=50000)
 
 # 动态阈值配置（根据个人年收入调整大额现金阈值）
-# 如果年收入超过阈值，则大额现金门槛相应提高
-DYNAMIC_THRESHOLD_CONFIG = {
-    'enabled': True,  # 是否启用动态阈值
-    'income_levels': {
-        500000: 100000,    # 年收入50万以上，大额阈值为10万
-        1000000: 200000,   # 年收入100万以上，大额阈值为20万
-        5000000: 500000,   # 年收入500万以上，大额阈值为50万
-    }
+DYNAMIC_THRESHOLD_CONFIG: Dict[str, Any] = {
+    'enabled': True,
+    'income_levels': _get_config('income_classification', 'income_levels', default={
+        500000: 100000,
+        1000000: 200000,
+        5000000: 500000,
+    })
 }
 
 # 数据质量阈值
-MAX_AMOUNT_THRESHOLD = 100000000  # 1亿元,超过则标记为异常
+MAX_AMOUNT_THRESHOLD: int = _get_config('validation', 'max_single_amount', default=100000000)
 
 # 分级阈值
-CASH_THRESHOLDS = {
-    'level_1': 10000,   # 1万元
-    'level_2': 50000,   # 5万元
-    'level_3': 100000,  # 10万元
-    'level_4': 500000   # 50万元
-}
+CASH_THRESHOLDS: Dict[str, int] = _get_config('large_cash', 'levels', default={
+    'level_1': 10000,
+    'level_2': 50000,
+    'level_3': 100000,
+    'level_4': 500000,
+})
 
 # 现金时空伴随检测参数
-CASH_TIME_WINDOW_HOURS = 48  # 时间窗口：48小时
-AMOUNT_TOLERANCE_RATIO = 0.05  # 金额容差：±5%
+CASH_TIME_WINDOW_HOURS: int = _get_config('cash_time_window', 'hours', default=48)
+AMOUNT_TOLERANCE_RATIO: float = _get_config('cash_time_window', 'amount_tolerance_ratio', default=0.05)
 
 # 固定频率检测参数
-FIXED_FREQUENCY_MIN_OCCURRENCES = 3  # 最少出现次数
-FIXED_FREQUENCY_DATE_TOLERANCE = 3   # 日期容差：±3天
-FIXED_FREQUENCY_AMOUNT_TOLERANCE = 0.1  # 金额容差:±10%
+FIXED_FREQUENCY_MIN_OCCURRENCES: int = _get_config('fixed_frequency', 'min_occurrences', default=3)
+FIXED_FREQUENCY_DATE_TOLERANCE: int = _get_config('fixed_frequency', 'date_tolerance', default=3)
+FIXED_FREQUENCY_AMOUNT_TOLERANCE: float = _get_config('fixed_frequency', 'amount_tolerance', default=0.1)
 
-# ============== 节假日与特殊时段配置 ==============
+# ============================================================
+# 节假日与特殊时段配置（从YAML配置读取）
+# ============================================================
 
 # 中国法定节假日（按年配置，支持多年）
-CHINESE_HOLIDAYS = {
+CHINESE_HOLIDAYS: Dict[int, List[Tuple[str, str, str]]] = {
     2024: [
-        # (开始日期, 结束日期, 节日名称)
         ('2024-01-01', '2024-01-01', '元旦'),
         ('2024-02-10', '2024-02-17', '春节'),
         ('2024-04-04', '2024-04-06', '清明节'),
@@ -277,49 +340,51 @@ CHINESE_HOLIDAYS = {
 }
 
 # 非工作时间定义（用于检测异常转账时间）
-NON_WORKING_HOURS_START = 20  # 晚8点
-NON_WORKING_HOURS_END = 8     # 早8点
+NON_WORKING_HOURS_START: int = 20
+NON_WORKING_HOURS_END: int = 8
 
 # 周末检测开关
-WEEKEND_DETECTION_ENABLED = True
+WEEKEND_DETECTION_ENABLED: bool = True
 
 # 第三方中转时间窗口（小时）
-THIRD_PARTY_RELAY_HOURS = 72
+THIRD_PARTY_RELAY_HOURS: int = 72
 
 # 金额拆分规避检测配置
-SPLIT_AMOUNT_THRESHOLD = 50000    # 5万元门槛
-SPLIT_DETECTION_COUNT = 3         # 连续3笔以上接近此金额
-SPLIT_AMOUNT_TOLERANCE = 0.02     # 金额容差2%（如49000-50000）
+SPLIT_AMOUNT_THRESHOLD: int = _get_config('structuring', 'min_large_amount', default=50000)
+SPLIT_DETECTION_COUNT: int = _get_config('structuring', 'min_split_count', default=3)
+SPLIT_AMOUNT_TOLERANCE: float = _get_config('structuring', 'amount_tolerance', default=0.02)
 
 # 整数金额偏好检测阈值
-ROUND_AMOUNT_THRESHOLD = 10000    # 1万元以上的整数
-ROUND_AMOUNT_MIN_COUNT = 5        # 至少5笔整数金额才算偏好
+ROUND_AMOUNT_THRESHOLD: int = _get_config('structuring', 'min_large_amount', default=10000)
+ROUND_AMOUNT_MIN_COUNT: int = 5
 
 # 吉利数尾号检测
-LUCKY_TAIL_NUMBERS = ['88', '66', '88888', '66666', '168', '888', '666']
+LUCKY_TAIL_NUMBERS: List[str] = ['88', '66', '88888', '66666', '168', '888', '666']
 
 # 节假日大额交易阈值（元）
-HOLIDAY_LARGE_AMOUNT_THRESHOLD = 50000  # 节假日期间5万以上视为大额
+HOLIDAY_LARGE_AMOUNT_THRESHOLD: int = _get_config('structuring', 'min_large_amount', default=50000)
 
 # 节假日检测时间窗口（新增）
-HOLIDAY_DETECTION_CONFIG = {
-    'days_before': 3,      # 节前3天（送礼高峰期）
-    'days_after': 2,       # 节后2天（回礼/谢礼）
-    'auto_detect_range': True,  # 是否根据数据自动检测时间范围
+HOLIDAY_DETECTION_CONFIG: Dict[str, Any] = {
+    'days_before': 3,
+    'days_after': 2,
+    'auto_detect_range': True,
 }
 
 # 房产购置匹配参数（新增）
-PROPERTY_MATCH_CONFIG = {
-    'time_window_months': 12,      # 匹配时间窗口：登记前后12个月
-    'cumulative_match': True,      # 是否支持累计金额匹配
-    'cumulative_tolerance': 0.2,   # 累计匹配容差：±20%
-    'single_match_tolerance': 0.1  # 单笔匹配容差：±10%
+PROPERTY_MATCH_CONFIG: Dict[str, Any] = {
+    'time_window_months': _get_config('validation', 'property_match', 'time_window_months', default=12),
+    'cumulative_match': _get_config('validation', 'property_match', 'cumulative_match', default=True),
+    'cumulative_tolerance': _get_config('validation', 'property_match', 'cumulative_tolerance', default=0.2),
+    'single_match_tolerance': _get_config('validation', 'property_match', 'single_match_tolerance', default=0.1),
 }
 
-# ============== 银行字段映射配置(支持真实银行数据) ==============
+# ============================================================
+# 银行字段映射配置(支持真实银行数据)
+# ============================================================
 
 # 真实银行流水字段映射
-BANK_FIELD_MAPPING = {
+BANK_FIELD_MAPPING: Dict[str, List[str]] = {
     'transaction_time': ['交易时间', '发生时间', '记账时间', '交易日期'],
     'transaction_amount': ['交易金额', '发生额', '金额'],
     'debit_credit_flag': ['借贷标志', '借贷', '收支标志'],
@@ -332,11 +397,14 @@ BANK_FIELD_MAPPING = {
     'transaction_id': ['交易流水号', '流水号', '交易序号', '业务流水号', '日志号']
 }
 
-# ============== Excel 列名统一映射配置 (铁律) ==============
+# ============================================================
+# Excel 列名统一映射配置 (铁律)
+# ============================================================
+
 # 【单一修改点】今后修改 Excel 列名只需改这一处，其他模块自动引用
 
 # 内部字段名 → Excel 显示名
-COLUMN_MAPPING = {
+COLUMN_MAPPING: Dict[str, str] = {
     'date': '交易时间',
     'income': '收入(元)',
     'expense': '支出(元)',
@@ -357,7 +425,7 @@ COLUMN_MAPPING = {
 }
 
 # Excel 列显示顺序
-COLUMN_ORDER = [
+COLUMN_ORDER: List[str] = [
     'date', 'income', 'expense', 'balance',
     'counterparty', 'description', 'category',
     '银行来源', 'account_number', 'is_cash',
@@ -367,25 +435,30 @@ COLUMN_ORDER = [
 
 # 读取 Excel 时的列名变体（用于兼容不同格式）
 # 按优先级排序，第一个是标准名称
-INCOME_COLUMN_VARIANTS = ['收入(元)', 'income', '收入', '贷方金额', '存入金额']
-EXPENSE_COLUMN_VARIANTS = ['支出(元)', 'expense', '支出', '借方金额', '转出金额']
-BALANCE_COLUMN_VARIANTS = ['余额(元)', 'balance', '余额', '账户余额', '当前余额']
-DATE_COLUMN_VARIANTS = ['交易时间', 'date', '交易日期', '发生时间', '记账时间']
-COUNTERPARTY_COLUMN_VARIANTS = ['交易对手', 'counterparty', '对方名称', '交易对方名称']
-DESCRIPTION_COLUMN_VARIANTS = ['交易摘要', 'description', '摘要', '用途', '附言']
-IS_CASH_COLUMN_VARIANTS = ['现金', 'is_cash']
-CATEGORY_COLUMN_VARIANTS = ['交易分类', 'category']
+INCOME_COLUMN_VARIANTS: List[str] = ['收入(元)', 'income', '收入', '贷方金额', '存入金额']
+EXPENSE_COLUMN_VARIANTS: List[str] = ['支出(元)', 'expense', '支出', '借方金额', '转出金额']
+BALANCE_COLUMN_VARIANTS: List[str] = ['余额(元)', 'balance', '余额', '账户余额', '当前余额']
+DATE_COLUMN_VARIANTS: List[str] = ['交易时间', 'date', '交易日期', '发生时间', '记账时间']
+COUNTERPARTY_COLUMN_VARIANTS: List[str] = ['交易对手', 'counterparty', '对方名称', '交易对方名称']
+DESCRIPTION_COLUMN_VARIANTS: List[str] = ['交易摘要', 'description', '摘要', '用途', '附言']
+IS_CASH_COLUMN_VARIANTS: List[str] = ['现金', 'is_cash']
+CATEGORY_COLUMN_VARIANTS: List[str] = ['交易分类', 'category']
 
-# ============== 去重配置 ==============
+# ============================================================
+# 去重配置
+# ============================================================
 
 # 去重时间容差(秒)
-DEDUP_TIME_TOLERANCE_SECONDS = 1
+DEDUP_TIME_TOLERANCE_SECONDS: int = 1
 
 # 去重关键字段
-DEDUP_KEYS = ['交易时间', '交易金额', '本方账号', '交易对方账号']
+DEDUP_KEYS: List[str] = ['交易时间', '交易金额', '本方账号', '交易对方账号']
 
-# ============== 交易分类配置 (自动打标) ==============
-TRANSACTION_CATEGORIES = {
+# ============================================================
+# 交易分类配置 (自动打标)
+# ============================================================
+
+TRANSACTION_CATEGORIES: Dict[str, Dict[str, Any]] = {
     '工资收入': {
         'keywords': ['工资', '代发薪', '奖金', '薪资', '补贴', '绩效', '年终奖', '劳务费', '稿费', 
                      '人才服务', '人力资源', '百旺金赋', '外包', '劳务派遣', '空间电源'], # 扩充发薪单位特征
@@ -411,7 +484,7 @@ TRANSACTION_CATEGORIES = {
         'priority': 50
     },
     '转账': {
-        'keywords': ['转账', '汇款', '往来', '划转', '朱明', '陈斌', '朱永平'], # 包含本人互转
+        'keywords': ['转账', '汇款', '往来', '划转'], # 包含本人互转
         'priority': 60
     },
     '第三方支付': {
@@ -426,77 +499,85 @@ TRANSACTION_CATEGORIES = {
 }
 
 # 疑似购房购车金额阈值（元）
-PROPERTY_THRESHOLD = 100000  # 10万元
-VEHICLE_THRESHOLD = 50000    # 5万元
+PROPERTY_THRESHOLD: int = _get_config('asset', 'large_amount_threshold', default=100000)
+VEHICLE_THRESHOLD: int = _get_config('asset', 'default_vehicle_value', default=50000)
 
-# ============== Excel字段映射配置 ==============
+# ============================================================
+# Excel字段映射配置
+# ============================================================
 
 # 支持的日期字段名（优先级从高到低）
-DATE_COLUMNS = [
+DATE_COLUMNS: List[str] = [
     '交易日期', '日期', '交易时间', '记账日期', '时间',
     'date', 'transaction_date', '发生日期'
 ]
 
 # 支持的摘要/备注字段名
-DESCRIPTION_COLUMNS = [
+DESCRIPTION_COLUMNS: List[str] = [
     '摘要', '备注', '交易摘要', '说明', '用途', '附言',
     'description', 'memo', 'remark', '交易说明'
 ]
 
 # 支持的收入字段名
-INCOME_COLUMNS = [
+INCOME_COLUMNS: List[str] = [
     '收入', '收入金额', '贷方', '贷方金额', '转入',
     'income', 'credit', 'deposit', '入账金额'
 ]
 
 # 支持的支出字段名
-EXPENSE_COLUMNS = [
+EXPENSE_COLUMNS: List[str] = [
     '支出', '支出金额', '借方', '借方金额', '转出',
     'expense', 'debit', 'withdrawal', '支取金额'
 ]
 
 # 支持的对手方字段名
-COUNTERPARTY_COLUMNS = [
+COUNTERPARTY_COLUMNS: List[str] = [
     '对手方', '交易对象', '对方户名', '对方账号', '收款方',
     '付款方', 'counterparty', 'opponent', '对手名称'
 ]
 
 # 支持的余额字段名
-BALANCE_COLUMNS = [
+BALANCE_COLUMNS: List[str] = [
     '余额', '账户余额', '当前余额', 'balance', '结余'
 ]
 
-# ============== 文件路径配置 ==============
+# ============================================================
+# 文件路径配置
+# ============================================================
 
 # 输出目录
-DATA_DIR = './data'
-OUTPUT_DIR = './output'  # 输出根目录
+DATA_DIR: str = './data'
+OUTPUT_DIR: str = './output'
 
 # 输出文件名
-OUTPUT_EXCEL_FILE = '资金核查底稿.xlsx'
-OUTPUT_REPORT_FILE = '核查结果分析报告.docx'
-OUTPUT_LOG_FILE = 'audit_system.log'
+OUTPUT_EXCEL_FILE: str = '资金核查底稿.xlsx'
+OUTPUT_REPORT_FILE: str = '核查结果分析报告.docx'
+OUTPUT_LOG_FILE: str = 'audit_system.log'
 
 # PDF线索文件关键词（用于自动识别）
-CLUE_FILE_KEYWORDS = ['线索', '举报', '信访', 'clue', 'tip']
+CLUE_FILE_KEYWORDS: List[str] = ['线索', '举报', '信访', 'clue', 'tip']
 
-# ============== 日志配置 ==============
+# ============================================================
+# 日志配置
+# ============================================================
 
-LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-LOG_DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
-LOG_LEVEL = 'INFO'
+LOG_FORMAT: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+LOG_DATE_FORMAT: str = '%Y-%m-%d %H:%M:%S'
+LOG_LEVEL: str = 'INFO'
 
 # 日志轮转配置
-LOG_MAX_BYTES = 10 * 1024 * 1024  # 10MB - 单个日志文件最大大小
-LOG_BACKUP_COUNT = 5               # 保留的备份文件数量 (audit_system.log.1 ~ .5)
+LOG_MAX_BYTES: int = 10 * 1024 * 1024  # 10MB - 单个日志文件最大大小
+LOG_BACKUP_COUNT: int = 5               # 保留的备份文件数量 (audit_system.log.1 ~ .5)
 
-# ============== 报告模板配置 ==============
+# ============================================================
+# 报告模板配置
+# ============================================================
 
 # 公文报告标题
-REPORT_TITLE = '核查结果分析报告'
+REPORT_TITLE: str = '核查结果分析报告'
 
 # 报告章节
-REPORT_SECTIONS = [
+REPORT_SECTIONS: List[str] = [
     '一、基本情况',
     '二、个人资产分析',
     '三、公司资金流向',
@@ -505,20 +586,22 @@ REPORT_SECTIONS = [
 ]
 
 # 疑点风险等级
-RISK_LEVELS = {
+RISK_LEVELS: Dict[str, str] = {
     'high': '高风险',
     'medium': '中风险',
     'low': '低风险',
     'info': '信息提示'
 }
 
-# ============== 数据质量检查 ==============
+# ============================================================
+# 数据质量检查
+# ============================================================
 
 # 必需字段
-REQUIRED_FIELDS = ['date', 'description']
+REQUIRED_FIELDS: List[str] = ['date', 'description']
 
 # 允许的日期格式
-DATE_FORMATS = [
+DATE_FORMATS: List[str] = [
     '%Y-%m-%d',
     '%Y/%m/%d',
     '%Y.%m.%d',
@@ -528,118 +611,123 @@ DATE_FORMATS = [
     '%Y%m%d'
 ]
 
-# ============== 集中式阈值配置（2026-01-09 新增）==============
-# 将分散在各模块中的硬编码数值集中管理，便于调整
+# ============================================================
+# 中式阈值配置（从YAML配置读取）
+# ============================================================
 
 # --- 资产分析阈值 ---
-ASSET_LARGE_AMOUNT_THRESHOLD = 50000      # 资产分析中的大额交易阈值（5万元）
-DEFAULT_VEHICLE_VALUE = 200000            # 车辆默认估值（20万元/辆）
+ASSET_LARGE_AMOUNT_THRESHOLD: int = _get_config('asset', 'large_amount_threshold', default=50000)
+DEFAULT_VEHICLE_VALUE: int = _get_config('asset', 'default_vehicle_value', default=200000)
 
 # --- 数据验证阈值 ---
-VALIDATION_MAX_SINGLE_AMOUNT = 10000000   # 单笔交易异常阈值（1000万元）
-VALIDATION_PROPERTY_EXPENSE_MIN = 10000   # 房产验证最低支出阈值（1万元）
+VALIDATION_MAX_SINGLE_AMOUNT: int = _get_config('validation', 'max_single_amount', default=100000000)
+VALIDATION_PROPERTY_EXPENSE_MIN: int = _get_config('validation', 'property_expense_min', default=10000)
 
 # --- 收入分析阈值 ---
-INCOME_MIN_AMOUNT = 1000                  # 收入分析最低金额（1000元）
-INCOME_REGULAR_MIN = 3000                 # 规律性非工资收入最低金额（3000元）
-INCOME_MEAN_AMOUNT_MIN = 2000             # 规律收入均值下限（2000元）
-INCOME_MEAN_AMOUNT_MAX = 80000            # 规律收入均值上限（8万元）
-INCOME_UNKNOWN_SOURCE_MIN = 10000         # 来源不明收入最低金额（1万元）
-INCOME_LARGE_PERSONAL_MIN = 20000         # 个人大额转入最低金额（2万元）
-INCOME_HIGH_RISK_MIN = 50000              # 高风险收入最低金额（5万元）
-INCOME_VERY_LARGE_MIN = 100000            # 非常大额收入阈值（10万元）
+INCOME_MIN_AMOUNT: int = _get_config('income_analysis', 'income_min_amount', default=1000)
+INCOME_REGULAR_MIN: int = _get_config('income_analysis', 'regular_non_salary_min', default=3000)
+INCOME_MEAN_AMOUNT_MIN: int = _get_config('income_analysis', 'mean_amount_min', default=2000)
+INCOME_MEAN_AMOUNT_MAX: int = _get_config('income_analysis', 'mean_amount_max', default=80000)
+INCOME_UNKNOWN_SOURCE_MIN: int = _get_config('income_analysis', 'unknown_source_min', default=10000)
+INCOME_LARGE_PERSONAL_MIN: int = _get_config('income_analysis', 'large_personal_min', default=20000)
+INCOME_HIGH_RISK_MIN: int = _get_config('income_analysis', 'high_risk_min', default=50000)
+INCOME_VERY_LARGE_MIN: int = _get_config('income_analysis', 'very_large_min', default=100000)
 
 # --- 可视化显示阈值 ---
-DISPLAY_AMOUNT_THRESHOLD = 10000          # 显示金额阈值（1万元，小于此值不显示）
+DISPLAY_AMOUNT_THRESHOLD: int = _get_config('visualization', 'display_amount_threshold', default=10000)
 
 # --- 借贷分析阈值 ---
-LOAN_MIN_AMOUNT = 5000                    # 借贷分析最低金额（5000元）
-LOAN_HIGH_RISK_MIN = 10000                # 借贷高风险最低金额（1万元）
-LOAN_BIDIRECTIONAL_HIGH_RISK = 50000      # 双向往来高风险阈值（5万元）
-LOAN_INTEREST_FREE_MIN = 50000            # 疑似无息借贷最低金额（5万元）
-LOAN_LARGE_NO_REPAY_MIN = 100000          # 大额无还款最低金额（10万元）
-LOAN_TIME_WINDOW_DAYS = 365               # 借贷配对时间窗口（天）
-LOAN_AMOUNT_TOLERANCE = 0.2               # 借贷金额匹配容差（20%）
-LOAN_PAIR_RATIO_MIN = 1.0                 # 借贷配对比例下限
-LOAN_PAIR_RATIO_MAX = 1.5                 # 借贷配对比例上限
-LOAN_USURY_RATE = 36.0                    # 高利贷年化利率红线(%)
-LOAN_HIGH_RATE = 24.0                     # 高息借贷年化利率阈值(%)
-LOAN_LOW_RATE = 4.0                       # 低息借贷年化利率阈值(%)
+LOAN_MIN_AMOUNT: int = _get_config('loan', 'min_match_amount', default=5000)
+LOAN_HIGH_RISK_MIN: int = _get_config('loan', 'high_risk_min', default=10000)
+LOAN_BIDIRECTIONAL_HIGH_RISK: int = _get_config('loan', 'bidirectional_high_risk', default=50000)
+LOAN_INTEREST_FREE_MIN: int = _get_config('loan', 'interest_free_min', default=50000)
+LOAN_LARGE_NO_REPAY_MIN: int = _get_config('loan', 'large_no_repay_min', default=100000)
+LOAN_TIME_WINDOW_DAYS: int = _get_config('loan', 'time_window_days', default=365)
+LOAN_AMOUNT_TOLERANCE: float = _get_config('loan', 'amount_tolerance', default=0.2)
+LOAN_PAIR_RATIO_MIN: float = _get_config('loan', 'pair_ratio_min', default=1.0)
+LOAN_PAIR_RATIO_MAX: float = _get_config('loan', 'pair_ratio_max', default=1.5)
+LOAN_USURY_RATE: float = _get_config('loan', 'usury_rate', default=36.0)
+LOAN_HIGH_RATE: float = _get_config('loan', 'high_rate', default=24.0)
+LOAN_LOW_RATE: float = _get_config('loan', 'low_rate', default=4.0)
 
 # --- 规律性收入检测参数 ---
-REGULAR_INCOME_INTERVAL_MIN = 20          # 月度规律最小间隔（天）
-REGULAR_INCOME_INTERVAL_MAX = 40          # 月度规律最大间隔（天）
-REGULAR_INCOME_CV_THRESHOLD = 0.5         # 金额稳定性变异系数阈值
-REGULAR_REPAYMENT_CV_THRESHOLD = 0.3      # 规律还款变异系数阈值
+REGULAR_INCOME_INTERVAL_MIN: int = _get_config('income_analysis', 'regular_interval_min', default=20)
+REGULAR_INCOME_INTERVAL_MAX: int = _get_config('income_analysis', 'regular_interval_max', default=40)
+REGULAR_INCOME_CV_THRESHOLD: float = _get_config('income_analysis', 'cv_threshold', default=0.5)
+REGULAR_REPAYMENT_CV_THRESHOLD: float = _get_config('income_analysis', 'repayment_cv_threshold', default=0.3)
 
 # --- 理财识别参数 ---
-WEALTH_IDENTIFICATION_MIN_AMOUNT = 100000 # 理财识别最低金额（10万元）
-WEALTH_ROUND_AMOUNT_UNIT = 10000          # 整万金额单位
-WEALTH_PERIODIC_MIN_OCCURRENCES = 4       # 定期存款模式最少出现次数
-WEALTH_PERIODIC_INTERVAL_TOLERANCE = 15   # 定期存款间隔容差（天）
-WEALTH_PERIODIC_MIN_INTERVAL = 60         # 定期存款最小间隔（天）
-WEALTH_INCREASING_RATIO = 0.6             # 定期存款金额递增比例阈值
+WEALTH_IDENTIFICATION_MIN_AMOUNT: int = _get_config('income_analysis', 'wealth_identification_min_amount', default=100000)
+WEALTH_ROUND_AMOUNT_UNIT: int = _get_config('income_analysis', 'wealth_round_amount_unit', default=10000)
+WEALTH_PERIODIC_MIN_OCCURRENCES: int = _get_config('income_analysis', 'wealth_periodic_min_occurrences', default=4)
+WEALTH_PERIODIC_INTERVAL_TOLERANCE: int = _get_config('income_analysis', 'wealth_periodic_interval_tolerance', default=15)
+WEALTH_PERIODIC_MIN_INTERVAL: int = _get_config('income_analysis', 'wealth_periodic_min_interval', default=60)
+WEALTH_INCREASING_RATIO: float = _get_config('income_analysis', 'wealth_increasing_ratio', default=0.6)
 
 # --- 疑点检测阈值 ---
-SUSPICION_PROPERTY_HIGH_RISK = 1000000    # 房产高风险阈值（100万元）
-SUSPICION_VEHICLE_HIGH_RISK = 500000      # 车辆高风险阈值（50万元）
-SUSPICION_LUCKY_NUMBER_MIN = 1000         # 吉利数检测最低金额（1000元）
+SUSPICION_PROPERTY_HIGH_RISK: int = _get_config('suspicion', 'medium_high_amount', default=1000000)
+SUSPICION_VEHICLE_HIGH_RISK: int = _get_config('suspicion', 'medium_high_amount', default=500000)
+SUSPICION_LUCKY_NUMBER_MIN: int = _get_config('suspicion', 'medium_high_amount', default=1000)
 
 # --- 资金穿透阈值 ---
-PENETRATION_MIN_AMOUNT = 10000            # 资金穿透最低金额（1万元）
+PENETRATION_MIN_AMOUNT: int = _get_config('fund_penetration', 'min_amount', default=10000)
 
 # --- 报告生成阈值 ---
-REPORT_CAR_PAYMENT_MIN = 10000            # 报告中车辆支付最低金额（1万元）
-REPORT_HOUSE_PAYMENT_MIN = 50000          # 报告中房产支付最低金额（5万元）
+REPORT_CAR_PAYMENT_MIN: int = _get_config('report', 'car_payment_min', default=10000)
+REPORT_HOUSE_PAYMENT_MIN: int = _get_config('report', 'house_payment_min', default=50000)
 
 # Unit Conversion
-UNIT_WAN = 10000  # 1万
+UNIT_WAN: int = 10000  # 1万
 
 # --- 理财分析阈值 ---
-WEALTH_SIGNIFICANT_PROFIT = 100000        # 理财显著盈利阈值（10万元）
-WEALTH_SIGNIFICANT_REDEMPTION = 100000    # 理财显著赎回阈值（10万元）
+WEALTH_SIGNIFICANT_PROFIT: int = _get_config('income_analysis', 'wealth_significant_profit', default=100000)
+WEALTH_SIGNIFICANT_REDEMPTION: int = _get_config('income_analysis', 'wealth_significant_redemption', default=100000)
 
 # --- 分期受贿检测参数 (2026-01-11 新增) ---
-BRIBE_INSTALLMENT_MIN_OCCURRENCES = 4     # 分期受贿最少出现次数
-BRIBE_INSTALLMENT_MIN_AMOUNT = 10000      # 分期受贿最低金额（1万元/次）
-BRIBE_INSTALLMENT_MAX_CV = 0.5            # 分期受贿金额最大波动系数
-BRIBE_INSTALLMENT_MIN_MONTHS = 4          # 分期受贿最少跨月数
+BRIBE_INSTALLMENT_MIN_OCCURRENCES: int = _get_config('bribe_installment', 'min_occurrences', default=4)
+BRIBE_INSTALLMENT_MIN_AMOUNT: int = _get_config('bribe_installment', 'min_amount', default=10000)
+BRIBE_INSTALLMENT_MAX_CV: float = _get_config('bribe_installment', 'max_cv', default=0.5)
+BRIBE_INSTALLMENT_MIN_MONTHS: int = _get_config('bribe_installment', 'min_months', default=4)
 
 # --- 工资识别增强参数 (2026-01-11 新增) ---
-HIGH_FREQUENCY_SALARY_CAP = 100000        # 高频收入自动识别为工资的上限（10万/月）
-                                          # 超过此金额需人工复核，防止分期受贿被误识为工资
+HIGH_FREQUENCY_SALARY_CAP: int = _get_config('income_analysis', 'high_frequency_salary_cap', default=100000)
 
 # --- 风险评分权重 (2026-01-11 新增) ---
-RISK_SCORE_FUND_CYCLE = 15                # 资金闭环分值
-RISK_SCORE_FUND_CYCLE_MAX = 30            # 资金闭环上限
-RISK_SCORE_PASS_THROUGH = 25              # 过账通道分值
-RISK_SCORE_HUB_NODE = 10                  # 资金枢纽分值
-RISK_SCORE_HIGH_RISK_TX = 5               # 高风险交易基础分值
-RISK_SCORE_HIGH_RISK_TX_MAX = 20          # 高风险交易基础上限
-RISK_SCORE_AMOUNT_BONUS_PER_100K = 5      # 每10万金额加成分值
-RISK_SCORE_AMOUNT_BONUS_MAX = 20          # 金额加成上限
-RISK_SCORE_COMMUNITY = 10                 # 团伙分值
-RISK_SCORE_COMMUNITY_MAX = 20             # 团伙上限
-RISK_SCORE_PERIODIC_INCOME = 5            # 周期性收入分值（降低）
-RISK_SCORE_PERIODIC_INCOME_MAX = 10       # 周期性收入上限（降低）
-RISK_SCORE_SUDDEN_CHANGE = 3              # 资金突变分值（降低）
-RISK_SCORE_SUDDEN_CHANGE_MAX = 12         # 资金突变上限
-RISK_SCORE_DELAYED_TRANSFER = 10          # 固定延迟转账分值
-RISK_SCORE_DELAYED_TRANSFER_MAX = 20      # 固定延迟转账上限
-RISK_SCORE_LOAN = 8                       # 借贷关系分值
-RISK_SCORE_LOAN_MAX = 16                  # 借贷关系上限
+RISK_SCORE_FUND_CYCLE: int = _get_config('risk_score', 'fund_cycle', default=15)
+RISK_SCORE_FUND_CYCLE_MAX: int = _get_config('risk_score', 'fund_cycle_max', default=30)
+RISK_SCORE_PASS_THROUGH: int = _get_config('risk_score', 'pass_through', default=25)
+RISK_SCORE_HUB_NODE: int = _get_config('risk_score', 'hub_node', default=10)
+RISK_SCORE_HIGH_RISK_TX: int = _get_config('risk_score', 'high_risk_tx', default=5)
+RISK_SCORE_HIGH_RISK_TX_MAX: int = _get_config('risk_score', 'high_risk_tx_max', default=20)
+RISK_SCORE_AMOUNT_BONUS_PER_100K: int = _get_config('risk_score', 'amount_bonus_per_100k', default=5)
+RISK_SCORE_AMOUNT_BONUS_MAX: int = _get_config('risk_score', 'amount_bonus_max', default=20)
+RISK_SCORE_COMMUNITY: int = _get_config('risk_score', 'community', default=10)
+RISK_SCORE_COMMUNITY_MAX: int = _get_config('risk_score', 'community_max', default=20)
+RISK_SCORE_PERIODIC_INCOME: int = _get_config('risk_score', 'periodic_income', default=5)
+RISK_SCORE_PERIODIC_INCOME_MAX: int = _get_config('risk_score', 'periodic_income_max', default=10)
+RISK_SCORE_SUDDEN_CHANGE: int = _get_config('risk_score', 'sudden_change', default=3)
+RISK_SCORE_SUDDEN_CHANGE_MAX: int = _get_config('risk_score', 'sudden_change_max', default=12)
+RISK_SCORE_DELAYED_TRANSFER: int = _get_config('risk_score', 'delayed_transfer', default=10)
+RISK_SCORE_DELAYED_TRANSFER_MAX: int = _get_config('risk_score', 'delayed_transfer_max', default=20)
+RISK_SCORE_LOAN: int = _get_config('risk_score', 'loan', default=8)
+RISK_SCORE_LOAN_MAX: int = _get_config('risk_score', 'loan_max', default=16)
 
-# ========== 缓存配置 (2026-01-17 新增) ==========
-CACHE_VERSION = "3.2.0"                   # 缓存版本号 (v4.3.0)
-CACHE_VERSION_MAJOR = 3                   # 缓存主版本号（用于兼容性检查）
-CACHE_PATH = "./output/analysis_results_cache.json"  # 缓存文件路径
-GRAPH_MAX_NODES = 200                     # 图谱最大节点数
-GRAPH_MAX_EDGES = 500                     # 图谱最大边数
+# ============================================================
+# 缓存配置 (2026-01-17 新增)
+# ============================================================
 
-# ========== 刑侦级指标配置 (Phase 0.1 - 2026-01-18 新增) ==========
+CACHE_VERSION: str = "3.2.0"  # 升级版本号
+CACHE_VERSION_MAJOR: int = 3  # 缓存主版本号（用于兼容性检查）
+CACHE_PATH: str = "./output/analysis_cache.json"  # 缓存文件路径
+GRAPH_MAX_NODES: int = _get_config('cache', 'max_nodes', default=200)
+GRAPH_MAX_EDGES: int = _get_config('cache', 'max_edges', default=500)
+
+# ============================================================
+# 刑侦级指标配置 (Phase 0.1 - 2026-01-18 新增)
+# ============================================================
 
 # 敏感词列表 - 交易摘要中包含这些词需要标记
-SENSITIVE_KEYWORDS = [
+SENSITIVE_KEYWORDS: List[str] = [
     # 借贷类
     '还款', '借款', '借贷', '借条', '欠款',
     # 好处费类
@@ -655,7 +743,7 @@ SENSITIVE_KEYWORDS = [
 ]
 
 # 交易渠道分类关键词
-TRANSACTION_CHANNEL_KEYWORDS = {
+TRANSACTION_CHANNEL_KEYWORDS: Dict[str, List[str]] = {
     'ATM': ['ATM', '自助', '自动柜员', '自助终端', '自助设备'],
     '柜面': ['柜面', '柜台', '网点', '现钞', '柜员', '临柜'],
     '手机银行': ['手机银行', '掌银', 'APP', '移动银行', '手机支付'],
@@ -665,62 +753,73 @@ TRANSACTION_CHANNEL_KEYWORDS = {
 }
 
 # 余额归零判断阈值（元）
-BALANCE_ZERO_THRESHOLD = 10.0  # 余额低于此值视为"清空"
+BALANCE_ZERO_THRESHOLD: float = _get_config('data_quality', 'balance_zero_threshold', default=10.0)
 
-# ========== 行为特征检测配置 (Phase 0.2 - 2026-01-18 新增) ==========
+# ============================================================
+# 行为特征检测配置 (Phase 0.2 - 2026-01-18 新增)
+# ============================================================
 
 # 快进快出检测参数
-FAST_IN_OUT_TIME_WINDOW_HOURS = 24      # 时间窗口（小时）
-FAST_IN_OUT_MIN_AMOUNT = 10000          # 触发检测的最低金额（1万）
-FAST_IN_OUT_AMOUNT_RATIO = 0.8          # 进出金额匹配比例
+FAST_IN_OUT_TIME_WINDOW_HOURS: int = _get_config('behavioral', 'fast_in_out_time_window_hours', default=24)
+FAST_IN_OUT_MIN_AMOUNT: int = _get_config('behavioral', 'fast_in_out_min_amount', default=10000)
+FAST_IN_OUT_AMOUNT_RATIO: float = _get_config('behavioral', 'fast_in_out_amount_ratio', default=0.8)
 
 # 整进散出检测参数
-STRUCTURING_MIN_SPLIT_COUNT = 3         # 最少拆分笔数
-STRUCTURING_AMOUNT_TOLERANCE = 0.2      # 金额匹配容差（20%）
-STRUCTURING_TIME_WINDOW_DAYS = 7        # 时间窗口（天）
-STRUCTURING_MIN_LARGE_AMOUNT = 50000    # 大额交易阈值（5万）
+STRUCTURING_MIN_SPLIT_COUNT: int = _get_config('behavioral', 'structuring_min_split_count', default=3)
+STRUCTURING_AMOUNT_TOLERANCE: float = _get_config('behavioral', 'structuring_amount_tolerance', default=0.2)
+STRUCTURING_TIME_WINDOW_DAYS: int = _get_config('behavioral', 'structuring_time_window_days', default=7)
+STRUCTURING_MIN_LARGE_AMOUNT: int = _get_config('behavioral', 'structuring_min_large_amount', default=50000)
 
 # 休眠激活检测参数
-DORMANT_MIN_DAYS = 180                  # 休眠期最少天数
-DORMANT_ACTIVATION_MIN_AMOUNT = 50000   # 激活后大额交易阈值（5万）
+DORMANT_MIN_DAYS: int = _get_config('behavioral', 'dormant_min_days', default=180)
+DORMANT_ACTIVATION_MIN_AMOUNT: int = _get_config('behavioral', 'dormant_activation_min_amount', default=50000)
 
-# ========== P1 硬编码阈值迁移 (2026-01-18 新增) ==========
+# ============================================================
+# P1 硬编码阈值迁移 (2026-01-18 新增)
+# ============================================================
+
 # 以下阈值从各分析模块中迁移过来，便于统一管理和调整
 
 # --- 借贷分析阈值 (loan_analyzer.py) ---
-LOAN_MIN_MATCH_AMOUNT = 5000              # 借贷配对最低金额（5000元）
+LOAN_MIN_MATCH_AMOUNT: int = _get_config('loan', 'min_match_amount', default=5000)
 
 # --- 时序分析阈值 (time_series_analyzer.py) ---
-TIME_SERIES_HIGH_RISK_AMOUNT = 50000      # 周期性收入高风险阈值（5万元）
-SUDDEN_CHANGE_MIN_AMOUNT = 100000         # 资金突变检测最低金额（10万元）
+TIME_SERIES_HIGH_RISK_AMOUNT: int = _get_config('time_series', 'high_risk_amount', default=50000)
+SUDDEN_CHANGE_MIN_AMOUNT: int = _get_config('time_series', 'sudden_change_min_amount', default=100000)
 
 # --- 资金穿透阈值 (fund_penetration.py) ---
-FUND_FLOW_MIN_AMOUNT = 100000             # 过账通道最低流量（10万元）
-GRAPH_EDGE_MIN_AMOUNT = 10000             # 资金图边最低金额（1万元）
+FUND_FLOW_MIN_AMOUNT: int = _get_config('fund_penetration', 'min_amount', default=100000)
+GRAPH_EDGE_MIN_AMOUNT: int = _get_config('fund_penetration', 'edge_min_amount', default=10000)
 
 # --- 疑点检测阈值 (suspicion_detector.py) ---
-SUSPICION_MEDIUM_HIGH_AMOUNT = 50000      # 疑点检测中等风险阈值（5万元）
+SUSPICION_MEDIUM_HIGH_AMOUNT: int = _get_config('suspicion', 'medium_high_amount', default=50000)
 
 # --- 高频收入阈值 (financial_profiler.py) ---
 # 注意：HIGH_FREQUENCY_SALARY_CAP 已在前面定义，此处复用
 
-# ========== 调查单位配置 (Phase 4 - 2026-01-20 新增) ==========
+# ============================================================
+# 调查单位配置 (Phase 4 - 2026-01-20 新增)
+# ============================================================
+
 # 用于识别与调查单位的资金往来
-# 【重要】此列表应在具体案件分析时根据实际情况填写,代码库中保持为空
+# 【重要】此列表应在具体案件分析时根据实际情况填写
 # 【使用说明】:
 #   1. 在分析具体案件时,将调查单位的名称或关键词添加到此列表
 #   2. 支持部分匹配,例如添加"某某公司"可以匹配"某某公司有限公司"
 #   3. 系统会自动识别与这些单位的资金往来,并在报告中单独统计
-INVESTIGATION_UNIT_KEYWORDS = [
+INVESTIGATION_UNIT_KEYWORDS: List[str] = [
     # 示例: '某某公司', '某某单位', '某某部门'
     # 运行时请根据实际案件填写
 ]
 
-# ========== 账户过滤配置 (Phase 4 - 2026-01-20 新增) ==========
+# ============================================================
+# 虚户过滤配置 (Phase 4 - 2026-01-20 新增)
+# ============================================================
+
 # 用于过滤非真实银行卡账户
 # 这些关键词用于识别理财账户、基金账户等非银行卡账户
 # 在Phase 1的账户类型识别中作为补充判断依据
-BANK_ACCOUNT_EXCLUDE_KEYWORDS = [
+BANK_ACCOUNT_EXCLUDE_KEYWORDS: List[str] = [
     # 理财相关
     '理财', '理财产品', '理财账户', '财富账户', '财富管理',
     # 基金相关
@@ -732,39 +831,112 @@ BANK_ACCOUNT_EXCLUDE_KEYWORDS = [
     '代销', '托管', '存管', '备付金'
 ]
 
-# ========== 关联交易排查配置 (P1增强 - 2026-01-20 新增) ==========
+# ============================================================
+# 关联交易排查配置 (P1增强 - 2026-01-20 新增)
+# ============================================================
 
 # 敏感人员关键词 - 用于识别需要重点关注的交易对手
 # 【重要】此列表应在具体案件分析时根据实际情况填写
 # 【使用说明】:
 #   1. 在分析具体案件时,将需要重点关注的人员姓名添加到此列表
 #   2. 系统会自动识别与这些人员的资金往来,并标记为敏感交易
-SENSITIVE_PERSON_KEYWORDS = [
+SENSITIVE_PERSON_KEYWORDS: List[str] = [
     # 示例: '张三', '李四', '某某'
     # 运行时请根据实际案件填写
 ]
 
 # 敏感公司关键词 - 用于识别涉案公司或关联公司
-SENSITIVE_COMPANY_KEYWORDS = [
+SENSITIVE_COMPANY_KEYWORDS: List[str] = [
     # 示例: '某某公司', '某某企业'
     # 运行时请根据实际案件填写
 ]
 
 # 关联交易排查阈值
-RELATED_PARTY_CONFIG = {
+RELATED_PARTY_CONFIG: Dict[str, Any] = {
     # 高频交易阈值（同一对手方）
-    'high_frequency_count': 10,       # 交易次数超过此值视为高频
-    'high_frequency_period_days': 365, # 计算周期（天）
+    'high_frequency_count': 10,
+    'high_frequency_period_days': 365,
     
     # 大额交易阈值
-    'large_amount_single': 50000,     # 单笔大额阈值（5万）
-    'large_amount_total': 200000,     # 累计大额阈值（20万）
+    'large_amount_single': 50000,
+    'large_amount_total': 200000,
     
     # 异常时段交易
-    'off_hours_start': 22,            # 异常时段开始（22:00）
-    'off_hours_end': 6,               # 异常时段结束（06:00）
+    'off_hours_start': 22,
+    'off_hours_end': 6,
     
     # 敏感人员交易自动标记为高风险
     'sensitive_auto_high_risk': True,
 }
 
+# ============================================================
+# 资金沉淀分析配置 (Phase 0.3 - 2026-01-18 新增)
+# ============================================================
+
+FUND_RETENTION_PASS_THRESHOLD: float = _get_config('fund_retention', 'pass_through_threshold', default=0.1)
+FUND_RETENTION_LOW_THRESHOLD: float = _get_config('fund_retention', 'low_retention_threshold', default=0.3)
+FUND_RETENTION_HIGH_THRESHOLD: float = _get_config('fund_retention', 'high_retention_threshold', default=0.9)
+
+# ============================================================
+# 数据质量评分配置 (Phase 0.3 - 2026-01-18 新增)
+# ============================================================
+
+DATA_QUALITY_ISSUE_PENALTY: int = _get_config('data_quality', 'issue_penalty', default=20)
+DATA_QUALITY_WARNING_PENALTY: int = _get_config('data_quality', 'warning_penalty', default=5)
+DATA_QUALITY_HIGH_NULL_PENALTY: int = _get_config('data_quality', 'high_null_penalty', default=10)
+DATA_QUALITY_EXCELLENT_SCORE: int = _get_config('data_quality', 'quality_levels', 'excellent', default=90)
+DATA_QUALITY_GOOD_SCORE: int = _get_config('data_quality', 'quality_levels', 'good', default=70)
+DATA_QUALITY_MEDIUM_SCORE: int = _get_config('data_quality', 'quality_levels', 'medium', default=50)
+DATA_QUALITY_POOR_SCORE: int = _get_config('data_quality', 'quality_levels', 'poor', default=0)
+
+# ============================================================
+# 报告生成配置 (从YAML读取)
+# ============================================================
+
+REPORT_USE_GLOBAL_TIMESTAMP: bool = _get_config('report', 'use_global_timestamp', default=True)
+REPORT_TIMESTAMP_FORMAT: str = _get_config('report', 'timestamp_format', default='%Y年%m月%d日 %H:%M:%S')
+REPORT_ISO_TIMESTAMP_FORMAT: str = _get_config('report', 'iso_timestamp_format', default='%Y-%m-%dT%H:%M:%S')
+
+# ============================================================
+# 性能优化配置 (从YAML读取)
+# ============================================================
+
+PERFORMANCE_BATCH_SIZE: int = _get_config('performance', 'batch_size', default=10000)
+PERFORMANCE_CHUNK_SIZE: int = _get_config('performance', 'chunk_size', default=10000)
+PERFORMANCE_ENABLE_MEMORY_OPTIMIZATION: bool = _get_config('performance', 'enable_memory_optimization', default=True)
+PERFORMANCE_ENABLE_BATCH_PROCESSING: bool = _get_config('performance', 'enable_batch_processing', default=True)
+
+# ============================================================
+# 理财识别参数 (从YAML读取)
+# ============================================================
+
+WEALTH_PERIODIC_MIN_OCCURRENCES: int = _get_config('income_analysis', 'wealth_periodic_min_occurrences', default=4)
+WEALTH_PERIODIC_INTERVAL_TOLERANCE: int = _get_config('income_analysis', 'wealth_periodic_interval_tolerance', default=15)
+WEALTH_PERIODIC_MIN_INTERVAL: int = _get_config('income_analysis', 'wealth_periodic_min_interval', default=60)
+WEALTH_INCREASING_RATIO: float = _get_config('income_analysis', 'wealth_increasing_ratio', default=0.6)
+
+# ============================================================
+# 可视化配置 (从YAML读取)
+# ============================================================
+
+VISUALIZATION_MAX_NODES: int = _get_config('visualization', 'max_nodes', default=200)
+VISUALIZATION_MAX_EDGES: int = _get_config('visualization', 'max_edges', default=500)
+VISUALIZATION_DISPLAY_AMOUNT_THRESHOLD: int = _get_config('visualization', 'display_amount_threshold', default=10000)
+
+# ============================================================
+# 调查单位配置 (从YAML读取)
+# ============================================================
+
+INVESTIGATION_UNIT_KEYWORDS: List[str] = _get_config('investigation_unit', 'keywords', default=[])
+
+# ============================================================
+# 敏感人员配置 (从YAML读取)
+# ============================================================
+
+SENSITIVE_PERSON_KEYWORDS: List[str] = _get_config('sensitive_person', 'keywords', default=[])
+
+# ============================================================
+# 敏感公司配置 (从YAML读取)
+# ============================================================
+
+SENSITIVE_COMPANY_KEYWORDS: List[str] = _get_config('sensitive_company', 'keywords', default=[])

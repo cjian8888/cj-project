@@ -1996,18 +1996,26 @@ def _analyze_cash_withdrawal_pattern(df: pd.DataFrame) -> Dict:
 
 def classify_income_sources(income_df: pd.DataFrame, entity_name: str = None) -> Dict:
     """
-    对收入来源进行分类
+    对收入来源进行分类（增强版 - 2026-01-25）
     
-    【Phase 4 - 2026-01-20】
+    【Phase 4 - 2026-01-20】【增强 - 2026-01-25】
     功能:
     1. 将收入分为三类: 合法收入、不明收入、可疑收入
     2. 计算各类占比
     3. 提供详细的分类依据
     
     分类标准:
-    - **合法收入**: 工资、政府机关转账、已知合规来源
+    - **合法收入**: 工资、政府机关转账、社保公积金、理财收益、投资收益等
     - **不明收入**: 个人转账、无法识别来源的收入
     - **可疑收入**: 借贷平台、高频小额、疑似洗钱模式
+    
+    【增强内容】
+    1. 新增社保/公积金识别
+    2. 新增养老金/职业年金识别
+    3. 新增投资收益识别（利息、分红、股息）
+    4. 新增代发工资识别
+    5. 新增退款/冲正识别
+    6. 优化理财收益识别
     
     Args:
         income_df: 收入交易DataFrame (只包含收入记录)
@@ -2025,7 +2033,7 @@ def classify_income_sources(income_df: pd.DataFrame, entity_name: str = None) ->
         - unknown_details: 不明收入明细列表
         - suspicious_details: 可疑收入明细列表
     """
-    logger.info('正在对收入来源进行分类...')
+    logger.info('正在对收入来源进行分类（增强版）...')
     
     if income_df.empty:
         logger.warning('无收入数据,无法分类')
@@ -2053,6 +2061,17 @@ def classify_income_sources(income_df: pd.DataFrame, entity_name: str = None) ->
     # 总收入
     total_income = income_df['income'].sum()
     
+    # 【新增】增强的合法收入关键词
+    ENHANCED_LEGITIMATE_KEYWORDS = {
+        'salary': ['工资', '奖金', '绩效', '代发', 'PAY', '薪酬', '薪资', '劳务费', '劳务报酬'],
+        'government': ['财政局', '公积金', '社保', '房改资金', '民政局', '人社局', '社保局', '公积金中心', '住房资金'],
+        'pension': ['职业年金', '养老金', '退休金', '退休费', '离休费'],
+        'investment': ['理财赎回', '基金赎回', '利息', '收益', '分红', '股息', '红利', '利息收入', '存款利息'],
+        'refund': ['退款', '冲正', '退回', '撤销', '退货退款'],
+        'insurance': ['保险理赔', '保险金', '赔款', '理赔款'],
+        'welfare': ['补贴', '补助', '抚恤金', '救济金', '低保', '困难补助']
+    }
+    
     # 遍历每笔收入进行分类
     for _, row in income_df.iterrows():
         amount = row['income']
@@ -2072,23 +2091,59 @@ def classify_income_sources(income_df: pd.DataFrame, entity_name: str = None) ->
         # 分类逻辑
         classified = False
         
-        # 1. 合法收入识别
-        # 1.1 工资性收入
-        if utils.contains_keywords(description, config.SALARY_STRONG_KEYWORDS):
+        # 1. 合法收入识别（增强版）
+        
+        # 1.1 工资性收入（包含代发工资）
+        if utils.contains_keywords(description, ENHANCED_LEGITIMATE_KEYWORDS['salary']):
             legitimate_income += amount
             record['reason'] = '工资性收入'
             legitimate_details.append(record)
             classified = True
         
-        # 1.2 政府机关转账
-        elif utils.contains_keywords(counterparty, config.GOVERNMENT_AGENCY_KEYWORDS) or \
-             utils.contains_keywords(description, config.GOVERNMENT_AGENCY_KEYWORDS):
+        # 1.2 政府机关转账（包含社保、公积金）
+        elif utils.contains_keywords(counterparty, ENHANCED_LEGITIMATE_KEYWORDS['government']) or \
+             utils.contains_keywords(description, ENHANCED_LEGITIMATE_KEYWORDS['government']):
             legitimate_income += amount
-            record['reason'] = '政府机关转账'
+            record['reason'] = '政府机关转账（社保/公积金）'
             legitimate_details.append(record)
             classified = True
         
-        # 1.3 已知发薪单位
+        # 1.3 养老金/职业年金
+        elif utils.contains_keywords(description, ENHANCED_LEGITIMATE_KEYWORDS['pension']):
+            legitimate_income += amount
+            record['reason'] = '养老金/职业年金'
+            legitimate_details.append(record)
+            classified = True
+        
+        # 1.4 投资收益（利息、分红、股息）
+        elif utils.contains_keywords(description, ENHANCED_LEGITIMATE_KEYWORDS['investment']):
+            legitimate_income += amount
+            record['reason'] = '投资收益'
+            legitimate_details.append(record)
+            classified = True
+        
+        # 1.5 退款/冲正
+        elif utils.contains_keywords(description, ENHANCED_LEGITIMATE_KEYWORDS['refund']):
+            legitimate_income += amount
+            record['reason'] = '退款/冲正'
+            legitimate_details.append(record)
+            classified = True
+        
+        # 1.6 保险理赔
+        elif utils.contains_keywords(description, ENHANCED_LEGITIMATE_KEYWORDS['insurance']):
+            legitimate_income += amount
+            record['reason'] = '保险理赔'
+            legitimate_details.append(record)
+            classified = True
+        
+        # 1.7 福利补贴
+        elif utils.contains_keywords(description, ENHANCED_LEGITIMATE_KEYWORDS['welfare']):
+            legitimate_income += amount
+            record['reason'] = '福利补贴'
+            legitimate_details.append(record)
+            classified = True
+        
+        # 1.8 已知发薪单位
         elif utils.contains_keywords(counterparty, config.KNOWN_SALARY_PAYERS) or \
              utils.contains_keywords(counterparty, config.USER_DEFINED_SALARY_PAYERS):
             legitimate_income += amount
@@ -2096,14 +2151,14 @@ def classify_income_sources(income_df: pd.DataFrame, entity_name: str = None) ->
             legitimate_details.append(record)
             classified = True
         
-        # 1.4 人力资源公司
+        # 1.9 人力资源公司
         elif utils.contains_keywords(counterparty, config.HR_COMPANY_KEYWORDS):
             legitimate_income += amount
             record['reason'] = '人力资源公司'
             legitimate_details.append(record)
             classified = True
         
-        # 1.5 理财赎回/收益
+        # 1.10 理财赎回/收益（原有逻辑保留）
         elif utils.contains_keywords(description, config.WEALTH_REDEMPTION_KEYWORDS):
             legitimate_income += amount
             record['reason'] = '理财赎回/收益'
@@ -2127,6 +2182,12 @@ def classify_income_sources(income_df: pd.DataFrame, entity_name: str = None) ->
                     record['reason'] = '第三方支付大额转入'
                     suspicious_details.append(record)
                     classified = True
+                else:
+                    # 小额第三方支付转入，归类为不明收入
+                    unknown_income += amount
+                    record['reason'] = '第三方支付小额转入'
+                    unknown_details.append(record)
+                    classified = True
             
             # 2.3 现金大额存入
             elif utils.contains_keywords(description, config.CASH_KEYWORDS):
@@ -2134,6 +2195,12 @@ def classify_income_sources(income_df: pd.DataFrame, entity_name: str = None) ->
                     suspicious_income += amount
                     record['reason'] = '大额现金存入'
                     suspicious_details.append(record)
+                    classified = True
+                else:
+                    # 小额现金存入，归类为不明收入
+                    unknown_income += amount
+                    record['reason'] = '小额现金存入'
+                    unknown_details.append(record)
                     classified = True
         
         # 3. 不明收入(兜底分类)

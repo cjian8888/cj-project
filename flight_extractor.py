@@ -105,7 +105,7 @@ def parse_flight_file(file_path: str) -> Dict:
             try:
                 xls = pd.ExcelFile(file_path, engine='xlrd')
             except Exception:
-                xls = pd.ExcelFile(file_path)
+                xls = pd.ExcelFile(file_path, engine='openpyxl')
         
         for sheet_name in xls.sheet_names:
             df = pd.read_excel(xls, sheet_name=sheet_name)

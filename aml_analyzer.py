@@ -35,9 +35,9 @@ def extract_aml_data(data_dir: str) -> Dict[str, Dict]:
     Returns:
         Dict[str, Dict]: 按身份证号分组的反洗钱数据
         {
-            "310102196504096017": {
-                "name": "施灵",
-                "id_number": "310102196504096017",
+            "310102XXXXXXXXXXXX": {
+                "name": "甲某某",
+                "id_number": "310102XXXXXXXXXXXX",
                 "has_result": True,
                 "payment_accounts": [...],  # 支付机构账户
                 "payment_transactions": [...],  # 支付机构交易明细
@@ -103,10 +103,15 @@ def parse_aml_file(file_path: str) -> Dict[str, Dict]:
         Dict[str, Dict]: 按身份证号分组的数据
     """
     result = {}
+    source_file = os.path.basename(file_path)
+    
+    # 验证文件
+    if not _validate_excel_file(file_path):
+        logger.warning(f"Excel文件验证失败，跳过: {source_file}")
+        return result
     
     try:
         xls = pd.ExcelFile(file_path)
-        source_file = os.path.basename(file_path)
         
         # 解析查询摘要获取人员列表
         persons = _parse_query_summary(xls, source_file)
@@ -156,6 +161,18 @@ def _parse_query_summary(xls: pd.ExcelFile, source_file: str) -> List[Dict]:
             try:
                 df = pd.read_excel(xls, sheet_name=sheet_name)
                 
+                # 检查是否为空
+                if df.empty:
+                    logger.warning(f"查询摘要sheet为空: {sheet_name}")
+                    continue
+                
+                # 检查必需列是否存在
+                required_columns = ["姓名", "证件号码"]
+                missing_columns = [col for col in required_columns if col not in df.columns]
+                if missing_columns:
+                    logger.warning(f"查询摘要sheet缺少必需列 {missing_columns}: {sheet_name}")
+                    continue
+                
                 for idx, row in df.iterrows():
                     name = row.get("姓名")
                     id_number = row.get("证件号码")
@@ -169,7 +186,8 @@ def _parse_query_summary(xls: pd.ExcelFile, source_file: str) -> List[Dict]:
                             "source_file": source_file
                         })
             except Exception as e:
-                logger.warning(f"解析查询摘要失败: {e}")
+                logger.warning(f"解析查询摘要失败 {sheet_name}: {e}")
+                continue
     
     return persons
 
@@ -185,9 +203,14 @@ def _parse_payment_accounts(xls: pd.ExcelFile, source_file: str) -> List[Dict]:
                 df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
                 
                 if df.empty:
+                    logger.debug(f"支付机构账户sheet为空: {sheet_name}")
                     continue
                 
-                # 解析格式：第一行可能是人员标识如"(一)施灵"
+                if df.shape[0] < 2:  # 至少需要2行（表头+数据）
+                    logger.debug(f"支付机构账户sheet数据不足: {sheet_name}")
+                    continue
+                
+                # 解析格式：第一行可能是人员标识如"(一)甲某某"
                 current_person = None
                 current_id = None
                 header_row = None
@@ -252,6 +275,11 @@ def _parse_payment_transactions(xls: pd.ExcelFile, source_file: str) -> List[Dic
                 df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
                 
                 if df.empty:
+                    logger.debug(f"支付机构交易明细sheet为空: {sheet_name}")
+                    continue
+                
+                if df.shape[0] < 2:  # 至少需要2行（表头+数据）
+                    logger.debug(f"支付机构交易明细sheet数据不足: {sheet_name}")
                     continue
                 
                 current_person = None
@@ -301,6 +329,59 @@ def _parse_payment_transactions(xls: pd.ExcelFile, source_file: str) -> List[Dic
                 logger.warning(f"解析支付机构交易明细失败: {e}")
     
     return transactions
+
+
+def _validate_excel_file(file_path: str) -> bool:
+    """
+    验证Excel文件是否有效
+    
+    Args:
+        file_path: Excel文件路径
+        
+    Returns:
+        bool: 文件有效返回True，否则返回False
+    """
+    # 检查文件是否存在
+    if not os.path.exists(file_path):
+        logger.error(f"文件不存在: {file_path}")
+        return False
+    
+    # 检查文件大小（空文件或过小文件可能损坏）
+    file_size = os.path.getsize(file_path)
+    if file_size == 0:
+        logger.warning(f"文件为空: {file_path}")
+        return False
+    
+    # 检查文件扩展名
+    if not file_path.lower().endswith(('.xlsx', '.xls')):
+        logger.warning(f"文件格式不支持: {file_path}")
+        return False
+    
+    # 尝试打开文件验证格式
+    try:
+        with open(file_path, 'rb') as f:
+            header = f.read(8)
+            # xlsx文件应该以PK开头（ZIP格式）
+            if not header.startswith(b'PK'):
+                logger.warning(f"文件格式不正确（非xlsx格式）: {file_path}")
+                return False
+    except Exception as e:
+        logger.error(f"读取文件头失败 {file_path}: {e}")
+        return False
+    
+    # 尝试用pandas打开验证
+    try:
+        xls = pd.ExcelFile(file_path)
+        # 检查是否有sheet
+        if not xls.sheet_names:
+            logger.warning(f"Excel文件没有sheet: {file_path}")
+            return False
+        xls.close()
+    except Exception as e:
+        logger.error(f"Excel文件打开失败 {file_path}: {e}")
+        return False
+    
+    return True
 
 
 def _find_aml_dir(data_dir: str) -> Optional[str]:

@@ -20,13 +20,14 @@
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║                        🚨🚨🚨 数据来源铁律 🚨🚨🚨                              ║
 # ╠══════════════════════════════════════════════════════════════════════════════╣
+# ║  详见 docs/data_processing_principle.md                                      ║
 # ║                                                                              ║
-# ║  输出目录下的 `cleaned_data` 文件夹（及其子目录 `个人` 和 `公司`）中的         ║
-# ║  Excel 文件，是本系统【唯一合法】的数据来源。                                 ║
+# ║  【三层数据源架构】按优先级获取数据:                                          ║
+# ║    1. output/cleaned_data/ - 标准化银行流水 (唯一原始数据来源)                ║
+# ║    2. output/analysis_cache/ - JSON缓存 (程序首选)                           ║
+# ║    3. output/analysis_results/资金核查底稿.xlsx - Excel核查底稿 (回退补充)    ║
 # ║                                                                              ║
-# ║  任何 API 接口（无论是概览、列表还是图谱），都必须基于这里面的数据进行         ║
-# ║  读取和计算。【严禁】直接读取原始输入目录 (`data/`) 或依赖内存中未落盘的       ║
-# ║  临时变量。                                                                  ║
+# ║  【严禁】直接读取原始输入目录 (`data/`) 或依赖内存中未落盘的临时变量          ║
 # ║                                                                              ║
 # ║  执行口号：Excel 里有什么，界面就显示什么；Excel 里没有的，界面绝不许瞎编。   ║
 # ║                                                                              ║
@@ -94,6 +95,9 @@ import ml_analyzer
 import time_series_analyzer
 import clue_aggregator
 
+# 导入 API 输入验证模块
+import api_validators
+
 # 🆕 Phase 6: P0级外部数据解析模块
 import pboc_account_extractor
 import aml_analyzer
@@ -115,6 +119,9 @@ import railway_extractor
 import flight_extractor
 
 # ==================== 日志配置 ====================
+
+# 导入性能监控
+import logging_config
 
 # 初始化模块级日志记录器
 logger = utils.setup_logger(__name__)
@@ -301,14 +308,22 @@ analysis_state = AnalysisState()
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
+        # 【诊断】添加连接统计
+        self.connection_count = 0
+        self.disconnect_count = 0
+        self.broadcast_failures = 0
     
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
+        self.connection_count += 1
+        logger.debug(f"[WebSocket] 新连接建立，当前连接数: {len(self.active_connections)} (总计: {self.connection_count})")
     
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+            self.disconnect_count += 1
+            logger.debug(f"[WebSocket] 连接断开，当前连接数: {len(self.active_connections)} (总计断开: {self.disconnect_count})")
     
     async def broadcast(self, message: dict):
         # 【P1修复】遍历连接副本，避免并发修改；发送失败时移除失效连接
@@ -316,12 +331,22 @@ class ConnectionManager:
         for connection in self.active_connections.copy():
             try:
                 await connection.send_json(message)
-            except Exception:
+            except Exception as e:
+                # 【诊断】记录具体的异常类型
+                self.broadcast_failures += 1
+                logger.debug(f"[WebSocket] 广播失败 (异常类型: {type(e).__name__}): {e}")
                 dead_connections.append(connection)
         
         # 清理失效连接
         for conn in dead_connections:
             self.disconnect(conn)
+        
+        # 【诊断】定期报告连接统计
+        if self.broadcast_failures > 0 and self.broadcast_failures % 10 == 0:
+            logger.warning(f"[WebSocket] 广播失败统计: {self.broadcast_failures} 次, "
+                         f"当前连接: {len(self.active_connections)}, "
+                         f"总计连接: {self.connection_count}, "
+                         f"总计断开: {self.disconnect_count}")
 
 manager = ConnectionManager()
 
@@ -792,6 +817,8 @@ def _get_cleaned_data_stats(output_dir: str = None) -> Dict[str, Any]:
     【快速统计接口】获取 cleaned_data 目录的统计摘要（不加载全部数据到内存）
     
     用于 /api/analysis/stats 等接口快速返回概览数据
+    
+    【内存优化】使用分批加载和及时释放内存的方式，避免大数据集时内存占用过高
     """
     if output_dir is None:
         output_dir = _current_config.get("outputDirectory", "./output")
@@ -806,10 +833,18 @@ def _get_cleaned_data_stats(output_dir: str = None) -> Dict[str, Any]:
     total_income = 0.0
     total_expense = 0.0
     
+    # 【内存优化】分批处理，避免同时加载所有数据到内存
+    batch_size = 10  # 每批最多处理10个文件
+    
     # 扫描个人目录
     if os.path.exists(person_dir):
-        for filename in os.listdir(person_dir):
-            if filename.endswith('.xlsx') and not filename.startswith('~$'):
+        person_files = [f for f in os.listdir(person_dir)
+                      if f.endswith('.xlsx') and not f.startswith('~$')]
+        
+        # 分批处理
+        for i in range(0, len(person_files), batch_size):
+            batch = person_files[i:i + batch_size]
+            for filename in batch:
                 entity_name = filename.replace('_合并流水.xlsx', '').replace('_合并流水.xls', '')
                 persons.append(entity_name)
                 
@@ -824,13 +859,26 @@ def _get_cleaned_data_stats(output_dir: str = None) -> Dict[str, Any]:
                     expense_col = _find_column(df, EXPENSE_COLUMN_VARIANTS)
                     total_income += _safe_sum_amount(df, income_col)
                     total_expense += _safe_sum_amount(df, expense_col)
+                    
+                    # 【内存优化】及时释放DataFrame
+                    del df
                 except Exception as e:
                     logging.warning(f"[Stats] 读取失败 {filepath}: {e}")
+            
+            # 【内存优化】每批处理后强制垃圾回收
+            if i + batch_size < len(person_files):
+                import gc
+                gc.collect()
     
     # 扫描公司目录
     if os.path.exists(company_dir):
-        for filename in os.listdir(company_dir):
-            if filename.endswith('.xlsx') and not filename.startswith('~$'):
+        company_files = [f for f in os.listdir(company_dir)
+                       if f.endswith('.xlsx') and not f.startswith('~$')]
+        
+        # 分批处理
+        for i in range(0, len(company_files), batch_size):
+            batch = company_files[i:i + batch_size]
+            for filename in batch:
                 entity_name = filename.replace('_合并流水.xlsx', '').replace('_合并流水.xls', '')
                 companies.append(entity_name)
                 
@@ -844,8 +892,16 @@ def _get_cleaned_data_stats(output_dir: str = None) -> Dict[str, Any]:
                     expense_col = _find_column(df, EXPENSE_COLUMN_VARIANTS)
                     total_income += _safe_sum_amount(df, income_col)
                     total_expense += _safe_sum_amount(df, expense_col)
+                    
+                    # 【内存优化】及时释放DataFrame
+                    del df
                 except Exception as e:
                     logging.warning(f"[Stats] 读取失败 {filepath}: {e}")
+            
+            # 【内存优化】每批处理后强制垃圾回收
+            if i + batch_size < len(company_files):
+                import gc
+                gc.collect()
     
     return {
         "corePersonCount": len(persons),
@@ -1048,6 +1104,23 @@ async def start_analysis(config: AnalysisConfig, background_tasks: BackgroundTas
     """启动分析任务"""
     if analysis_state.status == "running":
         raise HTTPException(status_code=400, detail="分析已在运行中")
+    
+    # 【P0修复】添加输入验证
+    try:
+        # 验证输入目录
+        api_validators.PathValidator.validate_directory_exists(config.inputDirectory)
+        
+        # 验证输出目录（可写）
+        api_validators.PathValidator.validate_writable_directory(config.outputDirectory)
+        
+        # 验证现金阈值
+        api_validators.NumericValidator.validate_cash_threshold(config.cashThreshold)
+        
+        # 验证时间窗口
+        api_validators.NumericValidator.validate_time_window(config.timeWindow)
+        
+    except api_validators.ValidationError as e:
+        raise api_validators.handle_validation_error(e)
     
     # 在后台任务中运行分析
     background_tasks.add_task(run_analysis, config)
@@ -1307,13 +1380,15 @@ async def open_folder(request: OpenFolderRequest):
     import subprocess
     import platform
     
-    output_dir = _current_config.get("outputDirectory", "./output")
-    target_path = os.path.abspath(os.path.join(output_dir, request.relativePath))
-    
-    # 安全检查：确保路径在输出目录内
-    abs_output = os.path.abspath(output_dir)
-    if not target_path.startswith(abs_output):
-        raise HTTPException(status_code=400, detail="非法路径")
+    # 【P0修复】使用验证器进行路径验证，防止路径遍历攻击
+    try:
+        output_dir = _current_config.get("outputDirectory", "./output")
+        target_path = api_validators.PathValidator.validate_relative_path(
+            request.relativePath,
+            output_dir
+        )
+    except api_validators.ValidationError as e:
+        raise api_validators.handle_validation_error(e)
     
     if not os.path.exists(target_path):
         raise HTTPException(status_code=404, detail=f"路径不存在: {request.relativePath}")
@@ -1583,6 +1658,8 @@ async def get_graph_data():
     【铁律实现】数据来源：
     1. 优先使用分析时预计算的缓存数据 (graphData)
     2. 兜底从 cleaned_data 成品目录读取，严禁读取原始 data/ 目录
+    
+    【内存优化】添加内存监控和分批处理，避免大数据集时内存占用过高
     """
     try:
         # 检查是否有分析结果
@@ -1598,6 +1675,13 @@ async def get_graph_data():
         # 【铁律修复】兜底：从 cleaned_data 成品目录读取，而非原始目录
         logger.warning("[graph-data] 缓存未命中，从 cleaned_data 成品目录读取...")
         
+        # 【内存优化】检查内存使用情况
+        import psutil
+        import gc
+        process = psutil.Process()
+        initial_memory = process.memory_info().rss / 1024 / 1024  # MB
+        logger.info(f"[graph-data] 初始内存使用: {initial_memory:.1f} MB")
+        
         # 从成品目录加载数据
         cleaned_data, metadata = _load_cleaned_data()
         all_persons = metadata["persons"]
@@ -1605,6 +1689,14 @@ async def get_graph_data():
         
         if not cleaned_data:
             raise HTTPException(status_code=404, detail="cleaned_data 目录为空，请先运行后端分析生成成品数据")
+        
+        # 【内存优化】检查加载后的内存使用
+        loaded_memory = process.memory_info().rss / 1024 / 1024  # MB
+        logger.info(f"[graph-data] 加载数据后内存: {loaded_memory:.1f} MB (增加 {loaded_memory - initial_memory:.1f} MB)")
+        
+        # 【内存优化】如果内存增长超过500MB，发出警告
+        if loaded_memory - initial_memory > 500:
+            logger.warning(f"[graph-data] 内存增长较大 ({loaded_memory - initial_memory:.1f} MB)，建议使用缓存")
         
         # 计算资金流向统计
         flow_stats = flow_visualizer._calculate_flow_stats(cleaned_data, all_persons)
@@ -1622,10 +1714,14 @@ async def get_graph_data():
         sampled_edges.sort(key=lambda x: x.get('value', 0), reverse=True)
         sampled_edges = sampled_edges[:max_edges]
         
-        # 释放内存
-        del cleaned_data, flow_stats
+        # 【内存优化】释放大对象
+        del cleaned_data, flow_stats, nodes, edges, sorted_nodes
         import gc
         gc.collect()
+        
+        # 【内存优化】检查释放后的内存使用
+        final_memory = process.memory_info().rss / 1024 / 1024  # MB
+        logger.info(f"[graph-data] 释放后内存: {final_memory:.1f} MB (释放 {loaded_memory - final_memory:.1f} MB)")
         
         loan_results = analysis_state.results.get("analysisResults", {}).get("loan", {})
         income_results = analysis_state.results.get("analysisResults", {}).get("income", {})
@@ -1675,6 +1771,8 @@ async def get_graph_data():
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket 连接端点，用于实时日志推送"""
     await manager.connect(websocket)
+    
+    # 【P0修复】使用 try-finally 确保连接一定被清理
     try:
         # 发送当前状态
         await websocket.send_json({
@@ -1682,13 +1780,47 @@ async def websocket_endpoint(websocket: WebSocket):
             "data": analysis_state.to_dict()
         })
         
+        # 【新增】心跳超时检测
+        last_ping_time = datetime.now()
+        heartbeat_timeout = 300  # 5分钟无心跳则断开
+        
         while True:
-            # 保持连接活跃
-            data = await websocket.receive_text()
-            if data == "ping":
-                await websocket.send_text("pong")
-    except WebSocketDisconnect:
+            try:
+                # 设置超时，避免无限等待
+                data = await asyncio.wait_for(
+                    websocket.receive_text(),
+                    timeout=30.0  # 30秒无消息则超时
+                )
+                
+                if data == "ping":
+                    await websocket.send_text("pong")
+                    last_ping_time = datetime.now()
+                    logger.debug(f"[WebSocket] 收到心跳，连接活跃")
+                
+                # 检查心跳超时
+                if (datetime.now() - last_ping_time).total_seconds() > heartbeat_timeout:
+                    logger.warning(f"[WebSocket] 心跳超时，断开连接")
+                    break
+                    
+            except asyncio.TimeoutError:
+                # 超时不是致命错误，继续等待
+                logger.debug(f"[WebSocket] 接收超时，继续等待...")
+                continue
+            except WebSocketDisconnect as e:
+                logger.info(f"[WebSocket] 客户端主动断开: code={e.code}, reason={e.reason}")
+                break
+            except Exception as e:
+                # 【P0修复】捕获所有异常，确保连接被清理
+                logger.error(f"[WebSocket] 连接异常 (类型: {type(e).__name__}): {e}")
+                break
+                
+    except Exception as e:
+        # 外层异常处理（如连接建立失败）
+        logger.error(f"[WebSocket] 连接建立失败 (类型: {type(e).__name__}): {e}")
+    finally:
+        # 【P0修复】确保连接一定被清理，防止内存泄漏
         manager.disconnect(websocket)
+        logger.debug(f"[WebSocket] 连接已清理")
 
 # ==================== 分析任务 ====================
 
@@ -1715,15 +1847,23 @@ def run_analysis(analysis_config: AnalysisConfig):
         analysis_state.update(progress=5, phase="扫描数据目录...")
         logger.info(f"扫描数据目录: {data_dir}")
         
+        import time
+        phase1_start = time.time()
+        
         categorized_files = file_categorizer.categorize_files(data_dir)
         persons = list(categorized_files['persons'].keys())
         companies = list(categorized_files['companies'].keys())
         
+        phase1_duration = (time.time() - phase1_start) * 1000
+        logging_config.log_performance(logger, "阶段1-扫描文件", phase1_duration,
+                                    person_count=len(persons), company_count=len(companies))
         logger.info(f"发现 {len(persons)} 个个人, {len(companies)} 个企业")
         
         # 阶段 2: 数据清洗（【铁律】保存到 cleaned_data 目录作为成品数据）
         analysis_state.update(progress=15, phase="数据清洗与标准化...")
         logger.info("开始数据清洗...")
+        
+        phase2_start = time.time()
         
         cleaned_data = {}
         output_dirs = create_output_directories(output_dir)
@@ -1766,19 +1906,33 @@ def run_analysis(analysis_config: AnalysisConfig):
             progress = 15 + int(25 * (len(persons) + i + 1) / total_entities)
             analysis_state.update(progress=progress)
         
+        phase2_duration = (time.time() - phase2_start) * 1000
+        logging_config.log_performance(logger, "阶段2-数据清洗", phase2_duration,
+                                    entity_count=len(cleaned_data))
         logger.info(f"清洗完成，共 {len(cleaned_data)} 个实体数据已保存到 cleaned_data 目录")
         
         # 阶段 3: 线索提取
         analysis_state.update(progress=45, phase="提取关联线索...")
+        
+        phase3_start = time.time()
         clue_persons, clue_companies = data_extractor.extract_all_clues(data_dir)
         all_persons = list(set(persons + clue_persons))
         all_companies = list(set(companies + clue_companies))
+        
+        phase3_duration = (time.time() - phase3_start) * 1000
+        logging_config.log_performance(logger, "阶段3-线索提取", phase3_duration,
+                                    clue_persons=len(clue_persons), clue_companies=len(clue_companies))
         
         # 阶段 4: 资金画像
         analysis_state.update(progress=55, phase="执行资金画像分析...")
         logger.info("生成资金画像...")
         
+        phase4_start = time.time()
+        
         profiles = {}
+        # 🆕 构建身份证号到人名的映射表（用于外部数据整合）
+        id_to_name_map = {}
+        
         for entity, df in cleaned_data.items():
             try:
                 profiles[entity] = financial_profiler.generate_profile_report(df, entity)
@@ -1788,17 +1942,46 @@ def run_analysis(analysis_config: AnalysisConfig):
                         profiles[entity]['bank_accounts'] = financial_profiler.extract_bank_accounts(df)
                     except Exception as e:
                         logger.warning(f"提取 {entity} 银行账户失败: {e}")
+                    
+                    # 🆕 Phase B: 从银行账户的source_file中提取身份证号，构建映射
+                    try:
+                        accounts = profiles[entity].get('bank_accounts', [])
+                        for acc in accounts:
+                            src_file = acc.get('source_file', '') if isinstance(acc, dict) else ''
+                            if src_file:
+                                # 从文件名提取身份证号，格式如 "滕雳_310230196811100267_..."
+                                import re
+                                id_match = re.search(r'_(\d{17}[\dXx])_', src_file)
+                                if id_match:
+                                    id_number = id_match.group(1).upper()
+                                    id_to_name_map[id_number] = entity
+                                    break  # 只需找到一个即可
+                    except Exception as e:
+                        logger.debug(f"提取 {entity} 身份证号失败: {e}")
             except Exception as e:
                 logger.warning(f"生成 {entity} 画像失败: {e}")
+        
+        logger.info(f"身份证号映射表构建完成: {len(id_to_name_map)} 个人员")
+        
+        phase4_duration = (time.time() - phase4_start) * 1000
+        logging_config.log_performance(logger, "阶段4-资金画像", phase4_duration,
+                                    profile_count=len(profiles))
         
         # 阶段 5: 疑点检测
         analysis_state.update(progress=70, phase="检测可疑交易模式...")
         logger.info("执行疑点碰撞检测...")
         
+        phase5_start = time.time()
         suspicions = suspicion_detector.run_all_detections(cleaned_data, all_persons, all_companies)
+        
+        phase5_duration = (time.time() - phase5_start) * 1000
+        logging_config.log_performance(logger, "阶段5-疑点检测", phase5_duration,
+                                    suspicion_count=len(suspicions.get("direct_transfers", [])))
         
         # 阶段 6: 高级分析
         analysis_state.update(progress=80, phase="运行高级分析模块...")
+        
+        phase6_start = time.time()
         
         analysis_results = {}
         
@@ -1880,37 +2063,72 @@ def run_analysis(analysis_config: AnalysisConfig):
             except Exception as e:
                 logger.warning(f"线索汇总失败: {e}")
         
-        # 🆕 Phase 5: 计算家庭汇总
+        # 🆕 Phase 5: 家庭关系分析(应用户主原则)
+        # 使用 build_family_units() 按户籍正确分组家庭,而非将所有人混在一起
         try:
-            import family_finance
-            family_summary_result = family_finance.calculate_family_summary(profiles, all_persons)
-            analysis_results["family_summary"] = family_summary_result
-            logger.info(f"家庭汇总计算完成: {len(family_summary_result.get('family_members', []))} 个家庭成员")
-        except Exception as e:
-            logger.warning(f"家庭汇总计算失败: {e}")
-        
-        # 🆕 BUG-01/BUG-02 修复：生成完整的家庭关系数据
-        # family_analyzer 生成 family_tree, family_units, family_relations
-        try:
+            # 1. 使用新的 build_family_units 函数(应用户主原则+跨户籍推断)
+            family_units_list = family_analyzer.build_family_units(all_persons, data_dir)
+            
+            # 2. 同时保留原有的 family_tree 和 family_summary 兼容旧代码
             family_tree = family_analyzer.build_family_tree(all_persons, data_dir)
             family_summary = family_analyzer.get_family_summary(family_tree)
             
-            # 构建完整的家庭数据结构（供 primary_targets_service 使用）
+            # 3. 构建完整的家庭数据结构
             analysis_results["family_tree"] = family_tree
-            analysis_results["family_units"] = family_summary  # 包含配偶、子女、父母等分类
-            analysis_results["family_relations"] = family_tree  # 原始家族成员数据
+            analysis_results["family_units"] = family_summary  # 兼容旧格式
+            analysis_results["family_relations"] = family_tree
+            analysis_results["family_units_v2"] = family_units_list  # 新格式: 按户主分组的家庭列表
             
-            logger.info(f"家庭关系分析完成: {len(family_tree)} 个核心人员")
+            # 4. 计算每个家庭的财务汇总(使用户主原则)
+            import family_finance
+            all_family_summaries = {}
+            for unit in family_units_list:
+                householder = unit.get('householder', '')
+                members = unit.get('members', [])
+                if members:
+                    try:
+                        unit_summary = family_finance.calculate_family_summary(profiles, members)
+                        unit_summary['householder'] = householder
+                        unit_summary['extended_relatives'] = unit.get('extended_relatives', [])
+                        all_family_summaries[householder] = unit_summary
+                    except Exception as e:
+                        logger.warning(f"计算 {householder} 家庭汇总失败: {e}")
+            
+            # 5. 合并所有家庭汇总(用于向后兼容)
+            if all_family_summaries:
+                # 选择第一个家庭作为主要 family_summary(向后兼容)
+                first_householder = list(all_family_summaries.keys())[0]
+                analysis_results["family_summary"] = all_family_summaries[first_householder]
+                analysis_results["all_family_summaries"] = all_family_summaries
+                logger.info(f"家庭分析完成: {len(family_units_list)} 个家庭")
+                for hh, summary in all_family_summaries.items():
+                    members = summary.get('family_members', [])
+                    logger.info(f"  - {hh} 家庭: {len(members)} 人 {members}")
+            else:
+                # 降级: 使用旧逻辑
+                family_summary_result = family_finance.calculate_family_summary(profiles, all_persons)
+                analysis_results["family_summary"] = family_summary_result
+                logger.info(f"家庭汇总计算完成(fallback): {len(family_summary_result.get('family_members', []))} 人")
+            
         except Exception as e:
-            logger.warning(f"家庭关系分析失败: {e}")
+            logger.warning(f"家庭分析失败: {e}")
+            import traceback
+            traceback.print_exc()
             # 提供空结构避免后续代码出错
             analysis_results["family_tree"] = {}
             analysis_results["family_units"] = {}
             analysis_results["family_relations"] = {}
+            analysis_results["family_summary"] = {}
+        
+        phase6_duration = (time.time() - phase6_start) * 1000
+        logging_config.log_performance(logger, "阶段6-高级分析", phase6_duration,
+                                    module_count=len(analysis_results))
         
         # 🆕 Phase 6: P0级外部数据解析
         analysis_state.update(progress=85, phase="解析外部数据源...")
         logger.info("开始解析 P0 级外部数据源...")
+        
+        phase7_start = time.time()  # P0级外部数据解析开始
         
         # 6.1 人民银行银行账户
         try:
@@ -1976,19 +2194,28 @@ def run_analysis(analysis_config: AnalysisConfig):
         except Exception as e:
             logger.warning(f"银行账户信息解析失败: {e}")
         
+        phase7_duration = (time.time() - phase7_start) * 1000
+        logging_config.log_performance(logger, "阶段7-P0外部数据解析", phase7_duration,
+                                    pboc_accounts=len(analysis_results.get("pboc_accounts", {})),
+                                    aml_alerts=len(suspicions.get("aml_alerts", [])))
+        
         # 🆕 Phase 7: P1级外部数据解析
         analysis_state.update(progress=87, phase="解析 P1 级外部数据源...")
         logger.info("开始解析 P1 级外部数据源...")
+        
+        phase8_start = time.time()
         
         # 7.1 公安部机动车
         try:
             vehicle_data = vehicle_extractor.extract_vehicle_data(data_dir)
             analysis_results["vehicle_data"] = vehicle_data
             logger.info(f"公安部机动车解析完成: {len(vehicle_data)} 个主体")
-            # 将车辆信息添加到个人画像
+            # 将车辆信息添加到个人画像（使用身份证号到人名的映射）
             for person_id, vehicles in vehicle_data.items():
-                if person_id in profiles:
-                    profiles[person_id]["vehicles"] = vehicles
+                person_name = id_to_name_map.get(person_id, person_id)  # 尝试映射，否则用原ID
+                if person_name in profiles:
+                    profiles[person_name]["vehicles"] = vehicles
+                    logger.info(f"已将车辆信息写入 {person_name}（身份证号 {person_id}）：{len(vehicles)} 辆")
         except Exception as e:
             logger.warning(f"公安部机动车解析失败: {e}")
         
@@ -2042,9 +2269,16 @@ def run_analysis(analysis_config: AnalysisConfig):
         except Exception as e:
             logger.warning(f"统一社会信用代码解析失败: {e}")
         
+        phase8_duration = (time.time() - phase8_start) * 1000
+        logging_config.log_performance(logger, "阶段8-P1外部数据解析", phase8_duration,
+                                    vehicle_count=len(analysis_results.get("vehicle_data", {})),
+                                    wealth_count=len(analysis_results.get("wealth_product_data", {})))
+        
         # 🆕 Phase 8: P2级外部数据解析
         analysis_state.update(progress=88, phase="解析 P2 级外部数据源...")
         logger.info("开始解析 P2 级外部数据源...")
+        
+        phase9_start = time.time()
         
         # 8.1 保险信息
         try:
@@ -2111,10 +2345,11 @@ def run_analysis(analysis_config: AnalysisConfig):
             analysis_results["railway_data"] = railway_data
             analysis_results["railway_timeline"] = railway_timeline
             logger.info(f"铁路票面信息解析完成: {len(railway_data)} 个主体")
-            # 将铁路出行记录添加到个人画像
+            # 将铁路出行记录添加到个人画像（使用身份证号到人名的映射）
             for person_id, data in railway_data.items():
-                if person_id in profiles:
-                    profiles[person_id]["railway_tickets"] = data.get("tickets", [])
+                person_name = id_to_name_map.get(person_id, person_id)
+                if person_name in profiles:
+                    profiles[person_name]["railway_tickets"] = data.get("tickets", [])
         except Exception as e:
             logger.warning(f"铁路票面信息解析失败: {e}")
         
@@ -2125,18 +2360,26 @@ def run_analysis(analysis_config: AnalysisConfig):
             analysis_results["flight_data"] = flight_data
             analysis_results["flight_timeline"] = flight_timeline
             logger.info(f"中航信航班进出港信息解析完成: {len(flight_data)} 个主体")
-            # 将航班记录添加到个人画像
+            # 将航班记录添加到个人画像（使用身份证号到人名的映射）
             for person_id, data in flight_data.items():
-                if person_id in profiles:
-                    profiles[person_id]["flight_records"] = {
+                person_name = id_to_name_map.get(person_id, person_id)
+                if person_name in profiles:
+                    profiles[person_name]["flight_records"] = {
                         "completed": data.get("completed", []),
                         "cancelled": data.get("cancelled", [])
                     }
         except Exception as e:
             logger.warning(f"中航信航班进出港信息解析失败: {e}")
+        
+        phase9_duration = (time.time() - phase9_start) * 1000
+        logging_config.log_performance(logger, "阶段9-P2外部数据解析", phase9_duration,
+                                    insurance_count=len(analysis_results.get("insurance_data", {})),
+                                    flight_count=len(analysis_results.get("flight_data", {})))
 
         analysis_state.update(progress=90, phase="生成审计报告...")
         logger.info("生成分析报告...")
+        
+        phase10_start = time.time()
         
         try:
             report_generator.generate_excel_workbook(
@@ -2297,6 +2540,10 @@ def run_analysis(analysis_config: AnalysisConfig):
             logger.info(f"公文报告已生成: {official_report_path}")
         except Exception as e:
             logger.warning(f"公文报告生成失败: {e}")
+        
+        phase10_duration = (time.time() - phase10_start) * 1000
+        logging_config.log_performance(logger, "阶段10-生成报告", phase10_duration,
+                                    report_count=1)
         
         analysis_state.update(progress=98, phase="保存分析缓存...")
         # ==================== TXT 报告生成完成 ====================
@@ -3000,6 +3247,25 @@ async def generate_report(request: ReportGenerateRequest):
     - assets: 个人资产
     - risks: 可疑交易 (包含资金闭环、现金时空伴随)
     """
+    # 【P0修复】添加输入验证
+    try:
+        # 验证报告格式
+        api_validators.ReportValidator.validate_format(request.format)
+        
+        # 验证报告章节
+        api_validators.ReportValidator.validate_sections(request.sections)
+        
+        # 验证案件名称
+        if request.case_name:
+            api_validators.StringValidator.validate_case_name(request.case_name)
+        
+        # 验证文号
+        if request.doc_number:
+            api_validators.StringValidator.validate_doc_number(request.doc_number)
+        
+    except api_validators.ValidationError as e:
+        raise api_validators.handle_validation_error(e)
+    
     try:
         # 1. 加载分析结果
         cached_results, status_msg = _load_analysis_cache()
@@ -3312,7 +3578,7 @@ async def get_investigation_subjects():
     返回:
     {
         "success": true,
-        "persons": ["张三", "李四"],
+        "persons": ["甲某某", "乙某某"],
         "companies": ["公司A", "公司B"]
     }
     """
@@ -3347,7 +3613,7 @@ async def generate_investigation_report(request: InvestigationReportRequest):
     
     请求体:
     {
-        "primary_person": "张三",
+        "primary_person": "甲某某",
         "doc_number": "国监查 [2026] 第 12345 号",
         "case_background": "依据相关线索...",
         "include_companies": ["公司A", "公司B"]
@@ -3365,6 +3631,22 @@ async def generate_investigation_report(request: InvestigationReportRequest):
         }
     }
     """
+    # 【P0修复】添加输入验证
+    try:
+        # 验证核查对象
+        api_validators.StringValidator.validate_person_name(request.primary_person)
+        
+        # 验证文号
+        if request.doc_number:
+            api_validators.StringValidator.validate_doc_number(request.doc_number)
+        
+        # 验证包含的公司列表
+        if request.include_companies:
+            api_validators.ConfigValidator.validate_include_companies(request.include_companies)
+        
+    except api_validators.ValidationError as e:
+        raise api_validators.handle_validation_error(e)
+    
     try:
         from investigation_report_builder import load_investigation_report_builder
         
@@ -3618,6 +3900,22 @@ async def save_primary_targets(request: PrimaryTargetsRequest):
     """
     保存归集配置
     """
+    # 【P0修复】添加输入验证
+    try:
+        # 验证分析单元
+        api_validators.ConfigValidator.validate_analysis_units(request.analysis_units)
+        
+        # 验证包含的公司列表
+        if request.include_companies:
+            api_validators.ConfigValidator.validate_include_companies(request.include_companies)
+        
+        # 验证文号
+        if request.doc_number:
+            api_validators.StringValidator.validate_doc_number(request.doc_number)
+        
+    except api_validators.ValidationError as e:
+        raise api_validators.handle_validation_error(e)
+    
     try:
         from report_config.primary_targets_schema import (
             PrimaryTargetsConfig,

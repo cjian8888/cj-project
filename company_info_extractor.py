@@ -36,9 +36,9 @@ def extract_company_info(data_dir: str) -> Dict[str, Dict]:
         Dict[str, Dict]: 按统一社会信用代码分组的企业信息
         {
             "913100006076928753": {
-                "company_name": "上海派尼科技实业股份有限公司",
+                "company_name": "XX科技有限公司",
                 "uscc": "913100006076928753",
-                "legal_representative": "汪平良",
+                "legal_representative": "甲某某",
                 "registered_capital": 3829.6,
                 "capital_currency": "人民币",
                 "establishment_date": "1993-05-26",

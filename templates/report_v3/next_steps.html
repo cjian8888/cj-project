@@ -1,0 +1,18 @@
+{#
+下一步工作计划章节模板 - 适配 _build_v4_next_steps 返回的数据结构
+
+数据结构：
+report.next_steps = [
+{action_type, target_name, action_text, priority}, ...
+]
+#}
+
+{% if report.next_steps and report.next_steps|length > 0 %}
+<ol class="indent-list">
+    {% for step in report.next_steps %}
+    <li>{{ step.action_text }}</li>
+    {% endfor %}
+</ol>
+{% else %}
+<p>暂无下一步工作计划。</p>
+{% endif %}

@@ -69,6 +69,15 @@ Agent 必须按顺序执行以下 Checkpoints。
 1.  **路径安全**: `output_dir` 等路径是否使用了 `os.path.abspath` 强制转为绝对路径？（防止 Windows/Mac 路径差异导致的 404）。
 2.  **关键词配置**: 检查 `INVESTIGATION_UNIT_KEYWORDS`（调查单位）和 `BANK_ACCOUNT_EXCLUDE_KEYWORDS`（虚拟账户排除）是否已配置。
 
+### Checkpoint 6: 户主优先原则 (Householder Priority)
+**Target**: `investigation_report_builder.py`, `family_analyzer.py`
+**背景**: 2026-01-25 发现滕雳未被正确识别为施灵家庭成员，原因是代码仅使用 `extended_relatives`（推断关系）而非 `family_units_v2`（真实户籍数据）。
+**Audit Rules**:
+1.  **户籍数据优先**: `_build_families_from_cache()` 必须**优先**使用 `family_units_v2`（来自公安部同户人数据），只有未覆盖的人员才回退到 `extended_relatives` 推断。
+2.  **关系获取优先级**: `_infer_relation_from_members()` 必须**优先**从 `family_units_v2.member_details` 获取真实"与户主关系"（如"妻"、"子"），而非仅使用推断关系。
+3.  **日志可追溯**: 家庭分组时必须输出 `[户主优先原则]` 日志，记录每个家庭的 anchor 和成员列表。
+4.  **数据完整性**: `family_units_v2` 必须包含 `anchor/householder`、`members`、`member_details`（含 name、relation）字段。
+
 ## Execution Instructions
 1.  **Initialize**: Load context from `docs/work_plan_master.md` and `docs/final_summary.md`.
 2.  **Start Loop**: Begin at Checkpoint 1.
@@ -79,9 +88,11 @@ Agent 必须按顺序执行以下 Checkpoints。
         - Log "❌ **Checkpoint X Failed**: [Detailed Error]".
         - **ACT**: Switch to Architect role, propose/apply the fix immediately.
         - **RESTART**: Log "🔄 **Resetting Walkthrough** to Checkpoint 1...".
-5.  **Finish**: When Checkpoint 5 is Passed, output: "🏆 **资金穿透审计系统 - 架构一致性校验完成。Ready for Deployment.**"
+5.  **Finish**: When Checkpoint 6 is Passed, output: "🏆 **资金穿透审计系统 - 架构一致性校验完成。Ready for Deployment.**"
 
 ## Constraints
 - **NO Browser Interaction**: Code analysis only.
 - **Strict Matching**: Verify function existence and call sites.
 - **Phase 8 Awareness**: Pay special attention to the newly added P2 extractors in Checkpoint 3.
+- **Householder Priority**: Checkpoint 6 是防止家庭成员识别错误的关键检查点，必须严格验证。
+

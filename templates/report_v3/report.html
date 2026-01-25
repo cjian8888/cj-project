@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+
+{% block title %}{{ report.meta.doc_number }} - 信息查询结果分析报告{% endblock %}
+
+{% block content %}
+{# 报告标题 #}
+<div class="report-title">关于{{ report.preface.persons_queried[0] if report.preface.persons_queried else '相关人员'
+    }}等信息查询结果分析报告</div>
+
+{# 报告开头说明 #}
+<p class="report-intro">
+    {{ report.preface.case_background }}
+</p>
+
+{# ==================== 家庭章节循环（v4.1新结构） ==================== #}
+{% if report.family_sections %}
+{% for family in report.family_sections %}
+{% set family_num = loop.index %}
+
+{# 家庭章节标题 #}
+<h1 class="section-title">{{ ['一','二','三','四','五','六','七','八','九','十'][family_num-1] if family_num <= 10 else family_num
+        }}、{{ family.family_name }}资产收入情况及数据分析</h1>
+
+        {# 家庭汇总（如果有多个成员） #}
+        {% if family.member_count > 1 and family.family_summary %}
+        <div class="family-summary-block">
+            <p><strong>家庭概况：</strong>{{ family.family_summary.narrative }}</p>
+            <p>家庭成员共{{ family.member_count }}人：
+                {% for member in family.family_summary.member_relations %}
+                {{ member.name }}（{{ member.relation }}）{% if not loop.last %}、{% endif %}
+                {% endfor %}
+            </p>
+        </div>
+        {% endif %}
+
+        {# 遍历家庭成员 #}
+        {% for person in family.member_sections %}
+        {% set unit = person %}
+        {% include 'person_section.html' %}
+        {% endfor %}
+
+        {% endfor %}
+
+        {% else %}
+        {# ==================== 兼容旧版：个人章节循环 ==================== #}
+        {% for person in report.person_sections %}
+        {% set section_num = loop.index %}
+        {# 一、XXX家庭资产收入情况及数据分析 #}
+        <h1 class="section-title">{{ ['一','二','三','四','五','六','七','八','九','十'][section_num-1] if section_num <= 10 else
+                section_num }}、{{ person.name }}家庭资产收入情况及数据分析</h1>
+
+                {# 引入人员详细分析模板，传递unit变量 #}
+                {% set unit = person %}
+                {% include 'person_section.html' %}
+
+                {% endfor %}
+                {% endif %}
+
+                {# ==================== 公司章节循环 ==================== #}
+                {% set company_start_num = (report.family_sections|length if report.family_sections else
+                report.person_sections|length) + 1 %}
+                {% for company in report.company_sections %}
+                {% set company_num = company_start_num + loop.index0 %}
+                <h1 class="section-title">{{ ['一','二','三','四','五','六','七','八','九','十'][company_num-1] if company_num <=
+                        10 else company_num }}、{{ company.company_name }}及相关人员查询数据分析</h1>
+
+                        {% set company_data = company %}
+                        {% include 'company_section.html' %}
+
+                        {% endfor %}
+
+                        {# ==================== 结论章节 ==================== #}
+                        {% set conclusion_num = (report.family_sections|length if report.family_sections else
+                        report.person_sections|length) + report.company_sections|length + 1 %}
+                        <h1 class="section-title">{{ ['一','二','三','四','五','六','七','八','九','十'][conclusion_num-1] if
+                            conclusion_num <= 10 else conclusion_num }}、结论</h1>
+
+                                {% include 'conclusion.html' %}
+
+                                {# ==================== 下一步工作计划章节 ==================== #}
+                                {% set nextstep_num = conclusion_num + 1 %}
+                                <h1 class="section-title">{{ ['一','二','三','四','五','六','七','八','九','十'][nextstep_num-1]
+                                    if
+                                    nextstep_num <= 10 else nextstep_num }}、下一步工作计划</h1>
+
+                                        {% include 'next_steps.html' %}
+
+                                        {# 报告尾部区域（可选） #}
+                                        {% if report.meta.show_footer %}
+                                        <div class="report-footer">
+                                            <p>报告生成时间：{{ report.meta.generated_at[:10] }}</p>
+                                            <p>报告编号：{{ report.meta.doc_number }}</p>
+                                        </div>
+                                        {% endif %}
+
+                                        {% endblock %}

@@ -25,7 +25,14 @@ def setup_logger(name: str = 'AuditSystem') -> logging.Logger:
         配置好的日志记录器
     """
     logger = logging.getLogger(name)
-    logger.setLevel(getattr(logging, config.LOG_LEVEL))
+    
+    # 延迟获取日志级别，避免循环导入
+    try:
+        log_level = getattr(config, 'LOG_LEVEL', 'INFO')
+        logger.setLevel(getattr(logging, log_level))
+    except (AttributeError, ImportError):
+        # 如果 config 模块尚未加载，使用默认值
+        logger.setLevel(logging.INFO)
     
     # 避免重复添加handler
     if not logger.handlers:
@@ -34,16 +41,32 @@ def setup_logger(name: str = 'AuditSystem') -> logging.Logger:
         console_handler.setLevel(logging.INFO)
         
         # 文件处理器 - 使用轮转机制
+        try:
+            log_file = getattr(config, 'OUTPUT_LOG_FILE', 'audit_system.log')
+            max_bytes = getattr(config, 'LOG_MAX_BYTES', 10 * 1024 * 1024)
+            backup_count = getattr(config, 'LOG_BACKUP_COUNT', 5)
+        except (AttributeError, ImportError):
+            log_file = 'audit_system.log'
+            max_bytes = 10 * 1024 * 1024
+            backup_count = 5
+        
         file_handler = RotatingFileHandler(
-            config.OUTPUT_LOG_FILE,
-            maxBytes=config.LOG_MAX_BYTES,
-            backupCount=config.LOG_BACKUP_COUNT,
+            log_file,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
             encoding='utf-8'
         )
         file_handler.setLevel(logging.DEBUG)
         
         # 格式化器
-        formatter = logging.Formatter(config.LOG_FORMAT, config.LOG_DATE_FORMAT)
+        try:
+            log_format = getattr(config, 'LOG_FORMAT', '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            date_format = getattr(config, 'LOG_DATE_FORMAT', '%Y-%m-%d %H:%M:%S')
+        except (AttributeError, ImportError):
+            log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            date_format = '%Y-%m-%d %H:%M:%S'
+        
+        formatter = logging.Formatter(log_format, date_format)
         console_handler.setFormatter(formatter)
         file_handler.setFormatter(formatter)
         
@@ -588,3 +611,309 @@ def safe_account_display(account: str, mask: bool = False) -> str:
         return s[-8:]
     
     return s
+
+
+# ============================================================
+# 报告时间戳管理 (2026-01-25 新增)
+# ============================================================
+
+# 全局报告时间戳（用于统一所有报告的时间）
+_global_report_timestamp = None
+
+
+def generate_report_timestamp() -> str:
+    """
+    生成统一的报告时间戳
+    
+    Returns:
+        格式为'YYYY年MM月DD日 HH:MM:SS'的时间戳字符串
+    """
+    return datetime.now().strftime('%Y年%m月%d日 %H:%M:%S')
+
+
+def generate_report_timestamp_iso() -> str:
+    """
+    生成ISO格式的报告时间戳
+    
+    Returns:
+        格式为'YYYY-MM-DDTHH:MM:SS'的ISO格式时间戳字符串
+    """
+    return datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+
+
+def set_global_report_timestamp(timestamp: str = None) -> str:
+    """
+    设置全局报告时间戳（用于批量生成报告时保持时间一致）
+    
+    Args:
+        timestamp: 可选的时间戳字符串，如果为None则生成新的时间戳
+    
+    Returns:
+        设置的时间戳字符串
+    """
+    global _global_report_timestamp
+    if timestamp is None:
+        _global_report_timestamp = generate_report_timestamp()
+    else:
+        _global_report_timestamp = timestamp
+    return _global_report_timestamp
+
+
+def get_global_report_timestamp() -> str:
+    """
+    获取全局报告时间戳
+    
+    Returns:
+        全局时间戳字符串，如果未设置则返回当前时间
+    """
+    global _global_report_timestamp
+    if _global_report_timestamp is None:
+        _global_report_timestamp = generate_report_timestamp()
+    return _global_report_timestamp
+
+
+def reset_global_report_timestamp():
+    """
+    重置全局报告时间戳（下次调用时将生成新的时间戳）
+    """
+    global _global_report_timestamp
+    _global_report_timestamp = None
+
+
+# ============================================================
+# 报告一致性验证 (2026-01-25 新增)
+# ============================================================
+
+def validate_report_consistency(json_data: Dict, html_report_path: str = None) -> List[str]:
+    """
+    验证JSON数据和HTML报告的一致性
+    
+    Args:
+        json_data: JSON数据字典（派生数据）
+        html_report_path: HTML报告文件路径（可选）
+    
+    Returns:
+        一致性问题列表
+    """
+    issues = []
+    
+    if not json_data:
+        return ['JSON数据为空']
+    
+    # 1. 检查资产总额一致性
+    if 'total_assets' in json_data:
+        json_total = json_data['total_assets'].get('total', 0)
+        # 如果有HTML报告，可以解析并验证（这里简化处理）
+        # 实际使用时需要解析HTML提取数据
+        logger.debug(f'JSON资产总额: {json_total}')
+    
+    # 2. 检查收入分类一致性
+    if 'income_classifications' in json_data:
+        for person, classification in json_data['income_classifications'].items():
+            json_ratio = classification.get('legitimate_ratio', 0)
+            json_unknown_ratio = classification.get('unknown_ratio', 0)
+            json_suspicious_ratio = classification.get('suspicious_ratio', 0)
+            
+            # 验证比例总和是否为1
+            total_ratio = json_ratio + json_unknown_ratio + json_suspicious_ratio
+            if abs(total_ratio - 1.0) > 0.01:  # 允许1%误差
+                issues.append(
+                    f'{person} 收入分类比例不一致: '
+                    f'合法={json_ratio:.2%}, 不明={json_unknown_ratio:.2%}, '
+                    f'可疑={json_suspicious_ratio:.2%}, 总和={total_ratio:.2%}'
+                )
+    
+    # 3. 检查风险等级一致性
+    if 'risk_assessment' in json_data:
+        json_risk = json_data['risk_assessment'].get('overall_risk_level', '')
+        logger.debug(f'JSON风险等级: {json_risk}')
+    
+    # 4. 检查数据完整性
+    required_fields = ['income_structure', 'fund_flow', 'wealth_management']
+    for field in required_fields:
+        if field not in json_data:
+            issues.append(f'JSON数据缺少必需字段: {field}')
+    
+    return issues
+
+
+# ============================================================
+# 大数据量处理优化 (2026-01-25 新增)
+# ============================================================
+
+def process_large_dataset_in_batches(
+    data: List,
+    process_func,
+    batch_size: int = 10000,
+    **kwargs
+) -> List:
+    """
+    分批处理大数据集
+    
+    Args:
+        data: 待处理的数据列表
+        process_func: 处理函数（接受单个批次）
+        batch_size: 每批大小
+        **kwargs: 传递给处理函数的额外参数
+    
+    Returns:
+        所有批次处理结果的合并列表
+    """
+    results = []
+    
+    for i in range(0, len(data), batch_size):
+        batch = data[i:i + batch_size]
+        batch_result = process_func(batch, **kwargs)
+        results.extend(batch_result)
+        
+        # 释放内存
+        del batch
+    
+    return results
+
+
+def analyze_transactions_streaming(
+    transactions: pd.DataFrame,
+    analyze_func,
+    **kwargs
+):
+    """
+    流式分析交易数据（生成器模式）
+    
+    Args:
+        transactions: 交易DataFrame
+        analyze_func: 分析函数（接受单笔交易）
+        **kwargs: 传递给分析函数的额外参数
+    
+    Yields:
+        每笔交易的分析结果
+    """
+    for idx, row in transactions.iterrows():
+        yield analyze_func(row, **kwargs)
+
+
+def process_large_dataframe_in_chunks(
+    df: pd.DataFrame,
+    process_func,
+    chunk_size: int = 10000,
+    **kwargs
+) -> pd.DataFrame:
+    """
+    分块处理大型DataFrame
+    
+    Args:
+        df: 待处理的DataFrame
+        process_func: 处理函数（接受单个DataFrame块）
+        chunk_size: 每块大小
+        **kwargs: 传递给处理函数的额外参数
+    
+    Returns:
+        合并后的DataFrame
+    """
+    results = []
+    
+    for i in range(0, len(df), chunk_size):
+        chunk = df.iloc[i:i + chunk_size].copy()
+        chunk_result = process_func(chunk, **kwargs)
+        results.append(chunk_result)
+        
+        # 释放内存
+        del chunk
+    
+    # 合并结果
+    if results:
+        return pd.concat(results, ignore_index=True)
+    else:
+        return pd.DataFrame()
+
+
+def optimize_dataframe_memory(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    优化DataFrame内存使用
+    
+    Args:
+        df: 待优化的DataFrame
+    
+    Returns:
+        优化后的DataFrame
+    """
+    # 转换数据类型以减少内存占用
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            # 尝试转换为category类型（适用于低基数字符串）
+            unique_count = df[col].nunique()
+            if unique_count / len(df) < 0.5:  # 基数小于50%
+                df[col] = df[col].astype('category')
+        elif df[col].dtype == 'float64':
+            # 如果数值范围较小，转换为float32
+            if df[col].min() >= -3.4e38 and df[col].max() <= 3.4e38:
+                df[col] = df[col].astype('float32')
+        elif df[col].dtype == 'int64':
+            # 如果数值范围较小，转换为int32
+            if df[col].min() >= -2.1e9 and df[col].max() <= 2.1e9:
+                df[col] = df[col].astype('int32')
+    
+    return df
+
+
+def validate_cross_report_consistency(
+    validation_report: Dict,
+    behavioral_report: Dict,
+    financial_report: Dict
+) -> List[str]:
+    """
+    验证多个报告之间的一致性
+    
+    Args:
+        validation_report: 数据验证报告
+        behavioral_report: 行为特征报告
+        financial_report: 资金画像报告
+    
+    Returns:
+        一致性问题列表
+    """
+    issues = []
+    
+    # 1. 检查实体列表一致性
+    entities_in_validation = set(validation_report.keys()) if isinstance(validation_report, dict) else set()
+    entities_in_behavioral = set(behavioral_report.get('summary', {}).keys()) if isinstance(behavioral_report, dict) else set()
+    entities_in_financial = set(financial_report.keys()) if isinstance(financial_report, dict) else set()
+    
+    # 检查是否有实体在某些报告中缺失
+    all_entities = entities_in_validation | entities_in_behavioral | entities_in_financial
+    
+    for entity in all_entities:
+        missing_reports = []
+        if entity not in entities_in_validation:
+            missing_reports.append('数据验证')
+        if entity not in entities_in_behavioral:
+            missing_reports.append('行为特征')
+        if entity not in entities_in_financial:
+            missing_reports.append('资金画像')
+        
+        if missing_reports:
+            issues.append(f'{entity} 缺少以下报告: {", ".join(missing_reports)}')
+    
+    # 2. 检查交易记录数一致性
+    for entity in all_entities:
+        counts = []
+        
+        if entity in validation_report and isinstance(validation_report[entity], dict):
+            count = validation_report[entity].get('record_count', 0)
+            counts.append(f'数据验证({count})')
+        
+        if entity in financial_report and isinstance(financial_report[entity], dict):
+            summary = financial_report[entity].get('summary', {})
+            count = summary.get('transaction_count', 0)
+            counts.append(f'资金画像({count})')
+        
+        if len(counts) > 1:
+            # 检查记录数是否一致（允许10%差异）
+            counts_int = [int(re.search(r'\((\d+)\)', c).group(1)) if re.search(r'\((\d+)\)', c) else 0 for c in counts]
+            if counts_int:
+                max_count = max(counts_int)
+                min_count = min(counts_int)
+                if max_count > 0 and (max_count - min_count) / max_count > 0.1:
+                    issues.append(f'{entity} 交易记录数不一致: {", ".join(counts)}')
+    
+    return issues

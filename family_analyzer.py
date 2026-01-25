@@ -361,21 +361,363 @@ def _infer_relation_to_person(person_to_householder: str, member_to_householder:
     return member_to_householder
 
 
+def identify_householder(members: List[Dict]) -> str:
+    """
+    从家庭成员中识别户主
+    
+    Args:
+        members: 家族成员列表
+        
+    Returns:
+        户主姓名,如未找到返回第一个成员
+    """
+    for member in members:
+        relation = member.get('与户主关系', '')
+        if relation == '户主':
+            return member.get('姓名', '')
+    
+    # 未找到户主,返回第一个成员
+    if members:
+        return members[0].get('姓名', '')
+    return ''
+
+
+def extract_person_info(data_directory: str, person_name: str) -> Dict:
+    """
+    提取单个人员的详细信息(用于跨户籍关系推断)
+    
+    Args:
+        data_directory: 数据目录
+        person_name: 人员姓名
+        
+    Returns:
+        人员信息字典
+    """
+    info = {
+        '姓名': person_name,
+        '身份证号': '',
+        '出生日期': '',
+        '籍贯': '',
+        '户籍地': '',
+        '性别': ''
+    }
+    
+    # 从户籍人口数据提取
+    pattern = os.path.join(
+        data_directory,
+        '**',
+        '公安部户籍人口（定向查询）',
+        f'{person_name}_*_公安部人口和户籍信息_1.xlsx'
+    )
+    
+    files = glob.glob(pattern, recursive=True)
+    if files:
+        try:
+            df = pd.read_excel(files[0])
+            if not df.empty:
+                row = df.iloc[0]
+                info['身份证号'] = str(row.get('身份证号', ''))
+                info['出生日期'] = str(row.get('出生日期', ''))
+                info['籍贯'] = str(row.get('籍贯', ''))
+                info['户籍地'] = str(row.get('户籍地', ''))
+                info['性别'] = str(row.get('性别', ''))
+        except Exception as e:
+            logger.warning(f'读取 {person_name} 户籍数据失败: {e}')
+    
+    return info
+
+
+def get_surname(name: str) -> str:
+    """提取姓氏(取第一个字)"""
+    return name[0] if name else ''
+
+
+def get_birth_year(id_or_birth: str) -> int:
+    """从身份证号或出生日期提取出生年份"""
+    s = str(id_or_birth)
+    try:
+        if len(s) >= 18:  # 身份证号
+            return int(s[6:10])
+        elif len(s) >= 8:  # 出生日期 YYYYMMDD
+            return int(s[:4])
+        elif len(s) >= 4:
+            return int(s[:4])
+    except:
+        pass
+    return 0
+
+
+def infer_extended_relatives(persons_info: List[Dict], family_tree: Dict[str, List[Dict]] = None) -> List[Dict]:
+    """
+    推断跨户籍的扩展亲属关系
+    
+    推断逻辑:
+    1. 相同姓氏 + 相同籍贯 + 年龄差<5岁 → 可能兄弟姐妹 (置信度: 0.7)
+    2. 相同姓氏 + 相同籍贯 + 年龄差20-40岁 → 可能父子/父女 (置信度: 0.6)
+       【改进】如果已有明确的父母关系，则不再推断为父母，而是推断为叔侄/姑侄
+    3. 身份证前6位相同 → 相同户籍地,增加置信度 +0.1
+    
+    Args:
+        persons_info: 人员信息列表 [{姓名, 身份证号, 籍贯, 出生日期, ...}]
+        family_tree: 已知的家族关系图谱 (用于排除重复推断)
+        
+    Returns:
+        推断的亲属关系列表: [{person_a, person_b, relation, confidence, reason}]
+    """
+    relations = []
+    
+    # 预处理：构建每个人已知的父母集合
+    known_parents = {}
+    if family_tree:
+        for householder, members in family_tree.items():
+            # 找到户主
+            real_householder = householder
+            for m in members:
+                if m.get('与户主关系') == '户主':
+                    real_householder = m.get('姓名')
+                    break
+            
+            for m in members:
+                name = m.get('姓名')
+                relation = m.get('与户主关系', '')
+                if not name: continue
+                
+                # 如果成员是户主的子女，则户主是成员的父/母
+                if relation in ['子', '女', '儿子', '女儿']:
+                    if name not in known_parents: known_parents[name] = set()
+                    known_parents[name].add(real_householder)
+                
+                # 如果成员是户主的配偶，则户主的父母是成员的公婆（非直系父母，暂不处理）
+                # 如果成员是户主的孙子女，则户主的子女是成员的父母（需递归，暂简化）
+    
+    n = len(persons_info)
+    for i in range(n):
+        for j in range(i + 1, n):
+            p1 = persons_info[i]
+            p2 = persons_info[j]
+            
+            name1 = p1.get('姓名', '')
+            name2 = p2.get('姓名', '')
+            
+            if not name1 or not name2:
+                continue
+            
+            # 提取特征
+            surname1 = get_surname(name1)
+            surname2 = get_surname(name2)
+            
+            jiguan1 = p1.get('籍贯', '')
+            jiguan2 = p2.get('籍贯', '')
+            
+            id1 = p1.get('身份证号', '')
+            id2 = p2.get('身份证号', '')
+            
+            birth1 = p1.get('出生日期', '') or id1
+            birth2 = p2.get('出生日期', '') or id2
+            
+            year1 = get_birth_year(birth1)
+            year2 = get_birth_year(birth2)
+            
+            # 条件判断
+            same_surname = surname1 == surname2 and surname1
+            same_jiguan = jiguan1 == jiguan2 and jiguan1 and jiguan1 != 'nan'
+            same_id_prefix = id1[:6] == id2[:6] if len(id1) >= 6 and len(id2) >= 6 else False
+            
+            age_diff = abs(year1 - year2) if year1 and year2 else 999
+            
+            # 推断关系
+            confidence = 0.0
+            relation = ''
+            reasons = []
+            
+            if same_surname and same_jiguan:
+                reasons.append(f'同姓"{surname1}"')
+                reasons.append(f'同籍贯"{jiguan1}"')
+                
+                if age_diff <= 5:
+                    relation = '可能兄弟姐妹'
+                    confidence = 0.7
+                    reasons.append(f'年龄差{age_diff}岁')
+                elif 20 <= age_diff <= 40:
+                    # 检查是否已存在父母关系
+                    # 假设 relation 是 "name1 是 name2 的父/母" (name1 > name2)
+                    # 或者 "name2 是 name1 的父/母" (name2 > name1)
+                    
+                    is_parent_relation = False
+                    parent_name, child_name = (name1, name2) if year1 < year2 else (name2, name1)
+                    
+                    # 检查 child 是否已有已知父母
+                    has_known_parent = False
+                    if child_name in known_parents and known_parents[child_name]:
+                        has_known_parent = True
+                        # 检查 parent_name 是否就是已知父母之一
+                        if parent_name in known_parents[child_name]:
+                            # 已经是已知父母，无需再次推断
+                            continue
+                            
+                    if has_known_parent:
+                        # 孩子已有已知父母，且当前推断对象不是已知父母
+                        # 推断对象可能是 叔叔/伯伯/姑姑/舅舅/姨 (父母的兄弟姐妹)
+                        relation = f'{parent_name}可能是{child_name}的长辈(叔/伯/姑/舅/姨)'
+                        confidence = 0.5
+                        reasons.append(f'年龄差{age_diff}岁')
+                        reasons.append(f'{child_name}已有已知父母(户籍),推断为旁系长辈')
+                    else:
+                        # 孩子没有已知父母，推断为父母
+                        relation = f'{parent_name}可能是{child_name}的父/母'
+                        confidence = 0.6
+                        reasons.append(f'年龄差{age_diff}岁')
+
+                elif 5 < age_diff < 20:
+                    relation = '可能旁系亲属'
+                    confidence = 0.4
+                    reasons.append(f'年龄差{age_diff}岁')
+            
+            if same_id_prefix and confidence > 0:
+                confidence = min(confidence + 0.1, 1.0)
+                reasons.append('身份证前6位相同')
+            
+            if relation and confidence >= 0.4:
+                relations.append({
+                    'person_a': name1,
+                    'person_b': name2,
+                    'relation': relation,
+                    'confidence': confidence,
+                    'reason': ', '.join(reasons)
+                })
+                logger.info(f'[扩展亲属推断] {name1} ↔ {name2}: {relation} (置信度:{confidence:.1f})')
+    
+    return relations
+
+
+def build_family_units(core_persons: List[str], data_directory: str) -> List[Dict]:
+    """
+    构建家庭分析单元(应用户主原则)
+    
+    户主原则:
+    1. 每个家庭以户主为anchor
+    2. 如果核查对象不是户主,则家庭anchor调整为户主
+    3. 自动识别跨户籍的扩展亲属关系
+    
+    Args:
+        core_persons: 核心人员列表
+        data_directory: 数据目录
+        
+    Returns:
+        家庭单元列表,格式兼容PrimaryTargetsConfig.analysis_units
+    """
+    logger.info('=' * 60)
+    logger.info('开始构建家庭分析单元(应用户主原则)')
+    logger.info('=' * 60)
+    
+    # 1. 构建家族树
+    family_tree = build_family_tree(core_persons, data_directory)
+    
+    # 2. 提取所有人员信息(用于跨户籍推断)
+    all_persons_info = []
+    for person in core_persons:
+        info = extract_person_info(data_directory, person)
+        all_persons_info.append(info)
+    
+    # 3. 推断跨户籍关系
+    extended_relations = infer_extended_relatives(all_persons_info, family_tree)
+    
+    # 4. 按户籍分组,识别独立家庭
+    families = {}  # key: 户主, value: {members, householder, ...}
+    person_to_family = {}  # 记录每个人属于哪个家庭
+    
+    for person, members in family_tree.items():
+        householder = identify_householder(members)
+        
+        if householder and householder not in families:
+            # 新家庭
+            member_names = [m.get('姓名', '') for m in members if m.get('姓名')]
+            families[householder] = {
+                'anchor': householder,  # 户主原则: anchor为户主
+                'householder': householder,
+                'members': list(set(member_names)),
+                'unit_type': 'family',
+                'member_details': []
+            }
+            
+            # 记录成员归属
+            for name in member_names:
+                person_to_family[name] = householder
+    
+    # 5. 构建成员详情
+    for householder, family in families.items():
+        member_details = []
+        for name in family['members']:
+            # 获取关系
+            relation = '本人' if name == householder else ''
+            
+            # 从原始数据获取关系
+            if name in family_tree:
+                for m in family_tree.get(name, []):
+                    if m.get('姓名') == name:
+                        rel = m.get('与户主关系', '')
+                        if rel == '户主':
+                            relation = '本人'
+                        else:
+                            relation = rel
+                        break
+            else:
+                # 从户主的成员中查找
+                for p, members in family_tree.items():
+                    for m in members:
+                        if m.get('姓名') == name:
+                            relation = m.get('与户主关系', '')
+                            break
+            
+            member_details.append({
+                'name': name,
+                'relation': relation or '家庭成员',
+                'has_data': name in core_persons,
+                'id_number': ''
+            })
+        
+        family['member_details'] = member_details
+    
+    # 6. 转换为列表
+    units = list(families.values())
+    
+    # 7. 添加扩展亲属信息
+    for unit in units:
+        unit['extended_relatives'] = [
+            r for r in extended_relations 
+            if r['person_a'] in unit['members'] or r['person_b'] in unit['members']
+        ]
+    
+    logger.info(f'\n家庭分析单元构建完成,共 {len(units)} 个家庭')
+    for unit in units:
+        logger.info(f'  - 户主: {unit["householder"]}, 成员: {unit["members"]}')
+        if unit.get('extended_relatives'):
+            for rel in unit['extended_relatives']:
+                logger.info(f'    扩展: {rel["person_a"]} ↔ {rel["person_b"]} ({rel["relation"]})')
+    
+    return units
+
+
 if __name__ == '__main__':
     # 测试代码
     import sys
     
     data_dir = sys.argv[1] if len(sys.argv) > 1 else './data'
-    test_persons = ['朱明', '朱永平', '陈斌', '马尚德']
+    test_persons = ['滕雳', '施灵', '施育', '施承天']
     
-    family_tree = build_family_tree(test_persons, data_dir)
-    summary = get_family_summary(family_tree)
-    
-    print('\n' + '=' * 60)
-    print('家族关系摘要')
     print('=' * 60)
-    for person, relations in summary.items():
-        print(f'\n【{person}】')
-        for relation_type, names in relations.items():
-            if names:
-                print(f'  {relation_type}: {", ".join(names)}')
+    print('测试: build_family_units() - 户主原则')
+    print('=' * 60)
+    
+    units = build_family_units(test_persons, data_dir)
+    
+    print('\n结果:')
+    for unit in units:
+        print(f"\n家庭: {unit['anchor']}")
+        print(f"  户主: {unit['householder']}")
+        print(f"  成员: {unit['members']}")
+        if unit.get('extended_relatives'):
+            print("  扩展亲属:")
+            for rel in unit['extended_relatives']:
+                print(f"    {rel['person_a']} ↔ {rel['person_b']}: {rel['relation']} (置信度:{rel['confidence']:.1f})")
+
