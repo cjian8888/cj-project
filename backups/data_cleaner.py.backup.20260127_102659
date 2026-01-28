@@ -15,7 +15,7 @@ import utils
 logger = utils.setup_logger(__name__)
 
 
-def deduplicate_transactions(df: pd.DataFrame, output_dir: str = None) -> Tuple[pd.DataFrame, Dict]:
+def deduplicate_transactions(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
     """
     智能去重交易记录
     
@@ -188,29 +188,10 @@ def deduplicate_transactions(df: pd.DataFrame, output_dir: str = None) -> Tuple[
     logger.info(f'去重完成: 原始{original_count}条, 去重{duplicate_count}条, '
                 f'保留{final_count}条 (去重率: {stats["dedup_rate"]})')
     
-    # 【2026-01-27 修复】持久化去重详情到 JSON 文件
-    if output_dir and dedup_details:
-        try:
-            dedup_path = os.path.join(output_dir, 'dedup_details.json')
-            with open(dedup_path, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'timestamp': datetime.now().isoformat(),
-                    'stats': {
-                        'original': original_count,
-                        'duplicates': duplicate_count,
-                        'final': final_count,
-                        'dedup_rate': stats['dedup_rate']
-                    },
-                    'details': dedup_details
-                }, f, ensure_ascii=False, indent=2)
-            logger.info(f'去重详情已保存: {dedup_path}')
-        except Exception as e:
-            logger.error(f'保存去重详情失败: {e}')
-    
     return df_dedup, stats
 
 
-def validate_data_quality(df: pd.DataFrame, output_dir: str = None) -> Tuple[pd.DataFrame, Dict]:
+def validate_data_quality(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict]:
     """
     验证数据质量
     
@@ -276,19 +257,6 @@ def validate_data_quality(df: pd.DataFrame, output_dir: str = None) -> Tuple[pd.
     
     logger.info(f'数据验证完成: 总计{len(df)}条, 有效{len(df_valid)}条, '
                 f'移除{quality_report["removed_rows"]}条')
-    
-    # 【2026-01-27 修复】持久化质量报告到 JSON 文件
-    if output_dir:
-        try:
-            quality_path = os.path.join(output_dir, 'quality_report.json')
-            with open(quality_path, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'timestamp': datetime.now().isoformat(),
-                    'report': quality_report
-                }, f, ensure_ascii=False, indent=2)
-            logger.info(f'质量报告已保存: {quality_path}')
-        except Exception as e:
-            logger.error(f'保存质量报告失败: {e}')
     
     if quality_report['warnings']:
         for warning in quality_report['warnings']:

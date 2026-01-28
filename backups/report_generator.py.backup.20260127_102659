@@ -8,8 +8,6 @@
 import pandas as pd
 from datetime import datetime
 from typing import Dict, List
-import html
-import json
 import config
 import utils
 
@@ -121,76 +119,79 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 def _escape_html(text):
     """
     HTML 转义函数，防止 XSS 攻击
-
-    【2026-01-27 修复】使用标准库 html.escape，确保安全
-
+    
     Args:
         text: 需要转义的文本
-
+        
     Returns:
         转义后的安全文本
     """
     if text is None:
         return ''
-    return html.escape(str(text), quote=True)
+    text_str = str(text)
+    # 转义 HTML 特殊字符
+    text_str = text_str.replace('&', '&')
+    text_str = text_str.replace('<', '<')
+    text_str = text_str.replace('>', '>')
+    text_str = text_str.replace('"', '"')
+    text_str = text_str.replace("'", '&#x27;')
+    return text_str
 
 
 def _safe_format_date(date_val):
     """
     安全格式化日期值
-
+    
     处理 Pandas Timestamp、datetime、字符串等多种日期格式
-
-    【2026-01-27 修复】使用 pd.to_datetime 统一处理，提升健壮性
-
+    
     Args:
         date_val: 日期值（可能是 Timestamp、datetime、字符串或 None）
-
+        
     Returns:
         格式化后的日期字符串 (YYYY-MM-DD) 或空字符串
     """
     if date_val is None:
         return ''
-
     # 检查是否是 pandas 的 NaT 或 numpy 的 nan
     if pd.isna(date_val):
         return ''
-
-    # 使用 pd.to_datetime 统一处理各种日期格式
-    try:
-        dt = pd.to_datetime(date_val)
-        return dt.strftime('%Y-%m-%d')
-    except Exception as e:
-        logger.warning(f'日期格式化失败: {date_val}, 错误: {e}')
-        # 回退到字符串截取
-        date_str = str(date_val)
-        if len(date_str) >= 10:
-            return date_str[:10]
-        return date_str
+    # 如果有 strftime 方法，直接格式化
+    if hasattr(date_val, 'strftime'):
+        try:
+            return date_val.strftime('%Y-%m-%d')
+        except (ValueError, AttributeError):
+            pass
+    # 字符串类型，尝试解析后格式化
+    if isinstance(date_val, str):
+        if len(date_val) >= 10:
+            return date_val[:10]
+        return date_val
+    # 其他类型，转换为字符串
+    return str(date_val)[:10] if date_val else ''
 
 
 def _calculate_family_financials(head, members, profiles, func_type):
     """
     计算家庭财务数据
-
+    
     Args:
         head: 户主
         members: 家庭成员列表
         profiles: 资金画像字典
         func_type: 计算类型 ('deposit' 或 'wealth')
-
+        
     Returns:
         计算结果（万元）
     """
     total = 0.0
     targets = set(members) if members else set()
     targets.add(head)
-
+    
     for p_name in targets:
          # Find profile: check if p_name is contained in any profile key
           profile = next((p for n, p in profiles.items() if p_name in n), None)
           if not profile or not profile['has_data']: continue
-
+          
           if func_type == 'deposit':
               # 【2026-01-22 修复】使用真实银行余额，而不是净流入估算
               val = _get_real_bank_balance(p_name, profiles)
@@ -207,7 +208,7 @@ def _calculate_family_financials(head, members, profiles, func_type):
 def _generate_summary_sheet(writer, profiles):
     """
     生成资金画像汇总表
-
+    
     Args:
         writer: ExcelWriter对象
         profiles: 资金画像字典
@@ -218,7 +219,7 @@ def _generate_summary_sheet(writer, profiles):
         has_data = profile.get('has_data', profile.get('entityType') != 'unknown')
         if not has_data:
             continue
-
+        
         # 根据实际数据结构获取字段
         total_income = profile.get('totalIncome', 0)
         total_expense = profile.get('totalExpense', 0)
@@ -228,7 +229,7 @@ def _generate_summary_sheet(writer, profiles):
         third_party_total = profile.get('thirdPartyTotal', 0)
         transaction_count = profile.get('transactionCount', 0)
         cash_total = profile.get('cashTotal', 0)
-
+        
         # 判断是否为公司（简单的启发式：名称包含"公司"或其他关键词，或者在profiles里有type字段）
         is_company = False
         if '公司' in entity or '中心' in entity or '部' in entity:
@@ -242,7 +243,7 @@ def _generate_summary_sheet(writer, profiles):
             '交易笔数': transaction_count,
             '大额现金总额(万元)': round(cash_total / 10000, 2)
         }
-
+        
         if not is_company:
             row_data.update({
                 '工资性收入(万元)': round(salary_total / 10000, 2),
@@ -255,9 +256,9 @@ def _generate_summary_sheet(writer, profiles):
                 '工资性收入占比': '-',
                 '第三方支付占比': round(third_party_total / total_income, 3) if total_income > 0 else 0,
             })
-
+            
         summary_data.append(row_data)
-
+    
     if summary_data:
         df_summary = pd.DataFrame(summary_data)
         df_summary.to_excel(writer, sheet_name='资金画像汇总', index=False)
@@ -272,7 +273,7 @@ def _generate_direct_transfer_sheet(writer, suspicions):
     """生成直接转账关系表"""
     if not suspicions.get('direct_transfers'):
         return
-
+    
     transfer_data = []
     for t in suspicions['direct_transfers']:
         transfer_data.append({
@@ -283,7 +284,7 @@ def _generate_direct_transfer_sheet(writer, suspicions):
             '金额(元)': t.get('amount', 0),
             '摘要': t.get('description', '')
         })
-
+    
     if transfer_data:
         df_transfer = pd.DataFrame(transfer_data)
         df_transfer.to_excel(writer, sheet_name='直接转账关系', index=False)
@@ -293,7 +294,7 @@ def _generate_cash_collision_sheet(writer, suspicions):
     """生成现金时空伴随表"""
     if not suspicions.get('cash_collisions'):
         return
-
+    
     collision_data = []
     for collision in suspicions['cash_collisions']:
         collision_data.append({
@@ -303,7 +304,7 @@ def _generate_cash_collision_sheet(writer, suspicions):
             '地点': collision.get('location', ''),
             '时间差(分钟)': collision.get('time_diff', collision.get('time_diff_hours', 0) * 60)
         })
-
+    
     if collision_data:
         df_collision = pd.DataFrame(collision_data)
         df_collision.to_excel(writer, sheet_name='现金时空伴随', index=False)
@@ -313,7 +314,7 @@ def _generate_hidden_asset_sheet(writer, suspicions):
     """生成隐形资产明细表"""
     if not suspicions.get('hidden_assets'):
         return
-
+    
     hidden_data = []
     for person, assets in suspicions['hidden_assets'].items():
         for asset in assets:
@@ -324,7 +325,7 @@ def _generate_hidden_asset_sheet(writer, suspicions):
                 '金额(元)': asset.get('amount', 0),
                 '摘要': asset.get('description', '')
             })
-
+    
     if hidden_data:
         df_hidden = pd.DataFrame(hidden_data)
         df_hidden.to_excel(writer, sheet_name='隐形资产明细', index=False)
@@ -334,7 +335,7 @@ def _generate_fixed_frequency_sheet(writer, suspicions):
     """生成固定频率异常进账表"""
     if not suspicions.get('fixed_frequency'):
         return
-
+    
     fixed_data = []
     for person, items in suspicions['fixed_frequency'].items():
         for item in items:
@@ -345,7 +346,7 @@ def _generate_fixed_frequency_sheet(writer, suspicions):
                 '发生次数': item['occurrences'],
                 '金额范围': f"{item.get('min_amount', 0)}-{item.get('max_amount', 0)}"
             })
-
+    
     if fixed_data:
         df_fixed = pd.DataFrame(fixed_data)
         df_fixed.to_excel(writer, sheet_name='固定频率异常进账', index=False)
@@ -354,11 +355,11 @@ def _generate_fixed_frequency_sheet(writer, suspicions):
 def _generate_large_cash_sheet(writer, profiles):
     """生成大额现金明细表"""
     large_cash_data = []
-
+    
     for entity, profile in profiles.items():
         if not profile['has_data']:
             continue
-
+        
         fund_flow = profile.get('fund_flow', {})
         for tx in fund_flow.get('large_cash_transactions', []):
             large_cash_data.append({
@@ -368,7 +369,7 @@ def _generate_large_cash_sheet(writer, profiles):
                 '摘要': tx['摘要'],
                 '对手方': tx['对手方']
             })
-
+    
     if large_cash_data:
         df_large_cash = pd.DataFrame(large_cash_data)
         df_large_cash.to_excel(writer, sheet_name='大额现金明细', index=False)
@@ -378,13 +379,13 @@ def _generate_third_party_sheets(writer, profiles):
     """生成第三方支付交易明细表"""
     third_party_income_data = []
     third_party_expense_data = []
-
+    
     for entity, profile in profiles.items():
         if not profile['has_data']:
             continue
-
+        
         fund_flow = profile.get('fund_flow', {})
-
+        
         # 收入明细
         for tx in fund_flow.get('third_party_income_transactions', []):
             third_party_income_data.append({
@@ -394,7 +395,7 @@ def _generate_third_party_sheets(writer, profiles):
                 '摘要': tx['摘要'],
                 '对手方': tx['对手方']
             })
-
+        
         # 支出明细
         for tx in fund_flow.get('third_party_expense_transactions', []):
             third_party_expense_data.append({
@@ -404,17 +405,17 @@ def _generate_third_party_sheets(writer, profiles):
                 '摘要': tx['摘要'],
                 '对手方': tx['对手方']
             })
-
+    
     # 第三方支付-收入工作表
     if third_party_income_data:
         df_tp_income = pd.DataFrame(third_party_income_data)
         df_tp_income.to_excel(writer, sheet_name='第三方支付-收入', index=False)
-
+    
     # 第三方支付-支出工作表
     if third_party_expense_data:
         df_tp_expense = pd.DataFrame(third_party_expense_data)
         df_tp_expense.to_excel(writer, sheet_name='第三方支付-支出', index=False)
-
+    
     # 第三方支付汇总
     third_party_summary = []
     for entity, profile in profiles.items():
@@ -430,7 +431,7 @@ def _generate_third_party_sheets(writer, profiles):
                 '支出金额(元)': fund_flow.get('third_party_expense', 0),
                 '净流入(元)': fund_flow.get('third_party_income', 0) - fund_flow.get('third_party_expense', 0)
             })
-
+    
     if third_party_summary:
         df_tp_summary = pd.DataFrame(third_party_summary)
         df_tp_summary.to_excel(writer, sheet_name='第三方支付-汇总', index=False)
@@ -440,13 +441,13 @@ def _generate_wealth_management_sheets(writer, profiles):
     """生成理财产品交易明细表"""
     wealth_purchase_data = []
     wealth_redemption_data = []
-
+    
     for entity, profile in profiles.items():
         if not profile['has_data']:
             continue
-
+        
         wealth_mgmt = profile.get('wealth_management', {})
-
+        
         # 购买明细
         for tx in wealth_mgmt.get('wealth_purchase_transactions', []):
             wealth_purchase_data.append({
@@ -457,7 +458,7 @@ def _generate_wealth_management_sheets(writer, profiles):
                 '对手方': tx['对手方'],
                 '判断依据': tx.get('判断依据', '')
             })
-
+        
         # 赎回明细
         for tx in wealth_mgmt.get('wealth_redemption_transactions', []):
             wealth_redemption_data.append({
@@ -468,17 +469,17 @@ def _generate_wealth_management_sheets(writer, profiles):
                 '对手方': tx['对手方'],
                 '判断依据': tx.get('判断依据', '')
             })
-
+    
     # 理财产品-购买工作表
     if wealth_purchase_data:
         df_wealth_purchase = pd.DataFrame(wealth_purchase_data)
         df_wealth_purchase.to_excel(writer, sheet_name='理财产品-购买', index=False)
-
+    
     # 理财产品-赎回工作表
     if wealth_redemption_data:
         df_wealth_redemption = pd.DataFrame(wealth_redemption_data)
         df_wealth_redemption.to_excel(writer, sheet_name='理财产品-赎回', index=False)
-
+    
     # 理财产品汇总
     wealth_summary = []
     for entity, profile in profiles.items():
@@ -495,7 +496,7 @@ def _generate_wealth_management_sheets(writer, profiles):
                 '净流向理财(元)': wealth_mgmt.get('net_wealth_flow', 0),
                 '持有估算(元)': wealth_mgmt.get('estimated_holding', 0)
             })
-
+    
     if wealth_summary:
         df_wealth_summary = pd.DataFrame(wealth_summary)
         df_wealth_summary.to_excel(writer, sheet_name='理财产品-汇总', index=False)
@@ -505,7 +506,7 @@ def _generate_family_tree_sheet(writer, family_tree):
     """生成家族关系图谱工作表"""
     if not family_tree:
         return
-
+    
     family_data = []
     for person, members in family_tree.items():
         for member in members:
@@ -519,7 +520,7 @@ def _generate_family_tree_sheet(writer, family_tree):
                 '户籍地': member.get('户籍地', ''),
                 '数据来源': member.get('数据来源', '')
             })
-
+    
     if family_data:
         df_family = pd.DataFrame(family_data)
         df_family.to_excel(writer, sheet_name='家族关系图谱', index=False)
@@ -529,7 +530,7 @@ def _generate_family_assets_sheets(writer, family_assets, profiles):
     """生成家族资产汇总工作表"""
     if not family_assets:
         return
-
+    
     # 8.1 资产汇总表
     asset_summary_data = []
     for person, assets in family_assets.items():
@@ -543,11 +544,11 @@ def _generate_family_assets_sheets(writer, family_assets, profiles):
             '存款估算(万元)': _calculate_family_financials(person, assets['家族成员'], profiles, 'deposit'),
             '理财持仓(万元)': _calculate_family_financials(person, assets['家族成员'], profiles, 'wealth')
         })
-
+    
     if asset_summary_data:
         df_asset_summary = pd.DataFrame(asset_summary_data)
         df_asset_summary.to_excel(writer, sheet_name='家族资产汇总', index=False)
-
+    
     # 8.2 房产明细表
     property_data = []
     for person, assets in family_assets.items():
@@ -566,12 +567,12 @@ def _generate_family_assets_sheets(writer, family_assets, profiles):
                 '权属状态': prop.get('权属状态', ''),
                 '数据质量': prop.get('数据质量', '正常')
             })
-
+    
     if property_data:
         df_properties = pd.DataFrame(property_data)
         df_properties = df_properties.fillna('-')
         df_properties.to_excel(writer, sheet_name='房产明细', index=False)
-
+    
     # 8.3 车辆明细表
     vehicle_data = []
     for person, assets in family_assets.items():
@@ -588,7 +589,7 @@ def _generate_family_assets_sheets(writer, family_assets, profiles):
                 '能源种类': vehicle.get('能源种类', ''),
                 '住所地址': vehicle.get('住所地址', '')
             })
-
+    
     if vehicle_data:
         df_vehicles = pd.DataFrame(vehicle_data)
         df_vehicles.to_excel(writer, sheet_name='车辆明细', index=False)
@@ -598,7 +599,7 @@ def _generate_validation_sheets(writer, validation_results):
     """生成数据验证结果工作表"""
     if not validation_results:
         return
-
+    
     # 9.1 流水数据验证
     if 'transactions' in validation_results:
         validation_data = []
@@ -611,11 +612,11 @@ def _generate_validation_sheets(writer, validation_results):
                 '问题': '; '.join(result['issues']) if result['issues'] else '',
                 '警告': '; '.join(result['warnings']) if result['warnings'] else ''
             })
-
+        
         if validation_data:
             df_validation = pd.DataFrame(validation_data)
             df_validation.to_excel(writer, sheet_name='数据验证-流水', index=False)
-
+    
     # 9.2 房产交易验证
     if 'properties' in validation_results:
         prop_validation_data = []
@@ -629,7 +630,7 @@ def _generate_validation_sheets(writer, validation_results):
                 '匹配交易日期': result['匹配交易']['日期'] if result.get('匹配交易') else '',
                 '匹配交易金额': result['匹配交易']['金额'] if result.get('匹配交易') else ''
             })
-
+        
         if prop_validation_data:
             df_prop_validation = pd.DataFrame(prop_validation_data)
             df_prop_validation.to_excel(writer, sheet_name='数据验证-房产', index=False)
@@ -639,7 +640,7 @@ def _generate_penetration_sheets(writer, penetration_results):
     """生成资金穿透分析工作表"""
     if not penetration_results:
         return
-
+    
     # 10.1 穿透汇总
     penetration_summary = []
     summary = penetration_results.get('summary', {})
@@ -663,10 +664,10 @@ def _generate_penetration_sheets(writer, penetration_results):
         '笔数': summary.get('涉案公司间笔数', 0),
         '金额(万元)': summary.get('涉案公司间总金额', 0) / 10000
     })
-
+    
     df_penetration_summary = pd.DataFrame(penetration_summary)
     df_penetration_summary.to_excel(writer, sheet_name='资金穿透-汇总', index=False)
-
+    
     # 10.2 个人→公司明细
     if penetration_results.get('person_to_company'):
         p2c_data = []
@@ -682,7 +683,7 @@ def _generate_penetration_sheets(writer, penetration_results):
             })
         if p2c_data:
             pd.DataFrame(p2c_data).to_excel(writer, sheet_name='穿透-个人到公司', index=False)
-
+    
     # 10.3 公司→个人明细
     if penetration_results.get('company_to_person'):
         c2p_data = []
@@ -698,7 +699,7 @@ def _generate_penetration_sheets(writer, penetration_results):
             })
         if c2p_data:
             pd.DataFrame(c2p_data).to_excel(writer, sheet_name='穿透-公司到个人', index=False)
-
+    
     # 10.4 核心人员之间明细
     if penetration_results.get('person_to_person'):
         p2p_data = []
@@ -714,7 +715,7 @@ def _generate_penetration_sheets(writer, penetration_results):
             })
         if p2p_data:
             pd.DataFrame(p2p_data).to_excel(writer, sheet_name='穿透-人员之间', index=False)
-
+    
     # 10.5 涉案公司之间明细
     if penetration_results.get('company_to_company'):
         c2c_data = []
@@ -735,12 +736,12 @@ def _generate_penetration_sheets(writer, penetration_results):
 def _generate_loan_analysis_sheets(writer, loan_results):
     """
     生成借贷分析工作表（与借贷行为分析报告.txt对应）
-
+    
     包含：双向往来、无还款借贷、规律还款三个工作表
     """
     if not loan_results:
         return
-
+    
     # 11.1 双向资金往来
     if loan_results.get('bidirectional_flows'):
         data = []
@@ -758,7 +759,7 @@ def _generate_loan_analysis_sheets(writer, loan_results):
             })
         if data:
             pd.DataFrame(data).to_excel(writer, sheet_name='借贷-双向往来', index=False)
-
+    
     # 11.2 无还款借贷（疑似利益输送）
     if loan_results.get('no_repayment_loans'):
         data = []
@@ -777,7 +778,7 @@ def _generate_loan_analysis_sheets(writer, loan_results):
             })
         if data:
             pd.DataFrame(data).to_excel(writer, sheet_name='借贷-无还款', index=False)
-
+    
     # 11.3 规律性还款模式
     if loan_results.get('regular_repayments'):
         data = []
@@ -795,7 +796,7 @@ def _generate_loan_analysis_sheets(writer, loan_results):
             })
         if data:
             pd.DataFrame(data).to_excel(writer, sheet_name='借贷-规律还款', index=False)
-
+    
     # 11.4 借贷配对分析
     if loan_results.get('loan_pairs'):
         data = []
@@ -815,7 +816,7 @@ def _generate_loan_analysis_sheets(writer, loan_results):
             })
         if data:
             pd.DataFrame(data).to_excel(writer, sheet_name='借贷-配对分析', index=False)
-
+    
     # 11.5 网贷平台往来
     if loan_results.get('online_loan_platforms'):
         data = []
@@ -840,10 +841,10 @@ def _generate_income_anomaly_sheets(writer, income_results):
     """
     if not income_results:
         return
-
+    
     # 12.1 异常收入汇总
     all_anomalies = []
-
+    
     # 规律性非工资收入
     for item in income_results.get('regular_non_salary', []):
         all_anomalies.append({
@@ -856,7 +857,7 @@ def _generate_income_anomaly_sheets(writer, income_results):
             '可疑原因': item.get('income_type', ''),
             '风险等级': item.get('risk_level', '').upper(),
         })
-
+    
     # 个人大额转入
     for item in income_results.get('large_personal_income', []):
         all_anomalies.append({
@@ -868,7 +869,7 @@ def _generate_income_anomaly_sheets(writer, income_results):
             '可疑原因': '个人大额转入需核实',
             '风险等级': item.get('risk_level', '').upper(),
         })
-
+    
     # 来源不明收入
     for item in income_results.get('unknown_source', []):
         all_anomalies.append({
@@ -881,7 +882,7 @@ def _generate_income_anomaly_sheets(writer, income_results):
             '摘要': item.get('description', ''),
             '风险等级': item.get('risk_level', '').upper(),
         })
-
+    
     # 同源多次收入
     for item in income_results.get('multi_source', []):
         all_anomalies.append({
@@ -894,7 +895,7 @@ def _generate_income_anomaly_sheets(writer, income_results):
             '可疑原因': item.get('income_type', ''),
             '风险等级': item.get('risk_level', '').upper(),
         })
-
+    
     # 大额单笔收入
     for item in income_results.get('large_single_income', []):
         all_anomalies.append({
@@ -906,10 +907,10 @@ def _generate_income_anomaly_sheets(writer, income_results):
             '可疑原因': item.get('income_type', ''),
             '风险等级': item.get('risk_level', '').upper(),
         })
-
+    
     if all_anomalies:
         pd.DataFrame(all_anomalies).to_excel(writer, sheet_name='异常收入-汇总', index=False)
-
+    
     # 12.2 疑似分期受贿（单独工作表）
     if income_results.get('suspected_bribery'):
         data = []
@@ -935,7 +936,7 @@ def _generate_time_series_sheets(writer, time_series_results):
     """
     if not time_series_results:
         return
-
+    
     # 13.1 资金突变事件
     if time_series_results.get('突变事件'):
         data = []
@@ -951,7 +952,7 @@ def _generate_time_series_sheets(writer, time_series_results):
             })
         if data:
             pd.DataFrame(data).to_excel(writer, sheet_name='时序-资金突变', index=False)
-
+    
     # 13.2 固定延迟转账
     if time_series_results.get('延迟转账'):
         data = []
@@ -960,11 +961,11 @@ def _generate_time_series_sheets(writer, time_series_results):
             person = item.get('person', '')
             income_cp = item.get('income_counterparty', '')
             expense_cp = item.get('expense_counterparty', '')
-
+            
             person = person if person and str(person) != 'nan' else '(未知)'
             income_cp = income_cp if income_cp and str(income_cp) != 'nan' else '(未知)'
             expense_cp = expense_cp if expense_cp and str(expense_cp) != 'nan' else '(未知)'
-
+            
             data.append({
                 '人员': person,
                 '收入来源': income_cp,
@@ -984,7 +985,7 @@ def _generate_fund_cycle_sheets(writer, penetration_results):
     """
     if not penetration_results:
         return
-
+    
     # 14.1 资金闭环
     if penetration_results.get('fund_cycles'):
         data = []
@@ -995,7 +996,7 @@ def _generate_fund_cycle_sheets(writer, penetration_results):
             else:
                 cycle_str = str(cycle)
                 cycle_len = 0
-
+            
             data.append({
                 '闭环路径': cycle_str,
                 '涉及节点数': cycle_len,
@@ -1003,7 +1004,7 @@ def _generate_fund_cycle_sheets(writer, penetration_results):
             })
         if data:
             pd.DataFrame(data).to_excel(writer, sheet_name='穿透-资金闭环', index=False)
-
+    
     # 14.2 过账通道
     if penetration_results.get('passthrough_channels'):
         data = []
@@ -1018,7 +1019,7 @@ def _generate_fund_cycle_sheets(writer, penetration_results):
             })
         if data:
             pd.DataFrame(data).to_excel(writer, sheet_name='穿透-过账通道', index=False)
-
+    
     # 14.3 资金枢纽节点
     if penetration_results.get('hub_nodes'):
         data = []
@@ -1036,25 +1037,25 @@ def _generate_fund_cycle_sheets(writer, penetration_results):
 def _generate_income_classification_sheet(writer, derived_data):
     """
     生成收入分类分析工作表
-
+    
     Args:
         writer: ExcelWriter对象
         derived_data: 派生数据字典（包含income_classifications）
     """
     if not derived_data or not derived_data.get('income_classifications'):
         return
-
+    
     income_classifications = derived_data['income_classifications']
-
+    
     # 为每个人员生成收入分类明细
     for person, classification in income_classifications.items():
         sheet_name = f'收入分类-{person}'
         # 限制sheet名称长度（Excel限制31个字符）
         if len(sheet_name) > 31:
             sheet_name = sheet_name[:28] + '...'
-
+        
         classification_data = []
-
+        
         # 合法收入明细
         for item in classification.get('legitimate_details', []):
             classification_data.append({
@@ -1066,7 +1067,7 @@ def _generate_income_classification_sheet(writer, derived_data):
                 '摘要': item.get('description', ''),
                 '判断依据': item.get('reason', '')
             })
-
+        
         # 未知收入明细
         for item in classification.get('unknown_details', []):
             classification_data.append({
@@ -1078,7 +1079,7 @@ def _generate_income_classification_sheet(writer, derived_data):
                 '摘要': item.get('description', ''),
                 '判断依据': item.get('reason', '')
             })
-
+        
         # 可疑收入明细
         for item in classification.get('suspicious_details', []):
             classification_data.append({
@@ -1090,7 +1091,7 @@ def _generate_income_classification_sheet(writer, derived_data):
                 '摘要': item.get('description', ''),
                 '判断依据': item.get('reason', '')
             })
-
+        
         if classification_data:
             df = pd.DataFrame(classification_data)
             df.to_excel(writer, sheet_name=sheet_name, index=False)
@@ -1099,17 +1100,17 @@ def _generate_income_classification_sheet(writer, derived_data):
 def _generate_income_summary_sheet(writer, derived_data):
     """
     生成收入分类汇总工作表
-
+    
     Args:
         writer: ExcelWriter对象
         derived_data: 派生数据字典（包含income_classifications）
     """
     if not derived_data or not derived_data.get('income_classifications'):
         return
-
+    
     income_classifications = derived_data['income_classifications']
     summary_data = []
-
+    
     for person, classification in income_classifications.items():
         summary_data.append({
             '人员': person,
@@ -1124,7 +1125,7 @@ def _generate_income_summary_sheet(writer, derived_data):
             '可疑收入笔数': classification.get('suspicious_count', 0),
             '总收入(元)': classification.get('legitimate_income', 0) + classification.get('unknown_income', 0) + classification.get('suspicious_income', 0)
         })
-
+    
     if summary_data:
         df = pd.DataFrame(summary_data)
         df.to_excel(writer, sheet_name='收入分类汇总', index=False)
@@ -1133,16 +1134,16 @@ def _generate_income_summary_sheet(writer, derived_data):
 def _generate_total_assets_sheet(writer, derived_data):
     """
     生成总资产汇总工作表
-
+    
     Args:
         writer: ExcelWriter对象
         derived_data: 派生数据字典（包含total_assets）
     """
     if not derived_data or not derived_data.get('total_assets'):
         return
-
+    
     total_assets = derived_data['total_assets']
-
+    
     assets_data = [{
         '资产类型': '银行存款',
         '金额(元)': total_assets.get('bank_balance', 0),
@@ -1164,7 +1165,7 @@ def _generate_total_assets_sheet(writer, derived_data):
         '金额(元)': total_assets.get('total', 0),
         '金额(万元)': round(total_assets.get('total', 0) / 10000, 2)
     }]
-
+    
     df = pd.DataFrame(assets_data)
     df.to_excel(writer, sheet_name='总资产汇总', index=False)
 
@@ -1172,17 +1173,17 @@ def _generate_total_assets_sheet(writer, derived_data):
 def _generate_member_transfers_sheet(writer, derived_data):
     """
     生成成员间转账工作表
-
+    
     Args:
         writer: ExcelWriter对象
         derived_data: 派生数据字典（包含member_transfers）
     """
     if not derived_data or not derived_data.get('member_transfers'):
         return
-
+    
     member_transfers = derived_data['member_transfers']
     transfer_data = []
-
+    
     for person, transfers in member_transfers.items():
         transfer_data.append({
             '人员': person,
@@ -1190,7 +1191,7 @@ def _generate_member_transfers_sheet(writer, derived_data):
             '从家庭转入(元)': transfers.get('from_family', 0),
             '净流入(元)': transfers.get('net', 0)
         })
-
+    
     if transfer_data:
         df = pd.DataFrame(transfer_data)
         df.to_excel(writer, sheet_name='成员间转账', index=False)
@@ -1209,7 +1210,7 @@ def generate_excel_workbook(profiles: Dict,
                             derived_data: Dict = None) -> str:
     """
     生成Excel核查底稿
-
+    
     Args:
         profiles: 资金画像字典
         suspicions: 疑点检测结果
@@ -1222,130 +1223,130 @@ def generate_excel_workbook(profiles: Dict,
         income_results: 异常收入分析结果（可选）
         time_series_results: 时序分析结果（可选）
         derived_data: 派生数据（可选，包含收入分类、总资产等）
-
+        
     Returns:
         生成的文件路径
     """
     if output_path is None:
         output_path = config.OUTPUT_EXCEL_FILE
-
+    
     logger.info(f'正在生成Excel底稿: {output_path}')
 
     with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-
+        
         # 1. 资金画像汇总表
         _generate_summary_sheet(writer, profiles)
 
-
+        
         # 2. 直接转账关系表
         _generate_direct_transfer_sheet(writer, suspicions)
-
+        
         # 3. 现金时空伴随表
         _generate_cash_collision_sheet(writer, suspicions)
-
+        
         # 4. 隐形资产明细表
         _generate_hidden_asset_sheet(writer, suspicions)
-
+        
         # 5. 固定频率异常进账表
         _generate_fixed_frequency_sheet(writer, suspicions)
-
+        
         # 6. 大额现金明细表
         _generate_large_cash_sheet(writer, profiles)
-
+        
         # 6.5 第三方支付交易明细表（微信/支付宝等）
         _generate_third_party_sheets(writer, profiles)
-
+        
         # 6.6 理财产品交易明细表
         _generate_wealth_management_sheets(writer, profiles)
-
+        
         # 7. 家族关系图谱
         _generate_family_tree_sheet(writer, family_tree)
-
+        
         # 8. 家族资产汇总
         _generate_family_assets_sheets(writer, family_assets, profiles)
-
+        
         # 9. 数据验证结果
         _generate_validation_sheets(writer, validation_results)
-
+        
         # 10. 资金穿透分析
         _generate_penetration_sheets(writer, penetration_results)
-
+        
         # 11. 借贷行为分析（新增）
         _generate_loan_analysis_sheets(writer, loan_results)
-
+        
         # 12. 异常收入分析（新增）
         _generate_income_anomaly_sheets(writer, income_results)
-
+        
         # 13. 时序分析（新增）
         _generate_time_series_sheets(writer, time_series_results)
-
+        
         # 14. 资金闭环/过账通道（新增）
         _generate_fund_cycle_sheets(writer, penetration_results)
-
+        
         # 15. 收入分类分析（新增）
         _generate_income_summary_sheet(writer, derived_data)
         _generate_income_classification_sheet(writer, derived_data)
-
+        
         # 16. 总资产汇总（新增）
         _generate_total_assets_sheet(writer, derived_data)
-
+        
         # 17. 成员间转账（新增）
         _generate_member_transfers_sheet(writer, derived_data)
-
+    
     logger.info(f'Excel底稿生成完成: {output_path}')
-
+    
     return output_path
 
 
 def _group_into_households(core_persons, family_summary):
     """
     将核心人员按家庭关系分组
-
+    
     支持两种 family_summary 格式：
     1. 新格式 (2026-01-23+): 包含 family_units 列表，直接使用预计算的家庭分组
     2. 旧格式: 每人 -> {配偶: [...], 子女: [...], ...}，需要动态计算分组
-
+    
     Args:
         core_persons: 核心人员列表
         family_summary: 家庭关系摘要（可以是新格式 dict 或旧格式 dict）
-
+        
     Returns:
         家庭分组列表，每个元素是一个家庭成员姓名列表
     """
     if not family_summary:
         # 无家庭数据，每人独立成组
         return [[p] for p in core_persons]
-
+    
     # ========== 优先使用新格式 family_units ==========
     family_units = family_summary.get('family_units', [])
     if family_units:
         modules = []
         used_persons = set()
-
+        
         for unit in family_units:
             # 过滤出属于 core_persons 的成员
             unit_members = unit.get('members', [])
             filtered_members = [m for m in unit_members if m in core_persons]
-
+            
             if filtered_members:
                 modules.append(sorted(filtered_members))
                 used_persons.update(filtered_members)
-
+        
         # 将未被分配的 core_persons 添加为独立单元
         for p in core_persons:
             if p not in used_persons:
                 modules.append([p])
-
+        
         return modules
-
+    
     # ========== 回退到旧格式 family_relations ==========
     # 从 family_summary 中获取 family_relations（如果存在）
     relations_data = family_summary.get('family_relations', family_summary)
-
+    
     adj = {p: set() for p in core_persons}
     if relations_data and isinstance(relations_data, dict):
         for p, rels in relations_data.items():
-            if p not in core_persons:
+            if p not in core_persons: 
                 continue
             if not isinstance(rels, dict):
                 continue
@@ -1356,9 +1357,9 @@ def _group_into_households(core_persons, family_summary):
             for d in direct_names:
                 if d in core_persons:
                     adj[p].add(d)
-                    if d in adj:
+                    if d in adj: 
                         adj[d].add(p)
-
+    
     # BFS 找连通分量
     modules = []
     visited = set()
@@ -1381,10 +1382,10 @@ def _group_into_households(core_persons, family_summary):
 def _format_salary_summary(income_data):
     """
     格式化工资收入摘要
-
+    
     Args:
         income_data: 收入数据
-
+        
     Returns:
         工资收入摘要字符串
     """
@@ -1394,7 +1395,7 @@ def _format_salary_summary(income_data):
         d_str = str(item.get('日期', ''))[:4]
         if d_str.isdigit():
             yearly[d_str] = yearly.get(d_str, 0) + item.get('金额', 0)
-
+    
     if not yearly: return "未发现明显工资性收入。"
     years = sorted(yearly.keys(), key=lambda x: int(x))
     total = sum(yearly.values())
@@ -1412,13 +1413,13 @@ def _format_salary_summary(income_data):
 def _get_top_counterparties_str(entity, direction, cleaned_data, top_n=5):
     """
     获取主要交易对手字符串
-
+    
     Args:
         entity: 实体名称
         direction: 方向 ('in' 或 'out')
         cleaned_data: 清洗后的数据
         top_n: 返回前N个
-
+        
     Returns:
         主要交易对手字符串
     """
@@ -1446,88 +1447,45 @@ def _get_top_counterparties_str(entity, direction, cleaned_data, top_n=5):
 def _get_real_bank_balance(person, profiles):
     """
     获取真实的银行账户余额（从 profiles 中的 bank_accounts 数据）
-
-    【2026-01-27 修复】添加数据溯源信息
-
+    
     Args:
         person: 人员名称
         profiles: 资金画像字典
-
+        
     Returns:
         真实的银行余额总和
     """
     profile = profiles.get(person, {})
     if not profile:
         return 0
-
+    
     # 获取银行账户数据
     bank_accounts = profile.get('bank_accounts', []) or profile.get('bankAccounts', [])
-
+    
     if not bank_accounts:
         return 0
-
+    
     total_balance = 0.0
     for acc in bank_accounts:
         if isinstance(acc, dict):
             # 优先使用 last_balance（流水末尾余额），其次 balance
             balance = acc.get('last_balance', 0) or acc.get('balance', 0) or acc.get('余额', 0) or 0
             total_balance += balance
-
+    
     return total_balance
-
-
-def _generate_data_source_tag(person: str, cleaned_data: dict = None, source_info: dict = None) -> str:
-    """
-    生成数据溯源标注 HTML
-
-    【2026-01-27 修复】新增数据溯源函数
-
-    Args:
-        person: 实体名称
-        cleaned_data: 清洗后的数据（用于获取来源信息）
-        source_info: 额外的源信息字典
-
-    Returns:
-        HTML 格式的溯源标注
-    """
-    # 获取数据来源信息
-    file_info = ''
-    row_count = 0
-
-    if cleaned_data and person in cleaned_data:
-        df = cleaned_data[person]
-        if '_source_file' in df.columns and len(df) > 0:
-            source_file = df['_source_file'].iloc[0]
-            file_info = f'文件: {source_file}'
-            row_count = len(df)
-
-    if source_info and person in source_info:
-        if 'file' in source_info[person]:
-            file_info = f'文件: {source_info[person]["file"]}'
-        if 'rows' in source_info[person]:
-            row_count = source_info[person]['rows']
-
-    if not file_info:
-        file_info = '文件: 未知'
-
-    return f"""
-    <div style="font-size:11px; color:#888; margin-top:5px; padding:5px; background-color:#f9f9f9; border-radius:3px; border-left:3px solid #007bff;">
-        📍 数据来源: {file_info} ({row_count} 条记录)
-    </div>
-    """
 
 
 def _estimate_bank_balance(person, cleaned_data):
     """
     估算银行余额（已弃用，保留用于兼容性）
-
+    
     注意：此函数使用简单的 收入-支出 计算，不准确
     建议使用 _get_real_bank_balance 获取真实余额
-
+    
     Args:
         person: 人员名称
         cleaned_data: 清洗后的数据
-
+        
     Returns:
         估算的银行余额
     """
@@ -1538,80 +1496,35 @@ def _estimate_bank_balance(person, cleaned_data):
     return max(0, total_in - total_out)
 
 
-def _generate_report_conclusion(profiles, suspicions, core_persons, involved_companies, aggregator=None):
+def _generate_report_conclusion(profiles, suspicions, core_persons, involved_companies):
     """
     生成报告核心结论部分
-
+    
     Args:
         profiles: 资金画像字典
         suspicions: 疑点检测结果
         core_persons: 核心人员列表
         involved_companies: 涉及公司列表
-        aggregator: ClueAggregator实例（可选），用于获取统一风险评分
-
+        
     Returns:
         报告行列表
     """
     report_lines = []
-
+    
     report_lines.append("一、核查结论")
     report_lines.append("-" * 60)
-
+    
     total_trans = sum(p['summary']['transaction_count'] for p in profiles.values() if p['has_data'])
     direct_sus_count = len(suspicions['direct_transfers'])
     hidden_sus_count = sum(len(v) for v in suspicions['hidden_assets'].values())
-
-    # 【P1 修复 2026-01-27】使用统一风险评分
-    # 如果有aggregator，使用统一的总体风险评级
-    if aggregator:
-        # 计算所有实体的平均风险分
-        all_entities = core_persons + involved_companies
-        total_risk_score = 0
-        entity_count = 0
-        high_risk_entities = []
-
-        for entity in all_entities:
-            if entity in aggregator.evidence_packs:
-                risk_score = aggregator.evidence_packs[entity].get('risk_score', 0)
-                risk_level = aggregator.evidence_packs[entity].get('risk_level', 'unknown')
-                total_risk_score += risk_score
-                entity_count += 1
-
-                if risk_level in ['critical', 'high']:
-                    high_risk_entities.append(f"{entity}({risk_score}分)")
-
-        # 计算平均分
-        avg_score = total_risk_score / entity_count if entity_count > 0 else 0
-
-        # 确定总体风险评级
-        if avg_score >= 70:
-            risk_assessment = "高风险"
-            risk_level_cn = "高风险"
-        elif avg_score >= 50:
-            risk_assessment = "关注级"
-            risk_level_cn = "关注级"
-        elif avg_score >= 30:
-            risk_assessment = "低风险"
-            risk_level_cn = "低风险"
-        else:
-            risk_assessment = "低风险"
-            risk_level_cn = "低风险"
-
-        report_lines.append(f"【总体评价】: 本次核查对象共 {len(core_persons)} 人及 {len(involved_companies)} 家关联公司，总体风险评级为[{risk_assessment}]（平均{avg_score:.1f}分）。")
-
-        # 如果有高风险实体，列出
-        if high_risk_entities:
-            report_lines.append(f"【高风险实体】: {', '.join(high_risk_entities)}")
-    else:
-        # 旧逻辑：如果没有aggregator，使用简单的判断
-        risk_assessment = "低风险"
-        if direct_sus_count > 0 or hidden_sus_count > 0:
-            risk_assessment = "中高风险" if direct_sus_count > 5 else "关注级"
-
-        report_lines.append(f"【总体评价】: 本次核查对象共 {len(core_persons)} 人及 {len(involved_companies)} 家关联公司，总体风险评级为[{risk_assessment}]。")
-
+    
+    risk_assessment = "低风险"
+    if direct_sus_count > 0 or hidden_sus_count > 0:
+        risk_assessment = "中高风险" if direct_sus_count > 5 else "关注级"
+        
+    report_lines.append(f"【总体评价】: 本次核查对象共 {len(core_persons)} 人及 {len(involved_companies)} 家关联公司，总体风险评级为[{risk_assessment}]。")
     report_lines.append(f"【数据概况】: 累计分析银行流水 {total_trans} 条。")
-
+    
     # 高流水预警
     high_flow_persons = []
     for p_name, p_data in profiles.items():
@@ -1626,7 +1539,7 @@ def _generate_report_conclusion(profiles, suspicions, core_persons, involved_com
         report_lines.append(f"【主要发现】: 未发现核心人员与涉案公司存在直接利益输送，亦未发现明显的隐形房产/车辆购置线索。")
     else:
         report_lines.append(f"【主要发现】: 发现 {direct_sus_count} 笔疑似直接利益输送，{hidden_sus_count} 笔疑似隐形资产线索，需进一步核查。")
-
+    
     report_lines.append("")
     return report_lines
 
@@ -1634,21 +1547,21 @@ def _generate_report_conclusion(profiles, suspicions, core_persons, involved_com
 def _generate_family_section(household, family_assets, profiles, cleaned_data):
     """
     生成家庭资产与资金画像部分
-
+    
     Args:
         household: 家庭成员列表
         family_assets: 家庭资产数据
         profiles: 资金画像字典
         cleaned_data: 清洗后的数据
-
+        
     Returns:
         报告行列表
     """
     report_lines = []
-
+    
     title = "、".join(household) + " 家庭" if len(household) > 1 else f"{household[0]} 个人"
     report_lines.append(f"➤ {title}")
-
+    
     # 2.1 家庭全貌统计
     fam_props_list = []
     fam_cars_num = 0
@@ -1656,13 +1569,13 @@ def _generate_family_section(household, family_assets, profiles, cleaned_data):
     fam_total_wealth_est = 0.0 # 估算理财沉淀
     fam_deposit_details = []
     fam_wealth_details = []
-
+    
     for person in household:
         # 资产
         props = family_assets.get(person, {}).get('房产', []) if family_assets else []
         fam_props_list.extend([(person, p) for p in props])
         fam_cars_num += len(family_assets.get(person, {}).get('车辆', [])) if family_assets else 0
-
+        
         # 资金状态
         p_prof = profiles.get(person)
         if p_prof and p_prof['has_data']:
@@ -1671,7 +1584,7 @@ def _generate_family_section(household, family_assets, profiles, cleaned_data):
             fam_total_deposit_est += deposit
             if deposit > 1000:
                 fam_deposit_details.append(f"{person}:{utils.format_currency(deposit)}")
-
+            
             # 理财沉淀估算 (使用新的V3算法 results)
             wealth = p_prof.get('wealth_management', {})
             # 优先使用 estimate_holding
@@ -1679,11 +1592,11 @@ def _generate_family_section(household, family_assets, profiles, cleaned_data):
             # 如果没有(老数据)，降级使用 Net
             if w_holding == 0 and 'estimated_holding' not in wealth:
                 w_holding = max(0, wealth.get('wealth_purchase', 0) - wealth.get('wealth_redemption', 0))
-
+            
             if w_holding > 0:
                  fam_total_wealth_est += w_holding
                  fam_wealth_details.append(f"{person}:{utils.format_currency(w_holding)}")
-
+    
     # 展示家庭全貌表格化
     report_lines.append(f"  【家庭资产全貌】 (截至数据提取日)")
     report_lines.append(f"   • 房产合计: {len(fam_props_list)} 套")
@@ -1694,7 +1607,7 @@ def _generate_family_section(household, family_assets, profiles, cleaned_data):
         area = p.get('建筑面积', 0)
         area_str = f"{area}平" if area > 0 else "面积未知"
         report_lines.append(f"     - [{owner}] {addr} ({area_str}, {price_str})")
-
+        
     report_lines.append(f"   • 车辆合计: {fam_cars_num} 辆")
     report_lines.append(f"   • 资金沉淀(估算): 存款约 {utils.format_currency(fam_total_deposit_est)} | 理财约 {utils.format_currency(fam_total_wealth_est)}")
     if fam_deposit_details:
@@ -1708,33 +1621,33 @@ def _generate_family_section(household, family_assets, profiles, cleaned_data):
         profile = next((p for p in profiles.values() if person in p.get('entity_name', '')), None)
         if not profile or not profile['has_data']:
             report_lines.append(f"  [{person}]: 暂无详细流水数据"); continue
-
+            
         summary = profile['summary']
         income = profile.get('income_structure', {})
         wealth = profile.get('wealth_management', {})
-
+        
         report_lines.append(f"  [{person}]")
         # 资金规模与自我转账
         self_transfer_vol = wealth.get('self_transfer_income', 0) + wealth.get('self_transfer_expense', 0)
         self_note = f"(含内部互转 {utils.format_currency(self_transfer_vol)})" if self_transfer_vol > 500000 else ""
         report_lines.append(f"    • 资金规模: 流入 {utils.format_currency(summary['total_income'])} / 流出 {utils.format_currency(summary['total_expense'])} {self_note}")
-
+        
         # 工资收入
         report_lines.append(f"    • 收入结构: {utils.format_currency(income.get('salary_income', 0))} (占比 {summary['salary_ratio']:.1%})")
         report_lines.append(f"      {_format_salary_summary(income)}")
-
+        
         # 理财深度分析
         w_purchase = wealth.get('wealth_purchase', 0)
         w_redeem = wealth.get('wealth_redemption', 0)
         w_est_holding = wealth.get('estimated_holding', 0)
-
+        
         if w_purchase > 100000:
             report_lines.append(f"    • 理财行为: 申购 {utils.format_currency(w_purchase)} / 赎回 {utils.format_currency(w_redeem)}")
             flow_vol = summary['total_income'] + summary['total_expense']
             if flow_vol > 0:
                 turnover = (w_purchase + w_redeem) / flow_vol
                 report_lines.append(f"      >> 资金空转率: {turnover:.1%} (理财申赎占总流水比例)")
-
+            
             # 状态判定
             if w_est_holding > 100000:
                 status = f"持有中(估算约{utils.format_currency(w_est_holding)})"
@@ -1743,7 +1656,7 @@ def _generate_family_section(household, family_assets, profiles, cleaned_data):
             else:
                 status = "基本持平"
             report_lines.append(f"      >> 资金状态: {status}")
-
+            
             # 产品大类分布
             holding_struct = wealth.get('holding_structure', {})
             if holding_struct:
@@ -1765,49 +1678,49 @@ def _generate_family_section(household, family_assets, profiles, cleaned_data):
                          report_lines.append(f"      >> 交易分布: {', '.join(cat_strs)}")
         else:
              report_lines.append(f"    • 理财行为: 累计申购 {utils.format_currency(w_purchase)} (规模较小)")
-
+        
         # 资金流向
         report_lines.append(f"    • 主要来源: {_get_top_counterparties_str(person, 'in', cleaned_data)}")
         report_lines.append(f"    • 主要去向: {_get_top_counterparties_str(person, 'out', cleaned_data)}")
         report_lines.append("")
-
+    
     return report_lines
 
 
 def _generate_company_section(company, profiles, core_persons, cleaned_data):
     """
     生成公司资金核查部分
-
+    
     Args:
         company: 公司名称
         profiles: 资金画像字典
         core_persons: 核心人员列表
         cleaned_data: 清洗后的数据
-
+        
     Returns:
         报告行列表
     """
     report_lines = []
-
+    
     report_lines.append(f"➤ {company}")
     comp_profile = next((p for p in profiles.values() if company in p.get('entity_name', '')), None)
-
+    
     if not comp_profile or not comp_profile['has_data']:
         report_lines.append("  (暂无详细流水数据)")
         report_lines.append("")
         return report_lines
-
+    
     summary = comp_profile['summary']
-
+    
     # 3.1 资金概况
     report_lines.append(f"  • 资金概况: 总流入 {utils.format_currency(summary['total_income'])} | 总流出 {utils.format_currency(summary['total_expense'])}")
-
+    
     # 3.2 大客户/供应商
     top_in = _get_top_counterparties_str(company, 'in', cleaned_data, 5)
     top_out = _get_top_counterparties_str(company, 'out', cleaned_data, 5)
     report_lines.append(f"  • 主要资金来源(客户): {top_in}")
     report_lines.append(f"  • 主要资金去向(供应商): {top_out}")
-
+    
     # 3.3 与核查对象往来 (高危检测)
     comp_df = cleaned_data.get(company)
     risky_trans = []
@@ -1819,7 +1732,7 @@ def _generate_company_section(company, profiles, core_persons, cleaned_data):
             for name, row in groups.iterrows():
                 if row['income'] > 0: risky_trans.append(f"收到 {name} {utils.format_currency(row['income'])}")
                 if row['expense'] > 0: risky_trans.append(f"支付给 {name} {utils.format_currency(row['expense'])}")
-
+    
     if risky_trans:
         report_lines.append(f"  • 【公私往来预警】: 发现直接资金往来!")
         for t in risky_trans:
@@ -1830,25 +1743,25 @@ def _generate_company_section(company, profiles, core_persons, cleaned_data):
     # 3.4 隐匿链路提示
     report_lines.append(f"  • 隐匿链路排查: 经穿透分析，未发现明显的第三方（如关联自然人、空壳公司）中转资金链路。")
     report_lines.append("")
-
+    
     return report_lines
 
 
 def _generate_suggestions_section(suspicions):
     """
     生成疑点与核查建议部分
-
+    
     Args:
         suspicions: 疑点检测结果
-
+        
     Returns:
         报告行列表
     """
     report_lines = []
-
+    
     suggestion_idx = 1
     has_suggestions = False
-
+    
     # 4.1 利益输送
     if suspicions['direct_transfers']:
         report_lines.append("【疑似利益输送】")
@@ -1869,7 +1782,7 @@ def _generate_suggestions_section(suspicions):
         suggestion_idx += 1
         has_suggestions = True
         report_lines.append("")
-
+        
     # 4.3 异常高频/大额
     fixed = [item for sublist in suspicions['fixed_frequency'].values() for item in sublist]
     if fixed:
@@ -1879,7 +1792,7 @@ def _generate_suggestions_section(suspicions):
         report_lines.append(f"  ➡ 建议 {suggestion_idx}: 核实该规律性收入的性质，排除兼职取酬或吃空饷嫌疑。")
         suggestion_idx += 1
         has_suggestions = True
-
+        
     if not has_suggestions:
         report_lines.append("本次自动化分析未发现显著的硬性疑点。")
         report_lines.append(f"  ➡ 建议: 重点关注大额消费支出是否与收入水平匹配（见Excel底稿'大额现金明细'）。")
@@ -1894,41 +1807,38 @@ def generate_official_report(profiles: Dict,
                             output_path: str = None,
                             family_summary: Dict = None,
                             family_assets: Dict = None,
-                            cleaned_data: Dict = None,
-                            aggregator=None) -> str:
+                            cleaned_data: Dict = None) -> str:
     """
     生成公文格式的核查结果分析报告（2026专业纪检优化版 v6）
     特点：
     1. 结论先行，风险分级
     2. 家庭全貌概览（包含房产/车辆/存款/理财总估值）
     3. 房产详细列表（一行一套）
-    4. 深度理财分析（引入"撮合估算"算法，计算更真实的当前持有量）
+    4. 深度理财分析（引入“撮合估算”算法，计算更真实的当前持有量）
     5. 公司资金核查（专章）
-    
-    【P1 修复 2026-01-27】aggregator参数用于统一风险评分
     """
     # 同时也生成HTML报告
     html_path = output_path.replace('.txt', '.html') if output_path else config.OUTPUT_REPORT_FILE.replace('.docx', '.html')
     generate_html_report(profiles, suspicions, core_persons, involved_companies, html_path, family_summary, family_assets, cleaned_data)
-
+    
     if output_path is None:
         output_path = config.OUTPUT_REPORT_FILE.replace('.docx', '.txt')
-
+    
     logger.info(f'正在生成专业版公文报告(V6): {output_path}')
-
+    
     report_lines = []
-
+    
     # === 报告开始 ===
     report_lines.append(f"{config.REPORT_TITLE}")
     report_lines.append("=" * 60)
-
+    
     # 1. 核心结论 (Executive Summary)
     report_lines.extend(_generate_report_conclusion(profiles, suspicions, core_persons, involved_companies))
 
     # 2. 家庭/个人详情 (Family Section)
     report_lines.append("二、家庭资产与资金画像")
     report_lines.append("-" * 60)
-
+    
     households = _group_into_households(core_persons, family_summary)
     for household in households:
         report_lines.extend(_generate_family_section(household, family_assets, profiles, cleaned_data))
@@ -1936,7 +1846,7 @@ def generate_official_report(profiles: Dict,
     # 3. 公司资金核查 (Company Section)
     report_lines.append("三、公司资金核查")
     report_lines.append("-" * 60)
-
+    
     if not involved_companies:
         report_lines.append("本次未涉及公司核查。")
     else:
@@ -1952,11 +1862,11 @@ def generate_official_report(profiles: Dict,
     report_lines.append("=" * 60)
     # report_lines.append(f"报告生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     report_lines.append("注: 本报告基于提供的电子数据分析生成，线索仅供参考。")
-
+    
     # 写入文件
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(report_lines))
-
+    
     logger.info(f'公文报告生成完成: {output_path}')
     return output_path
 
@@ -1967,14 +1877,14 @@ def _analyze_person_asset_trails(person_name: str, output_dir: str = 'output') -
     """
     import os
     text_lines = []
-
+    
     file_path = os.path.join(output_dir, 'cleaned_data', '个人', f'{person_name}_合并流水.xlsx')
     if not os.path.exists(file_path):
         return []
-
+        
     try:
         df = pd.read_excel(file_path)
-
+        
         # Helper: 关键词匹配
         def has_kw(row, kws):
             t = str(row.get('交易对手', '')) + str(row.get('交易摘要', ''))
@@ -1983,13 +1893,13 @@ def _analyze_person_asset_trails(person_name: str, output_dir: str = 'output') -
         # === 车辆分析 ===
         car_buy_kws = ['汽车', '4S', '绿地金凯', '宝马', '奔驰', '奥迪', '保时捷']
         car_loan_kws = ['汽车金融', '上汽通用', '车贷', '通用金融', '宝马金融', '奔驰金融']
-
+        
         # 1. 购车首付/全款
         car_payments = df[df.apply(lambda x: has_kw(x, car_buy_kws), axis=1) & (df['支出(元)'] > 10000)].sort_values('交易时间')
         if not car_payments.empty:
             for _, row in car_payments.iterrows():
                 text_lines.append(f"     [车辆购置] {row['交易时间']} 向 [{row['交易对手']}] 支付 {utils.format_currency(row['支出(元)'])}")
-
+        
         # 2. 车贷还款
         car_repayments = df[df.apply(lambda x: has_kw(x, car_loan_kws), axis=1) & (df['支出(元)'] > 0)].sort_values('交易时间')
         if not car_repayments.empty:
@@ -2006,13 +1916,13 @@ def _analyze_person_asset_trails(person_name: str, output_dir: str = 'output') -
         # 关键词：住房贷款, 个人贷款, 按揭 (房贷通常比较隐晦, 往往只显示"贷款归还"或"利息")
         # 这里只抓特征明显的
         house_loan_kws = ['住房贷款', '个人住房', '按揭', '房贷']
-
+        
         # 1. 购房支出
         house_payments = df[df.apply(lambda x: has_kw(x, house_buy_kws), axis=1) & (df['支出(元)'] > 50000)].sort_values('交易时间')
         if not house_payments.empty:
             for _, row in house_payments.iterrows():
                 text_lines.append(f"     [房产购置] {row['交易时间']} 向 [{row['交易对手']}] 支付 {utils.format_currency(row['支出(元)'])} (疑似购房款/首付)")
-
+                
         # 2. 房贷还款
         house_repayments = df[df.apply(lambda x: has_kw(x, house_loan_kws), axis=1) & (df['支出(元)'] > 0)].sort_values('交易时间')
         if not house_repayments.empty:
@@ -2021,7 +1931,7 @@ def _analyze_person_asset_trails(person_name: str, output_dir: str = 'output') -
 
     except Exception as e:
         logger.error(f"分析资产线索失败 {person_name}: {e}")
-
+        
     return text_lines
 
 import glob
@@ -2127,27 +2037,27 @@ HTML_TEMPLATE = """
 def _generate_html_conclusion(profiles, suspicions, core_persons, involved_companies):
     """
     生成HTML报告的核查结论部分
-
+    
     Args:
         profiles: 资金画像字典
         suspicions: 疑点检测结果
         core_persons: 核心人员列表
         involved_companies: 涉及公司列表
-
+        
     Returns:
         HTML内容字符串
     """
     import datetime
-
+    
     total_trans = sum(p['summary']['transaction_count'] for p in profiles.values() if p['has_data'])
-
+    
     # 风险评级
     risk_assessment = "低风险"
     direct_sus_count = len(suspicions['direct_transfers'])
     hidden_sus_count = sum(len(v) for v in suspicions['hidden_assets'].values())
     if direct_sus_count > 0 or hidden_sus_count > 0:
         risk_assessment = "中高风险" if direct_sus_count > 5 else "关注级"
-
+        
     risk_color = "green"
     if risk_assessment == "中高风险": risk_color = "red"
     elif risk_assessment == "关注级": risk_color = "orange"
@@ -2156,13 +2066,13 @@ def _generate_html_conclusion(profiles, suspicions, core_persons, involved_compa
     <div class="page">
         <h1>信息查询结果分析报告</h1>
         <p style="text-align:center; color:#888;">生成时间: {datetime.datetime.now().strftime('%Y年%m月%d日 %H:%M:%S')}</p>
-
+        
         <div class="section-title">一、核查结论</div>
         <div style="background-color:#f9f9f9; padding:15px; border-left: 5px solid {risk_color}; margin-bottom:20px;">
             <p><strong>【总体评价】</strong>: 本次核查对象共 {len(core_persons)} 人及 {len(involved_companies)} 家关联公司，总体风险评级为 <strong><span style="color:{risk_color}">{_escape_html(risk_assessment)}</span></strong>。</p>
             <p><strong>【数据概况】</strong>: 累计分析银行流水 {total_trans} 条。</p>
     """
-
+    
     # 高流水预警
     high_flow_persons = []
     for p_name, p_data in profiles.items():
@@ -2172,13 +2082,13 @@ def _generate_html_conclusion(profiles, suspicions, core_persons, involved_compa
                 high_flow_persons.append(_escape_html(p_name))
     if high_flow_persons:
         content_html += f"""<p><strong>【特别说明】</strong>: <span style="color:red">{', '.join(high_flow_persons)}</span> 银行流水规模较大，主要系理财产品频繁申赎所致(详见下文)。</p>"""
-
+    
     if direct_sus_count == 0 and hidden_sus_count == 0:
         content_html += f"""<p><strong>【主要发现】</strong>: 未发现核心人员与涉案公司存在直接利益输送，亦未发现明显的隐形房产/车辆购置线索。</p>"""
     else:
         content_html += f"""<p><strong>【主要发现】</strong>: 发现 {direct_sus_count} 笔疑似直接利益输送，{hidden_sus_count} 笔疑似隐形资产线索。</p>"""
     content_html += "</div></div>"
-
+    
     return content_html
 
 
@@ -2187,26 +2097,26 @@ def _generate_html_family_section(profiles, core_persons, family_summary, family
     生成HTML报告的家庭板块 (V2.0 深度版)
     """
     import utils
-
+    
     content_html = """<div class="page"><div class="section-title">二、家庭资产与资金画像</div>"""
     households = _group_into_households(core_persons, family_summary)
-
+    
     for household in households:
         title = "、".join(household) + " 家庭"
         if len(household) == 1: title = f"{household[0]} 个人"
-
+        
         # 1. 家庭全貌统计
         fam_props_list = []
         fam_cars_num = 0
         fam_total_deposit_est = 0.0
         fam_total_wealth_est = 0.0
-
+        
         for person in household:
             # 资产数据
             props = family_assets.get(person, {}).get('房产', []) if family_assets else []
             fam_props_list.extend([(person, p) for p in props])
             fam_cars_num += len(family_assets.get(person, {}).get('车辆', [])) if family_assets else 0
-
+            
             # 资金数据
             p_prof = profiles.get(person)
             if p_prof and p_prof['has_data']:
@@ -2218,9 +2128,9 @@ def _generate_html_family_section(profiles, core_persons, family_summary, family
                 if w_holding == 0 and 'estimated_holding' not in wealth:
                     w_holding = max(0, wealth.get('wealth_purchase', 0) - wealth.get('wealth_redemption', 0))
                 if w_holding > 0: fam_total_wealth_est += w_holding
-
+        
         content_html += f"""<div class="subsection-title">➤ {_escape_html(title)}</div>"""
-
+        
         # 家庭概览框
         content_html += f"""
         <div style="border: 1px solid #ddd; padding: 10px; background-color: #fcfcfc; margin-bottom: 15px;">
@@ -2235,18 +2145,18 @@ def _generate_html_family_section(profiles, core_persons, family_summary, family
              content_html += '</ul>'
         else:
              content_html += '<p style="text-indent:2em; color:#999; font-size:12px;">(未发现系统登记房产，建议调取线下档案)</p>'
-
+             
         content_html += f"""
             <p>• <strong>车辆合计: {fam_cars_num} 辆</strong></p>
             <p>• <strong>资金沉淀 (估算):</strong> 存款约 <b>{utils.format_currency(fam_total_deposit_est)}</b> | 理财约 <b>{utils.format_currency(fam_total_wealth_est)}</b></p>
         </div>
         """
-
+        
         # 2. 个人详情
         for person in household:
             content_html += f"""<h3 style="margin-left:0; font-size:16px;">[{_escape_html(person)}]</h3>"""
             profile = next((p for p in profiles.values() if person in p.get('entity_name', '')), None)
-
+            
             # --- 基础身份信息 (Placeholder) ---
             content_html += """
             <table style="width:100%; border:none; margin-bottom:10px;">
@@ -2256,17 +2166,17 @@ def _generate_html_family_section(profiles, core_persons, family_summary, family
                 </tr>
             </table>
             """
-
+            
             if not profile or not profile['has_data']:
                 content_html += "<p>(暂无详细流水数据)</p>"; continue
-
+            
             summary = profile['summary']
             income = profile.get('income_structure', {})
             wealth = profile.get('wealth_management', {})
-
+            
             # 资金规模
             content_html += f"""<p><strong>资金规模</strong>: 流入 {utils.format_currency(summary['total_income'])} / 流出 {utils.format_currency(summary['total_expense'])}</p>"""
-
+            
             # 收入结构
             salary_details = income.get('salary_details', [])
             yearly_sal = {}
@@ -2276,23 +2186,23 @@ def _generate_html_family_section(profiles, core_persons, family_summary, family
             sal_desc = ""
             if yearly_sal:
                  sal_desc = " (" + "; ".join([f"{y}年:{utils.format_currency(v)}" for y, v in sorted(yearly_sal.items())]) + ")"
-
+            
             ratio_val = summary['salary_ratio']
             ratio_str = f"{ratio_val:.1%}"
             ratio_style = "color:red; font-weight:bold;" if ratio_val < 0.5 else ""
-
+            
             content_html += f"""
             <p><strong>工资收入</strong>: 累计 {utils.format_currency(income.get('salary_income', 0))} {_escape_html(sal_desc)}</p>
             <p><strong>收支匹配</strong>: 工资占比 <span style="{ratio_style}">{_escape_html(ratio_str)}</span></p>
             """
             if ratio_val < 0.5:
                 content_html += f"""<p style="text-indent:2em; color:red; font-size:13px;">⚠ 预警: 工资收入无法覆盖消费支出 (占比低于50%)，存在资金来源不明风险。</p>"""
-
+            
             # 理财分析
             w_purchase = wealth.get('wealth_purchase', 0)
             if w_purchase > 100000:
                 content_html += f"""<p><strong>理财行为</strong>: 申购 {utils.format_currency(w_purchase)} / 赎回 {utils.format_currency(wealth.get('wealth_redemption', 0))}</p>"""
-
+            
             # 流向
             content_html += f"""\u003cp\u003e\u003cstrong\u003e主要去向\u003c/strong\u003e: {_escape_html(_get_top_counterparties_str(person, 'out', cleaned_data, 5))}\u003c/p\u003e"""
             content_html += "\u003chr style='border:0; border-top:1px dashed #eee; margin:10px 0;'\u003e"
@@ -2306,7 +2216,7 @@ def _generate_html_company_section(profiles, involved_companies, core_persons, c
     生成HTML报告的公司资金核查部分 (V2.0 深度版)
     """
     import utils
-
+    
     content_html = """<div class="page"><div class="section-title">三、公司资金核查</div>"""
     if not involved_companies:
         content_html += "<p>本次未涉及公司核查。</p>"
@@ -2314,12 +2224,12 @@ def _generate_html_company_section(profiles, involved_companies, core_persons, c
         for company in involved_companies:
             content_html += f"""<div class="subsection-title">➤ {_escape_html(company)}</div>"""
             comp_profile = next((p for p in profiles.values() if company in p.get('entity_name', '')), None)
-
+            
             if not comp_profile or not comp_profile['has_data']:
                 content_html += "<p>(暂无详细流水数据)</p>"; continue
-
+            
             summary = comp_profile['summary']
-
+            
             # 1. 资金规模
             content_html += f"""
             <div style="background-color:#f8f9fa; padding:10px; border-left:4px solid #007bff; margin-bottom:10px;">
@@ -2328,13 +2238,13 @@ def _generate_html_company_section(profiles, involved_companies, core_persons, c
                 <p>• 交易笔数: {_escape_html(str(summary['transaction_count']))} 笔</p>
             </div>
             """
-
+            
             # 2. 上下游分析
             top_in = _escape_html(_get_top_counterparties_str(company, 'in', cleaned_data, 5))
             top_out = _escape_html(_get_top_counterparties_str(company, 'out', cleaned_data, 5))
             content_html += f"""<p><strong>主要资金来源</strong>: {top_in}</p>"""
             content_html += f"""<p><strong>主要资金去向</strong>: {top_out}</p>"""
-
+            
             # 3. 关联交易 (重点)
             comp_df = cleaned_data.get(company) if cleaned_data else None
             risky_html = ""
@@ -2349,7 +2259,7 @@ def _generate_html_company_section(profiles, involved_companies, core_persons, c
                             risky_items.append(f"{_escape_html(name)} (收:{utils.format_currency(row['income'])}/付:{utils.format_currency(row['expense'])})")
                     if risky_items:
                         risky_html += f"""<p style="color:red; background-color:#fff0f0; padding:5px;">⚠ <strong>利益输送嫌疑</strong>: 发现与核心人员存在直接往来: {', '.join(risky_items)}</p>"""
-
+                
                 # 3.2 大额现金
                 cash_tx = comp_df[comp_df['is_cash'] == True]
                 if not cash_tx.empty:
@@ -2357,14 +2267,14 @@ def _generate_html_company_section(profiles, involved_companies, core_persons, c
                     cash_out = cash_tx['expense'].sum()
                     if cash_in + cash_out > 50000:
                         risky_html += f"""<p><strong>现金分析</strong>: 存在现金操作 (存:{utils.format_currency(cash_in)} / 取:{utils.format_currency(cash_out)})，请核实用途。</p>"""
-
-            if risky_html:
+            
+            if risky_html: 
                 content_html += risky_html
-            else:
+            else: 
                 content_html += "<p>• <strong>关联排查</strong>: 未发现与核心人员的直接资金往来，无大额现金预警。</p>"
-
+            
             content_html += "<br>"
-
+            
     content_html += "</div>"
     return content_html
 
@@ -2372,18 +2282,18 @@ def _generate_html_company_section(profiles, involved_companies, core_persons, c
 def _generate_html_suggestions_section(suspicions):
     """
     生成HTML报告的疑点与核查建议部分
-
+    
     Args:
         suspicions: 疑点检测结果
-
+        
     Returns:
         HTML内容字符串
     """
     import utils
-
+    
     content_html = """<div class="page"><div class="section-title">四、主要疑点与核查建议</div>"""
     has_suggestions = False
-
+    
     # 疑似利益输送
     if suspicions['direct_transfers']:
         content_html += """<p><strong>【疑似利益输送】</strong></p><ul>"""
@@ -2400,12 +2310,12 @@ def _generate_html_suggestions_section(suspicions):
              content_html += f"""<li>{_safe_format_date(h.get('date'))}: 支付 {utils.format_currency(h.get('amount', 0))} 给 {_escape_html(h.get('counterparty', ''))} <br><span style="color:#666; font-size:12px;">(摘要: {_escape_html(h.get('description', ''))})</span></li>"""
         content_html += "</ul><p class='highlight'>➡ 建议: 核实上述大额支出是否用于购房/购车，并检查是否按规定申报。</p>"
         has_suggestions = True
-
+        
     if not has_suggestions:
         content_html += "<p>本次自动化分析未发现显著的硬性疑点。</p><p>➡ 建议: 重点关注大额消费支出是否与收入水平匹配（见Excel底稿'大额现金明细'）。</p>"
-
+        
     content_html += "</div>"
-
+    
     return content_html
 
 
@@ -2422,45 +2332,45 @@ def generate_html_report(profiles, suspicions, core_persons, involved_companies,
 
     logger = utils.setup_logger(__name__)
     logger.info(f'正在生成HTML文本分析报告(V6): {output_path}')
-
+    
     # Ensure lists
     if involved_companies is None: involved_companies = []
     if core_persons is None: core_persons = []
-
+    
     # 构建报告内容
     content_html = ""
-
+    
     # 1. 标题与前言（核查结论）
     content_html += _generate_html_conclusion(profiles, suspicions, core_persons, involved_companies)
-
+    
     # 2. 家庭板块
     content_html += _generate_html_family_section(profiles, core_persons, family_summary, family_assets, cleaned_data)
-
+    
     # 3. 公司资金核查
     content_html += _generate_html_company_section(profiles, involved_companies, core_persons, cleaned_data)
-
+    
     # 4. 疑点与核查建议
     content_html += _generate_html_suggestions_section(suspicions)
-
+    
     # 家庭板块
     content_html += """<div class="page"><div class="section-title">二、家庭资产与资金画像</div>"""
     households = _group_into_households(core_persons, family_summary)
-
+    
     for household in households:
         title = "、".join(household) + " 家庭"
         if len(household) == 1: title = f"{household[0]} 个人"
-
+        
         # 1. 家庭全貌统计
         fam_props_list = []
         fam_cars_num = 0
         fam_total_deposit_est = 0.0
         fam_total_wealth_est = 0.0
-
+        
         for person in household:
             props = family_assets.get(person, {}).get('房产', []) if family_assets else []
             fam_props_list.extend([(person, p) for p in props])
             fam_cars_num += len(family_assets.get(person, {}).get('车辆', [])) if family_assets else 0
-
+            
             p_prof = profiles.get(person)
             if p_prof and p_prof['has_data']:
                 # 【2026-01-22 修复】使用真实银行余额
@@ -2471,9 +2381,9 @@ def generate_html_report(profiles, suspicions, core_persons, involved_companies,
                 if w_holding == 0 and 'estimated_holding' not in wealth:
                     w_holding = max(0, wealth.get('wealth_purchase', 0) - wealth.get('wealth_redemption', 0))
                 if w_holding > 0: fam_total_wealth_est += w_holding
-
+        
         content_html += f"""<div class="subsection-title">➤ {_escape_html(title)}</div>"""
-
+        
         # 家庭概览框
         content_html += f"""
         <div style="border: 1px solid #ddd; padding: 10px; background-color: #fcfcfc; margin-bottom: 15px;">
@@ -2487,30 +2397,30 @@ def generate_html_report(profiles, suspicions, core_persons, involved_companies,
             price_str = f"{utils.format_currency(price)}" if price > 0 else "价格未知"
             area = _escape_html(str(p.get('建筑面积', 0)))
             content_html += f"<li>[{_escape_html(owner)}] {addr} ({area}平, {price_str})</li>"
-
+        
         content_html += f"""
             </ul>
             <p>• <strong>车辆合计: {fam_cars_num} 辆</strong></p>
             <p>• <strong>资金沉淀 (估算):</strong> 存款约 <b>{utils.format_currency(fam_total_deposit_est)}</b> | 理财约 <b>{utils.format_currency(fam_total_wealth_est)}</b></p>
         </div>
         """
-
+        
         # 2. 个人详情
         for person in household:
             content_html += f"""<h3 style="margin-left:0; font-size:16px;">[{_escape_html(person)}]</h3>"""
             profile = next((p for p in profiles.values() if person in p.get('entity_name', '')), None)
             if not profile or not profile['has_data']:
                 content_html += "<p>(暂无详细流水数据)</p>"; continue
-
+            
             summary = profile['summary']
             income = profile.get('income_structure', {})
             wealth = profile.get('wealth_management', {})
-
+            
             # 资金规模
             self_transfer_vol = wealth.get('self_transfer_income', 0) + wealth.get('self_transfer_expense', 0)
             self_note = f"<span style='color:#888'>(含内部互转 {utils.format_currency(self_transfer_vol)})</span>" if self_transfer_vol > 500000 else ""
             content_html += f"""<p><strong>资金规模</strong>: 流入 {utils.format_currency(summary['total_income'])} / 流出 {utils.format_currency(summary['total_expense'])} {self_note}</p>"""
-
+            
             # 收入结构
             salary_details = income.get('salary_details', [])
             yearly_sal = {}
@@ -2521,19 +2431,19 @@ def generate_html_report(profiles, suspicions, core_persons, involved_companies,
             if yearly_sal:
                  sal_desc = " (" + "; ".join([f"{_escape_html(y)}年:{utils.format_currency(v)}" for y, v in sorted(yearly_sal.items())]) + ")"
             content_html += f"""<p><strong>收入结构</strong>: 工资性收入 {utils.format_currency(income.get('salary_income', 0))} (占比 {summary['salary_ratio']:.1%}){_escape_html(sal_desc)}</p>"""
-
+            
             # 理财深度分析
             w_purchase = wealth.get('wealth_purchase', 0)
             w_redeem = wealth.get('wealth_redemption', 0)
             w_est_holding = wealth.get('estimated_holding', 0)
-
+            
             if w_purchase > 100000:
                 content_html += f"""<p><strong>理财行为</strong>: 申购 {utils.format_currency(w_purchase)} / 赎回 {utils.format_currency(w_redeem)}</p>"""
                 flow_vol = summary['total_income'] + summary['total_expense']
                 if flow_vol > 0:
                     turnover = (w_purchase + w_redeem) / flow_vol
                     content_html += f"""<p style="text-indent: 2em;">>> <span style="color:#666">资金空转率: <strong>{turnover:.1%}</strong> (理财申赎占总流水比例)</span></p>"""
-
+                
                 status_str = ""
                 if w_est_holding > 100000:
                     status_str = f"持有中 (估算约 <b>{utils.format_currency(w_est_holding)}</b>)"
@@ -2542,19 +2452,19 @@ def generate_html_report(profiles, suspicions, core_persons, involved_companies,
                 else:
                     status_str = "基本持平"
                 content_html += f"""<p style="text-indent: 2em;">>> 资金状态: <span style="background-color:#e6f7ff; padding:2px 5px;">{status_str}</span></p>"""
-
+                
                 # 持有分布
                 holding_struct = wealth.get('holding_structure', {})
                 if holding_struct:
                      sorted_hold = sorted(holding_struct.items(), key=lambda x: x[1]['amount'], reverse=True)
                      hold_strs = [f"{_escape_html(k)}在持{utils.format_currency(v['amount'])}" for k, v in sorted_hold]
                      content_html += f"""<p style="text-indent: 2em;">>> 持有分布: {_escape_html(', '.join(hold_strs))}</p>"""
-
+            
             # 流向
             content_html += f"""<p><strong>主要去向</strong>: {_escape_html(_get_top_counterparties_str(person, 'out', cleaned_data))}</p>"""
             content_html += "<hr style='border:0; border-top:1px dashed #eee; margin:10px 0;'>"
     content_html += "</div>" # End Household Page
-
+    
     # 3. 公司资金核查 (Company Section)
     content_html += """<div class="page"><div class="section-title">三、公司资金核查</div>"""
     if not involved_companies:
@@ -2563,18 +2473,18 @@ def generate_html_report(profiles, suspicions, core_persons, involved_companies,
         for company in involved_companies:
             content_html += f"""<div class="subsection-title">➤ {_escape_html(company)}</div>"""
             comp_profile = next((p for p in profiles.values() if company in p.get('entity_name', '')), None)
-
+            
             if not comp_profile or not comp_profile['has_data']:
                 content_html += "<p>(暂无详细流水数据)</p>"; continue
-
+            
             summary = comp_profile['summary']
             content_html += f"""<p>• <strong>资金概况</strong>: 总流入 {utils.format_currency(summary['total_income'])} | 总流出 {utils.format_currency(summary['total_expense'])}</p>"""
-
+            
             top_in = _escape_html(_get_top_counterparties_str(company, 'in', cleaned_data, 5))
             top_out = _escape_html(_get_top_counterparties_str(company, 'out', cleaned_data, 5))
             content_html += f"""<p>• <strong>主要客户(来源)</strong>: {top_in}</p>"""
             content_html += f"""<p>• <strong>主要供应商(去向)</strong>: {top_out}</p>"""
-
+            
             # 风险
             comp_df = cleaned_data.get(company)
             risky_html = ""
@@ -2587,7 +2497,7 @@ def generate_html_report(profiles, suspicions, core_persons, involved_companies,
                         if row['income'] > 0 or row['expense'] > 0: risky_items.append(f"{_escape_html(name)} (收:{utils.format_currency(row['income'])}/付:{utils.format_currency(row['expense'])})")
                     if risky_items:
                         risky_html = f"""<p style="color:red">⚠ 发现与核心人员直接往来: {', '.join(risky_items)}</p>"""
-
+            
             if risky_html: content_html += risky_html
             else: content_html += "<p>• <strong>公私往来</strong>: 未发现与核心人员的直接资金往来。</p>"
             content_html += "<br>"
@@ -2596,7 +2506,7 @@ def generate_html_report(profiles, suspicions, core_persons, involved_companies,
     # 4. 疑点与核查建议
     content_html += """<div class="page"><div class="section-title">四、主要疑点与核查建议</div>"""
     has_suggestions = False
-
+    
     # 疑似利益输送
     if suspicions['direct_transfers']:
         content_html += """<p><strong>【疑似利益输送】</strong></p><ul>"""
@@ -2613,31 +2523,20 @@ def generate_html_report(profiles, suspicions, core_persons, involved_companies,
              content_html += f"""<li>{_safe_format_date(h.get('date'))}: 支付 {utils.format_currency(h.get('amount', 0))} 给 {_escape_html(h.get('counterparty', ''))} <br><span style="color:#666; font-size:12px;">(摘要: {_escape_html(h.get('description', ''))})</span></li>"""
         content_html += "</ul><p class='highlight'>➡ 建议: 核实上述大额支出是否用于购房/购车，并检查是否按规定申报。</p>"
         has_suggestions = True
-
+        
     if not has_suggestions:
         content_html += "<p>本次自动化分析未发现显著的硬性疑点。</p><p>➡ 建议: 重点关注大额消费支出是否与收入水平匹配（见Excel底稿'大额现金明细'）。</p>"
-
+        
     content_html += "</div>"
-
+    
     # Replace placeholder (Handle both types to be safe)
     final_html = HTML_TEMPLATE.replace('{{CONTENT}}', content_html).replace('<!-- CONTENT_PLACEHOLDER -->', content_html)
-
-    try:
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(final_html)
-
-        logger.info(f"HTML文本报告(V6)生成完毕: {output_path}")
-        return output_path
-    except PermissionError as e:
-        logger.error(f'保存 HTML 报告失败（权限错误）: {e}')
-        return None
-    except OSError as e:
-        logger.error(f'保存 HTML 报告失败（系统错误）: {e}')
-        return None
-    except Exception as e:
-        logger.error(f'保存 HTML 报告失败（未知错误）: {e}')
-        logger.exception('详细错误信息:')
-        return None
+    
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(final_html)
+    
+    logger.info(f"HTML文本报告(V6)生成完毕: {output_path}")
+    return output_path
 
 
 # ============================================================
@@ -2654,7 +2553,7 @@ def generate_word_report(profiles: Dict,
                          cleaned_data: Dict = None) -> str:
     """
     使用 python-docx 生成专业 Word 审计报告
-
+    
     Args:
         profiles: 资金画像字典
         suspicions: 疑点检测结果
@@ -2664,7 +2563,7 @@ def generate_word_report(profiles: Dict,
         family_summary: 家庭关系摘要
         family_assets: 家庭资产数据
         cleaned_data: 清洗后的数据
-
+        
     Returns:
         生成的 Word 文件路径
     """
@@ -2677,7 +2576,7 @@ def generate_word_report(profiles: Dict,
     except ImportError:
         logger.warning('python-docx 未安装，跳过 Word 报告生成。请执行: pip install python-docx')
         return None
-
+    
     # 参数验证
     if profiles is None:
         logger.error('generate_word_report: profiles 参数不能为 None')
@@ -2691,7 +2590,7 @@ def generate_word_report(profiles: Dict,
     if involved_companies is None:
         logger.error('generate_word_report: involved_companies 参数不能为 None')
         return None
-
+    
     # 确保参数是正确的类型
     if not isinstance(profiles, dict):
         logger.error(f'generate_word_report: profiles 必须是字典类型，实际类型: {type(profiles)}')
@@ -2705,18 +2604,18 @@ def generate_word_report(profiles: Dict,
     if not isinstance(involved_companies, list):
         logger.error(f'generate_word_report: involved_companies 必须是列表类型，实际类型: {type(involved_companies)}')
         return None
-
+    
     if output_path is None:
         output_path = os.path.join(config.OUTPUT_DIR, 'analysis_results', '审计分析报告.docx')
-
+    
     logger.info(f'正在生成 Word 审计报告: {output_path}')
-
+    
     try:
         doc = Document()
     except Exception as e:
         logger.error(f'创建 Word 文档失败: {e}')
         return None
-
+    
     # 设置默认字体
     try:
         style = doc.styles['Normal']
@@ -2725,7 +2624,7 @@ def generate_word_report(profiles: Dict,
         style._element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
     except Exception as e:
         logger.warning(f'设置默认字体失败: {e}，使用默认字体')
-
+    
     # ========== 1. 标题页 ==========
     try:
         title = doc.add_heading(config.REPORT_TITLE, level=0)
@@ -2733,7 +2632,7 @@ def generate_word_report(profiles: Dict,
     except Exception as e:
         logger.error(f'添加标题失败: {e}')
         return None
-
+    
     # 生成时间
     try:
         doc.add_paragraph()
@@ -2744,19 +2643,19 @@ def generate_word_report(profiles: Dict,
         time_run.font.color.rgb = RGBColor(128, 128, 128)
     except Exception as e:
         logger.warning(f'添加生成时间失败: {e}')
-
+    
     try:
         doc.add_page_break()
     except Exception as e:
         logger.warning(f'添加分页符失败: {e}')
-
+    
     # ========== 2. 核查结论 ==========
     try:
         doc.add_heading('一、核查结论', level=1)
     except Exception as e:
         logger.error(f'添加核查结论标题失败: {e}')
         return None
-
+    
     # 安全计算统计数据
     try:
         total_trans = 0
@@ -2768,7 +2667,7 @@ def generate_word_report(profiles: Dict,
     except Exception as e:
         logger.warning(f'计算交易总数失败: {e}')
         total_trans = 0
-
+    
     try:
         direct_sus_count = len(suspicions.get('direct_transfers', []))
         hidden_sus_count = sum(len(v) for v in suspicions.get('hidden_assets', {}).values())
@@ -2776,11 +2675,11 @@ def generate_word_report(profiles: Dict,
         logger.warning(f'计算疑点数量失败: {e}')
         direct_sus_count = 0
         hidden_sus_count = 0
-
+    
     risk_assessment = "低风险"
     if direct_sus_count > 0 or hidden_sus_count > 0:
         risk_assessment = "中高风险" if direct_sus_count > 5 else "关注级"
-
+    
     try:
         p = doc.add_paragraph()
         p.add_run('【总体评价】').bold = True
@@ -2791,14 +2690,14 @@ def generate_word_report(profiles: Dict,
     except Exception as e:
         logger.error(f'添加总体评价段落失败: {e}')
         return None
-
+    
     try:
         p2 = doc.add_paragraph()
         p2.add_run('【数据概况】').bold = True
         p2.add_run(f'累计分析银行流水 {total_trans} 条。')
     except Exception as e:
         logger.warning(f'添加数据概况段落失败: {e}')
-
+    
     # 主要发现
     try:
         p3 = doc.add_paragraph()
@@ -2810,60 +2709,60 @@ def generate_word_report(profiles: Dict,
             finding.font.color.rgb = RGBColor(255, 0, 0)
     except Exception as e:
         logger.warning(f'添加主要发现段落失败: {e}')
-
+    
     # ========== 3. 家庭资产概览表 ==========
     try:
         doc.add_heading('二、家庭资产与资金画像', level=1)
     except Exception as e:
         logger.error(f'添加家庭资产标题失败: {e}')
         return None
-
+    
     # 汇总表格
     if core_persons:
         try:
             table = doc.add_table(rows=1, cols=5)
             table.style = 'Table Grid'
             table.alignment = WD_TABLE_ALIGNMENT.CENTER
-
+            
             # 表头
             hdr_cells = table.rows[0].cells
             headers = ['人员', '总流入', '总流出', '工资占比', '理财持有']
             for i, h in enumerate(headers):
                 hdr_cells[i].text = h
                 hdr_cells[i].paragraphs[0].runs[0].font.bold = True
-
+            
             # 数据行
             for person in core_persons:
                 profile = profiles.get(person)
                 if not isinstance(profile, dict) or not profile.get('has_data', False):
                     continue
-
+                
                 try:
                     summary = profile.get('summary', {})
                     if not isinstance(summary, dict):
                         continue
-
+                    
                     row_cells = table.add_row().cells
                     row_cells[0].text = str(person)
-
+                    
                     # 安全格式化货币
                     try:
                         row_cells[1].text = utils.format_currency(summary.get('total_income', 0))
                     except Exception:
                         row_cells[1].text = str(summary.get('total_income', 0))
-
+                    
                     try:
                         row_cells[2].text = utils.format_currency(summary.get('total_expense', 0))
                     except Exception:
                         row_cells[2].text = str(summary.get('total_expense', 0))
-
+                    
                     # 安全格式化百分比
                     try:
                         salary_ratio = summary.get('salary_ratio', 0)
                         row_cells[3].text = f"{salary_ratio:.1%}"
                     except Exception:
                         row_cells[3].text = '-'
-
+                    
                     wealth = profile.get('wealth_management', {})
                     if isinstance(wealth, dict):
                         holding = wealth.get('estimated_holding', 0)
@@ -2878,14 +2777,14 @@ def generate_word_report(profiles: Dict,
                     continue
         except Exception as e:
             logger.error(f'创建家庭资产表格失败: {e}')
-
+    
     # ========== 4. 公司资金核查 ==========
     try:
         doc.add_heading('三、公司资金核查', level=1)
     except Exception as e:
         logger.error(f'添加公司资金核查标题失败: {e}')
         return None
-
+    
     if not involved_companies:
         try:
             doc.add_paragraph('本次未涉及公司核查。')
@@ -2898,16 +2797,16 @@ def generate_word_report(profiles: Dict,
             except Exception as e:
                 logger.warning(f'添加公司 {company} 标题失败: {e}')
                 continue
-
+            
             comp_profile = profiles.get(company)
-
+            
             if not isinstance(comp_profile, dict) or not comp_profile.get('has_data', False):
                 try:
                     doc.add_paragraph('(暂无详细流水数据)')
                 except Exception as e:
                     logger.warning(f'添加公司 {company} 无数据说明失败: {e}')
                 continue
-
+            
             try:
                 summary = comp_profile.get('summary', {})
                 if isinstance(summary, dict):
@@ -2919,17 +2818,17 @@ def generate_word_report(profiles: Dict,
                         p.add_run(f'总流入 {summary.get("total_income", 0)} | 总流出 {summary.get("total_expense", 0)}')
             except Exception as e:
                 logger.warning(f'添加公司 {company} 资金概况失败: {e}')
-
+    
     # ========== 5. 疑点与建议 ==========
     try:
         doc.add_heading('四、主要疑点与核查建议', level=1)
     except Exception as e:
         logger.error(f'添加疑点与建议标题失败: {e}')
         return None
-
+    
     suggestion_idx = 1
     has_suggestions = False
-
+    
     # 利益输送
     direct_transfers = suspicions.get('direct_transfers', [])
     if direct_transfers:
@@ -2951,7 +2850,7 @@ def generate_word_report(profiles: Dict,
             has_suggestions = True
         except Exception as e:
             logger.warning(f'添加利益输送部分失败: {e}')
-
+    
     # 隐形资产
     try:
         hidden_assets = suspicions.get('hidden_assets', {})
@@ -2974,14 +2873,14 @@ def generate_word_report(profiles: Dict,
             has_suggestions = True
     except Exception as e:
         logger.warning(f'添加隐形资产部分失败: {e}')
-
+    
     if not has_suggestions:
         try:
             doc.add_paragraph('本次自动化分析未发现显著的硬性疑点。')
             doc.add_paragraph('➡ 建议: 重点关注大额消费支出是否与收入水平匹配。')
         except Exception as e:
             logger.warning(f'添加无疑点说明失败: {e}')
-
+    
     # ========== 6. 报告尾部 ==========
     try:
         doc.add_paragraph()
@@ -2990,14 +2889,14 @@ def generate_word_report(profiles: Dict,
         footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
     except Exception as e:
         logger.warning(f'添加报告尾部失败: {e}')
-
+    
     # 保存文档
     try:
         # 确保输出目录存在
         output_dir = os.path.dirname(output_path)
         if output_dir and not os.path.exists(output_dir):
             os.makedirs(output_dir, exist_ok=True)
-
+        
         doc.save(output_path)
         logger.info(f'Word 审计报告生成完成: {output_path}')
         return output_path

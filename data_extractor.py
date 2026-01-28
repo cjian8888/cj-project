@@ -235,15 +235,19 @@ def find_column_by_keywords(df: pd.DataFrame, keywords: List[str],
         return None
 
 
-def normalize_transactions(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_transactions(df: pd.DataFrame, source_file: str = None, extract_timestamp: str = None) -> pd.DataFrame:
     """
     标准化交易数据
     
+    【2026-01-27 修复】添加数据溯源信息（文件名、行号、提取时间）
+    
     Args:
         df: 原始交易DataFrame
+        source_file: 源文件名（用于溯源）
+        extract_timestamp: 提取时间戳（用于溯源）
         
     Returns:
-        标准化后的DataFrame
+        标准化后的DataFrame（包含溯源信息）
     """
     logger.info('正在标准化交易数据...')
     
@@ -253,6 +257,11 @@ def normalize_transactions(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     
     normalized = pd.DataFrame()
+    
+    # 【修复】添加溯源信息
+    normalized['_source_file'] = source_file if source_file else 'unknown'
+    normalized['_source_row'] = df.index
+    normalized['_extract_timestamp'] = extract_timestamp if extract_timestamp else datetime.now().isoformat()
     
     # 查找并映射字段
     date_col = find_column_by_keywords(df, config.DATE_COLUMNS)
@@ -396,8 +405,12 @@ def read_excel_transactions(excel_path: str) -> pd.DataFrame:
         
         logger.info(f'读取到 {len(df)} 行原始数据')
         
-        # 标准化数据
-        normalized_df = normalize_transactions(df)
+        # 标准化数据（添加溯源信息）
+        file_basename = os.path.basename(excel_path)
+        extract_timestamp = datetime.now().isoformat()
+        normalized_df = normalize_transactions(df, file_basename, extract_timestamp)
+        
+        logger.info(f'数据溯源信息已添加: 文件={file_basename}, 时间={extract_timestamp}')
         
         return normalized_df
         

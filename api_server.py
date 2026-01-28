@@ -94,9 +94,16 @@ import flow_visualizer
 import ml_analyzer
 import time_series_analyzer
 import clue_aggregator
+import behavioral_profiler
 
 # 导入 API 输入验证模块
 import api_validators
+
+# 应用 openpyxl 警告过滤器
+import openpyxl_filter
+root_logger = logging.getLogger()
+for handler in root_logger.handlers:
+    handler.addFilter(openpyxl_filter.OpenpyxlWarningFilter())
 
 # 🆕 Phase 6: P0级外部数据解析模块
 import pboc_account_extractor
@@ -2471,7 +2478,11 @@ def run_analysis(analysis_config: AnalysisConfig):
         
         # 5.13 时间序列分析报告
         try:
-            ts_results = time_series_analyzer.analyze_time_series(cleaned_data, all_persons)
+            # 复用之前已计算的结果，避免重复执行
+            ts_results = analysis_results.get("timeSeries")
+            if not ts_results:
+                # 如果主流程中没有计算（配置禁用了），则在这里计算
+                ts_results = time_series_analyzer.analyze_time_series(cleaned_data, all_persons)
             analysis_results["time_series"] = ts_results
             ts_report_path = time_series_analyzer.generate_time_series_report(
                 ts_results, output_dirs['analysis_results']
@@ -2491,6 +2502,10 @@ def run_analysis(analysis_config: AnalysisConfig):
                 related_party_results=analysis_results.get("related_party", {}),
                 loan_results=analysis_results.get("loan", {})
             )
+            # 【P1 修复 2026-01-27】使用统一风险模型计算风险评分
+            aggregator.calculate_entity_risk_scores()
+            logger.info("统一风险评分计算完成")
+
             agg_report_path = clue_aggregator.generate_aggregation_report(
                 aggregator, output_dirs['analysis_results']
             )

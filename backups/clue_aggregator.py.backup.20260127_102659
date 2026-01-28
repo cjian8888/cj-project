@@ -40,7 +40,6 @@ from collections import defaultdict
 
 import config
 import utils
-from unified_risk_model import UnifiedRiskModel, calculate_financial_ratio, calculate_family_transfer_ratio
 
 logger = utils.setup_logger(__name__)
 
@@ -180,42 +179,19 @@ class ClueAggregator:
         # 聚合资金闭环（去重）
         seen_cycles = set()
         for cycle in penetration_results.get('fund_cycles', []):
-            # 【P1 修复 2026-01-27】处理不同数据格式
-            # cycle 可能是 List[str] 或 Dict
-            if isinstance(cycle, dict):
-                # 如果是字典，提取 cycle 键的值
-                cycle_list = cycle.get('cycle', [])
-                cycle_str = cycle.get('cycle_str', ' → '.join(cycle_list) if cycle_list else '')
-            else:
-                cycle_list = cycle
-                cycle_str = ' → '.join(cycle) if cycle else ''
-            
-            # 【P1 修复 2026-01-28】使用 json 序列化作为唯一标识，避免包含字典
-            # 这样无论 cycle_list 中是什么类型，都可以放入 set
-            try:
-                cycle_key = tuple(cycle_list) if cycle_list else ()
-                # 检查是否所有元素都是字符串
-                all_strings = all(isinstance(item, str) for item in cycle_key)
-                if not all_strings:
-                    # 如果包含非字符串元素，使用 json 序列化
-                    import json
-                    cycle_key = json.dumps(cycle, sort_keys=True, ensure_ascii=False)
-                
-                if cycle_key in seen_cycles:
-                    continue
-                seen_cycles.add(cycle_key)
-            except (TypeError, ValueError) as e:
-                # 如果 cycle_list 包含不可排序的元素或无法序列化，跳过
-                logger.warning(f"跳过无法处理的闭环: {cycle}, 错误: {e}")
+            # 创建唯一标识（排序后转元组）
+            cycle_key = tuple(sorted(cycle))
+            if cycle_key in seen_cycles:
                 continue
+            seen_cycles.add(cycle_key)
             
             # 闭环涉及的所有实体
-            for entity in cycle_list:
+            for entity in cycle:
                 if entity in self.evidence_packs:
                     self.evidence_packs[entity]['evidence']['fund_cycles'].append({
-                        'cycle': cycle_list,
-                        'cycle_str': cycle_str,
-                        'length': len(cycle_list)
+                        'cycle': cycle,
+                        'cycle_str': ' → '.join(cycle),
+                        'length': len(cycle)
                     })
         
         # 聚合过账通道
@@ -331,154 +307,119 @@ class ClueAggregator:
         """
         计算每个实体的综合风险分
         
-        【P1 修复 2026-01-27】使用统一风险模型
-        解决问题:
-        - 理财交易被误判为高风险
-        - 家庭内部正常转账被误判为资金闭环
-        - 风险评分与常识不符
-        
-        改进方案:
-        1. 引入 UnifiedRiskModel 统一风险评分
-        2. 计算理财交易占比，降低风险权重
-        3. 计算家庭转账占比，降低风险权重
-        4. 区分理财相关的资金闭环
+        【评分权重优化 2026-01-11】
+        1. 高风险交易：提高权重，单笔大额交易更重要
+        2. 周期性收入：降低权重，可能是正常兼职
+        3. 增加金额维度：大额异常比小额更严重
         """
-        logger.info('计算实体综合风险分（使用统一风险模型）...')
-        
-        # 初始化统一风险模型
-        risk_model = UnifiedRiskModel()
+        logger.info('计算实体综合风险分...')
         
         for entity, pack in self.evidence_packs.items():
+            score = 0
+            reasons = []
+            
             evidence = pack['evidence']
             
-            # 准备风险评分所需的数据
-            risk_evidence = {
-                'money_loops': evidence.get('fund_cycles', []),
-                'transit_channel': self._extract_transit_channel_info(evidence),
-                'related_entities': evidence.get('hub_connections', []) + 
-                                  [member for community in evidence.get('communities', []) 
-                                   for member in community.get('members', [])],
-                'ml_anomalies': evidence.get('sudden_changes', []),
-                'total_records': pack.get('statistics', {}).get('total_records', 0)
-            }
+            # 【P4 优化】资金闭环: 区分家庭闭环和其他闭环
+            # 家庭成员间的资金闭环属于正常家庭财务往来，降低评分
+            cycle_count = len(evidence['fund_cycles'])
+            if cycle_count > 0:
+                # 判断是否为家庭成员闭环
+                family_cycle_count = 0
+                other_cycle_count = 0
+                
+                for cycle in evidence['fund_cycles']:
+                    if _is_family_cycle(cycle, self.core_persons):
+                        family_cycle_count += 1
+                    else:
+                        other_cycle_count += 1
+                
+                # 家庭闭环: +3分/个，上限6分（大幅降低）
+                # 其他闭环: +15分/个，上限30分
+                if family_cycle_count > 0:
+                    family_score = min(family_cycle_count * 3, 6)
+                    score += family_score
+                    reasons.append(f'{family_cycle_count}个家庭成员资金闭环')
+                
+                if other_cycle_count > 0:
+                    other_score = min(other_cycle_count * 15, 30)
+                    score += other_score
+                    reasons.append(f'涉及{other_cycle_count}个资金闭环')
             
-            # 计算理财交易占比（从cleaned_data中读取）
-            financial_ratio = self._calculate_financial_ratio(entity)
+            # 过账通道: +25分
+            if evidence['pass_through']:
+                score += 25
+                reasons.append('疑似过账通道')
             
-            # 计算家庭转账占比
-            family_ratio = self._calculate_family_transfer_ratio(entity)
+            # 资金枢纽: +10分
+            if evidence['hub_connections']:
+                score += 10
+                reasons.append('为资金枢纽节点')
             
-            # 使用统一风险模型计算评分
-            risk_score = risk_model.calculate_score(
-                entity_name=entity,
-                evidence=risk_evidence,
-                financial_ratio=financial_ratio,
-                family_ratio=family_ratio
-            )
+            # 高风险交易: 【优化】按金额加权，单笔大额更重要
+            # 原: 每笔+5分，上限20分
+            # 新: 基础5分/笔 + 金额加成（每10万+5分），上限40分
+            high_risk_count = len(evidence['high_risk_transactions'])
+            if high_risk_count > 0:
+                base_score = min(high_risk_count * 5, 20)
+                # 计算总金额加成
+                total_amount = sum(tx.get('amount', 0) for tx in evidence['high_risk_transactions'])
+                amount_bonus = min(int(total_amount / 100000) * 5, 20)  # 每10万+5分，上限20分
+                score += base_score + amount_bonus
+                reasons.append(f'{high_risk_count}笔高风险交易(涉及{total_amount/10000:.0f}万)')
             
-            # 更新风险评分到evidence_pack
-            pack['risk_score'] = risk_score.total_score
-            pack['risk_level'] = risk_score.risk_level
-            pack['summary'] = risk_score.reason
-            pack['risk_confidence'] = risk_score.confidence
-            pack['risk_details'] = risk_score.details
+            # 团伙: 每个+10分，上限20分
+            community_count = len(evidence['communities'])
+            if community_count > 0:
+                score += min(community_count * 10, 20)
+                reasons.append(f'涉及{community_count}个资金团伙')
             
-            logger.info(f"{entity} 统一风险评分: {risk_score.total_score:.1f} ({risk_score.risk_level})")
-    
-    def _extract_transit_channel_info(self, evidence: Dict) -> Dict:
-        """提取过账通道信息"""
-        if not evidence.get('pass_through'):
-            return {}
-        
-        # 从evidence中提取进账和出账金额
-        # 需要根据实际数据结构调整
-        return {
-            'in': evidence.get('pass_through_income', 0),
-            'out': evidence.get('pass_through_expense', 0)
-        }
-    
-    def _calculate_financial_ratio(self, entity: str) -> float:
-        """
-        计算理财交易占比
-        
-        Returns:
-            理财收入占总收入的比例 (0-1)
-        """
-        try:
-            # 尝试读取cleaned_data
-            import os
-            import config
+            # 周期性收入: 【P1 修复 2026-01-18】提高权重
+            # 审计原则：固定周期收入是"养廉资金"的铁证，定性价值不低于偶发大额
+            # 原: 每个+5分，上限10分
+            # 新: 每个+12分，上限24分
+            periodic_count = len(evidence['periodic_income'])
+            if periodic_count > 0:
+                score += min(periodic_count * 12, 24)
+                reasons.append(f'{periodic_count}个周期性非工资收入')
             
-            output_dir = config.OUTPUT_DIR
-            if entity in self.core_persons:
-                cleaned_file = os.path.join(output_dir, 'cleaned_data', '个人', f'{entity}_合并流水.xlsx')
+            # 资金突变: 每个+3分（降低权重，可能是理财）
+            sudden_count = len(evidence['sudden_changes'])
+            if sudden_count > 0:
+                score += min(sudden_count * 3, 12)
+                reasons.append(f'{sudden_count}次资金突变')
+            
+            # 固定延迟转账: 每个+10分，上限20分
+            delayed_count = len(evidence['delayed_transfers'])
+            if delayed_count > 0:
+                score += min(delayed_count * 10, 20)
+                reasons.append(f'{delayed_count}个固定延迟转账模式')
+            
+            # 借贷关系: 【新增】每个+8分，上限16分
+            loan_count = len(evidence.get('loans', []))
+            if loan_count > 0:
+                score += min(loan_count * 8, 16)
+                reasons.append(f'{loan_count}个民间借贷关系')
+            
+            # 限制最高分100
+            score = min(score, 100)
+            
+            # 确定风险等级
+            if score >= 70:
+                risk_level = 'critical'
+            elif score >= 50:
+                risk_level = 'high'
+            elif score >= 30:
+                risk_level = 'medium'
             else:
-                cleaned_file = os.path.join(output_dir, 'cleaned_data', '公司', f'{entity}_合并流水.xlsx')
+                risk_level = 'low'
             
-            if not os.path.exists(cleaned_file):
-                logger.warning(f"找不到 {entity} 的清洗数据文件: {cleaned_file}")
-                return 0.0
+            pack['risk_score'] = score
+            pack['risk_level'] = risk_level
+            pack['summary'] = '; '.join(reasons) if reasons else '无明显风险线索'
             
-            df = pd.read_excel(cleaned_file)
-            # 【P1 修复 2026-01-27】添加文件大小检查和日志
-            file_size = os.path.getsize(cleaned_file) / (1024 * 1024)  # MB
-            logger.info(f"正在计算理财占比: {entity} ({file_size:.1f}MB)")
-            
-            # 使用统一的函数计算理财占比
-            from unified_risk_model import calculate_financial_ratio
-            financial_ratio = calculate_financial_ratio(
-                df, 
-                income_col='收入(元)', 
-                transaction_desc_col='交易摘要'
-            )
-            
-            logger.info(f"{entity} 理财交易占比: {financial_ratio*100:.1f}%")
-            return financial_ratio
-            
-        except Exception as e:
-            logger.warning(f"计算 {entity} 理财占比失败: {e}")
-            return 0.0
-    
-    def _calculate_family_transfer_ratio(self, entity: str) -> float:
-        """
-        计算家庭转账占比
-        
-        Returns:
-            家庭转账占总交易的比例 (0-1)
-        """
-        try:
-            if entity not in self.core_persons:
-                return 0.0  # 公司不计算家庭转账
-            
-            import os
-            import config
-            
-            output_dir = config.OUTPUT_DIR
-            cleaned_file = os.path.join(output_dir, 'cleaned_data', '个人', f'{entity}_合并流水.xlsx')
-            
-            if not os.path.exists(cleaned_file):
-                return 0.0
-            
-            # 【P1 修复 2026-01-27】添加日志
-            file_size = os.path.getsize(cleaned_file) / (1024 * 1024)  # MB
-            logger.info(f"  正在计算家庭转账占比: {entity} ({file_size:.1f}MB)")
-            
-            df = pd.read_excel(cleaned_file)
-            
-            # 使用统一的函数计算家庭转账占比
-            from unified_risk_model import calculate_family_transfer_ratio
-            family_ratio = calculate_family_transfer_ratio(
-                df,
-                counterparty_col='交易对手',
-                family_members=self.core_persons
-            )
-            
-            logger.info(f"{entity} 家庭转账占比: {family_ratio*100:.1f}%")
-            return family_ratio
-            
-        except Exception as e:
-            logger.warning(f"计算 {entity} 家庭转账占比失败: {e}")
-            return 0.0
+            # 统计
+            pack['statistics']['high_risk_count'] = high_risk_count
     
     def get_ranked_entities(self) -> List[Dict]:
         """获取按风险分排序的实体列表"""
@@ -767,64 +708,3 @@ def generate_aggregation_report(aggregator: ClueAggregator, output_dir: str) -> 
     
     logger.info(f'线索聚合报告已生成: {report_path}')
     return report_path
-
-    def calculate_entity_risk_scores(self):
-        """
-        计算每个实体的综合风险分
-        
-        【P1 修复 2026-01-27】使用统一风险模型
-        解决问题:
-        - 理财交易被误判为高风险
-        - 家庭内部正常转账被误判为资金闭环
-        - 风险评分与常识不符
-        
-        改进方案:
-        1. 引入 UnifiedRiskModel 统一风险评分
-        2. 计算理财交易占比，降低风险权重
-        3. 计算家庭转账占比，降低风险权重
-        4. 区分理财相关的资金闭环
-        """
-        logger.info('计算实体综合风险分（使用统一风险模型）...')
-        
-        # 初始化统一风险模型
-        risk_model = UnifiedRiskModel()
-        
-        for entity, pack in self.evidence_packs.items():
-            evidence = pack['evidence']
-            
-            # 准备风险评分所需的数据
-            risk_evidence = {
-                'money_loops': evidence.get('fund_cycles', []),
-                'transit_channel': self._extract_transit_channel_info(evidence),
-                'related_entities': evidence.get('hub_connections', []) + 
-                                      [member for community in evidence.get('communities', []) 
-                                       for member in community.get('members', [])],
-                'ml_anomalies': evidence.get('sudden_changes', []),
-                'total_records': pack.get('statistics', {}).get('total_records', 0)
-            }
-            
-            # 计算理财交易占比（从cleaned_data中读取）
-            financial_ratio = self._calculate_financial_ratio(entity)
-            
-            # 计算家庭转账占比
-            family_ratio = self._calculate_family_transfer_ratio(entity)
-            
-            # 使用统一风险模型计算评分
-            risk_score = risk_model.calculate_score(
-                entity_name=entity,
-                evidence=risk_evidence,
-                financial_ratio=financial_ratio,
-                family_ratio=family_ratio
-            )
-            
-            # 更新风险评分到evidence_pack
-            pack['risk_score'] = risk_score.total_score
-            pack['risk_level'] = risk_score.risk_level
-            pack['summary'] = risk_score.reason
-            pack['risk_confidence'] = risk_score.confidence
-            pack['risk_details'] = risk_score.details
-            
-            logger.info(f"{entity} 统一风险评分: {risk_score.total_score:.1f} ({risk_score.risk_level})")
-        
-        # 【P1 修复 2026-01-27】添加return语句
-        return None

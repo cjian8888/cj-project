@@ -162,7 +162,10 @@ def parse_wealth_file(file_path: str) -> Dict:
 def _parse_products_sheet(df: pd.DataFrame, source_file: str) -> List[Dict]:
     """解析理财产品信息sheet"""
     products = []
-    
+    total_rows = len(df)
+    processed = 0
+    log_interval = max(1, total_rows // 10)  # 每10%输出一次进度
+
     for _, row in df.iterrows():
         try:
             product = {
@@ -184,15 +187,22 @@ def _parse_products_sheet(df: pd.DataFrame, source_file: str) -> List[Dict]:
                 "feedback_date": _safe_date(row.get("反馈日期")),
                 "source_file": source_file
             }
-            
+
             # 只保留有产品名称的记录
             if product["product_name"]:
                 products.append(product)
-                
+
+            processed += 1
+            # 每10%输出进度
+            if processed % log_interval == 0 or processed == total_rows:
+                progress = (processed / total_rows * 100)
+                logger.info(f"理财产品解析进度: {progress:.1f}% ({processed}/{total_rows} 行)")
+
         except Exception as e:
             logger.debug(f"解析理财产品行失败: {e}")
             continue
-    
+
+    logger.info(f"理财产品解析完成: 共解析 {len(products)} 条有效记录")
     return products
 
 

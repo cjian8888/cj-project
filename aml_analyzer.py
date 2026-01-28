@@ -68,18 +68,27 @@ def extract_aml_data(data_dir: str) -> Dict[str, Dict]:
             if data:
                 # 按身份证号合并
                 for person_id, person_data in data.items():
-                    if person_id not in result:
-                        result[person_id] = person_data
-                    else:
-                        # 合并账户和交易数据
-                        existing = result[person_id]
-                        for key in ["payment_accounts", "payment_transactions", 
-                                   "suspicious_transactions", "large_transactions"]:
-                            if key in person_data:
-                                if key not in existing:
-                                    existing[key] = []
-                                existing[key].extend(person_data.get(key, []))
-                
+                    try:
+                        if person_id not in result:
+                            result[person_id] = person_data
+                        else:
+                            # 合并账户和交易数据
+                            existing = result[person_id]
+                            for key in ["payment_accounts", "payment_transactions",
+                                       "suspicious_transactions", "large_transactions"]:
+                                if key in person_data:
+                                    if key not in existing:
+                                        existing[key] = []
+                                    # 确保extend的参数是列表
+                                    value_to_extend = person_data.get(key, [])
+                                    if not isinstance(value_to_extend, list):
+                                        logger.warning(f"数据类型错误，期望列表，实际 {type(value_to_extend)}: {key}")
+                                        value_to_extend = []
+                                    existing[key].extend(value_to_extend)
+                    except Exception as e:
+                        logger.error(f"合并数据失败 {person_id}: {e}")
+                        continue
+
                 logger.info(f"成功解析 {file_path.name}")
                 
         except Exception as e:
@@ -147,7 +156,8 @@ def parse_aml_file(file_path: str) -> Dict[str, Dict]:
         
     except Exception as e:
         logger.error(f"解析反洗钱文件失败 {file_path}: {e}")
-        raise
+        logger.exception("详细错误信息:")
+        # 不要重新抛出异常，跳过该文件继续处理
     
     return result
 
