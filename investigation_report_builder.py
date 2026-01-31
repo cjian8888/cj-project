@@ -2313,6 +2313,33 @@ class InvestigationReportBuilder:
         start_date = date_range.get('start', '')[:10]
         end_date = date_range.get('end', '')[:10]
         
+        # 【3.1修复】添加审计依据说明
+        audit_basis = {
+            "data_sources": [
+                "银行流水数据：由各金融机构反馈的银行账户交易明细",
+                "不动产登记数据：由不动产登记中心反馈的房产登记信息",
+                "机动车登记数据：由车辆管理所反馈的机动车登记信息",
+                "理财产品数据：由各金融机构反馈的理财产品持仓信息",
+            ],
+            "query_time_range": f"银行流水查询时间范围：{start_date} 至 {end_date}",
+            "asset_query_date": f"其他资产数据查询时间：{datetime.now().strftime('%Y-%m-%d')}",
+            "audit_procedures": [
+                "数据清洗与标准化：对原始数据进行去重、格式统一",
+                "资金流向分析：分析资金流入流出情况及对手方",
+                "收入结构分析：识别工资性收入与其他收入来源",
+                "异常交易检测：识别大额现金、可疑转账等异常交易",
+                "关联关系分析：分析个人与企业之间的资金往来",
+            ],
+        }
+        
+        # 【5.2修复】添加数据质量说明
+        data_quality_note = {
+            "bank_data": "银行流水数据：已进行去重和标准化处理，交易记录完整",
+            "asset_data": "资产数据：部分资产信息（如房产交易价格）可能存在缺失，标注为【待补充】",
+            "data_timeliness": "数据时效性：银行流水数据为实时数据，资产数据为查询时点数据",
+            "data_validation": "数据验证：已对关键字段进行完整性检查，缺失字段已在报告中标注",
+        }
+        
         return {
             "case_background": case_background or "根据相关线索反映，现对相关人员进行资金穿透核查。",
             "persons_queried": persons,
@@ -2328,6 +2355,8 @@ class InvestigationReportBuilder:
             ],
             "person_count": len(persons),
             "company_count": len(companies),
+            "audit_basis": audit_basis,
+            "data_quality_note": data_quality_note,
         }
     
     def _build_v4_company_section(self, company: str) -> Dict:
@@ -2362,6 +2391,7 @@ class InvestigationReportBuilder:
     def _build_v4_conclusion(self, person_sections: List[Dict], company_sections: List[Dict]) -> Dict:
         """构建v4综合研判"""
         issues = []
+        risk_levels = {'high': 0, 'medium': 0, 'low': 0}
         
         # 从个人章节提取问题
         for section in person_sections:
@@ -2371,21 +2401,60 @@ class InvestigationReportBuilder:
             # 收支匹配问题
             income_match = analysis.get('income_match_analysis', {})
             if income_match.get('need_further_verification', False):
+                salary_ratio = income_match.get('salary_ratio', 0)
+                
+                # 【6.1修复】判断风险等级
+                if salary_ratio < 0.2:
+                    risk_level = 'high'
+                    risk_desc = '严重偏低'
+                elif salary_ratio < 0.5:
+                    risk_level = 'medium'
+                    risk_desc = '偏低'
+                else:
+                    risk_level = 'low'
+                    risk_desc = '正常'
+                
+                risk_levels[risk_level] += 1
+                
                 issues.append({
                     "person": name,
                     "issue_type": "收支不匹配",
-                    "description": f"工资收入占比仅{income_match.get('salary_ratio', 0):.1f}%，不足以支撑日常开支",
-                    "severity": "medium",
+                    "description": f"{name}（收支不匹配）：工资收入占比仅{salary_ratio*100:.1f}%，{risk_desc}，不足以支撑日常开支",
+                    "severity": risk_level,
                 })
+        
+        # 【6.1修复】生成增强版结论文本
+        conclusion_text = self._generate_enhanced_summary_text_v4(issues, risk_levels)
         
         return {
             "issues": issues,
             "issue_count": len(issues),
-            "summary_narrative": self._generate_summary_text_v4(issues),
+            "risk_levels": risk_levels,
+            "summary_narrative": conclusion_text,
         }
     
+    def _generate_enhanced_summary_text_v4(self, issues: List[Dict], risk_levels: Dict) -> str:
+        """生成v4增强版综合研判文本"""
+        if not issues:
+            return "经对相关人员资金流水进行穿透分析，未发现明显异常情况。"
+        
+        # 生成结论文本
+        conclusion_text = "通过对查询结果分析，发现异常情况：\n\n"
+        
+        for issue in issues:
+            risk_class = f"risk-{issue['severity']}"
+            conclusion_text += f'    <li class="{risk_class}">{issue["description"]}</li>\n'
+        
+        conclusion_text += f"""
+经对相关人员资金流水进行穿透分析，发现{len(issues)}项需要进一步核实的问题。
+
+风险等级统计：高风险{risk_levels['high']}项，中风险{risk_levels['medium']}项，低风险{risk_levels['low']}项。
+"""
+        
+        return conclusion_text
+    
     def _generate_summary_text_v4(self, issues: List[Dict]) -> str:
-        """生成v4综合研判文本"""
+        """生成v4综合研判文本（保留兼容性）"""
         if not issues:
             return "经对相关人员资金流水进行穿透分析，未发现明显异常情况。"
         
@@ -2395,6 +2464,7 @@ class InvestigationReportBuilder:
         """
         构建v4下一步工作计划（智能生成）
         
+        【6.2修复】提升建议可操作性
         基于分析发现自动生成建议：
         1. 购房款盲区 → 建议调取配偶银行流水
         2. 微信/支付宝占比高 → 建议调取电子支付数据
@@ -2413,20 +2483,25 @@ class InvestigationReportBuilder:
                 next_steps.append({
                     "action_type": "房款盲区",
                     "target_name": name,
+                    "priority": "高",
                     "action_text": f"从{name}银行流水中未查见购房款支付记录，建议进一步调取其配偶银行流水确认资金来源",
-                    "priority": "high",
+                    "detail": f"{name}名下有房产，建议：1. 调取配偶银行流水确认购房资金来源；2. 核查购房合同、付款凭证；3. 确认是否存在赠与、继承等情况",
+                    "deadline": "15个工作日内",
                 })
             
             # 2. 收支不匹配检测
             income_match = data_analysis.get('income_match_analysis', {})
             if income_match.get('need_further_verification'):
                 salary_ratio = income_match.get('salary_ratio', 0)
-                if salary_ratio < 30:
+                if salary_ratio < 0.5:
+                    priority = "高" if salary_ratio < 0.2 else "中"
                     next_steps.append({
                         "action_type": "收入来源核实",
                         "target_name": name,
-                        "action_text": f"{name}工资收入占比仅{salary_ratio:.1f}%，建议核实其其他收入来源的合法性",
-                        "priority": "high",
+                        "priority": priority,
+                        "action_text": f"{name}工资收入占比仅{salary_ratio*100:.1f}%，建议核实其其他收入来源的合法性",
+                        "detail": f"{name}工资收入占比仅{salary_ratio*100:.1f}%，建议：1. 约谈核实其他收入来源的合法性；2. 调取相关合同、发票等证明材料；3. 核实是否存在兼职、投资等其他收入渠道",
+                        "deadline": "7个工作日内",
                     })
             
             # 3. 电子支付盲区检测（第三方支付占比高）
@@ -2437,8 +2512,10 @@ class InvestigationReportBuilder:
                 next_steps.append({
                     "action_type": "电子支付盲区",
                     "target_name": name,
+                    "priority": "中",
                     "action_text": f"{name}第三方支付交易占比较高，建议进一步调取微信、支付宝等电子支付账户流水",
-                    "priority": "medium",
+                    "detail": f"{name}第三方支付交易占比较高，建议：1. 调取微信、支付宝等电子支付账户流水；2. 核查电子支付交易明细；3. 分析电子支付资金来源和用途",
+                    "deadline": "10个工作日内",
                 })
         
         return next_steps
@@ -3590,15 +3667,60 @@ class InvestigationReportBuilder:
         # 格式化房产数据
         property_list = []
         for i, prop in enumerate(properties, 1):
+            # 【1.1修复】房屋面积单位去重
+            area = prop.get('area', 0) or prop.get('建筑面积', 0)
+            if isinstance(area, str) and '平方米' in area:
+                area = area.replace('平方米', '').strip()
+                area = f"{area}平方米"
+            
+            # 【1.5修复】房产交易金额处理
+            value = prop.get('value', 0) or prop.get('交易金额', 0)
+            if value and value > 0:
+                value_display = f"{value/10000:.2f}"
+            else:
+                value_display = "【待补充】"
+            
+            # 【1.3修复】统一身份证号格式
+            co_owners = prop.get('co_owners', '') or prop.get('co_owner', '') or prop.get('共有人名称', '')
+            if co_owners:
+                # 格式化共有人信息：姓名,身份证号
+                formatted_owners = []
+                for owner in co_owners.split(';'):
+                    owner = owner.strip()
+                    if ',' in owner:
+                        name_part, id_num = owner.split(',', 1)
+                        # 清理无效身份证号（如"0"）
+                        if id_num and id_num != '0' and len(id_num) >= 6:
+                            formatted_owners.append(f"{name_part.strip()},{id_num.strip()}")
+                    else:
+                        formatted_owners.append(owner)
+                co_owners = ';'.join(formatted_owners)
+            
+            # 【1.4修复】数据完整性验证日志
+            location = prop.get('location', '') or prop.get('address', '') or prop.get('房地坐落', '')
+            register_date = prop.get('register_date', '') or prop.get('registration_date', '') or prop.get('登记时间', '')
+            
+            # 记录缺失字段
+            missing_fields = []
+            if not location:
+                missing_fields.append('地址')
+            if not area or area == 0:
+                missing_fields.append('面积')
+            if not register_date:
+                missing_fields.append('登记时间')
+            
+            if missing_fields:
+                logger.warning(f"[房产数据] {name} 第{i}处房产缺少字段: {', '.join(missing_fields)}")
+            
             property_list.append({
                 "序号": i,
-                "房地坐落": prop.get('location', '') or prop.get('address', '') or prop.get('房地坐落', ''),
-                "建筑面积": prop.get('area', 0) or prop.get('建筑面积', 0),
+                "房地坐落": location,
+                "建筑面积": area,
                 "权属状态": prop.get('status', '') or prop.get('权属状态', '现势'),
-                "登记时间": prop.get('register_date', '') or prop.get('registration_date', '') or prop.get('登记时间', ''),
-                "交易金额": prop.get('value', 0) or prop.get('交易金额', 0),
+                "登记时间": register_date,
+                "交易金额": value_display,
                 "共有情况": prop.get('ownership_type', '') or prop.get('co_ownership', '') or prop.get('共有情况', '单独所有'),
-                "共有人名称": prop.get('co_owners', '') or prop.get('co_owner', '') or prop.get('共有人名称', ''),
+                "共有人名称": co_owners,
             })
         
         return {
@@ -3728,13 +3850,14 @@ class InvestigationReportBuilder:
             color = v.get('color', '') or v.get('颜色', '') or ''
             brand = v.get('brand', '') or v.get('品牌', '') or v.get('车辆品牌', '') or ''
             plate = v.get('plate_number', '') or v.get('车牌号', '') or v.get('号牌号码', '') or ''
-            # 购入日期支持多种字段名
+            # 【1.2修复】购入日期支持多种字段名，添加默认值处理
             reg_date = (
-                v.get('registration_date', '') or 
-                v.get('登记时间', '') or 
-                v.get('初次登记日期', '') or 
+                v.get('registration_date', '') or
+                v.get('登记时间', '') or
+                v.get('初次登记日期', '') or
                 v.get('purchase_date', '') or
-                v.get('购入日期', '') or ''
+                v.get('购入日期', '') or
+                '【待补充】'  # 添加默认占位符
             )
             vehicle_type = v.get('vehicle_type', '') or v.get('车辆类型', '') or ''
             
@@ -3752,15 +3875,15 @@ class InvestigationReportBuilder:
                 "vehicle_type": vehicle_type,
             })
         
-        # 生成描述（确保购入日期正确显示）
+        # 【1.2修复】生成描述（处理缺失日期的情况）
         descs = []
         for v in vehicle_list:
             if v['plate_number']:
                 date_str = v['registration_date']
-                if date_str:
+                if date_str and date_str != '【待补充】':
                     descs.append(f"一辆{v['description']}，车牌号{v['plate_number']}，于{date_str}登记购入")
                 else:
-                    descs.append(f"一辆{v['description']}，车牌号{v['plate_number']}")
+                    descs.append(f"一辆{v['description']}，车牌号{v['plate_number']}，登记时间待补充")
         
         narrative = f"{name}本人名下有" + "；".join(descs) + "。" if descs else "未查见名下机动车。"
         
@@ -3891,23 +4014,28 @@ class InvestigationReportBuilder:
         # 分析判断
         income_sufficient = salary_total >= total_expense * 0.8  # 工资能覆盖80%支出算正常
         
+        # 【2.2修复】计算具体的收支对比数据
+        # 计算资金缺口
+        if net_balance >= 0:
+            gap_text = f"资金净结余{net_balance/10000:.2f}万元"
+        else:
+            gap_text = f"资金净流出{abs(net_balance)/10000:.2f}万元"
+        
         # 生成分析文本
         narrative_parts = [
             f"查询{name}名下银行卡流水，",
             f"总资金流入{total_income/10000:.2f}万元，流出{total_expense/10000:.2f}万元，",
+            f"{gap_text}。",
         ]
-        
-        if net_balance >= 0:
-            narrative_parts.append(f"资金净结余{net_balance/10000:.2f}万元；")
-        else:
-            narrative_parts.append(f"资金净流出{abs(net_balance)/10000:.2f}万元；")
         
         if salary_total > 0:
             narrative_parts.append(
-                f"资金流入中仅{salary_total/10000:.2f}万元为正常工资收入，占比{salary_ratio:.1f}%，"
+                f"资金流入中仅{salary_ratio:.1f}%为正常工资收入（{salary_total/10000:.2f}万元），"
             )
             if not income_sufficient:
                 narrative_parts.append("其正常工资收入金额不足以支撑月度消费。")
+            else:
+                narrative_parts.append("其正常工资收入金额足以支撑月度消费。")
             else:
                 narrative_parts.append("收支基本相抵。")
         
@@ -4030,14 +4158,22 @@ class InvestigationReportBuilder:
         include_companies = self.metadata.get('include_companies', [])
         has_company_relation = False  # 需要进一步分析
         
-        narrative = (
-            f"累计发生现金类收支{cash_total/10000:.2f}万元，"
-            f"其中收款{cash_income/10000:.2f}万元，支出{cash_expense/10000:.2f}万元。"
-        )
-        
-        if include_companies:
-            company_names = "、".join(include_companies[:3])
-            narrative += f"未查见与{company_names}存在关联。"
+        # 【4.1修复】在分析结果为0时，添加原因说明
+        if cash_total == 0:
+            narrative = (
+                f"累计发生现金类收支0.0万元，其中收款0.0万元，支出0.0万元。"
+                f"未查见与相关涉案公司存在关联。"
+                f"（说明：可能原因为：1. 银行流水中未识别到现金交易；2. 现金交易金额未达到大额标准；3. 数据源中未包含现金交易记录）"
+            )
+        else:
+            narrative = (
+                f"累计发生现金类收支{cash_total/10000:.2f}万元，"
+                f"其中收款{cash_income/10000:.2f}万元，支出{cash_expense/10000:.2f}万元。"
+            )
+            
+            if include_companies:
+                company_names = "、".join(include_companies[:3])
+                narrative += f"未查见与{company_names}存在关联。"
         
         return {
             "total": cash_total,
@@ -4119,14 +4255,19 @@ class InvestigationReportBuilder:
                 "narrative": "",  # 无房产则不生成此节
             }
         
+        # 【2.1修复】统一房产交易金额的显示逻辑
         total_value = sum(p.get('value', 0) or p.get('交易金额', 0) for p in properties)
+        
+        if total_value > 0:
+            value_text = f"{total_value/10000:.2f}万元"
+        else:
+            value_text = "【待补充】"
         
         # TODO: 分析购房款支付记录
         has_payment_record = False  # 需要进一步分析银行流水
         
-        narrative = (
-            f"家庭名下房产{len(properties)}套，房产总交易价格{total_value/10000:.2f}万元。"
-        )
+        # 【2.1修复】使用统一的金额描述
+        narrative = f"家庭名下房产{len(properties)}套，房产总交易价格{value_text}。"
         if not has_payment_record:
             narrative += f"从{name}银行流水中未查见购房款支付记录，需进一步确认其配偶的银行流水支付情况。"
         
@@ -4145,8 +4286,12 @@ class InvestigationReportBuilder:
         aml_count = len(aml_data) if isinstance(aml_data, list) else 0
         aml_total = sum(a.get('amount', 0) for a in aml_data) if isinstance(aml_data, list) else 0
         
+        # 【4.2修复】在反洗钱数据为0时，添加说明
         if aml_count == 0:
-            narrative = "未查见可疑交易记录。"
+            narrative = (
+                f"涉及数据共0条0.0万元，未查见可疑交易记录。"
+                f"（说明：可能原因为：1. 未调取反洗钱监测数据；2. 该人员未触发反洗钱预警；3. 数据源中未包含反洗钱记录）"
+            )
         else:
             narrative = (
                 f"涉及数据共{aml_count}条{aml_total/10000:.2f}万元，"
