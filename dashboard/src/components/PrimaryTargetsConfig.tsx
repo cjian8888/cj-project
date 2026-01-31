@@ -14,8 +14,8 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { 
-    Users, Building2, Plus, Trash2, Save, RefreshCw, 
+import {
+    Users, Building2, Plus, Trash2, Save, RefreshCw,
     ChevronDown, ChevronUp, Check, AlertTriangle, Info
 } from 'lucide-react';
 
@@ -87,7 +87,7 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
     const [isNew, setIsNew] = useState(false);
     const [expandedUnits, setExpandedUnits] = useState<Set<number>>(new Set([0]));
     const [showCompanies, setShowCompanies] = useState(true);
-    
+
     // 加载配置和实体列表
     useEffect(() => {
         loadData();
@@ -121,7 +121,12 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
             if (entitiesRes.ok) {
                 const entitiesData = await entitiesRes.json();
                 if (entitiesData.success) {
-                    setEntities(entitiesData.data);
+                    // 后端直接返回 persons 和 companies，不是包装在 data 对象中
+                    setEntities({
+                        persons: entitiesData.persons || [],
+                        companies: entitiesData.companies || [],
+                        family_summary: entitiesData.family_summary
+                    });
                 }
             }
         } catch (err) {
@@ -135,11 +140,11 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
     // 保存配置
     const saveConfig = async () => {
         if (!config) return;
-        
+
         setSaving(true);
         setError(null);
         setSuccessMessage(null);
-        
+
         try {
             const response = await fetch(`${API_BASE_URL}/api/primary-targets`, {
                 method: 'POST',
@@ -148,7 +153,7 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
             });
 
             const data = await response.json();
-            
+
             if (data.success) {
                 setSuccessMessage('配置已保存');
                 setIsNew(false);
@@ -191,7 +196,7 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
     // 添加分析单元
     const addUnit = (unitType: 'family' | 'independent') => {
         if (!config) return;
-        
+
         const newUnit: AnalysisUnit = {
             anchor: '',
             members: [],
@@ -199,13 +204,13 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
             member_details: [],
             note: unitType === 'family' ? '核心家庭单元' : '独立关联单元'
         };
-        
+
         const newConfig = {
             ...config,
             analysis_units: [...config.analysis_units, newUnit]
         };
         setConfig(newConfig);
-        
+
         // 展开新添加的单元
         setExpandedUnits(prev => new Set([...prev, config.analysis_units.length]));
     };
@@ -213,7 +218,7 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
     // 删除分析单元
     const removeUnit = (index: number) => {
         if (!config) return;
-        
+
         const newUnits = config.analysis_units.filter((_, i) => i !== index);
         setConfig({ ...config, analysis_units: newUnits });
     };
@@ -221,7 +226,7 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
     // 更新分析单元
     const updateUnit = (index: number, updates: Partial<AnalysisUnit>) => {
         if (!config) return;
-        
+
         const newUnits = [...config.analysis_units];
         newUnits[index] = { ...newUnits[index], ...updates };
         setConfig({ ...config, analysis_units: newUnits });
@@ -230,24 +235,24 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
     // 添加成员到单元
     const addMemberToUnit = (unitIndex: number, personName: string) => {
         if (!config) return;
-        
+
         const unit = config.analysis_units[unitIndex];
         if (unit.members.includes(personName)) return;
-        
+
         const personInfo = entities?.persons.find(p => p.name === personName);
-        
+
         const newMember: AnalysisUnitMember = {
             name: personName,
             relation: unit.members.length === 0 ? '本人' : '待确认',
             has_data: personInfo?.has_data ?? false
         };
-        
+
         const newMembers = [...unit.members, personName];
         const newMemberDetails = [...(unit.member_details || []), newMember];
-        
+
         // 如果是第一个成员，设置为锚点
         const anchor = newMembers.length === 1 ? personName : unit.anchor;
-        
+
         updateUnit(unitIndex, {
             anchor,
             members: newMembers,
@@ -258,16 +263,16 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
     // 从单元移除成员
     const removeMemberFromUnit = (unitIndex: number, personName: string) => {
         if (!config) return;
-        
+
         const unit = config.analysis_units[unitIndex];
         const newMembers = unit.members.filter(m => m !== personName);
         const newMemberDetails = (unit.member_details || []).filter(m => m.name !== personName);
-        
+
         // 如果移除的是锚点，选择第一个成员作为新锚点
-        const anchor = personName === unit.anchor && newMembers.length > 0 
-            ? newMembers[0] 
+        const anchor = personName === unit.anchor && newMembers.length > 0
+            ? newMembers[0]
             : (newMembers.includes(unit.anchor) ? unit.anchor : '');
-        
+
         updateUnit(unitIndex, {
             anchor,
             members: newMembers,
@@ -278,12 +283,12 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
     // 更新成员关系
     const updateMemberRelation = (unitIndex: number, personName: string, relation: string) => {
         if (!config) return;
-        
+
         const unit = config.analysis_units[unitIndex];
-        const newMemberDetails = (unit.member_details || []).map(m => 
+        const newMemberDetails = (unit.member_details || []).map(m =>
             m.name === personName ? { ...m, relation } : m
         );
-        
+
         updateUnit(unitIndex, { member_details: newMemberDetails });
     };
 
@@ -295,12 +300,12 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
     // 切换公司选择
     const toggleCompany = (companyName: string) => {
         if (!config) return;
-        
+
         const included = config.include_companies.includes(companyName);
         const newCompanies = included
             ? config.include_companies.filter(c => c !== companyName)
             : [...config.include_companies, companyName];
-        
+
         setConfig({ ...config, include_companies: newCompanies });
     };
 
@@ -320,11 +325,11 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
     // 检查成员关系是否违反铁律
     const checkRelationViolation = (unit: AnalysisUnit): string | null => {
         if (unit.unit_type !== 'family') return null;
-        
+
         const violations = (unit.member_details || [])
             .filter(m => INDEPENDENT_ONLY_RELATIONS.includes(m.relation))
             .map(m => m.name);
-        
+
         if (violations.length > 0) {
             return `⚠️ ${violations.join('、')} 的关系（父母/兄弟姐妹）不应加入核心家庭单元`;
         }
@@ -333,16 +338,25 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
 
     // 获取可选的人员（未被分配到任何单元的人员）
     const getAvailablePersons = useCallback((excludeUnitIndex?: number) => {
-        if (!entities || !config) return [];
-        
+        if (!entities || !config) {
+            console.log('[getAvailablePersons] entities or config missing', { entities, config });
+            return [];
+        }
+
         const assignedPersons = new Set<string>();
         config.analysis_units.forEach((unit, idx) => {
             if (idx !== excludeUnitIndex) {
                 unit.members.forEach(m => assignedPersons.add(m));
             }
         });
-        
-        return entities.persons.filter(p => !assignedPersons.has(p.name));
+
+        const available = entities.persons.filter(p => !assignedPersons.has(p.name));
+        console.log('[getAvailablePersons] excludeUnitIndex:', excludeUnitIndex,
+            'assignedPersons:', Array.from(assignedPersons),
+            'entities.persons:', entities.persons.map(p => p.name),
+            'available:', available.map(p => p.name));
+
+        return available;
     }, [entities, config]);
 
     if (loading) {
@@ -362,7 +376,7 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
                 <div className="flex flex-col items-center justify-center h-40 text-red-400">
                     <AlertTriangle size={32} className="mb-2" />
                     <p>{error}</p>
-                    <button 
+                    <button
                         onClick={loadData}
                         className="mt-3 px-4 py-2 bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600"
                     >
@@ -398,11 +412,10 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
                     <button
                         onClick={saveConfig}
                         disabled={saving}
-                        className={`px-3 py-1.5 text-xs rounded-md flex items-center gap-1 ${
-                            saving 
-                                ? 'bg-gray-500 text-gray-300 cursor-not-allowed' 
-                                : 'bg-green-500 text-white hover:bg-green-600'
-                        }`}
+                        className={`px-3 py-1.5 text-xs rounded-md flex items-center gap-1 ${saving
+                            ? 'bg-gray-500 text-gray-300 cursor-not-allowed'
+                            : 'bg-green-500 text-white hover:bg-green-600'
+                            }`}
                     >
                         <Save size={12} />
                         {saving ? '保存中...' : '保存配置'}
@@ -465,27 +478,25 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
                         const isExpanded = expandedUnits.has(unitIndex);
                         const violation = checkRelationViolation(unit);
                         const availablePersons = getAvailablePersons(unitIndex);
-                        
+
                         return (
-                            <div 
+                            <div
                                 key={unitIndex}
-                                className={`border rounded-lg overflow-hidden ${
-                                    unit.unit_type === 'family' 
-                                        ? 'border-blue-500/30 bg-blue-500/5' 
-                                        : 'border-purple-500/30 bg-purple-500/5'
-                                }`}
+                                className={`border rounded-lg overflow-hidden ${unit.unit_type === 'family'
+                                    ? 'border-blue-500/30 bg-blue-500/5'
+                                    : 'border-purple-500/30 bg-purple-500/5'
+                                    }`}
                             >
                                 {/* 单元头部 */}
-                                <div 
+                                <div
                                     className="flex items-center justify-between p-2 cursor-pointer hover:bg-white/5"
                                     onClick={() => toggleUnitExpand(unitIndex)}
                                 >
                                     <div className="flex items-center gap-2">
-                                        <span className={`px-1.5 py-0.5 text-xs rounded ${
-                                            unit.unit_type === 'family'
-                                                ? 'bg-blue-500/20 text-blue-400'
-                                                : 'bg-purple-500/20 text-purple-400'
-                                        }`}>
+                                        <span className={`px-1.5 py-0.5 text-xs rounded ${unit.unit_type === 'family'
+                                            ? 'bg-blue-500/20 text-blue-400'
+                                            : 'bg-purple-500/20 text-purple-400'
+                                            }`}>
                                             {unit.unit_type === 'family' ? '核心家庭' : '独立'}
                                         </span>
                                         <span className="text-sm font-medium theme-text">
@@ -525,17 +536,16 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
                                             <label className="text-xs theme-text-dim mb-1 block">成员列表</label>
                                             <div className="space-y-1">
                                                 {unit.member_details?.map((member) => (
-                                                    <div 
+                                                    <div
                                                         key={member.name}
                                                         className="flex items-center gap-2 p-1.5 bg-white/5 rounded"
                                                     >
                                                         <button
                                                             onClick={() => setAnchor(unitIndex, member.name)}
-                                                            className={`p-0.5 rounded ${
-                                                                unit.anchor === member.name
-                                                                    ? 'bg-green-500 text-white'
-                                                                    : 'bg-gray-600 text-gray-400 hover:bg-gray-500'
-                                                            }`}
+                                                            className={`p-0.5 rounded ${unit.anchor === member.name
+                                                                ? 'bg-green-500 text-white'
+                                                                : 'bg-gray-600 text-gray-400 hover:bg-gray-500'
+                                                                }`}
                                                             title={unit.anchor === member.name ? '主核查对象' : '设为主核查对象'}
                                                         >
                                                             <Check size={12} />
@@ -579,11 +589,10 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
                                                         <button
                                                             key={person.name}
                                                             onClick={() => addMemberToUnit(unitIndex, person.name)}
-                                                            className={`px-2 py-1 text-xs rounded border ${
-                                                                person.has_data
-                                                                    ? 'border-green-500/30 bg-green-500/10 text-green-400 hover:bg-green-500/20'
-                                                                    : 'border-gray-500/30 bg-gray-500/10 text-gray-400 hover:bg-gray-500/20'
-                                                            }`}
+                                                            className={`px-2 py-1 text-xs rounded border ${person.has_data
+                                                                ? 'border-green-500/30 bg-green-500/10 text-green-400 hover:bg-green-500/20'
+                                                                : 'border-gray-500/30 bg-gray-500/10 text-gray-400 hover:bg-gray-500/20'
+                                                                }`}
                                                         >
                                                             + {person.name}
                                                         </button>
@@ -601,7 +610,7 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
                             </div>
                         );
                     })}
-                    
+
                     {config?.analysis_units.length === 0 && (
                         <div className="text-center py-6 theme-text-dim text-sm">
                             暂无分析单元，请点击上方按钮添加
@@ -612,7 +621,7 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
 
             {/* 涉案公司 */}
             <div className="mb-4">
-                <div 
+                <div
                     className="flex items-center justify-between mb-2 cursor-pointer"
                     onClick={() => setShowCompanies(!showCompanies)}
                 >
@@ -634,11 +643,10 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
                                 <button
                                     key={company.name}
                                     onClick={() => toggleCompany(company.name)}
-                                    className={`px-2 py-1 text-xs rounded border transition-colors ${
-                                        isSelected
-                                            ? 'border-orange-500 bg-orange-500/20 text-orange-400'
-                                            : 'border-gray-600 bg-gray-700/50 theme-text-dim hover:bg-gray-700'
-                                    }`}
+                                    className={`px-2 py-1 text-xs rounded border transition-colors ${isSelected
+                                        ? 'border-orange-500 bg-orange-500/20 text-orange-400'
+                                        : 'border-gray-600 bg-gray-700/50 theme-text-dim hover:bg-gray-700'
+                                        }`}
                                 >
                                     {isSelected && <Check size={10} className="inline mr-1" />}
                                     {company.name}
