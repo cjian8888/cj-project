@@ -422,70 +422,102 @@ def calculate_family_summary(
         'vehicle_count': len(vehicles) if vehicles else 0
     }
     
-    # 2. 计算成员间互转
+    # 2. 计算成员间互转（遍历原始交易数据）
     member_transfers = {}
     total_family_transfers = 0.0
-    
+
     for member in family_members:
         if member not in all_profiles:
             continue
-        
+
         profile = all_profiles[member]
         if not profile.get('has_data'):
             continue
-        
-        # 分析该成员与其他家庭成员的互转
-        income_structure = profile.get('income_structure', {})
-        
+
+        # 从理财管理数据中获取自我转账记录（包含家庭成员间互转）
+        wealth_mgmt = profile.get('wealth_management', {})
+        transfer_records = wealth_mgmt.get('self_transfer_transactions', [])
+
         # 统计与其他家庭成员的互转
         to_family = 0.0
         from_family = 0.0
-        
-        # 从收支结构中提取(这里简化处理,实际需要遍历交易明细)
-        # 注: 由于当前数据结构限制,我们使用估算方法
-        # 在实际实现中,应该遍历原始交易数据
-        
+        transfer_details = []
+
+        # 遍历转账记录，筛选出家庭成员间的互转
+        for record in transfer_records:
+            counterparty = record.get('交易对手', '')
+            income = record.get('收入', 0) or 0
+            expense = record.get('支出', 0) or 0
+
+            # 检查交易对手是否是家庭成员
+            if counterparty in family_members and counterparty != member:
+                # 这是家庭成员间的互转
+                if income > 0:
+                    from_family += income
+                    transfer_details.append({
+                        'counterparty': counterparty,
+                        'amount': income,
+                        'direction': 'in',
+                        'date': record.get('日期', '')
+                    })
+                if expense > 0:
+                    to_family += expense
+                    transfer_details.append({
+                        'counterparty': counterparty,
+                        'amount': expense,
+                        'direction': 'out',
+                        'date': record.get('日期', '')
+                    })
+
         member_transfers[member] = {
             'to_family': to_family,
             'from_family': from_family,
-            'net': from_family - to_family
+            'net': from_family - to_family,
+            'transfer_details': transfer_details
         }
-        
+
+        # 累计家庭内部互转总额（只计算单方向）
         total_family_transfers += to_family
-    
+
     # 3. 汇总家庭收支(剔除互转)
     total_income = 0.0
     total_expense = 0.0
-    
+
     for member in family_members:
         if member not in all_profiles:
             continue
-        
+
         profile = all_profiles[member]
         if not profile.get('has_data'):
             continue
-        
+
         summary = profile.get('summary', {})
         total_income += summary.get('total_income', 0)
         total_expense += summary.get('total_expense', 0)
-    
-    # 剔除互转(互转会被双方都记录,所以实际金额是total_family_transfers)
-    external_income = total_income - total_family_transfers
-    external_expense = total_expense - total_family_transfers
+
+    # 剔除互转（互转会被双方都记录，所以家庭内部互转不应该计入家庭收支）
+    # 家庭对外收入 = 总收入 - 家庭成员转入
+    # 家庭对外支出 = 总支出 - 家庭成员转出
+    total_transfers_in = sum(m['from_family'] for m in member_transfers.values())
+    total_transfers_out = sum(m['to_family'] for m in member_transfers.values())
+
+    external_income = total_income - total_transfers_in
+    external_expense = total_expense - total_transfers_out
     net_flow = external_income - external_expense
-    
+
     total_income_expense = {
         'total_income': total_income,
         'total_expense': total_expense,
-        'family_transfers': total_family_transfers,
+        'internal_transfers_in': total_transfers_in,   # 家庭成员转入总额
+        'internal_transfers_out': total_transfers_out,  # 家庭成员转出总额
         'external_income': external_income,
         'external_expense': external_expense,
         'net_flow': net_flow
     }
     
     logger.info(f'家庭汇总完成: 总资产{utils.format_currency(total_assets["total"])}, '
-                f'净流入{utils.format_currency(net_flow)}')
-    
+                f'对外净流入{utils.format_currency(net_flow)} (剔除内部互转{utils.format_currency(total_transfers_in)}转入/{utils.format_currency(total_transfers_out)}转出)')
+
     return {
         'family_members': family_members,
         'total_assets': total_assets,

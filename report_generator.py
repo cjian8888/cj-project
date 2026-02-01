@@ -219,15 +219,21 @@ def _generate_summary_sheet(writer, profiles):
         if not has_data:
             continue
 
-        # 根据实际数据结构获取字段
-        total_income = profile.get('totalIncome', 0)
-        total_expense = profile.get('totalExpense', 0)
-        net_flow = total_income - total_expense
-        salary_total = profile.get('salaryTotal', 0)
-        salary_ratio = profile.get('salaryRatio', 0)
-        third_party_total = profile.get('thirdPartyTotal', 0)
-        transaction_count = profile.get('transactionCount', 0)
-        cash_total = profile.get('cashTotal', 0)
+        # 根据实际数据结构获取字段 - 使用嵌套的summary和income_structure结构
+        summary = profile.get('summary', profile).get('summary', {})
+        income_structure = profile.get('income_structure', {})
+        fund_flow = profile.get('fund_flow', {})
+
+        total_income = summary.get('total_income', 0)
+        total_expense = summary.get('total_expense', 0)
+        net_flow = summary.get('net_flow', total_income - total_expense)
+        salary_total = income_structure.get('salary_income', 0)
+        salary_ratio = summary.get('salary_ratio', 0)
+        third_party_total = fund_flow.get('third_party_amount', 0)
+        transaction_count = summary.get('transaction_count', 0)
+        # 大额现金从large_cash列表中计算总额
+        large_cash = profile.get('large_cash', [])
+        cash_total = sum(c.get('amount', 0) for c in large_cash) if large_cash else 0
 
         # 判断是否为公司（简单的启发式：名称包含"公司"或其他关键词，或者在profiles里有type字段）
         is_company = False
@@ -1428,7 +1434,7 @@ def _get_top_counterparties_str(entity, direction, cleaned_data, top_n=5):
     if col not in df.columns: return "无数据"
     subset = df[df[col] > 0]
     if subset.empty: return "无主要交易"
-    subset = subset[subset['counterparty'] != entity]
+    subset = subset[subset['交易对手'] != entity]
     stats = subset.groupby('counterparty')[col].sum().sort_values(ascending=False)
     lines = []
     count = 0
@@ -1533,8 +1539,8 @@ def _estimate_bank_balance(person, cleaned_data):
     """
     if not cleaned_data or person not in cleaned_data: return 0
     df = cleaned_data[person]
-    total_in = df['income'].sum()
-    total_out = df['expense'].sum()
+    total_in = df['收入(元)'].sum()
+    total_out = df['支出(元)'].sum()
     return max(0, total_in - total_out)
 
 
@@ -1557,7 +1563,7 @@ def _generate_report_conclusion(profiles, suspicions, core_persons, involved_com
     report_lines.append("一、核查结论")
     report_lines.append("-" * 60)
 
-    total_trans = sum(p['summary']['transaction_count'] for p in profiles.values() if p['has_data'])
+    total_trans = sum(p.get('summary', {}).get('transaction_count', 0) for p in profiles.values() if p.get('has_data', False))
     direct_sus_count = len(suspicions['direct_transfers'])
     hidden_sus_count = sum(len(v) for v in suspicions['hidden_assets'].values())
 
@@ -1616,7 +1622,8 @@ def _generate_report_conclusion(profiles, suspicions, core_persons, involved_com
     high_flow_persons = []
     for p_name, p_data in profiles.items():
         if p_name in core_persons and p_data['has_data']:
-            total_vol = p_data['summary']['total_income'] + p_data['summary']['total_expense']
+            summary = p_data.get('summary', {})
+            total_vol = summary.get('total_income', 0) + summary.get('total_expense', 0)
             if total_vol > 50000000: # 5000万
                 high_flow_persons.append(f"{p_name}({utils.format_currency(total_vol)})")
     if high_flow_persons:
@@ -1709,7 +1716,7 @@ def _generate_family_section(household, family_assets, profiles, cleaned_data):
         if not profile or not profile['has_data']:
             report_lines.append(f"  [{person}]: 暂无详细流水数据"); continue
 
-        summary = profile['summary']
+        summary = profile.get('summary', profile)
         income = profile.get('income_structure', {})
         wealth = profile.get('wealth_management', {})
 
@@ -1717,10 +1724,10 @@ def _generate_family_section(household, family_assets, profiles, cleaned_data):
         # 资金规模与自我转账
         self_transfer_vol = wealth.get('self_transfer_income', 0) + wealth.get('self_transfer_expense', 0)
         self_note = f"(含内部互转 {utils.format_currency(self_transfer_vol)})" if self_transfer_vol > 500000 else ""
-        report_lines.append(f"    • 资金规模: 流入 {utils.format_currency(summary['total_income'])} / 流出 {utils.format_currency(summary['total_expense'])} {self_note}")
+        report_lines.append(f"    • 资金规模: 流入 {utils.format_currency(summary.get('total_income', 0))} / 流出 {utils.format_currency(summary.get('total_expense', 0))} {self_note}")
 
         # 工资收入
-        report_lines.append(f"    • 收入结构: {utils.format_currency(income.get('salary_income', 0))} (占比 {summary['salary_ratio']:.1%})")
+        report_lines.append(f"    • 收入结构: {utils.format_currency(income.get('salary_income', 0))} (占比 {summary.get('salary_ratio', 0):.1%})")
         report_lines.append(f"      {_format_salary_summary(income)}")
 
         # 理财深度分析
@@ -1730,7 +1737,7 @@ def _generate_family_section(household, family_assets, profiles, cleaned_data):
 
         if w_purchase > 100000:
             report_lines.append(f"    • 理财行为: 申购 {utils.format_currency(w_purchase)} / 赎回 {utils.format_currency(w_redeem)}")
-            flow_vol = summary['total_income'] + summary['total_expense']
+            flow_vol = summary.get('total_income', 0) + summary.get('total_expense', 0)
             if flow_vol > 0:
                 turnover = (w_purchase + w_redeem) / flow_vol
                 report_lines.append(f"      >> 资金空转率: {turnover:.1%} (理财申赎占总流水比例)")
@@ -1797,10 +1804,10 @@ def _generate_company_section(company, profiles, core_persons, cleaned_data):
         report_lines.append("")
         return report_lines
 
-    summary = comp_profile['summary']
+    summary = comp_profile
 
     # 3.1 资金概况
-    report_lines.append(f"  • 资金概况: 总流入 {utils.format_currency(summary['total_income'])} | 总流出 {utils.format_currency(summary['total_expense'])}")
+    report_lines.append(f"  • 资金概况: 总流入 {utils.format_currency(summary.get('total_income', 0))} | 总流出 {utils.format_currency(summary.get('total_expense', 0))}")
 
     # 3.2 大客户/供应商
     top_in = _get_top_counterparties_str(company, 'in', cleaned_data, 5)
@@ -1813,12 +1820,12 @@ def _generate_company_section(company, profiles, core_persons, cleaned_data):
     risky_trans = []
     if comp_df is not None:
         # 检查与核心人员往来
-        rel_tx = comp_df[comp_df['counterparty'].isin(core_persons)]
+        rel_tx = comp_df[comp_df['交易对手'].isin(core_persons)]
         if not rel_tx.empty:
             groups = rel_tx.groupby('counterparty')[['income', 'expense']].sum()
             for name, row in groups.iterrows():
-                if row['income'] > 0: risky_trans.append(f"收到 {name} {utils.format_currency(row['income'])}")
-                if row['expense'] > 0: risky_trans.append(f"支付给 {name} {utils.format_currency(row['expense'])}")
+                if row['收入(元)'] > 0: risky_trans.append(f"收到 {name} {utils.format_currency(row['收入(元)'])}")
+                if row['支出(元)'] > 0: risky_trans.append(f"支付给 {name} {utils.format_currency(row['支出(元)'])}")
 
     if risky_trans:
         report_lines.append(f"  • 【公私往来预警】: 发现直接资金往来!")
@@ -2139,7 +2146,7 @@ def _generate_html_conclusion(profiles, suspicions, core_persons, involved_compa
     """
     import datetime
 
-    total_trans = sum(p['summary']['transaction_count'] for p in profiles.values() if p['has_data'])
+    total_trans = sum(p.get('summary', {}).get('transaction_count', 0) for p in profiles.values() if p.get('has_data', False))
 
     # 风险评级
     risk_assessment = "低风险"
@@ -2167,7 +2174,8 @@ def _generate_html_conclusion(profiles, suspicions, core_persons, involved_compa
     high_flow_persons = []
     for p_name, p_data in profiles.items():
         if p_name in core_persons and p_data['has_data']:
-            total_vol = p_data['summary']['total_income'] + p_data['summary']['total_expense']
+            summary = p_data.get('summary', {})
+            total_vol = summary.get('total_income', 0) + summary.get('total_expense', 0)
             if total_vol > 50000000:
                 high_flow_persons.append(_escape_html(p_name))
     if high_flow_persons:
@@ -2260,12 +2268,12 @@ def _generate_html_family_section(profiles, core_persons, family_summary, family
             if not profile or not profile['has_data']:
                 content_html += "<p>(暂无详细流水数据)</p>"; continue
 
-            summary = profile['summary']
+            summary = profile.get('summary', profile)
             income = profile.get('income_structure', {})
             wealth = profile.get('wealth_management', {})
 
             # 资金规模
-            content_html += f"""<p><strong>资金规模</strong>: 流入 {utils.format_currency(summary['total_income'])} / 流出 {utils.format_currency(summary['total_expense'])}</p>"""
+            content_html += f"""<p><strong>资金规模</strong>: 流入 {utils.format_currency(summary.get('total_income', 0))} / 流出 {utils.format_currency(summary.get('total_expense', 0))}</p>"""
 
             # 收入结构
             salary_details = income.get('salary_details', [])
@@ -2277,7 +2285,7 @@ def _generate_html_family_section(profiles, core_persons, family_summary, family
             if yearly_sal:
                  sal_desc = " (" + "; ".join([f"{y}年:{utils.format_currency(v)}" for y, v in sorted(yearly_sal.items())]) + ")"
 
-            ratio_val = summary['salary_ratio']
+            ratio_val = summary.get('salary_ratio', 0)
             ratio_str = f"{ratio_val:.1%}"
             ratio_style = "color:red; font-weight:bold;" if ratio_val < 0.5 else ""
 
@@ -2301,6 +2309,87 @@ def _generate_html_family_section(profiles, core_persons, family_summary, family
     return content_html
 
 
+def _generate_html_family_section_v2(profiles, core_persons, family_summary, family_assets, cleaned_data, family_units):
+    """
+    生成HTML报告的家庭板块 (V2.0 - 使用用户配置的家庭分组)
+
+    Args:
+        family_units: 用户配置的家庭单元列表，格式为:
+            [{
+                "anchor": "主归集人",
+                "members": ["成员1", "成员2", ...],
+                "member_details": [...],
+                "address": "家庭地址"
+            }, ...]
+    """
+    import utils
+
+    content_html = """<div class="page"><div class="section-title">二、家庭资产与资金画像</div>"""
+
+    # 使用用户配置的家庭分组
+    if family_units:
+        for unit in family_units:
+            anchor = unit.get('anchor', '')
+            members = unit.get('members', [])
+            address = unit.get('address', '')
+
+            if not members:
+                continue
+
+            # 标题使用主归集人的名字
+            title = f"{anchor} 家庭"
+            address_str = f" ({address})" if address else ""
+
+            content_html += f"""<div class="subsection-title">➤ {title}{address_str}</div>"""
+
+            # 获取主归集人的画像
+            anchor_profile = profiles.get(anchor)
+            if anchor_profile and anchor_profile.get('has_data'):
+                summary = anchor_profile.get('summary', anchor_profile)
+                income_structure = anchor_profile.get('income_structure', {})
+                wealth = anchor_profile.get('wealth_management', {})
+
+                # 资金规模
+                total_income = summary.get('total_income', 0)
+                total_expense = summary.get('total_expense', 0)
+                net_flow = summary.get('net_flow', 0)
+
+                content_html += f"""
+                <div style="border: 1px solid #ddd; padding: 10px; background-color: #fcfcfc; margin-bottom: 15px;">
+                    <p><strong>【家庭资产全貌】</strong> <span style="font-size:12px; color:#888;">(注: 房产/车辆信息需接入不动产/车管数据)</span></p>"""
+
+                # 显示各成员的基本数据
+                for member in members:
+                    member_profile = profiles.get(member)
+                    if member_profile and member_profile.get('has_data'):
+                        m_summary = member_profile.get('summary', member_profile)
+                        m_income = m_summary.get('total_income', 0)
+                        m_expense = m_summary.get('total_expense', 0)
+                        m_trans = m_summary.get('transaction_count', 0)
+
+                        is_anchor = (member == anchor)
+                        anchor_mark = " ⭐" if is_anchor else ""
+
+                        content_html += f"""
+                    <h3 style="margin-left:0; font-size:16px;">[{member}]{anchor_mark}</h3>
+                    <p><strong>资金规模</strong>: 流入 {utils.format_currency(m_income)} / 流出 {utils.format_currency(m_expense)}</p>
+                    <p><strong>交易笔数</strong>: {m_trans} 笔</p>
+"""
+                content_html += "</div>"
+                content_html += "<hr style='border:0; border-top:1px dashed #eee; margin:10px 0;'>"
+    else:
+        # 回退到系统识别的家庭分组
+        households = _group_into_households(core_persons, family_summary)
+        for household in households:
+            title = "、".join(household) + " 家庭"
+            if len(household) == 1: title = f"{household[0]} 个人"
+            # ... (使用原有逻辑)
+            content_html += f"<p>{title}</p>"
+
+    content_html += "</div>"
+    return content_html
+
+
 def _generate_html_company_section(profiles, involved_companies, core_persons, cleaned_data):
     """
     生成HTML报告的公司资金核查部分 (V2.0 深度版)
@@ -2318,14 +2407,14 @@ def _generate_html_company_section(profiles, involved_companies, core_persons, c
             if not comp_profile or not comp_profile['has_data']:
                 content_html += "<p>(暂无详细流水数据)</p>"; continue
 
-            summary = comp_profile['summary']
+            summary = comp_profile.get('summary', comp_profile)
 
             # 1. 资金规模
             content_html += f"""
             <div style="background-color:#f8f9fa; padding:10px; border-left:4px solid #007bff; margin-bottom:10px;">
                 <p><strong>【资金规模】</strong></p>
-                <p>• 累计进账: <b>{utils.format_currency(summary['total_income'])}</b> | 累计出账: <b>{utils.format_currency(summary['total_expense'])}</b></p>
-                <p>• 交易笔数: {_escape_html(str(summary['transaction_count']))} 笔</p>
+                <p>• 累计进账: <b>{utils.format_currency(summary.get('total_income', 0))}</b> | 累计出账: <b>{utils.format_currency(summary.get('total_expense', 0))}</b></p>
+                <p>• 交易笔数: {_escape_html(str(summary.get('transaction_count', 0)))} 笔</p>
             </div>
             """
 
@@ -2340,21 +2429,21 @@ def _generate_html_company_section(profiles, involved_companies, core_persons, c
             risky_html = ""
             if comp_df is not None:
                 # 3.1 与核心人员往来
-                rel_tx = comp_df[comp_df['counterparty'].isin(core_persons)]
+                rel_tx = comp_df[comp_df['交易对手'].isin(core_persons)]
                 if not rel_tx.empty:
                     groups = rel_tx.groupby('counterparty')[['income', 'expense']].sum()
                     risky_items = []
                     for name, row in groups.iterrows():
-                        if row['income'] > 0 or row['expense'] > 0:
-                            risky_items.append(f"{_escape_html(name)} (收:{utils.format_currency(row['income'])}/付:{utils.format_currency(row['expense'])})")
+                        if row['收入(元)'] > 0 or row['支出(元)'] > 0:
+                            risky_items.append(f"{_escape_html(name)} (收:{utils.format_currency(row['收入(元)'])}/付:{utils.format_currency(row['支出(元)'])})")
                     if risky_items:
                         risky_html += f"""<p style="color:red; background-color:#fff0f0; padding:5px;">⚠ <strong>利益输送嫌疑</strong>: 发现与核心人员存在直接往来: {', '.join(risky_items)}</p>"""
 
                 # 3.2 大额现金
-                cash_tx = comp_df[comp_df['is_cash'] == True]
+                cash_tx = comp_df[comp_df['现金'] == True]
                 if not cash_tx.empty:
-                    cash_in = cash_tx['income'].sum()
-                    cash_out = cash_tx['expense'].sum()
+                    cash_in = cash_tx['收入(元)'].sum()
+                    cash_out = cash_tx['支出(元)'].sum()
                     if cash_in + cash_out > 50000:
                         risky_html += f"""<p><strong>现金分析</strong>: 存在现金操作 (存:{utils.format_currency(cash_in)} / 取:{utils.format_currency(cash_out)})，请核实用途。</p>"""
 
@@ -2409,6 +2498,48 @@ def _generate_html_suggestions_section(suspicions):
     return content_html
 
 
+def _load_primary_targets_config(output_path=None):
+    """
+    读取用户配置的归集配置 (primary_targets.json)
+
+    Args:
+        output_path: 报告输出路径（用于确定配置文件位置）
+
+    Returns:
+        配置字典，包含 analysis_units, include_companies 等
+        如果文件不存在或读取失败，返回 None
+    """
+    import os
+    # 尝试多个可能的路径
+    possible_paths = [
+        'output/report_config/primary_targets.json',
+        'report_config/primary_targets.json',
+        'primary_targets.json'
+    ]
+
+    for config_path in possible_paths:
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                logger.info(f'已读取用户配置: {len(config.get("analysis_units", []))} 个分析单元')
+                return config
+            except Exception as e:
+                logger.warning(f'读取用户配置失败 ({config_path}): {e}')
+
+    logger.debug('未找到用户配置文件 primary_targets.json')
+    return None
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        logger.info(f'已读取用户配置: {len(config.get("analysis_units", []))} 个分析单元')
+        return config
+    except Exception as e:
+        logger.warning(f'读取用户配置失败: {e}')
+        return None
+
+
 def generate_html_report(profiles, suspicions, core_persons, involved_companies, output_path, family_summary=None, family_assets=None, cleaned_data=None):
     """
     生成HTML格式的分析报告 (V6版 - 匹配最新文本报告逻辑 - Fix Placeholder)
@@ -2427,14 +2558,26 @@ def generate_html_report(profiles, suspicions, core_persons, involved_companies,
     if involved_companies is None: involved_companies = []
     if core_persons is None: core_persons = []
 
+    # 读取用户配置 (primary_targets.json)
+    user_config = _load_primary_targets_config(output_path)
+
+    # 如果有用户配置，使用用户的家庭分组；否则使用系统识别的家庭分组
+    if user_config and user_config.get('analysis_units'):
+        # 使用用户配置的家庭分组
+        family_units = user_config['analysis_units']
+        logger.info(f'使用用户配置的家庭分组: {len(family_units)} 个家庭')
+    else:
+        # 使用系统识别的家庭分组（从family_summary）
+        family_units = None
+
     # 构建报告内容
     content_html = ""
 
     # 1. 标题与前言（核查结论）
     content_html += _generate_html_conclusion(profiles, suspicions, core_persons, involved_companies)
 
-    # 2. 家庭板块
-    content_html += _generate_html_family_section(profiles, core_persons, family_summary, family_assets, cleaned_data)
+    # 2. 家庭板块 - 使用用户配置或系统识别的家庭分组
+    content_html += _generate_html_family_section_v2(profiles, core_persons, family_summary, family_assets, cleaned_data, family_units)
 
     # 3. 公司资金核查
     content_html += _generate_html_company_section(profiles, involved_companies, core_persons, cleaned_data)
@@ -2502,14 +2645,14 @@ def generate_html_report(profiles, suspicions, core_persons, involved_companies,
             if not profile or not profile['has_data']:
                 content_html += "<p>(暂无详细流水数据)</p>"; continue
 
-            summary = profile['summary']
+            summary = profile.get('summary', profile)
             income = profile.get('income_structure', {})
             wealth = profile.get('wealth_management', {})
 
             # 资金规模
             self_transfer_vol = wealth.get('self_transfer_income', 0) + wealth.get('self_transfer_expense', 0)
             self_note = f"<span style='color:#888'>(含内部互转 {utils.format_currency(self_transfer_vol)})</span>" if self_transfer_vol > 500000 else ""
-            content_html += f"""<p><strong>资金规模</strong>: 流入 {utils.format_currency(summary['total_income'])} / 流出 {utils.format_currency(summary['total_expense'])} {self_note}</p>"""
+            content_html += f"""<p><strong>资金规模</strong>: 流入 {utils.format_currency(summary.get('total_income', 0))} / 流出 {utils.format_currency(summary.get('total_expense', 0))} {self_note}</p>"""
 
             # 收入结构
             salary_details = income.get('salary_details', [])
@@ -2520,7 +2663,7 @@ def generate_html_report(profiles, suspicions, core_persons, involved_companies,
             sal_desc = ""
             if yearly_sal:
                  sal_desc = " (" + "; ".join([f"{_escape_html(y)}年:{utils.format_currency(v)}" for y, v in sorted(yearly_sal.items())]) + ")"
-            content_html += f"""<p><strong>收入结构</strong>: 工资性收入 {utils.format_currency(income.get('salary_income', 0))} (占比 {summary['salary_ratio']:.1%}){_escape_html(sal_desc)}</p>"""
+            content_html += f"""<p><strong>收入结构</strong>: 工资性收入 {utils.format_currency(income.get('salary_income', 0))} (占比 {summary.get('salary_ratio', 0):.1%}){_escape_html(sal_desc)}</p>"""
 
             # 理财深度分析
             w_purchase = wealth.get('wealth_purchase', 0)
@@ -2529,7 +2672,7 @@ def generate_html_report(profiles, suspicions, core_persons, involved_companies,
 
             if w_purchase > 100000:
                 content_html += f"""<p><strong>理财行为</strong>: 申购 {utils.format_currency(w_purchase)} / 赎回 {utils.format_currency(w_redeem)}</p>"""
-                flow_vol = summary['total_income'] + summary['total_expense']
+                flow_vol = summary.get('total_income', 0) + summary.get('total_expense', 0)
                 if flow_vol > 0:
                     turnover = (w_purchase + w_redeem) / flow_vol
                     content_html += f"""<p style="text-indent: 2em;">>> <span style="color:#666">资金空转率: <strong>{turnover:.1%}</strong> (理财申赎占总流水比例)</span></p>"""
@@ -2567,8 +2710,8 @@ def generate_html_report(profiles, suspicions, core_persons, involved_companies,
             if not comp_profile or not comp_profile['has_data']:
                 content_html += "<p>(暂无详细流水数据)</p>"; continue
 
-            summary = comp_profile['summary']
-            content_html += f"""<p>• <strong>资金概况</strong>: 总流入 {utils.format_currency(summary['total_income'])} | 总流出 {utils.format_currency(summary['total_expense'])}</p>"""
+            summary = comp_profile.get('summary', comp_profile)
+            content_html += f"""<p>• <strong>资金概况</strong>: 总流入 {utils.format_currency(summary.get('total_income', 0))} | 总流出 {utils.format_currency(summary.get('total_expense', 0))}</p>"""
 
             top_in = _escape_html(_get_top_counterparties_str(company, 'in', cleaned_data, 5))
             top_out = _escape_html(_get_top_counterparties_str(company, 'out', cleaned_data, 5))
@@ -2579,12 +2722,12 @@ def generate_html_report(profiles, suspicions, core_persons, involved_companies,
             comp_df = cleaned_data.get(company)
             risky_html = ""
             if comp_df is not None:
-                rel_tx = comp_df[comp_df['counterparty'].isin(core_persons)]
+                rel_tx = comp_df[comp_df['交易对手'].isin(core_persons)]
                 if not rel_tx.empty:
                     groups = rel_tx.groupby('counterparty')[['income', 'expense']].sum()
                     risky_items = []
                     for name, row in groups.iterrows():
-                        if row['income'] > 0 or row['expense'] > 0: risky_items.append(f"{_escape_html(name)} (收:{utils.format_currency(row['income'])}/付:{utils.format_currency(row['expense'])})")
+                        if row['收入(元)'] > 0 or row['支出(元)'] > 0: risky_items.append(f"{_escape_html(name)} (收:{utils.format_currency(row['收入(元)'])}/付:{utils.format_currency(row['支出(元)'])})")
                     if risky_items:
                         risky_html = f"""<p style="color:red">⚠ 发现与核心人员直接往来: {', '.join(risky_items)}</p>"""
 
@@ -2839,7 +2982,7 @@ def generate_word_report(profiles: Dict,
                     continue
 
                 try:
-                    summary = profile.get('summary', {})
+                    summary = profile.get('summary', profile).get('summary', {})
                     if not isinstance(summary, dict):
                         continue
 
@@ -2909,7 +3052,7 @@ def generate_word_report(profiles: Dict,
                 continue
 
             try:
-                summary = comp_profile.get('summary', {})
+                summary = comp_profile.get('summary', comp_profile).get('summary', {})
                 if isinstance(summary, dict):
                     p = doc.add_paragraph()
                     p.add_run('资金概况: ').bold = True

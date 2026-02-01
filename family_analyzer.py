@@ -385,11 +385,11 @@ def identify_householder(members: List[Dict]) -> str:
 def extract_person_info(data_directory: str, person_name: str) -> Dict:
     """
     提取单个人员的详细信息(用于跨户籍关系推断)
-    
+
     Args:
         data_directory: 数据目录
         person_name: 人员姓名
-        
+
     Returns:
         人员信息字典
     """
@@ -398,8 +398,9 @@ def extract_person_info(data_directory: str, person_name: str) -> Dict:
         '身份证号': '',
         '出生日期': '',
         '籍贯': '',
-        '户籍地': '',
-        '性别': ''
+        '户籍地': '',  # 用于识别是否同一家庭
+        '性别': '',
+        '住址': ''     # 别名，方便理解
     }
     
     # 从户籍人口数据提取
@@ -419,7 +420,9 @@ def extract_person_info(data_directory: str, person_name: str) -> Dict:
                 info['身份证号'] = str(row.get('身份证号', ''))
                 info['出生日期'] = str(row.get('出生日期', ''))
                 info['籍贯'] = str(row.get('籍贯', ''))
-                info['户籍地'] = str(row.get('户籍地', ''))
+                address = str(row.get('户籍地', ''))
+                info['户籍地'] = address
+                info['住址'] = address  # 户籍地即为住址
                 info['性别'] = str(row.get('性别', ''))
         except Exception as e:
             logger.warning(f'读取 {person_name} 户籍数据失败: {e}')
@@ -622,35 +625,49 @@ def build_family_units(core_persons: List[str], data_directory: str) -> List[Dic
     # 3. 推断跨户籍关系
     extended_relations = infer_extended_relatives(all_persons_info, family_tree)
     
-    # 4. 按户籍分组,识别独立家庭
+    # 4. 按户籍分组,识别独立家庭（不同户籍地=不同家庭）
     families = {}  # key: 户主, value: {members, householder, ...}
     person_to_family = {}  # 记录每个人属于哪个家庭
-    
+    person_to_address = {}  # 记录每个人的地址
+
+    # 先收集所有人的地址信息
+    for info in all_persons_info:
+        name = info.get('姓名', '')
+        address = info.get('户籍地', '') or info.get('住址', '')
+        if name and address:
+            person_to_address[name] = address
+
     for person, members in family_tree.items():
         householder = identify_householder(members)
-        
+
         if householder and householder not in families:
             # 新家庭
             member_names = [m.get('姓名', '') for m in members if m.get('姓名')]
+            # 获取该家庭的地址（户主的地址）
+            family_address = person_to_address.get(householder, '')
+
             families[householder] = {
-                'anchor': householder,  # 户主原则: anchor为户主
+                'anchor': householder,  # 主归集人，默认为户主，用户可调整
                 'householder': householder,
                 'members': list(set(member_names)),
-                'unit_type': 'family',
+                'address': family_address,  # 家庭地址
                 'member_details': []
             }
-            
+
             # 记录成员归属
             for name in member_names:
                 person_to_family[name] = householder
     
-    # 5. 构建成员详情
+    # 5. 构建成员详情（包含地址信息）
     for householder, family in families.items():
         member_details = []
         for name in family['members']:
             # 获取关系
             relation = '本人' if name == householder else ''
-            
+
+            # 获取该成员的地址
+            member_address = person_to_address.get(name, family.get('address', ''))
+
             # 从原始数据获取关系
             if name in family_tree:
                 for m in family_tree.get(name, []):
@@ -668,14 +685,15 @@ def build_family_units(core_persons: List[str], data_directory: str) -> List[Dic
                         if m.get('姓名') == name:
                             relation = m.get('与户主关系', '')
                             break
-            
+
             member_details.append({
                 'name': name,
                 'relation': relation or '家庭成员',
+                'address': member_address,
                 'has_data': name in core_persons,
                 'id_number': ''
             })
-        
+
         family['member_details'] = member_details
     
     # 6. 转换为列表
@@ -690,7 +708,9 @@ def build_family_units(core_persons: List[str], data_directory: str) -> List[Dic
     
     logger.info(f'\n家庭分析单元构建完成,共 {len(units)} 个家庭')
     for unit in units:
-        logger.info(f'  - 户主: {unit["householder"]}, 成员: {unit["members"]}')
+        address = unit.get('address', '')
+        address_str = f' (住址: {address})' if address else ''
+        logger.info(f'  - {unit["householder"]} 家庭{address_str}, 成员: {unit["members"]}')
         if unit.get('extended_relatives'):
             for rel in unit['extended_relatives']:
                 logger.info(f'    扩展: {rel["person_a"]} ↔ {rel["person_b"]} ({rel["relation"]})')
@@ -713,8 +733,10 @@ if __name__ == '__main__':
     
     print('\n结果:')
     for unit in units:
-        print(f"\n家庭: {unit['anchor']}")
-        print(f"  户主: {unit['householder']}")
+        address = unit.get('address', '')
+        address_str = f' (住址: {address})' if address else ''
+        print(f"\n家庭: {unit['householder']}{address_str}")
+        print(f"  主归集人: {unit['anchor']}")
         print(f"  成员: {unit['members']}")
         if unit.get('extended_relatives'):
             print("  扩展亲属:")

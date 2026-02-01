@@ -1,16 +1,16 @@
 /**
- * 归集配置组件 (G-04 实现)
- * 
+ * 家庭归集配置组件
+ *
  * 功能：
  * 1. 从 analysis_cache 读取家庭成员和公司列表
- * 2. 展示家庭单元，让用户选择归集对象
- * 3. 支持创建/编辑分析单元（核心家庭 / 独立关联）
+ * 2. 展示家庭单元，让用户调整主归集人和成员
+ * 3. 支持创建/编辑家庭单元
  * 4. 保存配置到 primary_targets.json
- * 
- * 规范遵循：
- * - 核心家庭单元 = 本人 + 配偶 + 子女（资产聚合、收支合并）
- * - 独立关联单元 = 父母/兄弟姐妹（各自独立分析）
- * - 父母、兄弟姐妹严禁并入核心家庭单元
+ *
+ * 家庭识别规则：
+ * - 不同户籍地 = 不同家庭
+ * - 同一户籍地 = 同一家庭
+ * - 主归集人：默认为户主，用户可调整
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -34,10 +34,10 @@ interface AnalysisUnitMember {
 }
 
 interface AnalysisUnit {
-    anchor: string;
-    members: string[];
-    unit_type: 'family' | 'independent';
+    anchor: string;              // 主归集人（默认户主，可调整）
+    members: string[];           // 家庭成员列表
     member_details?: AnalysisUnitMember[];
+    address?: string;            // 家庭地址
     note?: string;
 }
 
@@ -67,9 +67,6 @@ interface EntitiesResponse {
 const RELATION_OPTIONS = [
     '本人', '配偶', '子女', '父亲', '母亲', '兄弟', '姐妹', '其他亲属', '待确认'
 ];
-
-// 不能加入核心家庭的关系（铁律）
-const INDEPENDENT_ONLY_RELATIONS = ['父亲', '母亲', '兄弟', '姐妹'];
 
 interface PrimaryTargetsConfigProps {
     onConfigChange?: (config: PrimaryTargetsConfig | null) => void;
@@ -193,16 +190,15 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
         }
     };
 
-    // 添加分析单元
-    const addUnit = (unitType: 'family' | 'independent') => {
+    // 添加分析单元（只有家庭类型）
+    const addUnit = () => {
         if (!config) return;
 
         const newUnit: AnalysisUnit = {
             anchor: '',
             members: [],
-            unit_type: unitType,
             member_details: [],
-            note: unitType === 'family' ? '核心家庭单元' : '独立关联单元'
+            note: '家庭单元'
         };
 
         const newConfig = {
@@ -322,19 +318,8 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
         });
     };
 
-    // 检查成员关系是否违反铁律
-    const checkRelationViolation = (unit: AnalysisUnit): string | null => {
-        if (unit.unit_type !== 'family') return null;
-
-        const violations = (unit.member_details || [])
-            .filter(m => INDEPENDENT_ONLY_RELATIONS.includes(m.relation))
-            .map(m => m.name);
-
-        if (violations.length > 0) {
-            return `⚠️ ${violations.join('、')} 的关系（父母/兄弟姐妹）不应加入核心家庭单元`;
-        }
-        return null;
-    };
+    // 检查成员关系是否违反铁律（已移除，不再有此限制）
+    // 不同住址的家庭会自动识别为独立家庭
 
     // 获取可选的人员（未被分配到任何单元的人员）
     const getAvailablePersons = useCallback((excludeUnitIndex?: number) => {
@@ -443,9 +428,9 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
                     <div>
                         <p className="mb-1"><strong>归集规则：</strong></p>
                         <ul className="list-disc list-inside space-y-0.5 text-xs">
-                            <li><strong>核心家庭单元</strong>：本人 + 配偶 + 子女（资产聚合分析）</li>
-                            <li><strong>独立关联单元</strong>：父母/兄弟姐妹（各自独立成章）</li>
-                            <li className="text-yellow-400">⚠️ 父母、兄弟姐妹<strong>严禁</strong>并入核心家庭</li>
+                            <li><strong>家庭识别</strong>：不同户籍地自动识别为不同家庭</li>
+                            <li><strong>主归集人</strong>：默认为户主，可根据核查需要调整</li>
+                            <li><strong>灵活配置</strong>：支持添加/删除家庭、调整成员、设置主归集人</li>
                         </ul>
                     </div>
                 </div>
@@ -457,18 +442,11 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
                     <h4 className="text-sm font-medium theme-text-muted">分析单元</h4>
                     <div className="flex gap-1">
                         <button
-                            onClick={() => addUnit('family')}
+                            onClick={() => addUnit()}
                             className="px-2 py-1 text-xs bg-blue-500/20 text-blue-400 rounded hover:bg-blue-500/30 flex items-center gap-1"
                         >
                             <Plus size={12} />
-                            核心家庭
-                        </button>
-                        <button
-                            onClick={() => addUnit('independent')}
-                            className="px-2 py-1 text-xs bg-purple-500/20 text-purple-400 rounded hover:bg-purple-500/30 flex items-center gap-1"
-                        >
-                            <Plus size={12} />
-                            独立单元
+                            添加家庭
                         </button>
                     </div>
                 </div>
@@ -476,16 +454,12 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
                 <div className="space-y-2 max-h-[300px] overflow-auto pr-1">
                     {config?.analysis_units.map((unit, unitIndex) => {
                         const isExpanded = expandedUnits.has(unitIndex);
-                        const violation = checkRelationViolation(unit);
                         const availablePersons = getAvailablePersons(unitIndex);
 
                         return (
                             <div
                                 key={unitIndex}
-                                className={`border rounded-lg overflow-hidden ${unit.unit_type === 'family'
-                                    ? 'border-blue-500/30 bg-blue-500/5'
-                                    : 'border-purple-500/30 bg-purple-500/5'
-                                    }`}
+                                className="border rounded-lg overflow-hidden border-blue-500/30 bg-blue-500/5"
                             >
                                 {/* 单元头部 */}
                                 <div
@@ -493,18 +467,20 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
                                     onClick={() => toggleUnitExpand(unitIndex)}
                                 >
                                     <div className="flex items-center gap-2">
-                                        <span className={`px-1.5 py-0.5 text-xs rounded ${unit.unit_type === 'family'
-                                            ? 'bg-blue-500/20 text-blue-400'
-                                            : 'bg-purple-500/20 text-purple-400'
-                                            }`}>
-                                            {unit.unit_type === 'family' ? '核心家庭' : '独立'}
+                                        <span className="px-1.5 py-0.5 text-xs rounded bg-blue-500/20 text-blue-400">
+                                            家庭
                                         </span>
                                         <span className="text-sm font-medium theme-text">
-                                            {unit.anchor || '(未设置)'}
+                                            {unit.anchor || '(未设置主归集人)'}
                                         </span>
                                         <span className="text-xs theme-text-dim">
                                             ({unit.members.length}人)
                                         </span>
+                                        {unit.address && (
+                                            <span className="text-xs theme-text-dim">
+                                                {unit.address}
+                                            </span>
+                                        )}
                                     </div>
                                     <div className="flex items-center gap-1">
                                         <button
@@ -524,13 +500,6 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
                                 {/* 单元详情 */}
                                 {isExpanded && (
                                     <div className="p-3 border-t border-white/10">
-                                        {/* 违规警告 */}
-                                        {violation && (
-                                            <div className="mb-2 p-2 bg-yellow-500/10 border border-yellow-500/30 rounded text-yellow-400 text-xs">
-                                                {violation}
-                                            </div>
-                                        )}
-
                                         {/* 成员列表 */}
                                         <div className="mb-3">
                                             <label className="text-xs theme-text-dim mb-1 block">成员列表</label>
@@ -542,11 +511,12 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
                                                     >
                                                         <button
                                                             onClick={() => setAnchor(unitIndex, member.name)}
-                                                            className={`p-0.5 rounded ${unit.anchor === member.name
-                                                                ? 'bg-green-500 text-white'
-                                                                : 'bg-gray-600 text-gray-400 hover:bg-gray-500'
-                                                                }`}
-                                                            title={unit.anchor === member.name ? '主核查对象' : '设为主核查对象'}
+                                                            className={`p-0.5 rounded ${
+                                                                unit.anchor === member.name
+                                                                    ? 'bg-green-500 text-white'
+                                                                    : 'bg-gray-600 text-gray-400 hover:bg-gray-500'
+                                                            }`}
+                                                            title={unit.anchor === member.name ? '主归集人' : '设为主归集人'}
                                                         >
                                                             <Check size={12} />
                                                         </button>

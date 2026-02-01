@@ -232,10 +232,9 @@ def _identify_salary_by_hr_company(income_df: pd.DataFrame) -> pd.DataFrame:
     return income_df
 
 
-
 def _identify_salary_by_frequency(income_df: pd.DataFrame) -> pd.DataFrame:
     """
-    潮次4: 高频稳定收入 (严格排除金融机构)
+    轮次4: 高频稳定收入 (严格排除金融机构)
     
     【审计风险警告 - 2026-01-11 增强】
     此轮次可能将"分期受贿"误识别为工资，增加以下防护：
@@ -250,24 +249,16 @@ def _identify_salary_by_frequency(income_df: pd.DataFrame) -> pd.DataFrame:
         标记了is_salary的DataFrame
     """
     import re
-    
-    # 【新增】高频收入金额上限（超过此金额需人工复核）
-    HIGH_FREQUENCY_AMOUNT_CAP = config.HIGH_FREQUENCY_SALARY_CAP  # 使用统一配置
 
     # 【P1 修复 2026-01-28】添加进度日志
+    # 【修复 2026-02-01】先定义 counterparty_groups
     counterparty_groups = income_df.groupby('counterparty')
     total_groups = len(counterparty_groups)
     processed_groups = 0
     log_interval = max(1, total_groups // 10)  # 每10%输出一次进度
     warning_count = 0  # 统计警告数量
-
+    HIGH_FREQUENCY_AMOUNT_CAP = config.HIGH_FREQUENCY_SALARY_CAP  # 使用统一配置
     for counterparty, group in counterparty_groups:
-        processed_groups += 1
-        # 每10%输出一次进度
-        if processed_groups % log_interval == 0 or processed_groups == total_groups:
-            progress = (processed_groups / total_groups * 100)
-            logger.info(f'  高频稳定收入分析进度: {progress:.1f}% ({processed_groups}/{total_groups} 个对手方)')
-        
         if not counterparty or str(counterparty) == 'nan': continue
         if group['is_salary'].any(): continue
         if group.iloc[0]['is_self_transfer']: continue
@@ -313,9 +304,8 @@ def _identify_salary_by_frequency(income_df: pd.DataFrame) -> pd.DataFrame:
 
                 # 【新增】金额上限检查：超过10万/月需人工复核
                 if mean_amount > HIGH_FREQUENCY_AMOUNT_CAP:
-                    # 【P1 修复 2026-01-28】汇总高频收入警告（减少日志输出）
-                    warning_count += 1
-                    # logger.warning(f'高频收入超过阈值，需人工复核: {counterparty_str}, 月均{mean_amount/10000:.2f}万, 共{len(months)}个月')
+                    logger.warning(f'高频收入超过阈值，需人工复核: {counterparty_str}, '
+                                   f'月均{mean_amount/10000:.2f}万, 共{len(months)}个月')
                     continue
 
                 # 进一步检查摘要，排除理财赎回特征
@@ -338,12 +328,14 @@ def _identify_salary_by_frequency(income_df: pd.DataFrame) -> pd.DataFrame:
 
                         income_df.at[idx, 'is_salary'] = True
                         income_df.at[idx, 'salary_reason'] = f'高频稳定收入(连续{len(months)}月)'
-    
+
+
     # 【P1 修复 2026-01-28】汇总高频收入警告
-    if warning_count > 0:
+    if 'warning_count' in locals() and warning_count > 0:
         logger.warning(f'  共发现 {warning_count} 个高频收入对手方（已汇总显示）')
-    
     return income_df
+
+
 def _calculate_yearly_monthly_stats(df: pd.DataFrame) -> tuple:
     """
     计算年度/月度统计

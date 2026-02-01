@@ -198,41 +198,46 @@ class PrimaryTargetsService:
     def generate_default_config(self) -> Tuple[Optional[PrimaryTargetsConfig], str]:
         """
         【G-02 核心实现】从 analysis_cache 生成默认归集配置
-        
+
         逻辑：
         1. 读取 profiles.json 获取所有实体列表
         2. 读取 derived_data.json 获取 family_summary（包含 family_units）
         3. 区分个人和公司
-        4. 根据 family_units 创建独立的分析单元
-        
+        4. 优先使用 family_units 创建独立的家庭分析单元
+        5. 如果没有 family_units，回退到使用 family_members 创建默认单元
+        6. 【关键修复】检查未分配的人员，为每个未分配人员创建独立分析单元
+
         Returns:
             (config, message)
         """
         cache, msg = self.load_analysis_cache()
         if not cache:
             return None, msg
-        
+
         profiles = cache.get('profiles', {})
         derived = cache.get('derived', {})
-        
+
         # 区分个人和公司
         persons = []
         companies = []
-        
+
         for name in profiles.keys():
             if self._is_company(name):
                 companies.append(name)
             else:
                 persons.append(name)
-        
+
         # 获取家庭汇总数据
         family_summary = derived.get('family_summary', {})
         family_units = family_summary.get('family_units', [])
         family_relations = family_summary.get('family_relations', {})
-        
+
         # 创建默认配置
         config = PrimaryTargetsConfig()
-        
+
+        # 用于跟踪已分配的人员
+        assigned_persons = set()
+
         # 【修复】使用 family_units 创建独立的家庭分析单元
         if family_units:
             for unit in family_units:
@@ -240,14 +245,18 @@ class PrimaryTargetsService:
                 members = unit.get('members', [])
                 unit_relations = unit.get('relations', {})
                 address = unit.get('address', '')
-                
+
                 if not members:
                     continue
-                
+
                 # 创建成员详情
                 member_details = []
                 for name in members:
                     has_data = name in profiles
+                    # 记录已分配的人员（仅限有数据的人员）
+                    if has_data:
+                        assigned_persons.add(name)
+
                     # 从 family_relations 获取关系信息
                     person_rels = unit_relations.get(name, {})
                     if name == anchor:
@@ -269,16 +278,16 @@ class PrimaryTargetsService:
                             relation = "父母"
                         else:
                             relation = "家庭成员"
-                    
+
                     member_details.append(AnalysisUnitMember(
                         name=name,
                         relation=relation,
                         has_data=has_data,
                     ))
-                
+
                 # 构建单元备注
                 note = f"户籍地址: {address}" if address else "系统自动识别的家庭单元"
-                
+
                 family_unit = AnalysisUnit(
                     anchor=anchor,
                     members=members,
@@ -287,7 +296,7 @@ class PrimaryTargetsService:
                     note=note
                 )
                 config.analysis_units.append(family_unit)
-        
+
         # 如果没有 family_units，回退到旧逻辑
         elif persons:
             family_members = family_summary.get('family_members', persons)
@@ -300,7 +309,10 @@ class PrimaryTargetsService:
                     relation=relation,
                     has_data=has_data,
                 ))
-            
+                # 记录已分配的人员（仅限有数据的人员）
+                if has_data:
+                    assigned_persons.add(name)
+
             default_unit = AnalysisUnit(
                 anchor=family_members[0],
                 members=family_members,
@@ -309,13 +321,39 @@ class PrimaryTargetsService:
                 note="系统自动生成的默认配置，请根据实际情况调整成员关系和单元划分"
             )
             config.analysis_units.append(default_unit)
-        
+
+        # 【关键修复】检查未分配的人员，为每个未分配人员创建独立分析单元
+        unassigned_persons = [p for p in persons if p not in assigned_persons]
+        if unassigned_persons:
+            logger.info(f"发现 {len(unassigned_persons)} 个未分配的人员: {unassigned_persons}")
+
+            for person_name in unassigned_persons:
+                has_data = person_name in profiles
+
+                # 创建独立人员单元
+                independent_unit = AnalysisUnit(
+                    anchor=person_name,
+                    members=[person_name],
+                    unit_type="independent",
+                    member_details=[
+                        AnalysisUnitMember(
+                            name=person_name,
+                            relation="本人",
+                            has_data=has_data,
+                        )
+                    ],
+                    note=f"系统自动为未分配人员创建的独立单元"
+                )
+                config.analysis_units.append(independent_unit)
+
+            logger.info(f"已为 {len(unassigned_persons)} 个未分配人员创建独立分析单元")
+
         # 设置待核查公司
         config.include_companies = companies
-        
+
         logger.info(f"生成默认归集配置: {len(config.analysis_units)} 个分析单元, "
                    f"{len(companies)} 个待核查公司")
-        
+
         return config, "success"
     
     def get_or_create_config(self) -> Tuple[Optional[PrimaryTargetsConfig], str, bool]:
