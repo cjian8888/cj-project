@@ -27,7 +27,7 @@ import queue
 import pandas as pd
 import time
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
@@ -77,6 +77,10 @@ import flight_extractor
 # 导入辅助模块
 import family_assets_helper
 import family_finance
+
+# 导入报告构建器（v3.0 新架构）
+from investigation_report_builder import InvestigationReportBuilder, load_investigation_report_builder
+from report_config.primary_targets_service import PrimaryTargetsService
 
 # ==================== Windows asyncio 兼容性修复 ====================
 if sys.platform == 'win32':
@@ -1270,6 +1274,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             "analysisResults": serialize_analysis_results(analysis_results),
             "graphData": graph_data_cache,
             "externalData": external_data,  # 🔄 新增: 外部数据也在结果中
+            "_profiles_raw": profiles,  # 🔧 修复: 保留完整画像供报告构建器使用
         }
 
         # 保存到文件
@@ -1394,9 +1399,15 @@ def _save_analysis_cache_refactored(results, cache_dir):
     try:
         os.makedirs(cache_dir, exist_ok=True)
 
-        # 保存 profiles.json
+        # 保存 profiles.json (简化版，供前端使用)
         with open(os.path.join(cache_dir, 'profiles.json'), 'w', encoding='utf-8') as f:
             json.dump(results['profiles'], f, ensure_ascii=False, indent=2, cls=CustomJSONEncoder)
+
+        # 🔧 修复: 保存 profiles_full.json (完整版，供报告构建器使用)
+        if results.get('_profiles_raw'):
+            with open(os.path.join(cache_dir, 'profiles_full.json'), 'w', encoding='utf-8') as f:
+                json.dump(results['_profiles_raw'], f, ensure_ascii=False, indent=2, cls=CustomJSONEncoder)
+            logger.info(f"  ✓ 完整画像已保存: profiles_full.json")
 
         # 保存 suspicions.json
         with open(os.path.join(cache_dir, 'suspicions.json'), 'w', encoding='utf-8') as f:
@@ -1512,6 +1523,665 @@ async def get_reports():
     return {"reports": reports}
 
 
+@app.get("/api/reports/subjects")
+async def get_report_subjects():
+    """获取报告生成可选的核查对象列表"""
+    # 优先从缓存中获取
+    if analysis_state.status == "completed" and analysis_state.results:
+        results = analysis_state.results
+        persons = results.get("persons", [])
+        companies = results.get("companies", [])
+        profiles = results.get("profiles", {})
+        
+        subjects = []
+        
+        # 添加个人
+        for person in persons:
+            profile = profiles.get(person, {})
+            subjects.append({
+                "name": person,
+                "type": "person",
+                "transactionCount": profile.get("transaction_count", 0),
+                "totalIncome": profile.get("total_income", 0),
+                "salaryRatio": profile.get("salary_ratio", 1.0),
+            })
+        
+        # 添加公司
+        for company in companies:
+            profile = profiles.get(company, {})
+            subjects.append({
+                "name": company,
+                "type": "company",
+                "transactionCount": profile.get("transaction_count", 0),
+                "totalIncome": profile.get("total_income", 0),
+            })
+        
+        return {"success": True, "subjects": subjects}
+    
+    # 尝试从缓存文件中读取
+    cache_dir = os.path.join("output", "analysis_cache")
+    metadata_path = os.path.join(cache_dir, "metadata.json")
+    profiles_path = os.path.join(cache_dir, "profiles.json")
+    
+    subjects = []
+    
+    if os.path.exists(metadata_path) and os.path.exists(profiles_path):
+        try:
+            with open(metadata_path, 'r', encoding='utf-8') as f:
+                metadata = json.load(f)
+            with open(profiles_path, 'r', encoding='utf-8') as f:
+                profiles = json.load(f)
+            
+            persons = metadata.get("persons", [])
+            companies = metadata.get("companies", [])
+            
+            for person in persons:
+                profile = profiles.get(person, {})
+                subjects.append({
+                    "name": person,
+                    "type": "person",
+                    "transactionCount": profile.get("transaction_count", 0),
+                    "totalIncome": profile.get("total_income", 0),
+                    "salaryRatio": profile.get("salary_ratio", 1.0),
+                })
+            
+            for company in companies:
+                profile = profiles.get(company, {})
+                subjects.append({
+                    "name": company,
+                    "type": "company",
+                    "transactionCount": profile.get("transaction_count", 0),
+                    "totalIncome": profile.get("total_income", 0),
+                })
+            
+            return {"success": True, "subjects": subjects}
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"读取缓存失败: {e}")
+    
+    return {"success": True, "subjects": []}
+
+
+# ==================== 归集配置 API (Primary Targets) ====================
+
+@app.get("/api/primary-targets")
+async def get_primary_targets_config():
+    """
+    获取当前归集配置
+    
+    如果配置不存在，自动生成默认配置
+    """
+    logger = logging.getLogger(__name__)
+    logger.info("[归集配置] 获取配置")
+    
+    try:
+        service = PrimaryTargetsService(data_dir="./data", output_dir="./output")
+        config, msg, is_new = service.get_or_create_config()
+        
+        if config is None:
+            logger.warning(f"[归集配置] 加载失败: {msg}")
+            return {"success": False, "error": msg, "config": None}
+        
+        logger.info(f"[归集配置] 加载成功: {len(config.analysis_units)} 个分析单元, is_new={is_new}")
+        
+        return {
+            "success": True,
+            "config": config.to_dict(),
+            "is_new": is_new,
+            "message": msg
+        }
+        
+    except Exception as e:
+        logger.exception(f"[归集配置] 获取失败: {e}")
+        return {"success": False, "error": str(e), "config": None}
+
+
+@app.get("/api/primary-targets/entities")
+async def get_primary_targets_entities():
+    """
+    获取可用的实体列表（人员和公司）
+    
+    用于前端归集配置界面显示可选择的对象
+    """
+    logger = logging.getLogger(__name__)
+    logger.info("[归集配置] 获取实体列表")
+    
+    try:
+        service = PrimaryTargetsService(data_dir="./data", output_dir="./output")
+        result = service.get_entities_with_data_status()
+        
+        logger.info(f"[归集配置] 实体: {len(result.get('persons', []))} 人员, "
+                   f"{len(result.get('companies', []))} 公司")
+        
+        return {
+            "success": True,
+            "persons": result.get("persons", []),
+            "companies": result.get("companies", []),
+            "family_summary": result.get("family_summary")
+        }
+        
+    except Exception as e:
+        logger.exception(f"[归集配置] 获取实体失败: {e}")
+        return {"success": False, "error": str(e), "persons": [], "companies": []}
+
+
+@app.post("/api/primary-targets")
+async def save_primary_targets_config(request: Request):
+    """
+    保存归集配置
+    """
+    logger = logging.getLogger(__name__)
+    logger.info("[归集配置] 保存配置")
+    
+    try:
+        config_dict = await request.json()
+        
+        # 从字典构建配置对象
+        from report_config.primary_targets_schema import PrimaryTargetsConfig
+        config = PrimaryTargetsConfig.from_dict(config_dict)
+        
+        # 保存配置
+        service = PrimaryTargetsService(data_dir="./data", output_dir="./output")
+        success, msg = service.save_config(config)
+        
+        if success:
+            logger.info(f"[归集配置] 保存成功: {msg}")
+            return {"success": True, "message": msg}
+        else:
+            logger.warning(f"[归集配置] 保存失败: {msg}")
+            return {"success": False, "error": msg}
+            
+    except Exception as e:
+        logger.exception(f"[归集配置] 保存失败: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/primary-targets/generate-default")
+async def generate_default_primary_targets():
+    """
+    重新生成默认归集配置
+    
+    根据 analysis_cache 中的数据生成配置
+    """
+    logger = logging.getLogger(__name__)
+    logger.info("[归集配置] 重新生成默认配置")
+    
+    try:
+        service = PrimaryTargetsService(data_dir="./data", output_dir="./output")
+        config, msg = service.generate_default_config()
+        
+        if config is None:
+            logger.warning(f"[归集配置] 生成失败: {msg}")
+            return {"success": False, "error": msg, "config": None}
+        
+        logger.info(f"[归集配置] 生成成功: {len(config.analysis_units)} 个分析单元")
+        
+        return {
+            "success": True,
+            "config": config.to_dict(),
+            "message": msg
+        }
+        
+    except Exception as e:
+        logger.exception(f"[归集配置] 生成失败: {e}")
+        return {"success": False, "error": str(e), "config": None}
+
+
+# ==================== 报告文件访问 API ====================
+
+@app.get("/api/reports")
+async def get_report_files():
+    """
+    获取已生成的报告文件列表
+    
+    返回 output/analysis_results 目录下的所有报告文件
+    """
+    logger = logging.getLogger(__name__)
+    results_dir = os.path.join("output", "analysis_results")
+    
+    if not os.path.exists(results_dir):
+        return {"success": True, "reports": [], "message": "报告目录不存在"}
+    
+    reports = []
+    
+    # 定义报告类型映射
+    report_types = {
+        '.txt': 'text',
+        '.html': 'html',
+        '.xlsx': 'excel',
+        '.md': 'markdown'
+    }
+    
+    try:
+        for filename in os.listdir(results_dir):
+            filepath = os.path.join(results_dir, filename)
+            if os.path.isfile(filepath):
+                ext = os.path.splitext(filename)[1].lower()
+                file_type = report_types.get(ext, 'other')
+                
+                # 获取文件信息
+                stat = os.stat(filepath)
+                
+                reports.append({
+                    "filename": filename,
+                    "type": file_type,
+                    "size": stat.st_size,
+                    "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    "path": f"output/analysis_results/{filename}"
+                })
+        
+        # 按修改时间排序（最新的在前）
+        reports.sort(key=lambda x: x["modified"], reverse=True)
+        
+        logger.info(f"[报告列表] 找到 {len(reports)} 个报告文件")
+        return {"success": True, "reports": reports}
+        
+    except Exception as e:
+        logger.exception(f"[报告列表] 获取失败: {e}")
+        return {"success": False, "reports": [], "error": str(e)}
+
+
+@app.get("/api/reports/preview/{filename:path}")
+async def preview_report_file(filename: str):
+    """
+    预览报告文件内容
+    
+    Args:
+        filename: 报告文件名
+        
+    Returns:
+        文件内容（txt/html/md）或下载链接（xlsx）
+    """
+    logger = logging.getLogger(__name__)
+    
+    # 安全检查：防止路径遍历攻击
+    safe_filename = os.path.basename(filename)
+    filepath = os.path.join("output", "analysis_results", safe_filename)
+    
+    if not os.path.exists(filepath):
+        return JSONResponse(
+            status_code=404, 
+            content={"success": False, "error": f"文件不存在: {safe_filename}"}
+        )
+    
+    ext = os.path.splitext(safe_filename)[1].lower()
+    
+    try:
+        if ext == '.txt' or ext == '.md':
+            # 文本文件，直接返回内容
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+            return {
+                "success": True,
+                "filename": safe_filename,
+                "type": "text",
+                "content": content
+            }
+            
+        elif ext == '.html':
+            # HTML 文件，返回完整 HTML
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+            return Response(
+                content=content, 
+                media_type="text/html; charset=utf-8"
+            )
+            
+        elif ext == '.xlsx':
+            # Excel 文件，返回下载链接
+            return {
+                "success": True,
+                "filename": safe_filename,
+                "type": "excel",
+                "download_url": f"/api/reports/download/{safe_filename}",
+                "message": "Excel 文件请使用下载链接"
+            }
+            
+        else:
+            return {
+                "success": False,
+                "error": f"不支持预览的文件类型: {ext}"
+            }
+            
+    except Exception as e:
+        logger.exception(f"[报告预览] 读取失败: {e}")
+        return JSONResponse(
+            status_code=500, 
+            content={"success": False, "error": f"读取文件失败: {str(e)}"}
+        )
+
+
+@app.get("/api/reports/download/{filename:path}")
+async def download_report_file(filename: str):
+    """
+    下载报告文件
+    
+    Args:
+        filename: 报告文件名
+    """
+    from fastapi.responses import FileResponse
+    
+    # 安全检查
+    safe_filename = os.path.basename(filename)
+    filepath = os.path.join("output", "analysis_results", safe_filename)
+    
+    if not os.path.exists(filepath):
+        return JSONResponse(
+            status_code=404, 
+            content={"success": False, "error": f"文件不存在: {safe_filename}"}
+        )
+    
+    return FileResponse(
+        path=filepath,
+        filename=safe_filename,
+        media_type="application/octet-stream"
+    )
+
+
+# ==================== 报告生成 API (v3.0 新架构) ====================
+
+class InvestigationReportRequest(BaseModel):
+    """v3.0 报告生成请求"""
+    case_background: Optional[str] = None
+    data_scope: Optional[str] = None
+
+
+@app.post("/api/investigation-report/generate-with-config")
+async def generate_investigation_report_with_config(request: InvestigationReportRequest = None):
+    """
+    【G-05】按归集配置生成初查报告 (v3.0 新架构)
+    
+    根据 primary_targets.json 中的分析单元配置组织报告章节：
+    - 核心家庭单元（family）: 聚合成员数据，生成合并章节
+    - 独立关联单元（independent）: 每个成员独立成章
+    
+    Returns:
+        {
+            "success": True,
+            "report": { InvestigationReport 完整结构 },
+            "message": "报告生成成功"
+        }
+    """
+    logger = logging.getLogger(__name__)
+    logger.info("[报告生成] 开始按配置生成 v3.0 报告")
+    
+    try:
+        # 1. 加载归集配置服务
+        service = PrimaryTargetsService(data_dir="./data", output_dir="./output")
+        
+        # 2. 获取或创建归集配置
+        config, msg, is_new = service.get_or_create_config()
+        if config is None:
+            logger.warning(f"[报告生成] 归集配置加载失败: {msg}")
+            return JSONResponse(
+                status_code=400, 
+                content={"success": False, "error": f"归集配置加载失败: {msg}"}
+            )
+        
+        logger.info(f"[报告生成] 配置加载成功: {len(config.analysis_units)} 个分析单元, is_new={is_new}")
+        
+        # 3. 加载报告构建器
+        builder = load_investigation_report_builder("./output")
+        if builder is None:
+            logger.warning("[报告生成] 缓存数据不存在，请先运行分析")
+            return JSONResponse(
+                status_code=400, 
+                content={"success": False, "error": "分析缓存不存在，请先运行分析"}
+            )
+        
+        # 4. 生成报告
+        case_background = request.case_background if request else None
+        data_scope = request.data_scope if request else None
+        
+        report = builder.build_report_with_config(
+            config=config,
+            case_background=case_background or config.case_notes,
+            data_scope=data_scope
+        )
+        
+        logger.info(f"[报告生成] v3.0 报告生成成功")
+        
+        return {
+            "success": True,
+            "report": report,
+            "message": "报告生成成功",
+            "config_info": {
+                "analysis_units_count": len(config.analysis_units),
+                "doc_number": config.doc_number,
+                "employer": config.employer
+            }
+        }
+        
+    except Exception as e:
+        logger.exception(f"[报告生成] 生成失败: {e}")
+        return JSONResponse(
+            status_code=500, 
+            content={"success": False, "error": f"报告生成失败: {str(e)}"}
+        )
+
+
+class LegacyReportGenerateRequest(BaseModel):
+    """传统报告生成请求"""
+    sections: List[str] = ["summary", "assets", "risks"]
+    format: str = "html"  # html / json
+    case_name: str = "初查报告"
+    subjects: List[str] = []
+    doc_number: Optional[str] = None
+    thresholds: Optional[Dict[str, float]] = None
+    primary_person: Optional[str] = None
+    case_background: Optional[str] = None
+
+
+@app.post("/api/reports/generate")
+async def generate_legacy_report(request: LegacyReportGenerateRequest):
+    """
+    传统报告生成 API
+    
+    支持 html / json 格式输出
+    """
+    logger = logging.getLogger(__name__)
+    logger.info(f"[报告生成] 传统报告生成请求: format={request.format}, subjects={request.subjects}")
+    
+    try:
+        # 1. 加载报告构建器
+        builder = load_investigation_report_builder("./output")
+        if builder is None:
+            return JSONResponse(
+                status_code=400, 
+                content={"success": False, "error": "分析缓存不存在，请先运行分析"}
+            )
+        
+        # 2. 确定核查对象
+        primary_person = request.primary_person
+        if not primary_person and request.subjects:
+            primary_person = request.subjects[0]
+        if not primary_person:
+            # 使用第一个可用的人员
+            available_persons = [p for p in builder._core_persons if p]
+            if available_persons:
+                primary_person = available_persons[0]
+            else:
+                return JSONResponse(
+                    status_code=400, 
+                    content={"success": False, "error": "未找到可用的核查对象"}
+                )
+        
+        # 3. 生成报告
+        report = builder.build_complete_report(
+            primary_person=primary_person,
+            doc_number=request.doc_number,
+            case_background=request.case_background or request.case_name,
+            include_companies=request.subjects if request.subjects else None
+        )
+        
+        # 4. 根据格式返回
+        if request.format == "json":
+            return {
+                "success": True,
+                "format": "json",
+                "report": report,
+                "message": "报告生成成功"
+            }
+        else:
+            # 生成 HTML 预览
+            html_content = _render_report_to_html(report)
+            return Response(
+                content=html_content, 
+                media_type="text/html; charset=utf-8"
+            )
+        
+    except Exception as e:
+        logger.exception(f"[报告生成] 传统报告生成失败: {e}")
+        return JSONResponse(
+            status_code=500, 
+            content={"success": False, "error": f"报告生成失败: {str(e)}"}
+        )
+
+
+def _render_report_to_html(report: Dict) -> str:
+    """将报告字典渲染为 HTML"""
+    meta = report.get("meta", {})
+    family = report.get("family", {})
+    member_details = report.get("member_details", [])
+    conclusion = report.get("conclusion", {})
+    
+    # 格式化金额
+    def format_amount(amount):
+        if amount is None:
+            return "0"
+        return f"{amount:,.2f}" if isinstance(amount, (int, float)) else str(amount)
+    
+    def format_wan(amount):
+        if amount is None:
+            return "0.00"
+        return f"{amount / 10000:,.2f}" if isinstance(amount, (int, float)) else str(amount)
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8">
+        <title>初查报告 - {meta.get('doc_number', '')}</title>
+        <style>
+            body {{ font-family: "SimSun", "Songti SC", serif; background: #f5f5f5; padding: 20px; margin: 0; }}
+            .container {{ max-width: 900px; margin: 0 auto; background: white; padding: 40px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+            h1 {{ text-align: center; font-size: 24px; margin-bottom: 30px; }}
+            h2 {{ font-size: 18px; border-bottom: 2px solid #333; padding-bottom: 5px; margin-top: 30px; }}
+            h3 {{ font-size: 16px; margin-top: 20px; }}
+            .meta {{ background: #f9f9f9; padding: 15px; margin-bottom: 20px; border-left: 4px solid #0066cc; }}
+            .meta p {{ margin: 5px 0; }}
+            table {{ width: 100%; border-collapse: collapse; margin: 15px 0; }}
+            th, td {{ border: 1px solid #ddd; padding: 10px; text-align: left; }}
+            th {{ background: #f0f0f0; font-weight: bold; }}
+            .amount {{ text-align: right; font-family: monospace; }}
+            .highlight {{ color: #c00; font-weight: bold; }}
+            .issue {{ background: #fff0f0; padding: 10px; margin: 10px 0; border-left: 4px solid #c00; }}
+            .issue.high {{ border-color: #c00; }}
+            .issue.medium {{ border-color: #f90; }}
+            .issue.low {{ border-color: #090; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>资金穿透审计初查报告</h1>
+            
+            <div class="meta">
+                <p><strong>文号：</strong>{meta.get('doc_number', '待填写')}</p>
+                <p><strong>生成时间：</strong>{meta.get('generated_at', '')}</p>
+                <p><strong>数据范围：</strong>{meta.get('data_scope', '待补充')}</p>
+                <p><strong>案件背景：</strong>{meta.get('case_background', '')}</p>
+            </div>
+            
+            <h2>一、家庭基本情况</h2>
+            <p>核查对象：<strong>{family.get('primary_person', '')}</strong></p>
+            <p>家庭成员共 {len(family.get('members', []))} 人</p>
+            
+            <table>
+                <tr><th>姓名</th><th>关系</th><th>有流水数据</th></tr>
+    """
+    
+    for m in family.get("members", []):
+        has_data = "✓" if m.get("has_data") else "✗"
+        html += f"<tr><td>{m.get('name', '')}</td><td>{m.get('relation', '')}</td><td>{has_data}</td></tr>"
+    
+    # 家庭汇总
+    summary = family.get("summary", {})
+    html += f"""
+            </table>
+            
+            <h3>家庭财务汇总</h3>
+            <table>
+                <tr><th>项目</th><th>金额（元）</th></tr>
+                <tr><td>总收入</td><td class="amount">{format_amount(summary.get('total_income', 0))}</td></tr>
+                <tr><td>总支出</td><td class="amount">{format_amount(summary.get('total_expense', 0))}</td></tr>
+                <tr><td>净收入（剔除互转）</td><td class="amount">{format_amount(summary.get('net_income', 0))}</td></tr>
+                <tr><td>家庭内部互转</td><td class="amount">{format_amount(summary.get('internal_transfers', 0))}</td></tr>
+            </table>
+            
+            <h2>二、成员详细分析</h2>
+    """
+    
+    for i, md in enumerate(member_details, 1):
+        html += f"""
+            <h3>{i}. {md.get('name', '')} ({md.get('relation', '')})</h3>
+            <table>
+                <tr><th>项目</th><th>数值</th></tr>
+                <tr><td>总收入</td><td class="amount">{format_amount(md.get('total_income', 0))}</td></tr>
+                <tr><td>总支出</td><td class="amount">{format_amount(md.get('total_expense', 0))}</td></tr>
+                <tr><td>交易笔数</td><td>{md.get('transaction_count', 0)}</td></tr>
+            </table>
+        """
+        
+        # 资产信息
+        assets = md.get("assets", {})
+        if assets:
+            html += f"""
+            <p><strong>资产情况：</strong></p>
+            <ul>
+                <li>工资总额: {format_amount(assets.get('salary_total', 0))} 元</li>
+                <li>工资占比: {assets.get('salary_ratio', 0):.1f}%</li>
+                <li>银行账户数: {assets.get('bank_account_count', 0)}</li>
+                <li>理财持仓: {format_wan(assets.get('wealth_holding', 0))} 万元</li>
+            </ul>
+            """
+    
+    # 综合研判
+    html += f"""
+            <h2>三、综合研判</h2>
+            <p>{conclusion.get('summary_text', '待补充研判意见')}</p>
+            
+            <h3>发现问题</h3>
+    """
+    
+    issues = conclusion.get("issues", [])
+    if issues:
+        for issue in issues:
+            severity = issue.get("severity", "medium")
+            html += f"""
+            <div class="issue {severity}">
+                <strong>[{issue.get('issue_type', '')}]</strong> {issue.get('person', '')}：
+                {issue.get('description', '')}
+            </div>
+            """
+    else:
+        html += "<p>暂无明显问题</p>"
+    
+    # 下一步建议
+    next_steps = conclusion.get("next_steps", [])
+    if next_steps:
+        html += "<h3>下一步建议</h3><ul>"
+        for step in next_steps:
+            html += f"<li>{step}</li>"
+        html += "</ul>"
+    
+    html += """
+        </div>
+    </body>
+    </html>
+    """
+    
+    return html
+
+
 class OpenFolderRequest(BaseModel):
     """打开文件夹请求"""
     relativePath: str
@@ -1539,7 +2209,8 @@ async def open_folder(request: OpenFolderRequest):
         if system == "Darwin":  # macOS
             subprocess.run(["open", folder_path], check=True)
         elif system == "Windows":
-            subprocess.run(["explorer", folder_path], check=True)
+            # 使用 os.startfile 打开文件夹，窗口会跳到前台
+            os.startfile(folder_path)
         else:  # Linux
             subprocess.run(["xdg-open", folder_path], check=True)
         

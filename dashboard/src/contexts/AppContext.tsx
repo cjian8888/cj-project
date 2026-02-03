@@ -257,92 +257,100 @@ export function AppProvider({ children }: AppProviderProps) {
                     isRunning: false,
                     progress: 100,
                     status: 'completed',
-                    currentPhase: '分析完成',
+                    currentPhase: '分析完成，正在加载数据...',
                 }));
 
-                // 然后获取结果
-                api.getResults().then(result => {
-                    if (result.data) {
-                        // 安全合并后端数据与默认值，防止缺失字段导致前端崩溃
-                        const backendData = result.data as any;
+                // 添加短暂延迟确保后端数据保存完成，然后获取结果
+                setTimeout(() => {
+                    api.getResults().then(result => {
+                        if (result.data) {
+                            // 安全合并后端数据与默认值，防止缺失字段导致前端崩溃
+                            const backendData = result.data as any;
 
-                        // 合并 suspicions，确保所有字段都有默认值
-                        const safeSuspicions: SuspicionResult = {
-                            directTransfers: backendData.suspicions?.directTransfers || [],
-                            cashCollisions: backendData.suspicions?.cashCollisions || [],
-                            hiddenAssets: backendData.suspicions?.hiddenAssets || {},
-                            fixedFrequency: backendData.suspicions?.fixedFrequency || {},
-                            cashTimingPatterns: backendData.suspicions?.cashTimingPatterns || [],
-                            holidayTransactions: backendData.suspicions?.holidayTransactions || {},
-                            amountPatterns: backendData.suspicions?.amountPatterns || {},
-                        };
+                            // 合并 suspicions，确保所有字段都有默认值
+                            const safeSuspicions: SuspicionResult = {
+                                directTransfers: backendData.suspicions?.directTransfers || [],
+                                cashCollisions: backendData.suspicions?.cashCollisions || [],
+                                hiddenAssets: backendData.suspicions?.hiddenAssets || {},
+                                fixedFrequency: backendData.suspicions?.fixedFrequency || {},
+                                cashTimingPatterns: backendData.suspicions?.cashTimingPatterns || [],
+                                holidayTransactions: backendData.suspicions?.holidayTransactions || {},
+                                amountPatterns: backendData.suspicions?.amountPatterns || {},
+                            };
 
-                        // 合并 analysisResults，确保所有模块都有默认结构
-                        const ar = backendData.analysisResults || {};
-                        const safeAnalysisResults: AppAnalysisResults = {
-                            loan: {
-                                summary: { 双向往来关系数: 0, 网贷平台交易数: 0, 规律还款模式数: 0, ...ar.loan?.summary },
-                                details: ar.loan?.details || [],
-                            },
-                            income: {
-                                summary: { 规律性非工资收入: 0, 个人大额转入: 0, 来源不明收入: 0, ...ar.income?.summary },
-                                details: ar.income?.details || [],
-                            },
-                            ml: {
-                                summary: { anomalyCount: 0, highRiskCount: 0, ...ar.ml?.summary },
-                                predictions: ar.ml?.predictions || [],
-                            },
-                            penetration: {
-                                summary: { 资金穿透链数: 0, 中间节点数: 0, ...ar.penetration?.summary },
-                                chains: ar.penetration?.chains || [],
-                            },
-                            relatedParty: {
-                                summary: { 直接往来笔数: 0, 第三方中转链数: 0, 资金闭环数: 0, ...ar.relatedParty?.summary },
-                                details: ar.relatedParty?.details || [],
-                            },
-                            correlation: {
-                                summary: { 资金碰撞总数: 0, ...ar.correlation?.summary },
-                                correlations: ar.correlation?.correlations || [],
-                            },
-                            timeSeries: {
-                                summary: { 异常时间点数: 0, ...ar.timeSeries?.summary },
-                                anomalies: ar.timeSeries?.anomalies || [],
-                            },
-                            aggregation: {
-                                rankedEntities: ar.aggregation?.rankedEntities || [],
-                                summary: { 极高风险实体数: 0, 高风险实体数: 0, ...ar.aggregation?.summary },
-                            },
-                        };
+                            // 合并 analysisResults，确保所有模块都有默认结构
+                            const ar = backendData.analysisResults || {};
+                            const safeAnalysisResults: AppAnalysisResults = {
+                                loan: {
+                                    summary: { 双向往来关系数: 0, 网贷平台交易数: 0, 规律还款模式数: 0, ...ar.loan?.summary },
+                                    details: ar.loan?.details || [],
+                                },
+                                income: {
+                                    summary: { 规律性非工资收入: 0, 个人大额转入: 0, 来源不明收入: 0, ...ar.income?.summary },
+                                    details: ar.income?.details || [],
+                                },
+                                ml: {
+                                    summary: { anomalyCount: 0, highRiskCount: 0, ...ar.ml?.summary },
+                                    predictions: ar.ml?.predictions || [],
+                                },
+                                penetration: {
+                                    summary: { 资金穿透链数: 0, 中间节点数: 0, ...ar.penetration?.summary },
+                                    chains: ar.penetration?.chains || [],
+                                },
+                                relatedParty: {
+                                    summary: { 直接往来笔数: 0, 第三方中转链数: 0, 资金闭环数: 0, ...ar.relatedParty?.summary },
+                                    details: ar.relatedParty?.details || [],
+                                },
+                                correlation: {
+                                    summary: { 资金碰撞总数: 0, ...ar.correlation?.summary },
+                                    correlations: ar.correlation?.correlations || [],
+                                },
+                                timeSeries: {
+                                    summary: { 异常时间点数: 0, ...ar.timeSeries?.summary },
+                                    anomalies: ar.timeSeries?.anomalies || [],
+                                },
+                                aggregation: {
+                                    rankedEntities: ar.aggregation?.rankedEntities || [],
+                                    summary: { 极高风险实体数: 0, 高风险实体数: 0, ...ar.aggregation?.summary },
+                                },
+                            };
 
-                        setData({
-                            persons: backendData.persons || [],
-                            companies: backendData.companies || [],
-                            profiles: backendData.profiles || {},
-                            suspicions: safeSuspicions,
-                            analysisResults: safeAnalysisResults,
-                            categorizedFiles: defaultData.categorizedFiles,
-                        });
+                            setData({
+                                persons: backendData.persons || [],
+                                companies: backendData.companies || [],
+                                profiles: backendData.profiles || {},
+                                suspicions: safeSuspicions,
+                                analysisResults: safeAnalysisResults,
+                                categorizedFiles: defaultData.categorizedFiles,
+                            });
 
-                        // 添加完成日志
+                            // 更新状态为完成
+                            setAnalysis(prev => ({
+                                ...prev,
+                                currentPhase: '分析完成',
+                            }));
+
+                            // 添加完成日志
+                            const now = new Date();
+                            const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+                            addLog({ time: timeStr, level: 'INFO', msg: '✓ 分析完成，数据已加载' });
+                        }
+                    }).catch(error => {
+                        console.error('获取分析结果失败:', error);
+                        const errorMsg = error instanceof Error ? error.message : '未知错误';
                         const now = new Date();
                         const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-                        addLog({ time: timeStr, level: 'INFO', msg: '✓ 分析完成，数据已加载' });
-                    }
-                }).catch(error => {
-                    console.error('获取分析结果失败:', error);
-                    const errorMsg = error instanceof Error ? error.message : '未知错误';
-                    const now = new Date();
-                    const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-                    addLog({ time: timeStr, level: 'ERROR', msg: `获取结果失败: ${errorMsg}` });
+                        addLog({ time: timeStr, level: 'ERROR', msg: `获取结果失败: ${errorMsg}` });
 
-                    // 更新状态为失败
-                    setAnalysis(prev => ({
-                        ...prev,
-                        isRunning: false,
-                        status: 'failed',
-                        currentPhase: `获取结果失败: ${errorMsg}`
-                    }));
-                });
+                        // 更新状态为失败
+                        setAnalysis(prev => ({
+                            ...prev,
+                            isRunning: false,
+                            status: 'failed',
+                            currentPhase: `获取结果失败: ${errorMsg}`
+                        }));
+                    });
+                }, 500); // 500ms 延迟确保后端数据保存完成
             }
         });
 

@@ -1,0 +1,118 @@
+{
+  "full_cache_exists": true,
+  "cache_files": {
+    "profiles.json": {
+      "exists": true,
+      "size_mb": 0.0
+    },
+    "profiles_full.json": {
+      "exists": true,
+      "size_mb": 0.44
+    },
+    "derived_data.json": {
+      "exists": true,
+      "size_mb": 3.23
+    },
+    "metadata.json": {
+      "exists": true,
+      "size_mb": 0.0
+    },
+    "suspicions.json": {
+      "exists": true,
+      "size_mb": 0.0
+    },
+    "graph_data.json": {
+      "exists": true,
+      "size_mb": 0.03
+    }
+  },
+  "derived_data_keys": [
+    "loan",
+    "income",
+    "large_transactions",
+    "relatedParty",
+    "correlation",
+    "timeSeries",
+    "aggregation",
+    "family_tree",
+    "family_units",
+    "family_relations",
+    "family_units_v2",
+    "family_summary",
+    "all_family_summaries",
+    "behavioral"
+  ],
+  "family_summary_keys": [
+    "family_members",
+    "total_assets",
+    "total_income_expense",
+    "member_transfers",
+    "householder",
+    "extended_relatives"
+  ],
+  "family_summary_income_expense": {
+    "total_income": 84428731.24000001,
+    "total_expense": 83068382.52,
+    "internal_transfers_in": 0.0,
+    "internal_transfers_out": 0.0,
+    "external_income": 84428731.24000001,
+    "external_expense": 83068382.52,
+    "net_flow": 1360348.7200000137
+  },
+  "family_summary_assets": {
+    "bank_balance": 1360348.719999996,
+    "property_value": 0.0,
+    "vehicle_value": 0,
+    "wealth_balance": 10513464.74,
+    "total": 11873813.459999997,
+    "property_count": 0,
+    "vehicle_count": 0
+  },
+  "profiles_count": 7,
+  "profile_samples": {
+    "施承天": {
+      "totalIncome": 4343076.04,
+      "totalExpense": 4364848.18,
+      "salaryTotal": 1040999.3699999999,
+      "wealthTotal": 2150609.88,
+      "bankAccounts_count": 5
+    },
+    "施灵": {
+      "totalIncome": 69035814.41,
+      "totalExpense": 67654854.91999999,
+      "salaryTotal": 6388796.880000004,
+      "wealthTotal": 14026839.53,
+      "bankAccounts_count": 49
+    },
+    "施育": {
+      "totalIncome": 3339532.62,
+      "totalExpense": 2710197.44,
+      "salaryTotal": 693572.0199999992,
+      "wealthTotal": 43657.84999999999,
+      "bankAccounts_count": 14
+    }
+  },
+  "report_keys": [
+    "meta",
+    "preface",
+    "family_sections",
+    "person_sections",
+    "company_sections",
+    "conclusion",
+    "next_steps"
+  ],
+  "family_sections_0_keys": [
+    "family_name",
+    "anchor",
+    "members",
+    "member_count",
+    "unit_type",
+    "family_summary",
+    "member_sections"
+  ],
+  "family_sections_0_summary": {
+    "total_income": 84493563.12,
+    "total_expense": 83133214.39999998,
+    "total_salary": 10889718.990000004
+  }
+}

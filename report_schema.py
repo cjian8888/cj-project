@@ -478,6 +478,95 @@ class InvestigationFamily:
     summary: FamilySummary = field(default_factory=FamilySummary)
 
 
+# ============================================================
+# v3.1 新增：家庭分析层级结构（对齐用户模板）
+# ============================================================
+
+@dataclass
+class RelationEvidence:
+    """关系证据"""
+    evidence_type: str = ""                 # 证据类型：户籍确认/同一地址/共同房产/资金往来/推测
+    source: str = ""                        # 来源描述
+    confidence: float = 1.0                 # 置信度 0-1
+
+
+@dataclass
+class FamilyRosterMember:
+    """家庭成员清单条目（含关系证据）"""
+    name: str = ""
+    relation: str = ""                      # 与核查对象的关系
+    has_data: bool = False                  # 是否有流水数据
+    id_number: str = ""                     # 身份证号
+    relation_evidence: RelationEvidence = field(default_factory=RelationEvidence)
+
+
+@dataclass
+class FamilyRoster:
+    """家庭成员清单（对应模板 family_roster）"""
+    householder: str = ""                   # 户主
+    address: str = ""                       # 户籍地址
+    members: List[FamilyRosterMember] = field(default_factory=list)
+    extended_relatives: List[Dict] = field(default_factory=list)  # 旁系亲属（推测）
+
+
+@dataclass
+class IncomeAssetMismatch:
+    """收支资产匹配分析"""
+    total_family_income: float = 0.0        # 家庭总收入
+    total_family_expense: float = 0.0       # 家庭总支出
+    total_assets_value: float = 0.0         # 总资产价值
+    income_covers_expense: bool = True      # 收入是否覆盖支出
+    income_covers_assets: bool = True       # 收入是否覆盖资产
+    gap_amount: float = 0.0                 # 缺口金额
+    analysis_text: str = ""                 # 分析说明
+    risk_level: str = "low"                 # 风险等级
+
+
+@dataclass
+class JointRisks:
+    """家庭成员间联合风险"""
+    internal_transfer_total: float = 0.0    # 内部互转总额
+    transfer_details: List[Dict] = field(default_factory=list)  # 互转明细
+    has_anomaly: bool = False               # 是否异常
+    anomaly_description: str = ""           # 异常描述
+    risk_level: str = "low"                 # 风险等级
+
+
+@dataclass
+class FamilyLevelAnalysis:
+    """家庭层面分析（对应模板 family_level_analysis）"""
+    income_asset_mismatch: IncomeAssetMismatch = field(default_factory=IncomeAssetMismatch)
+    joint_risks: JointRisks = field(default_factory=JointRisks)
+
+
+@dataclass
+class FamilyUnit:
+    """
+    家庭单元（对应模板 family_unit）
+    
+    包含：
+    - family_roster: 成员清单
+    - members_detailed: 成员详情列表（复用 MemberDetails）
+    - family_level_analysis: 家庭层面分析
+    """
+    unit_label: str = ""                    # 单元标签，如 "施灵家庭"
+    anchor: str = ""                        # 锚点人员
+    family_roster: FamilyRoster = field(default_factory=FamilyRoster)
+    # members_detailed 引用 MemberDetails 列表（在后面定义）
+    family_level_analysis: FamilyLevelAnalysis = field(default_factory=FamilyLevelAnalysis)
+
+
+@dataclass
+class HouseholdAnalysisSection:
+    """
+    家庭分析章节（对应模板 household_analysis_section）
+    
+    顶层结构，包含所有家庭单元
+    """
+    family_units: List[FamilyUnit] = field(default_factory=list)
+    total_families: int = 0
+    total_persons_with_data: int = 0
+
 @dataclass
 class BankAccountInfo:
     """银行账户信息"""
@@ -631,21 +720,182 @@ class RelatedPartyTransactions:
     by_company: List[Dict] = field(default_factory=list)  # 按公司分组
 
 
+# ============================================================
+# v3.1 新增：征信预警与行为风险
+# ============================================================
+
+@dataclass
+class CreditAlertItem:
+    """征信预警条目"""
+    name: str = ""                          # 姓名
+    id_number: str = ""                     # 身份证号
+    alert_type: str = ""                    # 预警类型：欠税记录/民事判决/强制执行/行政处罚
+    count: int = 0                          # 条数
+    source: str = ""                        # 数据来源
+
+
+@dataclass
+class BehavioralRiskItem:
+    """行为风险条目"""
+    risk_type: str = ""                     # 类型：fast_in_out/split_in_large_out
+    risk_level: str = "medium"              # 风险等级
+    trigger_date: str = ""                  # 触发日期
+    amount: float = 0.0                     # 涉及金额
+    counterparty: str = ""                  # 对手方
+    description: str = ""                   # 描述
+
+
+@dataclass 
+class BehavioralRiskSummary:
+    """行为风险摘要"""
+    fast_in_out_count: int = 0              # 快进快出次数
+    structuring_count: int = 0              # 拆分交易次数
+    dormant_activation_count: int = 0       # 休眠激活次数
+    total_patterns: int = 0                 # 模式总数
+    high_risk_items: List[BehavioralRiskItem] = field(default_factory=list)
+
+
+@dataclass
+class SuspiciousFlags:
+    """可疑标记汇总（对应模板 suspicious_flags）"""
+    # 现金风险
+    cash_deposit_total: float = 0.0         # 存现总额
+    cash_withdraw_total: float = 0.0        # 取现总额
+    cash_transactions: List[Dict] = field(default_factory=list)  # 大额现金明细
+    
+    # 转账风险
+    unknown_source_transfers: List[Dict] = field(default_factory=list)  # 来源不明转账
+    suspicious_counterparty_transfers: List[Dict] = field(default_factory=list)  # 与可疑对手方转账
+    
+    # 征信预警（新增）
+    credit_alerts: List[CreditAlertItem] = field(default_factory=list)
+    credit_alert_summary: str = ""          # 征信预警摘要
+    
+    # 行为风险（新增）
+    behavioral_risk: BehavioralRiskSummary = field(default_factory=BehavioralRiskSummary)
+
+
 @dataclass
 class PersonAnalysis:
-    """个人分析板块"""
+    """个人分析板块（增强版）"""
     income_gap: IncomeGapAnalysis = field(default_factory=IncomeGapAnalysis)
     inflow_analysis: InflowAnalysis = field(default_factory=InflowAnalysis)      # 资金流入分析
     outflow_analysis: OutflowAnalysis = field(default_factory=OutflowAnalysis)   # 资金流出分析
     large_cash: LargeCashAnalysis = field(default_factory=LargeCashAnalysis)
     large_transfers: LargeTransferAnalysis = field(default_factory=LargeTransferAnalysis)
-    related_party_transactions: RelatedPartyTransactions = field(default_factory=RelatedPartyTransactions)  # 关联交易排查
+    related_party_transactions: RelatedPartyTransactions = field(default_factory=RelatedPartyTransactions)
     third_party_total: float = 0.0          # 第三方支付总额
     suspicious_count: int = 0               # 可疑交易笔数
+    # v3.1 新增：可疑标记汇总
+    suspicious_flags: SuspiciousFlags = field(default_factory=SuspiciousFlags)
     # 外部数据占位
     identity_info: ExternalDataPlaceholder = field(default_factory=lambda: ExternalDataPlaceholder(message="基本身份信息需外部数据源"))
     property_info: ExternalDataPlaceholder = field(default_factory=lambda: ExternalDataPlaceholder(message="房产信息需不动产数据"))
     vehicle_info: ExternalDataPlaceholder = field(default_factory=lambda: ExternalDataPlaceholder(message="车辆信息需外部数据源"))
+
+
+# ============================================================
+# v4.0 新增：报告骨架结构数据类
+# ============================================================
+
+@dataclass
+class FamilyAssetsOverview:
+    """家庭资产总览"""
+    property_count: int = 0                 # 房产套数
+    property_value: float = 0.0             # 房产总价值（万元）
+    property_value_wan: float = 0.0         # 房产总价值（万元，格式化）
+    bank_balance: float = 0.0               # 银行存款总额（元）
+    bank_balance_wan: float = 0.0           # 银行存款总额（万元）
+    wealth_holding: float = 0.0             # 理财持仓总额（元）
+    wealth_holding_wan: float = 0.0         # 理财持仓总额（万元）
+    vehicle_count: int = 0                  # 车辆数量
+    total_assets: float = 0.0               # 总资产（元）
+    total_assets_wan: float = 0.0           # 总资产（万元）
+    narrative: str = ""                     # 资产描述话术
+
+
+@dataclass
+class FamilyYearlySalary:
+    """家庭年度工资汇总"""
+    year: str = ""                          # 年份
+    total: float = 0.0                      # 年度工资总额（元）
+    total_wan: float = 0.0                  # 年度工资总额（万元）
+    member_breakdown: Dict[str, float] = field(default_factory=dict)  # 各成员分解
+
+
+@dataclass
+class FamilyOverviewSection:
+    """家庭整体分析章节"""
+    family_name: str = ""                   # 家庭名称，如"施灵家庭"
+    anchor: str = ""                        # 核查对象
+    member_count: int = 0                   # 成员数量
+    member_relations: List[Dict] = field(default_factory=list)  # 成员关系列表
+    
+    # 家庭资产总览
+    assets_overview: FamilyAssetsOverview = field(default_factory=FamilyAssetsOverview)
+    
+    # 家庭收支汇总
+    total_income: float = 0.0               # 总收入（元）
+    total_income_wan: float = 0.0           # 总收入（万元）
+    total_expense: float = 0.0              # 总支出（元）
+    total_expense_wan: float = 0.0          # 总支出（万元）
+    total_salary: float = 0.0               # 总工资（元）
+    total_salary_wan: float = 0.0           # 总工资（万元）
+    avg_yearly_salary: float = 0.0          # 年均工资（元）
+    avg_yearly_salary_wan: float = 0.0      # 年均工资（万元）
+    salary_ratio: float = 0.0               # 工资占收入比例（%）
+    
+    # 家庭年度工资汇总
+    yearly_salary_breakdown: List[FamilyYearlySalary] = field(default_factory=list)
+    
+    # 综述话术
+    narrative: str = ""
+    assets_narrative: str = ""
+    salary_narrative: str = ""
+
+
+@dataclass
+class DimensionAnalysis:
+    """单个维度分析结果"""
+    dimension_name: str = ""                # 维度名称
+    dimension_icon: str = ""                # 维度图标
+    score: int = 0                          # 得分
+    max_score: int = 0                      # 满分
+    risk_level: str = "low"                 # 风险等级
+    findings: List[str] = field(default_factory=list)  # 具体发现
+    narrative: str = ""                     # 分析描述
+
+
+@dataclass
+class PersonalFinancialProfile:
+    """个人资金特征画像"""
+    name: str = ""                          # 姓名
+    
+    # 整体风险评级
+    risk_level: str = "low"                 # 风险等级: low/medium/high
+    risk_score: int = 0                     # 风险评分 0-100
+    risk_color: str = "green"               # 颜色: green/yellow/red
+    risk_label: str = "低风险"              # 风险标签
+    
+    # 五维度评分
+    income_expense_match: DimensionAnalysis = field(default_factory=lambda: DimensionAnalysis(
+        dimension_name="收支匹配度", dimension_icon="💳", max_score=25))
+    lending_behavior: DimensionAnalysis = field(default_factory=lambda: DimensionAnalysis(
+        dimension_name="借贷行为", dimension_icon="💴", max_score=20))
+    consumption_pattern: DimensionAnalysis = field(default_factory=lambda: DimensionAnalysis(
+        dimension_name="消费特征", dimension_icon="🛍", max_score=15))
+    fund_flow: DimensionAnalysis = field(default_factory=lambda: DimensionAnalysis(
+        dimension_name="资金流向", dimension_icon="📊", max_score=25))
+    cash_operation: DimensionAnalysis = field(default_factory=lambda: DimensionAnalysis(
+        dimension_name="现金操作", dimension_icon="💵", max_score=15))
+    
+    # 专业审计话术
+    professional_narrative: str = ""
+    conclusion_narrative: str = ""
+    
+    # 高风险预警
+    high_risk_alerts: List[str] = field(default_factory=list)
+    has_alerts: bool = False
 
 
 @dataclass
@@ -716,15 +966,22 @@ class CompanyReport:
 
 @dataclass
 class IssueItem:
-    """问题条目"""
+    """问题条目（增强版）"""
     person: str = ""                        # 涉及人员/公司
-    issue_type: str = ""                    # 问题类型：收支不抵/异常资金往来/资金来源不明
+    issue_type: str = ""                    # 问题类型：收支不抵/异常资金往来/资金来源不明/借贷异常
     description: str = ""                   # 问题描述
     severity: str = "medium"                # 严重程度：high/medium/low
-    # 审计专业分类（新增）
-    verification_status: str = "need_verification"  # confirmed(基本确认)/highly_suspicious(高度可疑)/need_verification(需核实)/normal(正常)
+    # 审计专业分类
+    verification_status: str = "need_verification"  # confirmed/highly_suspicious/need_verification/normal
     amount: float = 0.0                     # 涉及金额
     evidence_refs: List[str] = field(default_factory=list)
+    # v3.1 新增字段
+    counterparty: str = ""                  # 对手方
+    counterparty_type: str = ""             # 对手方类型：family(家人)/colleague(同事)/managed_entity(管理对象)/supplier(供应商)/unknown(不明)
+    transaction_date: str = ""              # 首次/最近交易日期
+    direction: str = ""                     # 方向：inflow(流入)/outflow(流出)/both(双向)
+    transaction_count: int = 0              # 交易笔数
+    priority_score: int = 0                 # 优先级评分（0-100，用于排序）
 
 
 @dataclass
@@ -757,16 +1014,20 @@ class AnalysisUnit:
 @dataclass
 class InvestigationReport:
     """
-    初查报告完整结构（v3.0）
+    初查报告完整结构（v3.1）
     
     按照 report_data_contract.md 定义的标准格式
     支持三段式结构：前言 + 分析单元循环体 + 综合研判
+    
+    v3.1 新增 household_analysis_section 对齐用户模板
     """
     meta: InvestigationMeta = field(default_factory=InvestigationMeta)
-    family: InvestigationFamily = field(default_factory=InvestigationFamily)
-    analysis_units: List[AnalysisUnit] = field(default_factory=list)  # 分析单元（新增）
+    family: InvestigationFamily = field(default_factory=InvestigationFamily)  # 保留兼容性
+    # v3.1 新增：家庭分析章节（对齐用户模板）
+    household_analysis_section: HouseholdAnalysisSection = field(default_factory=HouseholdAnalysisSection)
+    analysis_units: List[AnalysisUnit] = field(default_factory=list)  # 分析单元
     member_details: List[MemberDetails] = field(default_factory=list)  # 保留兼容性
-    company_reports: List[CompanyReport] = field(default_factory=list)  # 公司报告（重命名）
+    company_reports: List[CompanyReport] = field(default_factory=list)  # 公司报告
     conclusion: InvestigationConclusion = field(default_factory=InvestigationConclusion)
     
     def to_dict(self) -> Dict:

@@ -1,0 +1,53 @@
+{
+  "family_members": [
+    "施灵",
+    "施承天",
+    "滕雳"
+  ],
+  "profiles_entities": [
+    "施承天",
+    "施灵",
+    "施育",
+    "滕雳",
+    "上海派尼科技实业股份有限公司",
+    "上海派尼斯机电技术有限公司",
+    "上海通耀机械有限公司"
+  ],
+  "member_data": {
+    "施灵": {
+      "has_data": true,
+      "totalIncome": 69035814.41,
+      "totalExpense": 67654854.91999999,
+      "summary_total_income": 69035814.41,
+      "summary_total_expense": 67654854.91999999
+    },
+    "施承天": {
+      "has_data": true,
+      "totalIncome": 4343076.04,
+      "totalExpense": 4364848.18,
+      "summary_total_income": 4343076.04,
+      "summary_total_expense": 4364848.18
+    },
+    "滕雳": {
+      "has_data": true,
+      "totalIncome": 11114672.67,
+      "totalExpense": 11113511.3,
+      "summary_total_income": 11114672.67,
+      "summary_total_expense": 11113511.3
+    }
+  },
+  "comparison": {
+    "calculated_from_profiles": {
+      "total_income": 84493563.12,
+      "total_expense": 83133214.39999999
+    },
+    "cached_family_summary": {
+      "total_income": 84428731.24000001,
+      "total_expense": 83068382.52
+    },
+    "difference": {
+      "income": 64831.87999999523,
+      "expense": 64831.87999999523
+    }
+  }
+}

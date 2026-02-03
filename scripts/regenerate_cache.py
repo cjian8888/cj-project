@@ -847,7 +847,27 @@ def main():
     
     print(f"  总计合并: 房产{property_merged}+车辆{vehicle_merged}+保险{insurance_merged}+证券{securities_merged}+征信{credit_merged}")
     
+    # ============================================
+    # Phase 10.5: 重新计算 family_summary (修复数据不一致)
+    # ============================================
+    # 【修复】由于 Phase 10 修改了 profiles（合并外部数据），
+    # 需要在此重新计算 family_summary 以确保数据一致性。
+    # 否则报告使用缓存的 family_summary 时会与 profiles 数据不匹配。
+    print("重新计算家庭汇总 (Phase 10.5)...")
+    try:
+        if all_family_members and family_summary:
+            finance_summary = family_finance.calculate_family_summary(profiles, all_family_members)
+            family_summary['total_assets'] = finance_summary.get('total_assets', {})
+            family_summary['total_income_expense'] = finance_summary.get('total_income_expense', {})
+            family_summary['member_transfers'] = finance_summary.get('member_transfers', {})
+            # 更新 result 中的 familySummary
+            result['familySummary'] = family_summary
+            print(f"  家庭汇总已更新: 总收入={finance_summary.get('total_income_expense', {}).get('total_income', 0)/10000:.2f}万")
+    except Exception as e:
+        print(f"  重新计算家庭汇总失败: {e}")
+
     # 10. 保存到文件（使用自定义编码器处理日期）
+
     import pandas as pd
     
     class CustomJSONEncoder(json.JSONEncoder):

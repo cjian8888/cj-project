@@ -1,0 +1,17 @@
+{
+  "cached_family_members": [],
+  "cached_total_income": 0,
+  "report_members": [
+    "施灵",
+    "滕雳",
+    "施承天"
+  ],
+  "report_total_income": 84493563.12,
+  "report_total_expense": 83133214.39999998,
+  "expected_from_profiles": {
+    "total_income": 84493563.11999999,
+    "total_expense": 83133214.39999999
+  },
+  "income_matches_expected": true,
+  "income_diff": 1.4901161193847656e-08
+}

@@ -1,0 +1,20 @@
+﻿=== Family Members in family_summary ===
+Members: ['施灵', '施承天', '滕雳']
+
+=== 各成员 profile 数据 ===
+施灵: has_data=True, income=69,035,814.41, expense=67,654,854.92
+施承天: has_data=True, income=4,343,076.04, expense=4,364,848.18
+滕雳: has_data=True, income=11,114,672.67, expense=11,113,511.30
+
+=== Profiles 中的所有实体 ===
+施承天: income=4,343,076.04
+施灵: income=69,035,814.41
+施育: income=3,339,532.62
+滕雳: income=11,114,672.67
+上海派尼科技实业股份有限公司: income=2,306,319,481.15
+上海派尼斯机电技术有限公司: income=71,374,115.76
+上海通耀机械有限公司: income=14,719.43
+
+=== 计算对比 ===
+从 family_members 计算: income=84,493,563.12, expense=83,133,214.40
+缓存 family_summary:     income=84,428,731.24, expense=83,068,382.52
