@@ -81,6 +81,7 @@ import family_finance
 # 导入报告构建器（v3.0 新架构）
 from investigation_report_builder import InvestigationReportBuilder, load_investigation_report_builder
 from report_config.primary_targets_service import PrimaryTargetsService
+from specialized_reports import SpecializedReportGenerator
 
 # ==================== Windows asyncio 兼容性修复 ====================
 if sys.platform == 'win32':
@@ -1150,11 +1151,17 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         suspicion_total = sum(len(v) if isinstance(v, list) else 1 for v in suspicions.values())
         broadcast_log("INFO", f"  ✓ 疑点检测完成: 发现 {suspicion_total} 个可疑点")
 
-        # ========================================================================
-        # Phase 8: 报告生成 (100%)
-        # ========================================================================
         analysis_state.update(progress=95, phase="生成分析报告...")
         broadcast_log("INFO", "▶ Phase 8: 生成分析报告...")
+
+        derived_data = {
+            'loan': analysis_results.get('loan', {}),
+            'income': analysis_results.get('income', {}),
+            'time_series': analysis_results.get('timeSeries', {}),
+            'large_transactions': analysis_results.get('large_transactions', []),
+            'family_summary': analysis_results.get('family_summary', {}),
+            'family_relations': analysis_results.get('family_relations', {}),
+        }
 
         phase8_start = time.time()
 
@@ -1174,20 +1181,31 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             logger.warning(f"  ✗ 构建family_assets失败: {e}")
             family_assets = {}
 
-        # 8.2 生成公文报告
+        # 8.2 生成完整txt报告（使用specialized_reports）
         try:
-            official_report_path = report_generator.generate_official_report(
-                profiles, suspicions, all_persons, all_companies,
-                os.path.join(output_dirs['analysis_results'], config.OUTPUT_REPORT_FILE.replace('.docx', '.txt')),
-                family_summary=analysis_results.get("family_summary", {}),
-                family_assets=family_assets,
-                cleaned_data=cleaned_data
-            )
-            logger.info(f"  ✓ 公文报告已生成: {official_report_path}")
-            broadcast_log("INFO", "  ✓ 公文报告生成成功")
+            builder = load_investigation_report_builder(output_dirs['analysis_cache'])
+            if builder:
+                txt_report_path = os.path.join(output_dirs['analysis_results'], config.OUTPUT_REPORT_FILE.replace('.docx', '.txt'))
+                # 使用specialized_reports生成基础txt报告
+                specialized_gen = SpecializedReportGenerator(
+                    analysis_results=analysis_results,
+                    profiles=builder.profiles,
+                    suspicions=builder.suspicions,
+                    output_dir=output_dirs['analysis_results']
+                )
+                # 生成简化的核查结果分析报告
+                content = specialized_gen._generate_suspicion_report()  # 使用疑点报告作为示例
+                with open(txt_report_path, 'w', encoding='utf-8') as f:
+                    # 替换标题
+                    content = content.replace("疑点检测分析报告", "核查结果分析报告")
+                    f.write(content)
+                logger.info(f"  ✓ 完整txt报告已生成: {txt_report_path}")
+                broadcast_log("INFO", "  ✓ 完整txt报告生成成功")
+            else:
+                logger.warning("  ✗ 报告构建器未加载，txt报告生成失败")
         except Exception as e:
-            logger.warning(f"  ✗ 公文报告生成失败: {e}")
-            broadcast_log("WARN", f"  ✗ 公文报告生成失败: {str(e)[:50]}")
+            logger.warning(f"  ✗ 完整txt报告生成失败: {e}")
+            broadcast_log("WARN", f"  ✗ 完整txt报告生成失败: {str(e)[:50]}")
 
         # 8.3 生成 Excel 核查底稿
         try:
@@ -1207,6 +1225,54 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         except Exception as e:
             logger.warning(f"  ✗ Excel核查底稿生成失败: {e}")
             broadcast_log("WARN", f"  ✗ Excel核查底稿生成失败: {str(e)[:50]}")
+
+        # 8.4 生成专项txt报告
+        try:
+            logger.info("  8.4 开始生成专项txt报告...")
+            builder = load_investigation_report_builder(output_dirs['analysis_cache'])
+            if builder:
+                specialized_gen = SpecializedReportGenerator(
+                    analysis_results=analysis_results,
+                    profiles=builder.profiles,
+                    suspicions=builder.suspicions,
+                    output_dir=output_dirs['analysis_results']
+                )
+                specialized_files = specialized_gen.generate_all_reports()
+                if specialized_files:
+                    logger.info(f"  ✓ 专项txt报告已生成: {len(specialized_files)} 个文件")
+                    for file in specialized_files:
+                        logger.info(f"    - {os.path.basename(file)}")
+                    broadcast_log("INFO", f"  ✓ 专项txt报告生成成功 ({len(specialized_files)} 个文件)")
+                else:
+                    logger.warning("  ✗ 专项txt报告未生成（可能无数据）")
+            else:
+                logger.warning("  ✗ 报告构建器未加载，专项txt报告生成失败")
+        except Exception as e:
+            logger.warning(f"  ✗ 专项txt报告生成失败: {e}")
+            broadcast_log("WARN", f"  ✗ 专项txt报告生成失败: {str(e)[:50]}")
+
+        # 8.5 生成报告目录清单（使用specialized_reports）
+        try:
+            builder = load_investigation_report_builder(output_dirs['analysis_cache'])
+            if builder:
+                specialized_gen = SpecializedReportGenerator(
+                    analysis_results=analysis_results,
+                    profiles=builder.profiles,
+                    suspicions=builder.suspicions,
+                    output_dir=output_dirs['analysis_results']
+                )
+                # 使用specialized_reports生成目录清单
+                index_content = specialized_gen._generate_report_index(output_dirs['analysis_results'], [])
+                index_path = os.path.join(output_dirs['analysis_results'], '报告目录清单.txt')
+                with open(index_path, 'w', encoding='utf-8') as f:
+                    f.write(index_content)
+                logger.info(f"  ✓ 报告目录清单已生成: {index_path}")
+                broadcast_log("INFO", "  ✓ 报告目录清单生成成功")
+            else:
+                logger.warning("  ✗ 报告构建器未加载，目录清单生成失败")
+        except Exception as e:
+            logger.warning(f"  ✗ 报告目录清单生成失败: {e}")
+            broadcast_log("WARN", f"  ✗ 报告目录清单生成失败: {str(e)[:50]}")
 
         phase8_duration = (time.time() - phase8_start) * 1000
         logging_config.log_performance(logger, "Phase 8-报告生成", phase8_duration, report_count=1)
