@@ -122,6 +122,69 @@ class AnalysisState:
 analysis_state = AnalysisState()
 _current_config = {}
 _ws_connections = set()
+_log_queue = queue.Queue()  # 日志队列，用于 WebSocket 广播
+
+def _get_current_time_str() -> str:
+    """获取当前时间字符串 HH:MM:SS"""
+    now = datetime.now()
+    return f"{now.hour:02d}:{now.minute:02d}:{now.second:02d}"
+
+class WebSocketLogHandler(logging.Handler):
+    """
+    自定义日志处理器，将所有 Python 日志推送到 WebSocket 队列
+    这样前端可以看到和终端一样丰富的日志信息
+    """
+    
+    # 需要过滤的日志源（避免推送过多无用日志）
+    EXCLUDED_LOGGERS = {'uvicorn', 'uvicorn.access', 'uvicorn.error', 'websockets', 'asyncio'}
+    
+    def emit(self, record):
+        try:
+            # 过滤掉 uvicorn 等框架日志
+            if record.name in self.EXCLUDED_LOGGERS:
+                return
+            
+            # 格式化日志消息
+            msg = self.format(record)
+            # 移除重复的时间戳前缀（如果有）
+            if ' - ' in msg and msg.startswith('20'):
+                # 保留模块名和消息部分
+                parts = msg.split(' - ', 2)
+                if len(parts) >= 3:
+                    msg = f"[{parts[1]}] {parts[2]}"
+                elif len(parts) >= 2:
+                    msg = f"[{parts[0]}] {parts[1]}"
+            
+            level = record.levelname
+            log_entry = {
+                "time": _get_current_time_str(),
+                "level": level,
+                "msg": msg
+            }
+            _log_queue.put({"type": "log", "data": log_entry})
+        except Exception:
+            pass  # 避免日志处理器本身抛出异常
+
+# 设置 WebSocket 日志处理器
+_ws_handler = WebSocketLogHandler()
+_ws_handler.setLevel(logging.INFO)
+_ws_handler.setFormatter(logging.Formatter('%(name)s - %(message)s'))
+
+# 添加到根日志器，捕获所有模块的日志
+logging.getLogger().addHandler(_ws_handler)
+
+def broadcast_log(level: str, msg: str):
+    """
+    向 WebSocket 客户端广播日志消息
+    
+    消息格式: {type: 'log', data: {time, level, msg}}
+    """
+    log_entry = {
+        "time": _get_current_time_str(),
+        "level": level,
+        "msg": msg
+    }
+    _log_queue.put({"type": "log", "data": log_entry})
 
 # ==================== Pydantic 模型 ====================
 class AnalysisConfig(BaseModel):
@@ -131,6 +194,34 @@ class AnalysisConfig(BaseModel):
     modules: Optional[Dict[str, bool]] = None
 
 # ==================== 辅助函数 ====================
+def serialize_for_json(obj):
+    """
+    递归转换 NumPy/Pandas 类型为 JSON 可序列化的 Python 原生类型
+    解决 FastAPI 无法序列化 numpy.int32 等类型的问题
+    """
+    import numpy as np
+    
+    if isinstance(obj, dict):
+        return {k: serialize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [serialize_for_json(v) for v in obj]
+    elif isinstance(obj, tuple):
+        return tuple(serialize_for_json(v) for v in obj)
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (pd.Timestamp, datetime)):
+        return obj.isoformat()
+    elif pd.isna(obj):
+        return None
+    else:
+        return obj
+
 def create_output_directories(base_dir: str) -> Dict[str, str]:
     """创建输出目录结构"""
     dirs = {
@@ -145,27 +236,283 @@ def create_output_directories(base_dir: str) -> Dict[str, str]:
     return dirs
 
 def serialize_profiles(profiles: Dict) -> Dict:
-    """序列化画像数据"""
+    """
+    序列化画像数据
+    
+    将后端嵌套的 snake_case 结构转换为前端期望的扁平化 camelCase 结构。
+    
+    后端结构:
+        profile.summary.total_income
+        profile.summary.total_expense
+        profile.fund_flow.cash_total
+        ...
+        
+    前端期望:
+        profile.entityName
+        profile.totalIncome
+        profile.totalExpense
+        profile.cashTotal
+        ...
+    """
     result = {}
     for name, profile in profiles.items():
         try:
+            # 处理不同类型的 profile 对象
             if hasattr(profile, 'dict'):
-                result[name] = profile.dict()
+                profile_dict = profile.dict()
             elif isinstance(profile, dict):
-                result[name] = profile
+                profile_dict = profile
             else:
-                result[name] = dict(profile)
-        except Exception:
-            result[name] = str(profile)
+                profile_dict = dict(profile)
+            
+            # 🔧 关键修复: 将嵌套结构映射为前端期望的扁平化结构
+            summary = profile_dict.get('summary', {})
+            income_structure = profile_dict.get('income_structure', {})
+            fund_flow = profile_dict.get('fund_flow', {})
+            wealth_mgmt = profile_dict.get('wealth_management', {})
+            large_cash = profile_dict.get('large_cash', [])
+            
+            # 计算现金交易总额 (取现 + 存现)
+            cash_total = (
+                fund_flow.get('cash_income', 0) + 
+                fund_flow.get('cash_expense', 0)
+            )
+            
+            # 计算第三方支付总额
+            third_party_total = (
+                fund_flow.get('third_party_income', 0) + 
+                fund_flow.get('third_party_expense', 0)
+            )
+            
+            # 构建前端期望的扁平化结构
+            frontend_profile = {
+                # 基础标识
+                'entityName': name,
+                
+                # 核心财务指标 (camelCase)
+                'totalIncome': summary.get('total_income', 0) or income_structure.get('total_income', 0),
+                'totalExpense': summary.get('total_expense', 0) or income_structure.get('total_expense', 0),
+                'transactionCount': summary.get('transaction_count', 0),
+                
+                # 审计关键字段
+                'cashTotal': cash_total,
+                'thirdPartyTotal': third_party_total,
+                'wealthTotal': wealth_mgmt.get('total_transactions', 0),
+                'maxTransaction': income_structure.get('max_single_transaction', 0),
+                'salaryRatio': summary.get('salary_ratio', 0),
+            }
+            
+            result[name] = frontend_profile
+            
+        except Exception as e:
+            logger.warning(f"序列化 {name} profile 失败: {e}")
+            # 降级处理：返回基础结构
+            result[name] = {
+                'entityName': name,
+                'totalIncome': 0,
+                'totalExpense': 0,
+                'transactionCount': 0,
+                'cashTotal': 0,
+                'thirdPartyTotal': 0,
+                'wealthTotal': 0,
+                'maxTransaction': 0,
+                'salaryRatio': 0,
+                '_error': str(e)
+            }
     return result
 
 def serialize_suspicions(suspicions: Dict) -> Dict:
-    """序列化疑点数据"""
-    return suspicions
+    """
+    序列化疑点数据
+    
+    将后端 snake_case 字段名转换为前端期望的 camelCase 字段名。
+    包括顶层字段和每条记录内部的字段。
+    """
+    
+    def convert_cash_collision(record: Dict) -> Dict:
+        """转换单条 cash_collision 记录"""
+        return {
+            # 核心字段映射 (后端 withdrawal_entity -> 前端 person1)
+            'person1': record.get('withdrawal_entity', ''),
+            'person2': record.get('deposit_entity', ''),
+            'time1': _format_date(record.get('withdrawal_date')),
+            'time2': _format_date(record.get('deposit_date')),
+            'amount1': record.get('withdrawal_amount', 0),
+            'amount2': record.get('deposit_amount', 0),
+            # 位置信息
+            'location1': record.get('withdrawal_bank', ''),
+            'location2': record.get('deposit_bank', ''),
+            # 扩展字段 (camelCase)
+            'timeDiff': record.get('time_diff_hours', 0),
+            'riskLevel': record.get('risk_level', 'low'),
+            'riskReason': record.get('risk_reason', ''),
+            'withdrawalBank': record.get('withdrawal_bank', ''),
+            'depositBank': record.get('deposit_bank', ''),
+            'withdrawalSource': record.get('withdrawal_source', ''),
+            'depositSource': record.get('deposit_source', ''),
+        }
+    
+    def convert_direct_transfer(record: Dict) -> Dict:
+        """转换单条 direct_transfer 记录"""
+        return {
+            # 核心字段映射 (后端 person -> 前端 from)
+            'from': record.get('person', ''),
+            'to': record.get('company', ''),
+            'amount': record.get('amount', 0),
+            'date': _format_date(record.get('date')),
+            'description': record.get('description', ''),
+            # 扩展字段 (camelCase)
+            'direction': record.get('direction', ''),
+            'bank': record.get('bank', ''),
+            'sourceFile': record.get('source_file', ''),
+            'riskLevel': record.get('risk_level', 'low'),
+            'riskReason': record.get('risk_reason', ''),
+        }
+    
+    def _format_date(date_val) -> str:
+        """格式化日期为 ISO 字符串"""
+        if date_val is None:
+            return ''
+        if isinstance(date_val, str):
+            return date_val
+        if hasattr(date_val, 'isoformat'):
+            return date_val.isoformat()
+        return str(date_val)
+    
+    # 顶层字段名映射: snake_case -> camelCase
+    field_mapping = {
+        'direct_transfers': 'directTransfers',
+        'cash_collisions': 'cashCollisions',
+        'hidden_assets': 'hiddenAssets',
+        'fixed_frequency': 'fixedFrequency',
+        'cash_timing_patterns': 'cashTimingPatterns',
+        'holiday_transactions': 'holidayTransactions',
+        'amount_patterns': 'amountPatterns',
+        'aml_alerts': 'amlAlerts',
+        'credit_alerts': 'creditAlerts',
+        'hidden_assets_with_context': 'hiddenAssetsWithContext',
+        'timeSeriesAlerts': 'timeSeriesAlerts',
+    }
+    
+    result = {}
+    for key, value in suspicions.items():
+        new_key = field_mapping.get(key, key)
+        
+        # 对特定字段的记录进行内部转换
+        if key == 'cash_collisions' and isinstance(value, list):
+            result[new_key] = [convert_cash_collision(r) for r in value]
+        elif key == 'direct_transfers' and isinstance(value, list):
+            result[new_key] = [convert_direct_transfer(r) for r in value]
+        else:
+            result[new_key] = value
+    
+    return result
 
 def serialize_analysis_results(results: Dict) -> Dict:
-    """序列化分析结果"""
-    return results
+    """
+    序列化分析结果
+    
+    将后端的分类数组（bidirectional_flows, regular_repayments 等）
+    合并为前端期望的 details 统一数组，每条记录添加 _type 字段标识类型。
+    """
+    serialized = {}
+    
+    for key, value in results.items():
+        if key == 'loan':
+            # 合并借贷分析的多个分类数组为 details
+            loan_result = value if isinstance(value, dict) else {}
+            details = []
+            
+            # 映射：后端数组名 -> _type 标识
+            loan_type_mapping = {
+                'bidirectional_flows': 'bidirectional',
+                'regular_repayments': 'regular_repayment',
+                'no_repayment_loans': 'no_repayment',
+                'online_loan_platforms': 'online_loan',
+                'loan_pairs': 'loan_pair',
+                'abnormal_interest': 'abnormal_interest',
+            }
+            
+            for array_name, type_name in loan_type_mapping.items():
+                for item in loan_result.get(array_name, []):
+                    record = item.copy() if isinstance(item, dict) else {}
+                    record['_type'] = type_name
+                    details.append(record)
+            
+            serialized['loan'] = {
+                'summary': loan_result.get('summary', {}),
+                'details': details,
+                # 保留原始分类数组供需要的地方使用
+                **{k: v for k, v in loan_result.items() if k not in ['summary']}
+            }
+        
+        elif key == 'income':
+            # 合并收入分析的多个分类数组为 details
+            income_result = value if isinstance(value, dict) else {}
+            details = []
+            
+            # 映射：后端数组名 -> _type 标识
+            income_type_mapping = {
+                'large_single_income': 'large_single',
+                'large_individual_income': 'large_individual',
+                'unknown_source_income': 'unknown_source',
+                'regular_non_salary': 'regular_non_salary',
+                'same_source_multi': 'same_source_multi',
+                'potential_bribe_installment': 'bribe_installment',
+                'high_risk': 'high_risk',
+                'medium_risk': 'medium_risk',
+            }
+            
+            for array_name, type_name in income_type_mapping.items():
+                for item in income_result.get(array_name, []):
+                    record = item.copy() if isinstance(item, dict) else {}
+                    record['_type'] = type_name
+                    details.append(record)
+            
+            serialized['income'] = {
+                'summary': income_result.get('summary', {}),
+                'details': details,
+                # 保留原始分类数组供需要的地方使用
+                **{k: v for k, v in income_result.items() if k not in ['summary']}
+            }
+        
+        elif key == 'aggregation':
+            # 转换聚合结果为前端期望格式
+            agg_result = value if isinstance(value, dict) else {}
+            
+            # 从 all_entities 构建 rankedEntities
+            ranked_entities = []
+            for entity_name, entity_data in agg_result.get('all_entities', {}).items():
+                entity = entity_data if isinstance(entity_data, dict) else {}
+                ranked_entities.append({
+                    'name': entity_name,
+                    'riskLevel': entity.get('risk_level', 'low'),
+                    'riskScore': entity.get('risk_score', 0),
+                    'reasons': entity.get('reasons', [])
+                })
+            
+            # 按风险分数排序
+            ranked_entities.sort(key=lambda x: x.get('riskScore', 0), reverse=True)
+            
+            # 构建 summary
+            critical_count = sum(1 for e in ranked_entities if e.get('riskLevel') == 'critical')
+            high_count = sum(1 for e in ranked_entities if e.get('riskLevel') == 'high')
+            
+            serialized['aggregation'] = {
+                'rankedEntities': ranked_entities,
+                'summary': {
+                    '极高风险实体数': critical_count,
+                    '高风险实体数': high_count,
+                },
+                # 保留原始数据供需要的地方使用
+                **{k: v for k, v in agg_result.items()}
+            }
+        
+        else:
+            # 其他字段原样保留
+            serialized[key] = value
+    
+    return serialized
 
 def _enhance_suspicions_with_analysis(suspicions: Dict, analysis_results: Dict) -> Dict:
     """用分析结果增强疑点数据"""
@@ -209,6 +556,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         # Phase 1: 文件扫描 (5%)
         # ========================================================================
         analysis_state.update(progress=5, phase="扫描数据目录...")
+        broadcast_log("INFO", "▶ Phase 1: 扫描数据目录...")
         logger.info(f"扫描数据目录: {data_dir}")
 
         phase1_start = time.time()
@@ -221,11 +569,13 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         logging_config.log_performance(logger, "Phase 1-扫描文件", phase1_duration,
                                      person_count=len(persons), company_count=len(companies))
         logger.info(f"发现 {len(persons)} 个个人, {len(companies)} 个企业")
+        broadcast_log("INFO", f"  ✓ 发现 {len(persons)} 个个人, {len(companies)} 个企业")
 
         # ========================================================================
         # Phase 2: 数据清洗 (15%)
         # ========================================================================
         analysis_state.update(progress=15, phase="数据清洗与标准化...")
+        broadcast_log("INFO", "▶ Phase 2: 数据清洗与标准化...")
         logger.info("开始数据清洗...")
 
         phase2_start = time.time()
@@ -234,6 +584,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         output_dirs = create_output_directories(output_dir)
 
         total_entities = len(persons) + len(companies)
+        broadcast_log("INFO", f"  ↻ 待处理实体: {total_entities} 个 ({len(persons)} 个人 + {len(companies)} 企业)")
 
         # 清洗个人数据
         for i, p in enumerate(persons):
@@ -251,6 +602,8 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
 
             progress = 15 + int(10 * (i + 1) / total_entities)
             analysis_state.update(progress=progress)
+            if (i + 1) % 2 == 0 or i == len(persons) - 1:
+                broadcast_log("INFO", f"  ↻ 清洗个人数据: {i + 1}/{len(persons)} - {p}")
 
         # 清洗公司数据
         for i, c in enumerate(companies):
@@ -273,11 +626,13 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         logging_config.log_performance(logger, "Phase 2-数据清洗", phase2_duration,
                                      entity_count=len(cleaned_data))
         logger.info(f"清洗完成，共 {len(cleaned_data)} 个实体数据")
+        broadcast_log("INFO", f"  ✓ 数据清洗完成: {len(cleaned_data)} 个实体")
 
         # ========================================================================
         # Phase 3: 线索提取 (30%)
         # ========================================================================
         analysis_state.update(progress=30, phase="提取关联线索...")
+        broadcast_log("INFO", "▶ Phase 3: 提取关联线索...")
 
         phase3_start = time.time()
         clue_persons, clue_companies = data_extractor.extract_all_clues(data_dir)
@@ -287,11 +642,14 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         phase3_duration = (time.time() - phase3_start) * 1000
         logging_config.log_performance(logger, "Phase 3-线索提取", phase3_duration,
                                      clue_persons=len(clue_persons), clue_companies=len(clue_companies))
+        broadcast_log("INFO", f"  ✓ 线索提取完成: 新增 {len(clue_persons)} 个人 + {len(clue_companies)} 企业")
+        broadcast_log("INFO", f"  ↻ 待分析实体总数: {len(all_persons)} 个人, {len(all_companies)} 企业")
 
         # ========================================================================
         # Phase 4: 外部数据提取 (40%) ← 🔄 关键改进: 全部提取器提前执行!
         # ========================================================================
         analysis_state.update(progress=40, phase="提取外部数据源 (P0/P1/P2)...")
+        broadcast_log("INFO", "▶ Phase 4: 提取外部数据源 (18个提取器)...")
         logger.info("🔄 [重构] 开始提取全部外部数据源 (18个提取器)...")
 
         phase4_start = time.time()
@@ -305,6 +663,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
 
         # ========== P0: 核心上下文 ==========
         logger.info("  [P0] 提取核心上下文数据...")
+        broadcast_log("INFO", "  [P0] 提取核心上下文数据...")
 
         # P0.1: 人民银行银行账户
         try:
@@ -457,11 +816,13 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         logging_config.log_performance(logger, "Phase 4-外部数据提取(全部)", phase4_duration)
 
         logger.info("🔄 [重构] 外部数据提取完成")
+        broadcast_log("INFO", f"  ✓ 外部数据提取完成 (P0/P1/P2 共 18 个提取器)")
 
         # ========================================================================
         # Phase 5: 融合数据画像 (50%) ← 🔄 结合外部数据生成完整画像
         # ========================================================================
         analysis_state.update(progress=50, phase="生成融合数据画像...")
+        broadcast_log("INFO", "▶ Phase 5: 生成融合数据画像...")
         logger.info("🔄 [重构] 生成包含外部数据的完整画像...")
 
         phase5_start = time.time()
@@ -581,11 +942,13 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         logging_config.log_performance(logger, "Phase 5-融合数据画像", phase5_duration,
                                      profile_count=len(profiles))
         logger.info(f"🔄 [重构] 融合画像生成完成: {len(profiles)} 个实体")
+        broadcast_log("INFO", f"  ✓ 融合画像生成完成: {len(profiles)} 个实体")
 
         # ========================================================================
         # Phase 6: 全面分析 (70%) ← 🔄 有完整上下文后执行
         # ========================================================================
         analysis_state.update(progress=70, phase="运行全面分析模块...")
+        broadcast_log("INFO", "▶ Phase 6: 运行全面分析模块 (12个分析器)...")
         logger.info("🔄 [重构] 运行全面分析 (有完整上下文)...")
 
         phase6_start = time.time()
@@ -739,11 +1102,13 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         phase6_duration = (time.time() - phase6_start) * 1000
         logging_config.log_performance(logger, "Phase 6-全面分析", phase6_duration,
                                      module_count=len(analysis_results))
+        broadcast_log("INFO", f"  ✓ 全面分析完成: {len(analysis_results)} 个模块")
 
         # ========================================================================
         # Phase 7: 疑点检测 (85%) ← 🔄 有完整上下文后执行
         # ========================================================================
         analysis_state.update(progress=85, phase="检测可疑交易模式...")
+        broadcast_log("INFO", "▶ Phase 7: 检测可疑交易模式...")
         logger.info("🔄 [重构] 执行疑点检测 (有资产上下文)...")
 
         phase7_start = time.time()
@@ -778,11 +1143,14 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         phase7_duration = (time.time() - phase7_start) * 1000
         logging_config.log_performance(logger, "Phase 7-疑点检测(增强版)", phase7_duration,
                                      suspicion_count=len(suspicions.get("direct_transfers", [])))
+        suspicion_total = sum(len(v) if isinstance(v, list) else 1 for v in suspicions.values())
+        broadcast_log("INFO", f"  ✓ 疑点检测完成: 发现 {suspicion_total} 个可疑点")
 
         # ========================================================================
         # Phase 8: 报告生成 (100%)
         # ========================================================================
         analysis_state.update(progress=95, phase="生成分析报告...")
+        broadcast_log("INFO", "▶ Phase 8: 生成分析报告...")
 
         phase8_start = time.time()
 
@@ -812,8 +1180,29 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                 cleaned_data=cleaned_data
             )
             logger.info(f"  ✓ 公文报告已生成: {official_report_path}")
+            broadcast_log("INFO", "  ✓ 公文报告生成成功")
         except Exception as e:
             logger.warning(f"  ✗ 公文报告生成失败: {e}")
+            broadcast_log("WARN", f"  ✗ 公文报告生成失败: {str(e)[:50]}")
+
+        # 8.3 生成 Excel 核查底稿
+        try:
+            excel_path = report_generator.generate_excel_workbook(
+                profiles=profiles,
+                suspicions=suspicions,
+                output_path=os.path.join(output_dirs['analysis_results'], config.OUTPUT_EXCEL_FILE),
+                family_assets=family_assets,
+                penetration_results=analysis_results.get('penetration', {}),
+                loan_results=analysis_results.get('loan', {}),
+                income_results=analysis_results.get('income', {}),
+                time_series_results=analysis_results.get('time_series', {}),
+                derived_data=derived_data if 'derived_data' in dir() else {}
+            )
+            logger.info(f"  ✓ Excel核查底稿已生成: {excel_path}")
+            broadcast_log("INFO", "  ✓ Excel核查底稿生成成功")
+        except Exception as e:
+            logger.warning(f"  ✗ Excel核查底稿生成失败: {e}")
+            broadcast_log("WARN", f"  ✗ Excel核查底稿生成失败: {str(e)[:50]}")
 
         phase8_duration = (time.time() - phase8_start) * 1000
         logging_config.log_performance(logger, "Phase 8-报告生成", phase8_duration, report_count=1)
@@ -822,6 +1211,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         # 完成
         # ========================================================================
         analysis_state.update(progress=100, phase="分析完成")
+        broadcast_log("INFO", "✓ 分析完成")
         analysis_state.end_time = datetime.now()
         analysis_state.status = "completed"
 
@@ -1093,18 +1483,262 @@ async def get_results():
     """获取分析结果"""
     if analysis_state.status != "completed":
         raise HTTPException(status_code=400, detail="分析尚未完成")
+    
+    # 序列化结果，转换 NumPy 类型为 Python 原生类型
+    results_data = serialize_for_json(analysis_state.results) if analysis_state.results else {}
+    
+    # 返回前端期望的格式: { message, data }
+    return {
+        "message": "分析结果获取成功",
+        "data": results_data
+    }
 
-    return analysis_state.results
+@app.get("/api/reports")
+async def get_reports():
+    """获取报告列表"""
+    reports = []
+    reports_dir = os.path.join("output", "analysis_results")
+    if os.path.exists(reports_dir):
+        for filename in os.listdir(reports_dir):
+            if filename.endswith(('.html', '.docx', '.txt', '.pdf')):
+                filepath = os.path.join(reports_dir, filename)
+                stat_info = os.stat(filepath)
+                reports.append({
+                    "name": filename,  # 前端期望 "name" 而非 "filename"
+                    "path": filepath,
+                    "size": stat_info.st_size,
+                    "modified": datetime.fromtimestamp(stat_info.st_mtime).isoformat()  # 前端期望 "modified"
+                })
+    return {"reports": reports}
+
+
+class OpenFolderRequest(BaseModel):
+    """打开文件夹请求"""
+    relativePath: str
+
+
+@app.post("/api/open-folder")
+async def open_folder(request: OpenFolderRequest):
+    """在系统文件管理器中打开指定文件夹"""
+    import subprocess
+    import platform
+    
+    # 构建绝对路径
+    folder_path = os.path.abspath(request.relativePath)
+    
+    # 检查路径是否存在
+    if not os.path.exists(folder_path):
+        raise HTTPException(status_code=404, detail=f"路径不存在: {request.relativePath}")
+    
+    # 如果是文件，获取其父目录
+    if os.path.isfile(folder_path):
+        folder_path = os.path.dirname(folder_path)
+    
+    try:
+        system = platform.system()
+        if system == "Darwin":  # macOS
+            subprocess.run(["open", folder_path], check=True)
+        elif system == "Windows":
+            subprocess.run(["explorer", folder_path], check=True)
+        else:  # Linux
+            subprocess.run(["xdg-open", folder_path], check=True)
+        
+        return {"success": True, "path": folder_path}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"打开文件夹失败: {str(e)}")
+
+
+@app.get("/api/analysis/graph-data")
+async def get_graph_data():
+    """获取图谱可视化数据"""
+    if analysis_state.status != "completed" or not analysis_state.results:
+        raise HTTPException(status_code=400, detail="分析尚未完成")
+    
+    results = analysis_state.results
+    persons = results.get("persons", [])
+    companies = results.get("companies", [])
+    
+    # 从缓存结果中获取图谱数据
+    graph_cache = results.get("graphData", {})
+    nodes = graph_cache.get("nodes", [])
+    edges = graph_cache.get("edges", [])
+    
+    # 构建完整的统计信息（前端 GraphData 接口要求）
+    stats = {
+        "nodeCount": len(nodes),
+        "edgeCount": len(edges),
+        "corePersonCount": len(persons),
+        "corePersonNames": persons,
+        "involvedCompanyCount": len(companies),
+        "highRiskCount": 0,
+        "mediumRiskCount": 0,
+        "loanPairCount": 0,
+        "noRepayCount": 0,
+        "coreEdgeCount": 0,
+        "companyEdgeCount": 0,
+        "otherEdgeCount": len(edges)
+    }
+    
+    # 构建报告数据结构（前端 GraphData.report 接口要求）
+    report = {
+        "loan_pairs": [],
+        "no_repayment_loans": [],
+        "high_risk_income": [],
+        "online_loans": []
+    }
+    
+    # 构建采样信息
+    sampling = {
+        "totalNodes": len(nodes),
+        "totalEdges": len(edges),
+        "sampledNodes": len(nodes),
+        "sampledEdges": len(edges),
+        "message": "完整数据"
+    }
+    
+    # 返回前端期望的格式: { message: 'success', data: { nodes, edges, stats, sampling, report } }
+    return serialize_for_json({
+        "message": "success",
+        "data": {
+            "nodes": nodes,
+            "edges": edges,
+            "stats": stats,
+            "sampling": sampling,
+            "report": report
+        }
+    })
+
+@app.get("/api/audit-navigation")
+async def get_audit_navigation():
+    """获取审计导航结构（包含文件夹路径和报告列表）"""
+    if analysis_state.status != "completed" or not analysis_state.results:
+        raise HTTPException(status_code=400, detail="分析尚未完成")
+    
+    results = analysis_state.results
+    persons = results.get("persons", [])
+    companies = results.get("companies", [])
+    
+    # 定义输出目录路径（相对路径，与 config.py 一致）
+    output_dir = "output"
+    cleaned_data_person_dir = os.path.join(output_dir, "cleaned_data", "个人")
+    cleaned_data_company_dir = os.path.join(output_dir, "cleaned_data", "公司")
+    analysis_results_dir = os.path.join(output_dir, "analysis_results")
+    
+    # 构建个人清洗数据列表
+    person_files = []
+    if os.path.exists(cleaned_data_person_dir):
+        for filename in os.listdir(cleaned_data_person_dir):
+            if filename.endswith('.xlsx'):
+                filepath = os.path.join(cleaned_data_person_dir, filename)
+                stat_info = os.stat(filepath)
+                # 提取人名（假设格式为 "姓名_合并流水.xlsx"）
+                name = filename.replace('_合并流水.xlsx', '').replace('.xlsx', '')
+                person_files.append({
+                    "name": name,
+                    "filename": filename,
+                    "size": stat_info.st_size,
+                    "sizeFormatted": f"{stat_info.st_size / 1024:.1f}KB" if stat_info.st_size < 1024 * 1024 else f"{stat_info.st_size / 1024 / 1024:.1f}MB",
+                    "modified": datetime.fromtimestamp(stat_info.st_mtime).isoformat()
+                })
+    
+    # 构建公司清洗数据列表
+    company_files = []
+    if os.path.exists(cleaned_data_company_dir):
+        for filename in os.listdir(cleaned_data_company_dir):
+            if filename.endswith('.xlsx'):
+                filepath = os.path.join(cleaned_data_company_dir, filename)
+                stat_info = os.stat(filepath)
+                name = filename.replace('_合并流水.xlsx', '').replace('.xlsx', '')
+                company_files.append({
+                    "name": name,
+                    "filename": filename,
+                    "size": stat_info.st_size,
+                    "sizeFormatted": f"{stat_info.st_size / 1024:.1f}KB" if stat_info.st_size < 1024 * 1024 else f"{stat_info.st_size / 1024 / 1024:.1f}MB",
+                    "modified": datetime.fromtimestamp(stat_info.st_mtime).isoformat()
+                })
+    
+    # 构建报告文件列表
+    report_files = []
+    primary_report_patterns = ['核查底稿', '审计报告', 'report']
+    if os.path.exists(analysis_results_dir):
+        for filename in os.listdir(analysis_results_dir):
+            if filename.endswith(('.xlsx', '.html', '.docx', '.txt', '.pdf')):
+                filepath = os.path.join(analysis_results_dir, filename)
+                stat_info = os.stat(filepath)
+                is_primary = any(p in filename.lower() for p in primary_report_patterns)
+                report_files.append({
+                    "name": filename,
+                    "size": stat_info.st_size,
+                    "sizeFormatted": f"{stat_info.st_size / 1024:.1f}KB" if stat_info.st_size < 1024 * 1024 else f"{stat_info.st_size / 1024 / 1024:.1f}MB",
+                    "modified": datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
+                    "isPrimary": is_primary
+                })
+        # 主要报告排在前面
+        report_files.sort(key=lambda x: (not x["isPrimary"], x["name"]))
+    
+    return serialize_for_json({
+        "persons": person_files if person_files else [{"name": p, "type": "person"} for p in persons],
+        "companies": company_files if company_files else [{"name": c, "type": "company"} for c in companies],
+        "reports": report_files,
+        "outputDir": output_dir,
+        "paths": {
+            "cleanedDataPerson": cleaned_data_person_dir,
+            "cleanedDataCompany": cleaned_data_company_dir,
+            "analysisResults": analysis_results_dir
+        },
+        "totalEntities": len(persons) + len(companies)
+    })
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket 实时日志推送"""
+    """WebSocket 实时日志推送
+    
+    消息格式 (与前端 WebSocketMessage 接口对齐):
+    {
+        "type": "status" | "complete" | "log",
+        "data": { status, progress, currentPhase, startTime, endTime, error }
+    }
+    """
     await websocket.accept()
     _ws_connections.add(websocket)
+    last_status = None
+    
     try:
         while True:
-            await websocket.send_json(analysis_state.to_dict())
-            await asyncio.sleep(1)
+            # 1. 发送所有待发送的日志消息
+            while not _log_queue.empty():
+                try:
+                    log_message = _log_queue.get_nowait()
+                    await websocket.send_json(log_message)
+                except queue.Empty:
+                    break
+            
+            # 2. 发送状态更新
+            state_dict = analysis_state.to_dict()
+            
+            # 将 phase 映射为 currentPhase 以匹配前端 AnalysisStatus 接口
+            message_data = {
+                "status": state_dict.get("status"),
+                "progress": state_dict.get("progress"),
+                "currentPhase": state_dict.get("phase", ""),
+                "startTime": state_dict.get("startTime"),
+                "endTime": state_dict.get("endTime"),
+                "error": state_dict.get("error")
+            }
+            
+            # 判断消息类型
+            current_status = state_dict.get("status")
+            
+            if current_status == "completed" and last_status != "completed":
+                # 状态刚变为 completed，发送 complete 消息
+                message = {"type": "complete", "data": message_data}
+            else:
+                # 发送普通状态更新
+                message = {"type": "status", "data": message_data}
+            
+            last_status = current_status
+            await websocket.send_json(message)
+            await asyncio.sleep(0.5)  # 缩短间隔以更快地推送日志
     except WebSocketDisconnect:
         _ws_connections.discard(websocket)
 
