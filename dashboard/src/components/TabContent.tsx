@@ -1916,19 +1916,18 @@ function AuditReportTab() {
 
         try {
             setPreviewLoading(true);
-            const blob = await api.downloadReport(filename);
-            
-            // 【P0 修复】使用 TextDecoder 明确指定 UTF-8 编码
-            // 解决中文乱码问题
-            const arrayBuffer = await blob.arrayBuffer();
-            const decoder = new TextDecoder('utf-8');
-            const content = decoder.decode(arrayBuffer);
-            
-            setPreviewFile({
-                name: filename,
-                content,
-                type: ext === 'txt' ? 'text' : 'html'
-            });
+            // 使用专门的预览API端点
+            const result = await api.previewReport(filename);
+
+            if (result.success && result.content !== undefined) {
+                setPreviewFile({
+                    name: filename,
+                    content: result.content,
+                    type: result.type === 'text' ? 'text' : 'html'
+                });
+            } else {
+                throw new Error('预览API返回无效数据');
+            }
         } catch (err) {
             console.error('预览失败:', err);
             alert('预览失败，请尝试下载');

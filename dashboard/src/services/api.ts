@@ -285,7 +285,7 @@ class ApiService {
      * 下载报告
      */
     async downloadReport(filename: string): Promise<Blob> {
-        const url = `${this.baseUrl}/api/reports/${encodeURIComponent(filename)}`;
+        const url = `${this.baseUrl}/api/reports/download/${encodeURIComponent(filename)}`;
         const response = await fetch(url);
 
         if (!response.ok) {
@@ -293,6 +293,20 @@ class ApiService {
         }
 
         return response.blob();
+    }
+
+    /**
+     * 预览报告（txt/html文件）
+     */
+    async previewReport(filename: string): Promise<{ success: boolean; filename: string; type?: string; content?: string }> {
+        const url = `${this.baseUrl}/api/reports/preview/${encodeURIComponent(filename)}`;
+        const response = await fetch(url);
+
+        if (!response.ok) {
+            throw new Error(`预览失败: ${response.status}`);
+        }
+
+        return response.json();
     }
 
     /**

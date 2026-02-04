@@ -186,6 +186,28 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
                 if (data.success && data.report) {
                     const v3Html = renderV3ReportToHtml(data.report);
                     setPreviewHtml(v3Html);
+                    
+                    // 保存HTML到输出目录
+                    try {
+                        const saveResponse = await fetch(`${API_BASE_URL}/api/investigation-report/save-html`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({
+                                html: v3Html,
+                                filename: `${caseName}.html`,
+                            }),
+                        });
+                        if (saveResponse.ok) {
+                            const saveData = await saveResponse.json();
+                            console.log('HTML已保存到输出目录:', saveData.path);
+                        } else {
+                            console.error('保存HTML失败');
+                        }
+                    } catch (saveErr) {
+                        console.error('保存HTML失败:', saveErr);
+                    }
                 } else {
                     throw new Error(data.error || 'v3.0 报告生成失败');
                 }
@@ -236,7 +258,7 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
         const meta = report.meta || {};
         const family = report.family || {};
         const memberDetails = report.member_details || [];
-        const companies = report.companies || [];
+        const companies = report.companies || [];  // 使用 companies 而非 company_reports
         const conclusion = report.conclusion || {};
         
         // 格式化金额（分转万元）
@@ -246,6 +268,16 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
         // 计算家庭总银行卡数
         const totalBankAccounts = memberDetails.reduce((sum: number, m: any) => 
             sum + (m.assets?.bank_account_count || m.assets?.bank_accounts?.length || 0), 0);
+
+        // 将公司数据转换为兼容格式
+        const companyReports = companies.map((c: any) => ({
+            name: c.company_name || c.name || '未知公司',
+            fund_scale: {
+                total_income: c.total_income || 0,
+                transaction_count: c.transaction_count || 0,
+            },
+            related_person_transfers: c.key_person_transfers || {},
+        }));
 
         return `
 <!DOCTYPE html>
@@ -388,10 +420,10 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
     </div>
     `).join('')}
 
-    ${companies.length > 0 ? `
+    ${companyReports.length > 0 ? `
     <div class="section">
         <h2>四、涉案公司分析</h2>
-        ${companies.map((company: any) => `
+        ${companyReports.map((company: any) => `
         <div style="margin-bottom: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 8px;">
             <h3 style="margin-top: 0;">${company.name || '未知公司'}</h3>
             <table>
