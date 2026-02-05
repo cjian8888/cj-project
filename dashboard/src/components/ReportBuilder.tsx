@@ -170,6 +170,31 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
         try {
             // 【G-05】v3 格式使用新的 generate-with-config API
             if (format === 'v3') {
+                // 【v4.1 新增】步骤0：先调用重新生成txt报告的API
+                let txtRegenerateMsg = '';
+                let txtRegenerateSuccess = false;
+                try {
+                    const regenResponse = await fetch(`${API_BASE_URL}/api/investigation-report/regenerate-txt`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                    });
+
+                    if (regenResponse.ok) {
+                        const regenData = await regenResponse.json();
+                        if (regenData.success) {
+                            txtRegenerateSuccess = true;
+                            txtRegenerateMsg = `✅ txt报告已根据用户配置重新生成`;
+                            console.log('[报告生成]', txtRegenerateMsg, '- 路径:', regenData.path);
+                        }
+                    }
+                } catch (regenErr) {
+                    console.warn('txt报告重新生成失败:', regenErr);
+                    txtRegenerateMsg = '⚠️ txt报告重新生成失败，将使用缓存数据';
+                }
+                
+                // 步骤1：生成HTML报告
                 const response = await fetch(`${API_BASE_URL}/api/investigation-report/generate-with-config`, {
                     method: 'POST',
                     headers: {

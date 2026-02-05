@@ -2298,6 +2298,59 @@ async def generate_investigation_report_with_config(
                 content={"success": False, "error": "分析缓存不存在，请先运行分析"},
             )
 
+        # 【v4.1 新增】设置用户配置到报告构建器
+        builder.set_primary_config(config)
+        logger.info(
+            f"[报告生成] 已设置用户配置: {len(config.analysis_units)} 个分析单元"
+        )
+
+        # 【v4.1 新增】根据用户配置重新计算家庭汇总
+        logger.info("[报告生成] 检测到用户配置，重新计算家庭汇总...")
+
+        # 4.1. 加载 profiles.json
+        cache_dir = os.path.join("./output", "analysis_cache")
+        with open(os.path.join(cache_dir, "profiles.json"), "r", encoding="utf-8") as f:
+            profiles = json.load(f)
+
+        # 4.2. 重新计算每个家庭的汇总
+        from family_finance import calculate_family_summary
+
+        updated_family_summaries = {}
+        for unit in config.analysis_units:
+            if unit.unit_type == "family":
+                householder = unit.anchor
+                members = unit.members
+
+                # 重新计算家庭财务汇总
+                try:
+                    unit_summary = calculate_family_summary(profiles, members)
+                    unit_summary["householder"] = householder
+                    updated_family_summaries[householder] = unit_summary
+                    logger.info(f"[家庭汇总] 已重新计算 {householder} 家庭汇总")
+                except Exception as e:
+                    logger.warning(f"计算 {householder} 家庭汇总失败: {e}")
+
+        # 4.3. 更新 derived_data.json
+        if updated_family_summaries:
+            with open(
+                os.path.join(cache_dir, "derived_data.json"), "r+", encoding="utf-8"
+            ) as f:
+                derived_data = json.load(f)
+
+                # 保留原有数据
+                derived_data["all_family_summaries"] = updated_family_summaries
+
+                # 更新第一个家庭的summary
+                first_householder = list(updated_family_summaries.keys())[0]
+                derived_data["family_summary"] = updated_family_summaries[
+                    first_householder
+                ]
+
+                f.seek(0)
+                json.dump(derived_data, f, ensure_ascii=False, indent=2)
+
+            logger.info(f"[家庭汇总] 已更新: {len(updated_family_summaries)} 个家庭")
+
         # 4. 生成报告
         case_background = request.case_background if request else None
         data_scope = request.data_scope if request else None
@@ -2365,6 +2418,73 @@ async def save_html_report(request: dict):
         return JSONResponse(
             status_code=500,
             content={"success": False, "error": f"保存失败: {str(e)}"},
+        )
+
+
+@app.post("/api/investigation-report/regenerate-txt")
+async def regenerate_txt_report():
+    """
+    【v4.1 新增】根据用户配置重新生成txt报告
+
+    1. 加载 PrimaryTargetsConfig（用户配置）
+    2. 使用配置中的家庭单元重新生成txt报告
+    3. 更新 output/analysis_results/核查结果分析报告.txt
+
+    Returns:
+        {"success": True, "message": "txt报告重新生成成功"}
+    """
+    logger = logging.getLogger(__name__)
+    logger.info("[txt报告] 开始根据用户配置重新生成")
+
+    try:
+        # 1. 加载归集配置
+        service = PrimaryTargetsService(data_dir="./data", output_dir="./output")
+        config, msg = service.load_config()
+
+        if config is None:
+            logger.warning(f"[txt报告] 配置加载失败: {msg}，生成默认配置")
+            config, msg, _ = service.get_or_create_config()
+
+        # 2. 加载报告构建器
+        builder = load_investigation_report_builder("./output")
+        if builder is None:
+            logger.warning("[txt报告] 缓存数据不存在")
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "分析缓存不存在，请先运行分析"},
+            )
+
+        # 3. 【关键】设置用户配置到报告构建器
+        builder.set_primary_config(config)
+        logger.info(
+            f"[txt报告] 已设置用户配置: {len(config.analysis_units)} 个分析单元"
+        )
+
+        # 4. 重新生成txt报告（会使用用户配置的家庭单元）
+        output_dirs = create_output_directories("./output")
+        txt_report_path = os.path.join(
+            output_dirs["analysis_results"], "核查结果分析报告.txt"
+        )
+
+        result = builder.generate_complete_txt_report(txt_report_path)
+
+        logger.info(f"[txt报告] 重新生成成功: {txt_report_path}")
+        return {
+            "success": True,
+            "message": "txt报告重新生成成功",
+            "path": txt_report_path,
+            "config_info": {
+                "analysis_units_count": len(config.analysis_units),
+                "doc_number": config.doc_number,
+                "employer": config.employer,
+            },
+        }
+
+    except Exception as e:
+        logger.exception(f"[txt报告] 重新生成失败: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": f"txt报告重新生成失败: {str(e)}"},
         )
 
 
