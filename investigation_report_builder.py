@@ -247,21 +247,22 @@ class InvestigationReportBuilder:
                     self._id_to_name_map[person_id_str] = owner_name
                     self._name_to_id_map[owner_name] = person_id_str
 
-         logger.debug(f"[身份证号映射] 建立完成: {len(self._id_to_name_map)} 条记录")
-        
+        logger.debug(f"[身份证号映射] 建立完成: {len(self._id_to_name_map)} 条记录")
+
         # 【v4.1 新增】用户配置（家庭归集）
         self._primary_config = None  # PrimaryTargetsConfig 对象
 
     def set_primary_config(self, config):
         """
         【v4.1 新增】设置用户配置
-        
+
         Args:
             config: PrimaryTargetsConfig - 家庭归集配置对象
         """
         self._primary_config = config
-        logger.info(f"[初查报告] 已设置用户配置: {len(config.analysis_units) if config else 0} 个分析单元")
-
+        logger.info(
+            f"[初查报告] 已设置用户配置: {len(config.analysis_units) if config else 0} 个分析单元"
+        )
 
     def _is_numeric(self, value) -> bool:
         """判断值是否可以转换为数字"""
@@ -540,36 +541,36 @@ class InvestigationReportBuilder:
         )
 
         return report_dict
-    
+
     # ==================== v4.1 新增：统一报告数据构建 ====================
-    
+
     def build_unified_report_data(
         self, config: PrimaryTargetsConfig = None
     ) -> UnifiedReportData:
         """
         【v4.1 统一数据构建】构建统一报告数据（txt和HTML共享）
-        
+
         修改此数据结构 = 同时影响txt和HTML
-        
+
         Args:
             config: PrimaryTargetsConfig - 归集配置对象，如果不提供则使用默认配置
-        
+
         Returns:
             UnifiedReportData - 包含所有报告章节的完整数据
         """
         logger.info("[统一数据] 开始构建统一报告数据...")
-        
+
         # 1. 加载或使用配置
         if config is None:
             service = PrimaryTargetsService(
                 data_dir=os.path.join(self.output_dir, "data"),
-                output_dir=self.output_dir
+                output_dir=self.output_dir,
             )
             config, _, _ = service.get_or_create_config()
-        
+
         # 2. 构建元信息
         meta = self._build_meta(config.doc_number, config.case_notes, None)
-        
+
         # 3. 【根据配置】重新计算家庭汇总
         if config.analysis_units:
             logger.info(f"[统一数据] 使用用户配置重新计算家庭汇总...")
@@ -577,7 +578,7 @@ class InvestigationReportBuilder:
         else:
             logger.info("[统一数据] 使用缓存数据...")
             family_data = self._build_family_data_from_cache()
-        
+
         # 4. 构建每个成员的完整报告
         members = []
         for unit in config.analysis_units:
@@ -585,27 +586,27 @@ class InvestigationReportBuilder:
                 # 家庭单元：聚合所有成员
                 for member_name in unit.members:
                     member = self._build_member_report_unified(
-                        member_name, 
+                        member_name,
                         unit.anchor,  # 用于关系推断
-                        unit.members  # 用于家庭汇总
+                        unit.members,  # 用于家庭汇总
                     )
                     members.append(member)
             else:
                 # 独立单元：单个成员
                 member = self._build_member_report_unified(
-                    unit.anchor,
-                    unit.anchor,
-                    [unit.anchor]
+                    unit.anchor, unit.anchor, [unit.anchor]
                 )
                 members.append(member)
-        
+
         # 5. 构建公司报告
-        companies = [self._build_company_report(c) 
-                    for c in config.include_companies or self._companies]
-        
+        companies = [
+            self._build_company_report(c)
+            for c in config.include_companies or self._companies
+        ]
+
         # 6. 构建可疑交易分析
         suspicious = self._build_suspicion_analysis_unified()
-        
+
         # 7. 构建综合研判
         # 将members中的MemberReport转换为MemberDetails（用于现有逻辑）
         member_details_objs = [
@@ -617,13 +618,17 @@ class InvestigationReportBuilder:
                 transaction_count=m.income_expense.transaction_count,
                 assets=PersonAssets(
                     total_assets=m.assets.total_assets,
-                    bank_accounts_count=m.assets.property_count + m.assets.vehicle_count,  # 使用银行卡数量
+                    bank_accounts_count=m.assets.property_count
+                    + m.assets.vehicle_count,  # 使用银行卡数量
                     total_balance=m.assets.bank_balance,
                 ),
                 analysis=PersonAnalysis(
                     income_gap=IncomeGapAnalysis(
                         total_income=m.income_expense.total_income,
-                        salary_income=m.income_expense.total_income * (m.risk_analysis.income_expense_match.score / 100),  # 简化计算
+                        salary_income=m.income_expense.total_income
+                        * (
+                            m.risk_analysis.income_expense_match.score / 100
+                        ),  # 简化计算
                         ratio=m.risk_analysis.income_expense_match.score / 100,
                         verdict=m.risk_analysis.income_expense_match.verdict,
                     ),
@@ -642,9 +647,9 @@ class InvestigationReportBuilder:
             )
             for m in members
         ]
-        
+
         conclusion = self._build_conclusion(member_details_objs, companies)
-        
+
         # 8. 组装统一数据
         unified_data = UnifiedReportData(
             meta=meta,
@@ -654,31 +659,33 @@ class InvestigationReportBuilder:
             members=members,
             companies=companies,
             suspicious_transactions=suspicious,
-            conclusion=conclusion
+            conclusion=conclusion,
         )
-        
-        logger.info(f"[统一数据] 构建完成: {len(members)}个成员, {len(companies)}个公司")
-        
+
+        logger.info(
+            f"[统一数据] 构建完成: {len(members)}个成员, {len(companies)}个公司"
+        )
+
         return unified_data
-    
+
     def _build_member_report_unified(
         self, name: str, family_anchor: str, family_members: List[str]
     ) -> MemberReport:
         """
         【v4.1 统一数据】构建单个成员的完整报告
-        
+
         包含：基本信息、资产、收支、年度工资、五维度分析、风险等级、专业话术
-        
+
         Args:
             name: 成员姓名
             family_anchor: 家庭锚点（用于关系推断）
             family_members: 家庭成员列表（用于家庭汇总）
-        
+
         Returns:
             MemberReport - 成员的完整报告数据
         """
         profile = self.profiles.get(name, {})
-        
+
         # 1. 基础信息
         basic_info = PersonBasicInfo(
             name=name,
@@ -691,7 +698,7 @@ class InvestigationReportBuilder:
             id_number="",
             family_members_desc="",
         )
-        
+
         # 2. 资产数据
         assets = MemberAssets(
             total_assets=profile.get("totalIncome", 0) or 0,  # 简化
@@ -701,7 +708,7 @@ class InvestigationReportBuilder:
             vehicle_count=0,
             wealth_holdings=0,
         )
-        
+
         # 3. 收支数据
         income_expense = IncomeExpenseData(
             total_income=profile.get("totalIncome", 0) or 0,
@@ -709,13 +716,13 @@ class InvestigationReportBuilder:
             net_income=0,
             transaction_count=profile.get("transactionCount", 0) or 0,
         )
-        
+
         # 4. 年度工资数据（核心：年度工资汇总）
         yearly_salary = self._build_member_yearly_salary_unified(name, profile)
-        
+
         # 5. 五维度分析（核心：风险分析）
         risk_analysis = self._build_five_dimension_analysis_unified(name, profile)
-        
+
         # 6. 风险等级和证据评分
         total_score = risk_analysis.total_score
         if total_score <= 30:
@@ -724,20 +731,20 @@ class InvestigationReportBuilder:
             risk_level = "medium"
         else:
             risk_level = "high"
-        
+
         evidence_score = 100 - total_score  # 证据评分与风险成反比
-        
+
         # 7. 专业话术
         professional_narrative = self._generate_professional_narrative_unified(
             name, risk_analysis, risk_level
         )
-        
+
         # 8. 高风险预警
         high_risk_warnings = self._extract_high_risk_warnings_unified(name, profile)
-        
+
         # 9. 推断与家庭锚点的关系
         relation = self._infer_relation_from_config(name, family_anchor)
-        
+
         return MemberReport(
             name=name,
             relation=relation,
@@ -751,8 +758,10 @@ class InvestigationReportBuilder:
             professional_narrative=professional_narrative,
             high_risk_warnings=high_risk_warnings,
         )
-    
-    def _build_member_yearly_salary_unified(self, name: str, profile: Dict) -> YearlySalaryData:
+
+    def _build_member_yearly_salary_unified(
+        self, name: str, profile: Dict
+    ) -> YearlySalaryData:
         """构建成员年度工资数据（统一版本）"""
         yearly_salary_obj = profile.get("yearlySalary", {})
         salary_by_year = (
@@ -761,54 +770,58 @@ class InvestigationReportBuilder:
             else {}
         )
         salary_by_year = salary_by_year or {}
-        
+
         # 转换为标准格式
         yearly_data = []
         for year, year_data in salary_by_year.items():
-            yearly_data.append({
-                "year": year,
-                "total": year_data.get("total", 0) or 0,
-                "total_wan": (year_data.get("total", 0) or 0) / 10000,
-                "transaction_count": year_data.get("transaction_count", 0) or 0
-            })
-        
+            yearly_data.append(
+                {
+                    "year": year,
+                    "total": year_data.get("total", 0) or 0,
+                    "total_wan": (year_data.get("total", 0) or 0) / 10000,
+                    "transaction_count": year_data.get("transaction_count", 0) or 0,
+                }
+            )
+
         return YearlySalaryData(yearly_data=yearly_data)
-    
-    def _build_five_dimension_analysis_unified(self, name: str, profile: Dict) -> FiveDimensionAnalysis:
+
+    def _build_five_dimension_analysis_unified(
+        self, name: str, profile: Dict
+    ) -> FiveDimensionAnalysis:
         """构建五维度分析（统一版本）"""
         # 1. 收支匹配度分析
         income_expense_match = self._analyze_income_expense_match_unified(name, profile)
-        
+
         # 2. 借贷行为分析
         lending_behavior = self._analyze_lending_behavior_unified(name, profile)
-        
+
         # 3. 消费特征分析
         consumption_pattern = self._analyze_consumption_pattern_unified(name, profile)
-        
+
         # 4. 资金流向分析
         fund_flow = self._analyze_fund_flow_unified(name, profile)
-        
+
         # 5. 现金操作分析
         cash_operation = self._analyze_cash_operation_unified(name, profile)
-        
+
         # 计算总分
         total_score = (
-            income_expense_match.score + 
-            lending_behavior.score +
-            consumption_pattern.score +
-            fund_flow.score +
-            cash_operation.score
+            income_expense_match.score
+            + lending_behavior.score
+            + consumption_pattern.score
+            + fund_flow.score
+            + cash_operation.score
         )
-        
+
         return FiveDimensionAnalysis(
             income_expense_match=income_expense_match,
             lending_behavior=lending_behavior,
             consumption_pattern=consumption_pattern,
             fund_flow=fund_flow,
             cash_operation=cash_operation,
-            total_score=total_score
+            total_score=total_score,
         )
-    
+
     def _generate_professional_narrative_unified(
         self, name: str, risk_analysis: FiveDimensionAnalysis, risk_level: str
     ) -> str:
@@ -819,36 +832,40 @@ class InvestigationReportBuilder:
             return f"{name}存在一定资金流动异常，需进一步核实。收支匹配度{risk_analysis.income_expense_match.score}分，建议关注异常交易对手和大额资金往来。"
         else:
             return f"{name}存在较高资金风险，需重点核查。收支严重不匹配（{risk_analysis.income_expense_match.score}分），存在多处异常交易模式，建议深入调查其资金来源和去向。"
-    
-    def _extract_high_risk_warnings_unified(self, name: str, profile: Dict) -> List[str]:
+
+    def _extract_high_risk_warnings_unified(
+        self, name: str, profile: Dict
+    ) -> List[str]:
         """提取高风险预警（统一版本）"""
         warnings = []
-        
+
         # 1. 收支不匹配
         income = profile.get("totalIncome", 0) or 0
         expense = profile.get("totalExpense", 0) or 0
         if income > 0 and expense > income * 1.5:
             warnings.append("支出严重超过收入，需核实资金来源")
-        
+
         # 2. 大额现金
         cash_total = profile.get("cashTotal", 0) or 0
         if cash_total > 500000:  # 50万元
-            warnings.append(f"大额现金交易总额{cash_total/10000:.2f}万元，需核查现金来源")
-        
+            warnings.append(
+                f"大额现金交易总额{cash_total / 10000:.2f}万元，需核查现金来源"
+            )
+
         # 3. 可疑对手
         # 从suspicion获取...
-        
+
         return warnings
-    
+
     def _build_family_data_from_config(self, config: PrimaryTargetsConfig) -> Dict:
         """根据用户配置构建家庭数据"""
         # 导入family_finance
         import family_finance
-        
+
         # 计算家庭汇总
         all_family_summaries = {}
         family_units_list = []
-        
+
         for unit in config.analysis_units:
             if unit.unit_type == "family":
                 # 计算家庭汇总
@@ -856,64 +873,84 @@ class InvestigationReportBuilder:
                     self.profiles, unit.members
                 )
                 all_family_summaries[unit.anchor] = unit_summary
-                
+
                 # 家庭单元列表
-                family_units_list.append({
-                    "anchor": unit.anchor,
-                    "members": unit.members,
-                    "householder": unit.anchor,
-                })
-        
+                family_units_list.append(
+                    {
+                        "anchor": unit.anchor,
+                        "members": unit.members,
+                        "householder": unit.anchor,
+                    }
+                )
+
         # 构建家庭年度工资汇总
         family_yearly_salary = []
         if family_units_list:
             first_unit = family_units_list[0]
-            family_yearly_salary = self._aggregate_family_yearly_salary(first_unit["members"])
-        
+            family_yearly_salary = self._aggregate_family_yearly_salary(
+                first_unit["members"]
+            )
+
         # 构建家庭财务特征
         family_financial_profile = FamilyFinancialProfile()
         if all_family_summaries:
             first_summary = list(all_family_summaries.values())[0]
-            family_financial_profile.total_income = first_summary.get("total_income_expense", {}).get("total_income", 0) or 0
-            family_financial_profile.total_expense = first_summary.get("total_income_expense", {}).get("total_expense", 0) or 0
-            family_financial_profile.internal_transfers = first_summary.get("member_transfers", {}).get("to_family", 0) or 0
-        
+            family_financial_profile.total_income = (
+                first_summary.get("total_income_expense", {}).get("total_income", 0)
+                or 0
+            )
+            family_financial_profile.total_expense = (
+                first_summary.get("total_income_expense", {}).get("total_expense", 0)
+                or 0
+            )
+            family_financial_profile.internal_transfers = (
+                first_summary.get("member_transfers", {}).get("to_family", 0) or 0
+            )
+
         # 构建家庭概览
         overview = FamilyOverviewSection()
-        
+
         return {
             "overview": overview,
             "yearly_salary": family_yearly_salary,
             "financial_profile": family_financial_profile,
         }
-    
+
     def _build_family_data_from_cache(self) -> Dict:
         """从缓存构建家庭数据"""
         # 使用现有的derived_data
         family_summary_data = self.derived_data.get("family_summary", {})
-        
+
         family_yearly_salary = []
         family_units = self.derived_data.get("family_units_v2", [])
         if family_units:
             first_unit = family_units[0]
-            family_yearly_salary = self._aggregate_family_yearly_salary(first_unit.get("members", []))
-        
+            family_yearly_salary = self._aggregate_family_yearly_salary(
+                first_unit.get("members", [])
+            )
+
         # 家庭财务特征
         family_financial_profile = FamilyFinancialProfile()
         if family_summary_data:
             income_data = family_summary_data.get("total_income_expense", {})
-            family_financial_profile.total_income = income_data.get("total_income", 0) or 0
-            family_financial_profile.total_expense = income_data.get("total_expense", 0) or 0
-            family_financial_profile.internal_transfers = family_summary_data.get("member_transfers", {}).get("to_family", 0) or 0
-        
+            family_financial_profile.total_income = (
+                income_data.get("total_income", 0) or 0
+            )
+            family_financial_profile.total_expense = (
+                income_data.get("total_expense", 0) or 0
+            )
+            family_financial_profile.internal_transfers = (
+                family_summary_data.get("member_transfers", {}).get("to_family", 0) or 0
+            )
+
         overview = FamilyOverviewSection()
-        
+
         return {
             "overview": overview,
             "yearly_salary": family_yearly_salary,
             "financial_profile": family_financial_profile,
         }
-    
+
     def _build_suspicion_analysis_unified(self) -> SuspicionAnalysis:
         """构建可疑交易分析（统一版本）"""
         return SuspicionAnalysis(
@@ -923,9 +960,11 @@ class InvestigationReportBuilder:
             low_risk_count=0,
             details=[],
         )
-    
+
     # 五维度分析辅助方法
-    def _analyze_income_expense_match_unified(self, name: str, profile: Dict) -> DimensionScore:
+    def _analyze_income_expense_match_unified(
+        self, name: str, profile: Dict
+    ) -> DimensionScore:
         """收支匹配度分析（统一版本）"""
         total_income = profile.get("totalIncome", 0) or 0
         total_expense = profile.get("totalExpense", 0) or 0
@@ -943,42 +982,47 @@ class InvestigationReportBuilder:
         else:
             score = 10
             verdict = "数据不足"
-        
+
         return DimensionScore(score=score, verdict=verdict, details="")
-    
-    def _analyze_lending_behavior_unified(self, name: str, profile: Dict) -> DimensionScore:
+
+    def _analyze_lending_behavior_unified(
+        self, name: str, profile: Dict
+    ) -> DimensionScore:
         """借贷行为分析（统一版本）"""
         # 简化版本
         score = 20  # 默认分数
         verdict = "无明显异常借贷行为"
         details = ""
-        
+
         return DimensionScore(score=score, verdict=verdict, details=details)
-    
-    def _analyze_consumption_pattern_unified(self, name: str, profile: Dict) -> DimensionScore:
+
+    def _analyze_consumption_pattern_unified(
+        self, name: str, profile: Dict
+    ) -> DimensionScore:
         """消费特征分析（统一版本）"""
         score = 15  # 默认分数
         verdict = "消费模式正常"
         details = ""
-        
+
         return DimensionScore(score=score, verdict=verdict, details=details)
-    
+
     def _analyze_fund_flow_unified(self, name: str, profile: Dict) -> DimensionScore:
         """资金流向分析（统一版本）"""
         score = 25  # 默认分数
         verdict = "资金流向正常"
         details = ""
-        
+
         return DimensionScore(score=score, verdict=verdict, details=details)
-    
-    def _analyze_cash_operation_unified(self, name: str, profile: Dict) -> DimensionScore:
+
+    def _analyze_cash_operation_unified(
+        self, name: str, profile: Dict
+    ) -> DimensionScore:
         """现金操作分析（统一版本）"""
         score = 15  # 默认分数
         verdict = "现金操作正常"
         details = ""
-        
-        return DimensionScore(score=score, verdict=verdict, details=details)
 
+        return DimensionScore(score=score, verdict=verdict, details=details)
 
     def _build_analysis_unit_section(self, unit: AnalysisUnit) -> Dict:
         """
@@ -6956,7 +7000,7 @@ class InvestigationReportBuilder:
         lines.append("-" * 70)
         lines.append("")
 
-         # 【v4.1 修改】获取家庭单元（优先使用用户配置）
+        # 【v4.1 修改】获取家庭单元（优先使用用户配置）
         if self._primary_config and self._primary_config.analysis_units:
             # 使用用户配置
             family_units = [
@@ -6974,7 +7018,7 @@ class InvestigationReportBuilder:
             # 回退到使用 derived_data 中的家庭单元
             family_units = derived_data.get("family_units_v2", [])
             logger.info("[txt报告] 没有用户配置，使用derived_data中的家庭单元")
-        
+
         # 如果还是没有家庭单元数据，使用所有核心人员作为默认家庭
         if not family_units:
             family_units = [
@@ -6985,7 +7029,6 @@ class InvestigationReportBuilder:
                 }
             ]
             logger.info("[txt报告] 没有家庭单元数据，使用所有核心人员作为默认家庭")
-
 
         for family_index, family_unit in enumerate(family_units, 1):
             anchor = family_unit.get("anchor", "")
