@@ -2584,18 +2584,18 @@ def _render_report_to_html(report: Dict) -> str:
     <body>
         <div class="container">
             <h1>资金穿透审计初查报告</h1>
-            
+             
             <div class="meta">
                 <p><strong>文号：</strong>{meta.get("doc_number", "待填写")}</p>
                 <p><strong>生成时间：</strong>{meta.get("generated_at", "")}</p>
                 <p><strong>数据范围：</strong>{meta.get("data_scope", "待补充")}</p>
                 <p><strong>案件背景：</strong>{meta.get("case_background", "")}</p>
             </div>
-            
+             
             <h2>一、家庭基本情况</h2>
             <p>核查对象：<strong>{family.get("primary_person", "")}</strong></p>
             <p>家庭成员共 {len(family.get("members", []))} 人</p>
-            
+             
             <table>
                 <tr><th>姓名</th><th>关系</th><th>有流水数据</th></tr>
     """
@@ -2604,18 +2604,43 @@ def _render_report_to_html(report: Dict) -> str:
         has_data = "✓" if m.get("has_data") else "✗"
         html += f"<tr><td>{m.get('name', '')}</td><td>{m.get('relation', '')}</td><td>{has_data}</td></tr>"
 
-    # 家庭汇总
+    # 家庭汇总 - 修复数据单位为万元
     summary = family.get("summary", {})
     html += f"""
             </table>
-            
+             
             <h3>家庭财务汇总</h3>
             <table>
-                <tr><th>项目</th><th>金额（元）</th></tr>
-                <tr><td>总收入</td><td class="amount">{format_amount(summary.get("total_income", 0))}</td></tr>
-                <tr><td>总支出</td><td class="amount">{format_amount(summary.get("total_expense", 0))}</td></tr>
-                <tr><td>净收入（剔除互转）</td><td class="amount">{format_amount(summary.get("net_income", 0))}</td></tr>
-                <tr><td>家庭内部互转</td><td class="amount">{format_amount(summary.get("internal_transfers", 0))}</td></tr>
+                <tr><th>项目</th><th>金额（万元）</th></tr>
+                <tr><td>总收入</td><td class="amount">{format_wan(summary.get("total_income", 0))}</td></tr>
+                <tr><td>总支出</td><td class="amount">{format_wan(summary.get("total_expense", 0))}</td></tr>
+                <tr><td>净收入（剔除互转）</td><td class="amount">{format_wan(summary.get("net_income", 0))}</td></tr>
+                <tr><td>家庭内部互转</td><td class="amount">{format_wan(summary.get("internal_transfers", 0))}</td></tr>
+            </table>
+             
+            <h3>家庭年度工资收入（按年统计）</h3>
+            <table>
+                <tr><th>年份</th><th>家庭总工资(万元)</th></tr>
+    """
+
+    # 提取年度工资数据
+    family_yearly_salary = {}
+    for md in member_details:
+        assets = md.get("assets", {})
+        yearly_salary_list = assets.get("yearly_salary", [])
+        for ys in yearly_salary_list:
+            year = ys.get("year", "")
+            if year:
+                if year not in family_yearly_salary:
+                    family_yearly_salary[year] = 0
+                family_yearly_salary[year] += ys.get("total", 0)
+
+    # 按年份排序并添加到HTML
+    for year in sorted(family_yearly_salary.keys()):
+        total_wan = family_yearly_salary[year] / 10000
+        html += f"<tr><td>{year}</td><td class='amount'>{total_wan:.2f}</td></tr>"
+
+    html += """
             </table>
             
             <h2>二、成员详细分析</h2>
@@ -2626,8 +2651,8 @@ def _render_report_to_html(report: Dict) -> str:
             <h3>{i}. {md.get("name", "")} ({md.get("relation", "")})</h3>
             <table>
                 <tr><th>项目</th><th>数值</th></tr>
-                <tr><td>总收入</td><td class="amount">{format_amount(md.get("total_income", 0))}</td></tr>
-                <tr><td>总支出</td><td class="amount">{format_amount(md.get("total_expense", 0))}</td></tr>
+                <tr><td>总收入</td><td class="amount">{format_wan(md.get("total_income", 0))} 万元</td></tr>
+                <tr><td>总支出</td><td class="amount">{format_wan(md.get("total_expense", 0))} 万元</td></tr>
                 <tr><td>交易笔数</td><td>{md.get("transaction_count", 0)}</td></tr>
             </table>
         """
@@ -2635,11 +2660,14 @@ def _render_report_to_html(report: Dict) -> str:
         # 资产信息
         assets = md.get("assets", {})
         if assets:
+            salary_ratio = assets.get("salary_ratio", 0)
+            # 统一处理：salaryRatio 是小数形式（如 0.2396 = 23.96%），需要乘以100
+            salary_ratio_percent = salary_ratio * 100
             html += f"""
             <p><strong>资产情况：</strong></p>
             <ul>
-                <li>工资总额: {format_amount(assets.get("salary_total", 0))} 元</li>
-                <li>工资占比: {assets.get("salary_ratio", 0):.1f}%</li>
+                <li>工资总额: {format_wan(assets.get("salary_total", 0))} 万元</li>
+                <li>工资占比: {salary_ratio_percent:.1f}%</li>
                 <li>银行账户数: {assets.get("bank_account_count", 0)}</li>
                 <li>理财持仓: {format_wan(assets.get("wealth_holding", 0))} 万元</li>
             </ul>
@@ -2649,7 +2677,7 @@ def _render_report_to_html(report: Dict) -> str:
     html += f"""
             <h2>三、综合研判</h2>
             <p>{conclusion.get("summary_text", "待补充研判意见")}</p>
-            
+             
             <h3>发现问题</h3>
     """
 
