@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+统一缓存管理器 - CacheManager
+
+功能：
+1. 统一管理所有缓存文件的保存和读取
+2. 维护缓存版本号和时间戳
+3. 提供缓存验证机制
+4. 支持按需失效和批量清除
+5. 确保缓存一致性
+
+使用示例：
+    cache_mgr = CacheManager(cache_dir)
+    cache_mgr.save_results(results)
+    cache = cache_mgr.load_results()
+    cache_mgr.invalidate(module="profiles")
+"""
+
+import json
+import os
+import logging
+import shutil
+from datetime import datetime
+from typing import Dict, List, Optional, Any
+from pathlib import Path
+
+
+class CacheManager:
+    """
+    统一缓存管理器
+
+    管理分析缓存的生命周期，确保数据一致性。
+    """
+
+    # 缓存文件名称定义
+    CACHE_FILES = {
+        "profiles": "profiles.json",
+        "profiles_full": "profiles_full.json",
+        "suspicions": "suspicions.json",
+        "derived_data": "derived_data.json",
+        "graph_data": "graph_data.json",
+        "metadata": "metadata.json",
+        "analysis_results": "analysis_results.json",
+    }
+
+    # 当前缓存格式版本
+    CACHE_VERSION = "4.0.0"
+
+    def __init__(self, cache_dir: str):
+        """
+        初始化缓存管理器
+
+        Args:
+            cache_dir: 缓存目录路径
+        """
+        self.cache_dir = Path(cache_dir)
+        self.logger = logging.getLogger(__name__)
+
+        # 确保缓存目录存在
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        self.logger.info(f"[缓存管理器] 初始化完成，目录: {self.cache_dir}")
+
+    def get_cache_path(self, cache_name: str) -> Path:
+        """
+        获取指定缓存文件的路径
+
+        Args:
+            cache_name: 缓存名称（如 'profiles'）
+
+        Returns:
+            缓存文件的完整路径
+
+        Raises:
+            ValueError: 缓存名称未知
+        """
+        if cache_name not in self.CACHE_FILES:
+            raise ValueError(f"未知的缓存名称: {cache_name}")
+        return self.cache_dir / self.CACHE_FILES[cache_name]
+
+    def is_cache_valid(
+        self, cache_name: str, max_age_hours: Optional[int] = None
+    ) -> bool:
+        """
+        检查缓存文件是否存在且有效
+
+        Args:
+            cache_name: 缓存名称
+            max_age_hours: 最大缓存年龄（小时），None 表示不检查时间
+
+        Returns:
+            缓存是否有效
+        """
+        cache_path = self.get_cache_path(cache_name)
+
+        # 检查文件是否存在
+        if not cache_path.exists():
+            self.logger.debug(f"[缓存验证] {cache_name} 不存在")
+            return False
+
+        # 检查缓存版本
+        if cache_name == "metadata":
+            # metadata.json 包含版本信息
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    metadata = json.load(f)
+                    cache_version = metadata.get("version", "")
+
+                # 版本必须匹配
+                if cache_version != self.CACHE_VERSION:
+                    self.logger.warning(
+                        f"[缓存验证] {cache_name} 版本不匹配: {cache_version} (期望: {self.CACHE_VERSION})"
+                    )
+                    return False
+            except Exception as e:
+                self.logger.warning(f"[缓存验证] {cache_name} 读取失败: {e}")
+                return False
+
+        # 检查缓存年龄
+        if max_age_hours is not None:
+            cache_age = datetime.now() - datetime.fromtimestamp(
+                cache_path.stat().st_mtime
+            )
+            if cache_age.total_seconds() > max_age_hours * 3600:
+                self.logger.warning(
+                    f"[缓存验证] {cache_name} 已过期 (年龄: {cache_age})"
+                )
+                return False
+
+        self.logger.debug(f"[缓存验证] {cache_name} 有效")
+        return True
+
+    def invalidate(self, cache_name: Optional[str] = None):
+        """
+        失效指定的缓存文件
+
+        Args:
+            cache_name: 缓存名称，None 表示失效所有缓存
+        """
+        if cache_name is None:
+            # 清除所有缓存
+            self.clear_all()
+        else:
+            cache_path = self.get_cache_path(cache_name)
+            if cache_path.exists():
+                os.remove(cache_path)
+                self.logger.info(f"[缓存失效] 已删除: {cache_name}")
+
+    def clear_all(self):
+        """清除所有缓存文件"""
+        for cache_file in self.cache_dir.iterdir():
+            if cache_file.is_file():
+                os.remove(cache_file)
+                self.logger.info(f"[缓存清除] 已删除: {cache_file.name}")
+
+    def save_cache(self, cache_name: str, data: Any):
+        """
+        保存缓存数据
+
+        Args:
+            cache_name: 缓存名称
+            data: 要保存的数据（可以是字典、列表等）
+        """
+        cache_path = self.get_cache_path(cache_name)
+
+        # 使用自定义编码器处理特殊类型
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, cls=CustomJSONEncoder)
+
+        self.logger.info(f"[缓存保存] {cache_name} -> {cache_path.name}")
+
+    def load_cache(self, cache_name: str) -> Optional[Dict]:
+        """
+        加载缓存数据
+
+        Args:
+            cache_name: 缓存名称
+
+        Returns:
+            缓存数据，如果不存在或无效则返回 None
+        """
+        if not self.is_cache_valid(cache_name):
+            return None
+
+        cache_path = self.get_cache_path(cache_name)
+
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.logger.info(f"[缓存加载] {cache_name} <- {cache_path.name}")
+            return data
+        except Exception as e:
+            self.logger.error(f"[缓存加载] {cache_name} 失败: {e}")
+            return None
+
+    def save_metadata(self, metadata: Dict):
+        """
+        保存元数据（包含版本号和生成时间）
+
+        Args:
+            metadata: 元数据字典
+        """
+        # 添加版本号和时间戳
+        metadata["version"] = self.CACHE_VERSION
+        metadata["generatedAt"] = datetime.now().isoformat()
+        metadata["cacheManagerVersion"] = "4.0.0"
+
+        self.save_cache("metadata", metadata)
+
+    def save_results(self, results: Dict):
+        """
+        保存完整的分析结果到缓存
+
+        Args:
+            results: 分析结果字典
+        """
+        # 保存各个模块的缓存
+        if "profiles" in results:
+            self.save_cache("profiles", results["profiles"])
+
+        if "_profiles_raw" in results:
+            self.save_cache("profiles_full", results["_profiles_raw"])
+
+        if "suspicions" in results:
+            self.save_cache("suspicions", results["suspicions"])
+
+        if "analysisResults" in results:
+            self.save_cache("derived_data", results["analysisResults"])
+
+        if "graphData" in results:
+            self.save_cache("graph_data", results["graphData"])
+
+        # 保存元数据
+        metadata = {
+            "persons": results.get("persons", []),
+            "companies": results.get("companies", []),
+            "version": self.CACHE_VERSION,
+            "generatedAt": datetime.now().isoformat(),
+            "refactored": True,
+            "dataFlow": "external_data_first",
+        }
+        self.save_metadata(metadata)
+
+        self.logger.info("[缓存管理] 所有缓存已保存")
+
+    def load_results(self) -> Optional[Dict]:
+        """
+        加载完整的分析结果
+
+        Returns:
+            分析结果字典，如果缓存无效则返回 None
+        """
+        # 先验证元数据
+        metadata = self.load_cache("metadata")
+        if metadata is None:
+            self.logger.warning("[缓存加载] 元数据无效，放弃加载")
+            return None
+
+        # 加载各个模块
+        results = {
+            "profiles": self.load_cache("profiles"),
+            "_profiles_raw": self.load_cache("profiles_full"),
+            "suspicions": self.load_cache("suspicions"),
+            "analysisResults": self.load_cache("derived_data"),
+            "graphData": self.load_cache("graph_data"),
+        }
+
+        # 检查是否所有必需缓存都加载成功
+        if all(results.values()):
+            self.logger.info("[缓存加载] 所有缓存加载成功")
+            return results
+        else:
+            self.logger.warning("[缓存加载] 部分缓存加载失败")
+            return None
+
+    def get_cache_info(self) -> Dict:
+        """
+        获取缓存信息（用于调试和监控）
+
+        Returns:
+            缓存信息字典
+        """
+        cache_info = {
+            "cacheDir": str(self.cache_dir),
+            "cacheVersion": self.CACHE_VERSION,
+            "files": {},
+        }
+
+        for cache_name in self.CACHE_FILES:
+            cache_path = self.get_cache_path(cache_name)
+            if cache_path.exists():
+                stat = cache_path.stat()
+                cache_info["files"][cache_name] = {
+                    "exists": True,
+                    "size": stat.st_size,
+                    "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    "valid": self.is_cache_valid(cache_name),
+                }
+            else:
+                cache_info["files"][cache_name] = {"exists": False}
+
+        return cache_info
+
+
+class CustomJSONEncoder(json.JSONEncoder):
+    """
+    自定义 JSON 编码器
+
+    处理 pandas Timestamp, numpy 等特殊类型
+    """
+
+    def default(self, obj):
+        # 处理时间戳
+        if hasattr(obj, "isoformat"):
+            return obj.isoformat()
+
+        # 处理 numpy 类型
+        if hasattr(obj, "dtype"):
+            import numpy as np
+
+            if isinstance(obj, np.integer):
+                return int(obj)
+            if isinstance(obj, np.floating):
+                return float(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            if isinstance(obj, np.bool_):
+                return bool(obj)
+
+        # 处理 pandas Series
+        if hasattr(obj, "tolist"):
+            return obj.tolist()
+
+        # 处理字典和对象
+        if hasattr(obj, "__dict__"):
+            return obj.__dict__
+
+        # 处理 Path 对象
+        if isinstance(obj, Path):
+            return str(obj)
+
+        return super().default(obj)

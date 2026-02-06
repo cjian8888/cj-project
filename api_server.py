@@ -58,6 +58,9 @@ import loan_analyzer
 import income_analyzer
 import flow_visualizer
 import ml_analyzer
+
+# 导入缓存管理器
+from cache_manager import CacheManager
 import time_series_analyzer
 import clue_aggregator
 import behavioral_profiler
@@ -140,12 +143,24 @@ analysis_state = AnalysisState()
 _current_config = {}
 _ws_connections = set()
 _log_queue = queue.Queue()  # 日志队列，用于 WebSocket 广播
+_cache_manager: Optional[CacheManager] = None  # 缓存管理器（懒加载）
 
 
 def _get_current_time_str() -> str:
     """获取当前时间字符串 HH:MM:SS"""
     now = datetime.now()
     return f"{now.hour:02d}:{now.minute:02d}:{now.second:02d}"
+
+
+def _get_cache_manager() -> CacheManager:
+    """获取或创建缓存管理器实例"""
+    global _cache_manager
+    if _cache_manager is None:
+        # 从全局配置获取缓存目录
+        cache_dir = _current_config.get("outputDirectory", "output")
+        cache_dir = os.path.join(cache_dir, "analysis_cache")
+        _cache_manager = CacheManager(cache_dir)
+    return _cache_manager
 
 
 class WebSocketLogHandler(logging.Handler):
@@ -1644,109 +1659,13 @@ def _detect_hidden_assets_with_context(
 
 
 def _save_analysis_cache_refactored(results, cache_dir):
-    """保存分析缓存到文件"""
+    """保存分析缓存到文件（使用缓存管理器）"""
     logger = logging.getLogger(__name__)
 
-    # 自定义JSON编码器处理pandas Timestamp, numpy等类型
-    class CustomJSONEncoder(json.JSONEncoder):
-        def default(self, obj):
-            # 处理时间戳
-            if hasattr(obj, "isoformat"):
-                return obj.isoformat()
-            # 处理numpy整数
-            if hasattr(obj, "dtype"):
-                import numpy as np
-
-                if isinstance(obj, np.integer):
-                    return int(obj)
-                if isinstance(obj, np.floating):
-                    return float(obj)
-                if isinstance(obj, np.ndarray):
-                    return obj.tolist()
-            # 处理pandas Series
-            if hasattr(obj, "tolist"):
-                return obj.tolist()
-            # 处理字典和对象
-            if hasattr(obj, "__dict__"):
-                return obj.__dict__
-            return super().default(obj)
-
     try:
-        os.makedirs(cache_dir, exist_ok=True)
-
-        # 保存 profiles.json (简化版，供前端使用)
-        with open(os.path.join(cache_dir, "profiles.json"), "w", encoding="utf-8") as f:
-            json.dump(
-                results["profiles"],
-                f,
-                ensure_ascii=False,
-                indent=2,
-                cls=CustomJSONEncoder,
-            )
-
-        # 🔧 修复: 保存 profiles_full.json (完整版，供报告构建器使用)
-        if results.get("_profiles_raw"):
-            with open(
-                os.path.join(cache_dir, "profiles_full.json"), "w", encoding="utf-8"
-            ) as f:
-                json.dump(
-                    results["_profiles_raw"],
-                    f,
-                    ensure_ascii=False,
-                    indent=2,
-                    cls=CustomJSONEncoder,
-                )
-            logger.info(f"  ✓ 完整画像已保存: profiles_full.json")
-
-        # 保存 suspicions.json
-        with open(
-            os.path.join(cache_dir, "suspicions.json"), "w", encoding="utf-8"
-        ) as f:
-            json.dump(
-                results["suspicions"],
-                f,
-                ensure_ascii=False,
-                indent=2,
-                cls=CustomJSONEncoder,
-            )
-
-        # 保存 derived_data.json
-        with open(
-            os.path.join(cache_dir, "derived_data.json"), "w", encoding="utf-8"
-        ) as f:
-            json.dump(
-                results["analysisResults"],
-                f,
-                ensure_ascii=False,
-                indent=2,
-                cls=CustomJSONEncoder,
-            )
-
-        # 保存 graph_data.json
-        if results.get("graphData"):
-            with open(
-                os.path.join(cache_dir, "graph_data.json"), "w", encoding="utf-8"
-            ) as f:
-                json.dump(
-                    results["graphData"],
-                    f,
-                    ensure_ascii=False,
-                    indent=2,
-                    cls=CustomJSONEncoder,
-                )
-
-        # 保存 metadata.json
-        metadata = {
-            "version": "3.2.0",  # 重构版本
-            "generatedAt": datetime.now().isoformat(),
-            "persons": results.get("persons", []),
-            "companies": results.get("companies", []),
-            "refactored": True,
-            "dataFlow": "external_data_first",
-        }
-        with open(os.path.join(cache_dir, "metadata.json"), "w", encoding="utf-8") as f:
-            json.dump(metadata, f, ensure_ascii=False, indent=2)
-
+        # 使用缓存管理器保存所有缓存
+        cache_mgr = CacheManager(cache_dir)
+        cache_mgr.save_results(results)
         logger.info(f"✓ 缓存已保存: {cache_dir}")
 
     except Exception as e:
@@ -1809,17 +1728,33 @@ async def start_analysis(config: AnalysisConfig, background_tasks: BackgroundTas
 
 @app.get("/api/results")
 async def get_results():
-    """获取分析结果"""
-    if analysis_state.status != "completed":
-        raise HTTPException(status_code=400, detail="分析尚未完成")
+    """获取分析结果（优先从内存读取，fallback到缓存文件）"""
+    # 如果内存中有结果，直接返回
+    if analysis_state.status == "completed" and analysis_state.results:
+        results_data = serialize_for_json(analysis_state.results)
+        return {"message": "分析结果获取成功", "data": results_data}
 
-    # 序列化结果，转换 NumPy 类型为 Python 原生类型
-    results_data = (
-        serialize_for_json(analysis_state.results) if analysis_state.results else {}
-    )
+    # 内存中没有结果，尝试从缓存文件读取
+    cache_dir = os.path.join("output", "analysis_cache")
+    try:
+        cache_mgr = CacheManager(cache_dir)
+        results_data = cache_mgr.load_results()
 
-    # 返回前端期望的格式: { message, data }
-    return {"message": "分析结果获取成功", "data": results_data}
+        if results_data:
+            # 将缓存结果加载到内存
+            analysis_state.results = results_data
+            analysis_state.status = "completed"
+            return {
+                "message": "分析结果获取成功（来自缓存）",
+                "data": serialize_for_json(results_data),
+            }
+        else:
+            raise HTTPException(status_code=400, detail="分析尚未完成且缓存无效")
+    except Exception as e:
+        logging.getLogger(__name__).error(f"读取缓存失败: {e}")
+        raise HTTPException(
+            status_code=400, detail=f"分析尚未完成且缓存读取失败: {str(e)}"
+        )
 
 
 @app.get("/api/reports")
@@ -1950,6 +1885,39 @@ async def get_report_subjects():
             logging.getLogger(__name__).warning(f"读取缓存失败: {e}")
 
     return {"success": True, "subjects": []}
+
+
+@app.get("/api/cache/info")
+async def get_cache_info():
+    """获取缓存信息（用于调试和监控）"""
+    cache_dir = os.path.join("output", "analysis_cache")
+    try:
+        cache_mgr = CacheManager(cache_dir)
+        cache_info = cache_mgr.get_cache_info()
+        return {"success": True, "data": cache_info}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/cache/invalidate")
+async def invalidate_cache(cache_name: Optional[str] = None):
+    """
+    失效指定的缓存文件
+
+    Args:
+        cache_name: 缓存名称（如 'profiles'），None 表示失效所有缓存
+    """
+    cache_dir = os.path.join("output", "analysis_cache")
+    try:
+        cache_mgr = CacheManager(cache_dir)
+        if cache_name:
+            cache_mgr.invalidate(cache_name)
+            return {"success": True, "message": f"已失效缓存: {cache_name}"}
+        else:
+            cache_mgr.clear_all()
+            return {"success": True, "message": "已清除所有缓存"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 # ==================== 归集配置 API (Primary Targets) ====================
