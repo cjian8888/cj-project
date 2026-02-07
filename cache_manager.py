@@ -231,6 +231,38 @@ class CacheManager:
         if "graphData" in results:
             self.save_cache("graph_data", results["graphData"])
 
+        # 【修复】保存外部数据（P0和P1）
+        if "externalData" in results:
+            external_data = results["externalData"]
+
+            # P0 外部数据
+            if "p0" in external_data:
+                p0_data = external_data["p0"]
+                self.save_cache("external_p0", p0_data)
+
+                # 提取并保存单独的文件以便 InvestigationReportBuilder 使用
+                if "precise_property_data" in p0_data:
+                    self.save_cache(
+                        "precisePropertyData", p0_data["precise_property_data"]
+                    )
+                if "credit_data" in p0_data:
+                    self.save_cache("creditData", p0_data["credit_data"])
+                if "aml_data" in p0_data:
+                    self.save_cache("amlData", p0_data["aml_data"])
+
+            # P1 外部数据
+            if "p1" in external_data:
+                p1_data = external_data["p1"]
+                self.save_cache("external_p1", p1_data)
+
+                # 提取并保存单独的文件以便 InvestigationReportBuilder 使用
+                if "vehicle_data" in p1_data:
+                    self.save_cache("vehicleData", p1_data["vehicle_data"])
+                if "wealth_product_data" in p1_data:
+                    self.save_cache("wealthProductData", p1_data["wealth_product_data"])
+                if "securities_data" in p1_data:
+                    self.save_cache("securitiesData", p1_data["securities_data"])
+
         # 保存元数据
         metadata = {
             "persons": results.get("persons", []),

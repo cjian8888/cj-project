@@ -467,6 +467,23 @@ class InvestigationReportBuilder:
             f"[初查报告] 开始按归集配置生成报告，{len(config.analysis_units)} 个分析单元"
         )
 
+        # 【调试】检查 self.derived_data 的内容
+        logger.info(
+            f"[初查报告] self.derived_data keys: {list(self.derived_data.keys())}"
+        )
+        if "family_units_v2" in self.derived_data:
+            logger.info(
+                f"[初查报告] family_units_v2 length: {len(self.derived_data['family_units_v2'])}"
+            )
+            for unit in self.derived_data["family_units_v2"]:
+                logger.info(
+                    f"[初查报告]   - Unit: anchor={unit.get('anchor')}, members={unit.get('members')}"
+                )
+        if "all_family_summaries" in self.derived_data:
+            logger.info(
+                f"[初查报告] all_family_summaries keys: {list(self.derived_data['all_family_summaries'].keys())}"
+            )
+
         # 1. 构建元信息
         meta = self._build_meta(config.doc_number, case_background, data_scope)
 
@@ -486,18 +503,35 @@ class InvestigationReportBuilder:
         companies_to_include = config.include_companies or self._companies
         company_reports = [self._build_company_report(c) for c in companies_to_include]
 
-        # 4. 构建 family 结构（取第一个家庭单元作为主家庭，兼容旧前端）
-        primary_family_unit = (
-            config.get_family_units()[0] if config.get_family_units() else None
-        )
+        # 4. 构建 family 结构（取第一个有数据的家庭单元作为主家庭，兼容旧前端）
+        primary_family_unit = None
+        if config.get_family_units():
+            # 优先选择第一个家庭单元
+            for unit in config.get_family_units():
+                # 只统计有流水数据的成员
+                members_with_data = [m.name for m in unit.member_details if m.has_data]
+                if members_with_data:  # 至少有一个有数据
+                    primary_family_unit = unit
+                    break
+
+        if not primary_family_unit and config.analysis_units:
+            # 回退：使用第一个有数据的分析单元
+            for unit in config.analysis_units:
+                members_with_data = [m.name for m in unit.member_details if m.has_data]
+                if members_with_data:  # 至少有一个有数据
+                    primary_family_unit = unit
+                    break
+
         if primary_family_unit:
             family = self._build_family_section_from_unit(primary_family_unit)
         else:
-            # 无家庭单元时，使用第一个分析单元的锚点
-            first_anchor = (
-                config.analysis_units[0].anchor if config.analysis_units else ""
+            # 无家庭单元或无有数据的单元，使用默认的第一个人员
+            first_person = (
+                self.get_available_primary_persons()[0]
+                if self.get_available_primary_persons()
+                else ""
             )
-            family = self._build_family_section(first_anchor)
+            family = self._build_family_section(first_person)
 
         # 5. 生成综合研判
         # 将 unit_sections 中的 member_details 转换为 MemberDetails 对象
@@ -1287,24 +1321,31 @@ class InvestigationReportBuilder:
         """
         members = []
         for name in unit.members:
-            # 尝试从 member_details 获取关系
+            # 【修复】直接从 unit.member_details 获取所有成员信息
             relation = "家庭成员"
+            has_data = False
+
             for md in unit.member_details:
                 if md.name == name:
                     relation = md.relation or "家庭成员"
+                    has_data = md.has_data
                     break
 
             if name == unit.anchor:
                 relation = "本人"
 
             members.append(
-                FamilyMember(
-                    name=name, relation=relation, has_data=name in self.profiles
-                )
+                FamilyMember(name=name, relation=relation, has_data=has_data)
             )
 
         # 构建家庭汇总
+        # 【修复】优先从 self.profiles 读取成员数据（包含工资信息）
         family_summary_data = self.derived_data.get("family_summary", {})
+        # 从 all_family_summaries 中匹配的家庭汇总数据
+        all_family_summaries = self.derived_data.get("all_family_summaries", {})
+        if unit.anchor in all_family_summaries:
+            family_summary_data = all_family_summaries[unit.anchor]
+
         summary = self._build_family_summary(unit.members, family_summary_data)
 
         return InvestigationFamily(
@@ -7492,6 +7533,30 @@ def load_investigation_report_builder(
                 analysis_cache[key] = {}
         else:
             logger.warning(f"[初查报告] 文件不存在: {filepath}")
+            analysis_cache[key] = {}
+
+    # 【修复】加载外部数据缓存
+    external_data_files = {
+        "precisePropertyData": "precisePropertyData.json",
+        "vehicleData": "vehicleData.json",
+        "wealthProductData": "wealthProductData.json",
+        "securitiesData": "securitiesData.json",
+        "creditData": "creditData.json",
+        "amlData": "amlData.json",
+    }
+
+    for key, filename in external_data_files.items():
+        filepath = os.path.join(cache_dir, filename)
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    analysis_cache[key] = json.load(f)
+                logger.info(f"[初查报告] 已加载外部数据: {filename}")
+            except Exception as e:
+                logger.warning(f"[初查报告] 加载 {filename} 失败: {e}")
+                analysis_cache[key] = {}
+        else:
+            logger.debug(f"[初查报告] 外部数据文件不存在: {filepath}")
             analysis_cache[key] = {}
 
     return InvestigationReportBuilder(analysis_cache, output_dir)

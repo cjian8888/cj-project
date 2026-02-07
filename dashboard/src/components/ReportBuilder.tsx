@@ -101,7 +101,6 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
 
     const [caseName, setCaseName] = useState('初查报告');
     const [docNumber, setDocNumber] = useState('');
-    const [format, setFormat] = useState<'html' | 'json' | 'v3'>('v3');  // 默认使用 v3 格式
     const [isGenerating, setIsGenerating] = useState(false);
     const [previewHtml, setPreviewHtml] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -152,134 +151,66 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
     };
 
     const generateReport = useCallback(async () => {
-        if (selectedSubjects.length === 0 && format !== 'v3') {
-            setError('请至少选择一个核查对象');
-            return;
-        }
-
-        const selectedSections = sections.filter(s => s.checked).map(s => s.id);
-        if (selectedSections.length === 0 && format !== 'v3') {
-            setError('请至少选择一个报告模块');
-            return;
-        }
-
         setIsGenerating(true);
         setError(null);
         setPreviewHtml(null);
 
         try {
-            // 【G-05】v3 格式使用新的 generate-with-config API
-            if (format === 'v3') {
-                // 【v4.1 新增】步骤0：先调用重新生成txt报告的API
-                let txtRegenerateMsg = '';
-                let txtRegenerateSuccess = false;
+            // 生成HTML报告
+            const response = await fetch(`${API_BASE_URL}/api/investigation-report/generate-with-config`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    case_background: caseName,
+                    data_scope: '',
+                }),
+            });
+
+            if (!response.ok) {
+                const errData = await response.json();
+                throw new Error(errData.error || '报告生成失败');
+            }
+
+            const data = await response.json();
+            if (data.success && data.report) {
+                const html = renderReportToHtml(data.report);
+                setPreviewHtml(html);
+
+                // 保存HTML到输出目录
                 try {
-                    const regenResponse = await fetch(`${API_BASE_URL}/api/investigation-report/regenerate-txt`, {
+                    const saveResponse = await fetch(`${API_BASE_URL}/api/investigation-report/save-html`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
                         },
+                        body: JSON.stringify({
+                            html: html,
+                            filename: `${caseName}.html`,
+                        }),
                     });
-
-                    if (regenResponse.ok) {
-                        const regenData = await regenResponse.json();
-                        if (regenData.success) {
-                            txtRegenerateSuccess = true;
-                            txtRegenerateMsg = `✅ txt报告已根据用户配置重新生成`;
-                            console.log('[报告生成]', txtRegenerateMsg, '- 路径:', regenData.path);
-                        }
+                    if (saveResponse.ok) {
+                        const saveData = await saveResponse.json();
+                        console.log('HTML已保存到输出目录:', saveData.path);
+                    } else {
+                        console.error('保存HTML失败');
                     }
-                } catch (regenErr) {
-                    console.warn('txt报告重新生成失败:', regenErr);
-                    txtRegenerateMsg = '⚠️ txt报告重新生成失败，将使用缓存数据';
-                }
-                
-                // 步骤1：生成HTML报告
-                const response = await fetch(`${API_BASE_URL}/api/investigation-report/generate-with-config`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                });
-
-                if (!response.ok) {
-                    const errData = await response.json();
-                    throw new Error(errData.error || '报告生成失败');
-                }
-
-                const data = await response.json();
-                if (data.success && data.report) {
-                    const v3Html = renderV3ReportToHtml(data.report);
-                    setPreviewHtml(v3Html);
-                    
-                    // 保存HTML到输出目录
-                    try {
-                        const saveResponse = await fetch(`${API_BASE_URL}/api/investigation-report/save-html`, {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                            },
-                            body: JSON.stringify({
-                                html: v3Html,
-                                filename: `${caseName}.html`,
-                            }),
-                        });
-                        if (saveResponse.ok) {
-                            const saveData = await saveResponse.json();
-                            console.log('HTML已保存到输出目录:', saveData.path);
-                        } else {
-                            console.error('保存HTML失败');
-                        }
-                    } catch (saveErr) {
-                        console.error('保存HTML失败:', saveErr);
-                    }
-                } else {
-                    throw new Error(data.error || 'v3.0 报告生成失败');
+                } catch (saveErr) {
+                    console.error('保存HTML失败:', saveErr);
                 }
             } else {
-                // 其他格式使用原有 API
-                const response = await fetch(`${API_BASE_URL}/api/reports/generate`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        sections: selectedSections,
-                        format: format,
-                        case_name: caseName,
-                        subjects: selectedSubjects,
-                        doc_number: docNumber || null,
-                        thresholds: {
-                            large_transfer: thresholds.largeTransfer,
-                            large_cash: thresholds.largeCash
-                        },
-                        primary_person: selectedSubjects[0] || null,
-                        case_background: caseName,
-                    }),
-                });
-
-                if (!response.ok) {
-                    const errData = await response.json();
-                    throw new Error(errData.error || '报告生成失败');
-                }
-
-                if (format === 'html') {
-                    const html = await response.text();
-                    setPreviewHtml(html);
-                } else {
-                    const data = await response.json();
-                    setPreviewHtml(`<pre style="white-space: pre-wrap; font-family: monospace; padding: 20px; color: #333;">${JSON.stringify(data, null, 2)}</pre>`);
-                }
+                throw new Error(data.error || '报告生成失败');
             }
         } catch (err) {
             setError(err instanceof Error ? err.message : '未知错误');
         } finally {
             setIsGenerating(false);
         }
-    }, [sections, format, caseName, selectedSubjects, docNumber, thresholds]);
+    }, [caseName]);
 
-    // v3.0 报告转 HTML 预览
-    const renderV3ReportToHtml = (report: any): string => {
+    // 报告转 HTML 预览
+    const renderReportToHtml = (report: any): string => {
         const meta = report.meta || {};
         const family = report.family || {};
         const memberDetails = report.member_details || [];
@@ -503,9 +434,9 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
     const downloadReport = useCallback(() => {
         if (!previewHtml) return;
 
-        const mimeType = format === 'html' || format === 'v3' ? 'text/html' : 'application/json';
-        const extension = format === 'json' ? 'json' : 'html';
-        
+        const mimeType = 'text/html';
+        const extension = 'html';
+
         const blob = new Blob([previewHtml], { type: mimeType });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -515,7 +446,7 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-    }, [previewHtml, format, caseName]);
+    }, [previewHtml, caseName]);
 
     return (
         <div className={`report-builder flex flex-col h-[700px] ${className || ''}`}>
@@ -815,42 +746,8 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
                                         </div>
                                     ))}
                                 </div>
-                            </div>
-
-                            {/* 格式选择 */}
-                            <div className="mb-3.5">
-                                <label className="block text-sm font-medium theme-text-muted mb-1.5">输出格式</label>
-                                <div style={styles.formatButtons}>
-                                    <button
-                                        onClick={() => setFormat('v3')}
-                                        style={{
-                                            ...styles.formatButton,
-                                            ...(format === 'v3' ? styles.formatButtonActive : styles.formatButtonInactive)
-                                        }}
-                                    >
-                                        📋 v3.0 初查报告
-                                    </button>
-                                    <button
-                                        onClick={() => setFormat('html')}
-                                        style={{
-                                            ...styles.formatButton,
-                                            ...(format === 'html' ? styles.formatButtonActive : styles.formatButtonInactive)
-                                        }}
-                                    >
-                                        HTML 报告
-                                    </button>
-                                    <button
-                                        onClick={() => setFormat('json')}
-                                        style={{
-                                            ...styles.formatButton,
-                                            ...(format === 'json' ? styles.formatButtonActive : styles.formatButtonInactive)
-                                        }}
-                                    >
-                                        JSON 数据
-                                    </button>
-                                </div>
-                            </div>
-
+                             </div>
+ 
                             {/* 生成按钮 */}
                             <button
                                 onClick={generateReport}
@@ -1110,29 +1007,6 @@ const styles: Record<string, React.CSSProperties> = {
         fontSize: '11px',
         color: '#64748b',
         marginTop: '2px',
-    },
-    formatButtons: {
-        display: 'flex',
-        gap: '8px',
-    },
-    formatButton: {
-        flex: 1,
-        padding: '10px',
-        borderRadius: '6px',
-        cursor: 'pointer',
-        fontSize: '12px',
-        fontWeight: 500,
-        transition: 'all 0.2s',
-    },
-    formatButtonActive: {
-        border: '1px solid #3b82f6',
-        backgroundColor: '#3b82f6',
-        color: '#fff',
-    },
-    formatButtonInactive: {
-        border: '1px solid #334155',
-        backgroundColor: '#0f172a',
-        color: '#94a3b8',
     },
     generateButton: {
         width: '100%',

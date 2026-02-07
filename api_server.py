@@ -450,8 +450,20 @@ def serialize_analysis_results(results: Dict) -> Dict:
     """
     序列化分析结果
 
-    将后端的分类数组（bidirectional_flows, regular_repayments 等）
-    合并为前端期望的 details 统一数组，每条记录添加 _type 字段标识类型。
+    将后端嵌套的 snake_case 结构转换为前端期望的扁平化 camelCase 结构。
+
+    后端结构:
+        profile.summary.total_income
+        profile.summary.total_expense
+        profile.fund_flow.cash_total
+        ...
+
+    前端期望:
+        profile.entityName
+        profile.totalIncome
+        profile.totalExpense
+        profile.cashTotal
+        ...
     """
     serialized = {}
 
@@ -461,14 +473,26 @@ def serialize_analysis_results(results: Dict) -> Dict:
             loan_result = value if isinstance(value, dict) else {}
             details = []
 
-            # 映射：后端数组名 -> _type 标识
+            # 映射：后端数组名 -> 前端 _type 标识
             loan_type_mapping = {
                 "bidirectional_flows": "bidirectional",
-                "regular_repayments": "regular_repayment",
-                "no_repayment_loans": "no_repayment",
+                "regular_repayments": "regular_payment",
+                "no_payment_loans": "no_payment",
                 "online_loan_platforms": "online_loan",
                 "loan_pairs": "loan_pair",
                 "abnormal_interest": "abnormal_interest",
+            }
+
+            # 映射：后端数组名 -> 前端 _type 标识
+            income_type_mapping = {
+                "large_single_income": "large_single",
+                "large_individual_income": "large_individual",
+                "unknown_source_income": "unknown_source",
+                "regular_non_salary": "regular_non_salary",
+                "same_source_multi": "same_source_multi",
+                "potential_bribe_installment": "bribe_installment",
+                "high_risk": "high_risk",
+                "medium_risk": "medium_risk",
             }
 
             for array_name, type_name in loan_type_mapping.items():
@@ -481,7 +505,11 @@ def serialize_analysis_results(results: Dict) -> Dict:
                 "summary": loan_result.get("summary", {}),
                 "details": details,
                 # 保留原始分类数组供需要的地方使用
-                **{k: v for k, v in loan_result.items() if k not in ["summary"]},
+                **{
+                    k: v
+                    for k, v in loan_result.items()
+                    if k not in ["summary", "details"]
+                },
             }
 
         elif key == "income":
@@ -489,7 +517,7 @@ def serialize_analysis_results(results: Dict) -> Dict:
             income_result = value if isinstance(value, dict) else {}
             details = []
 
-            # 映射：后端数组名 -> _type 标识
+            # 映射：后端数组名 -> 前端 _type 标识
             income_type_mapping = {
                 "large_single_income": "large_single",
                 "large_individual_income": "large_individual",
@@ -511,45 +539,45 @@ def serialize_analysis_results(results: Dict) -> Dict:
                 "summary": income_result.get("summary", {}),
                 "details": details,
                 # 保留原始分类数组供需要的地方使用
-                **{k: v for k, v in income_result.items() if k not in ["summary"]},
-            }
-
-        elif key == "aggregation":
-            # 转换聚合结果为前端期望格式
-            agg_result = value if isinstance(value, dict) else {}
-
-            # 从 all_entities 构建 rankedEntities
-            ranked_entities = []
-            for entity_name, entity_data in agg_result.get("all_entities", {}).items():
-                entity = entity_data if isinstance(entity_data, dict) else {}
-                ranked_entities.append(
-                    {
-                        "name": entity_name,
-                        "riskLevel": entity.get("risk_level", "low"),
-                        "riskScore": entity.get("risk_score", 0),
-                        "reasons": entity.get("reasons", []),
-                    }
-                )
-
-            # 按风险分数排序
-            ranked_entities.sort(key=lambda x: x.get("riskScore", 0), reverse=True)
-
-            # 构建 summary
-            critical_count = sum(
-                1 for e in ranked_entities if e.get("riskLevel") == "critical"
-            )
-            high_count = sum(1 for e in ranked_entities if e.get("riskLevel") == "high")
-
-            serialized["aggregation"] = {
-                "rankedEntities": ranked_entities,
-                "summary": {
-                    "极高风险实体数": critical_count,
-                    "高风险实体数": high_count,
+                **{
+                    k: v
+                    for k, v in income_result.items()
+                    if k not in ["summary", "details"]
                 },
-                # 保留原始数据供需要的地方使用
-                **{k: v for k, v in agg_result.items()},
             }
 
+        elif key == "timeSeries":
+            serialized[key] = value
+        elif key == "aggregation":
+            serialized[key] = value
+        elif key == "family_tree":
+            serialized["family_tree"] = value
+        elif key == "family_units_v2":
+            serialized["family_units_v2"] = value
+        elif key == "family_units":
+            # 【修复】只有当 family_units_v2 不存在时才处理 family_units（向后兼容）
+            if "family_units_v2" not in serialized:
+                # 兼容两种格式：family_units（字典）和 family_units_v2（列表）
+                if isinstance(value, list):
+                    serialized["family_units_v2"] = value
+                else:
+                    # 如果是字典格式，转换为列表格式
+                    serialized["family_units_v2"] = (
+                        [value] if isinstance(value, dict) else []
+                    )
+            # 如果 family_units_v2 已经存在，则忽略 family_units
+        elif key == "family_relations":
+            if isinstance(value, list):
+                serialized["family_relations"] = value
+            else:
+                # 如果是字典格式，转换为列表格式
+                serialized["family_relations"] = (
+                    [value] if isinstance(value, dict) else []
+                )
+        elif key == "family_summary":
+            serialized["family_summary"] = value
+        elif key == "all_family_summaries":
+            serialized["all_family_summaries"] = value
         else:
             # 其他字段原样保留
             serialized[key] = value
@@ -1442,7 +1470,13 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             logger.warning(f"  ✗ 报告目录清单生成失败: {e}")
             broadcast_log("WARN", f"  ✗ 报告目录清单生成失败: {str(e)[:50]}")
 
-        # 8.6 生成初查报告v4.html（HTML报告，自动生成）
+        # 【修复】8.6 保存分析缓存（提前到 HTML 报告生成之前）
+        logger.info("保存分析缓存...")
+        _save_analysis_cache_refactored(
+            analysis_state.results, output_dirs["analysis_cache"]
+        )
+
+        # 8.7 生成初查报告v4.html（HTML报告，自动生成）
         try:
             builder = load_investigation_report_builder(output_dir)
             if builder:
@@ -1450,24 +1484,36 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                     output_dirs["analysis_results"], "初查报告_v4.html"
                 )
 
-                # 调用builder生成报告
-                report = builder.build_complete_report(
-                    primary_person=persons[0] if persons else "",
-                    doc_number="",
-                    case_background="",
-                    data_scope="",
-                    include_companies=companies,
+                # 加载归集配置
+                from report_config.primary_targets_service import PrimaryTargetsService
+
+                config_service = PrimaryTargetsService(
+                    data_dir="./data", output_dir="./output"
+                )
+                primary_targets_config, msg, is_new = (
+                    config_service.get_or_create_config()
                 )
 
-                # 渲染为HTML
-                html_content = _render_report_to_html(report)
+                if primary_targets_config is None:
+                    logger.warning(f"  ✗ 归集配置加载失败: {msg}")
+                    broadcast_log("WARN", f"  ✗ 归集配置加载失败")
+                else:
+                    # 使用新版配置接口生成报告
+                    report = builder.build_report_with_config(
+                        config=primary_targets_config,
+                        case_background="",
+                        data_scope="",
+                    )
 
-                # 保存HTML文件
-                with open(html_report_path, "w", encoding="utf-8") as f:
-                    f.write(html_content)
+                    # 渲染为HTML
+                    html_content = _render_report_to_html(report)
 
-                logger.info(f"  ✓ HTML报告已生成: {html_report_path}")
-                broadcast_log("INFO", "  ✓ HTML报告生成成功（初查报告v4.html）")
+                    # 保存HTML文件
+                    with open(html_report_path, "w", encoding="utf-8") as f:
+                        f.write(html_content)
+
+                    logger.info(f"  ✓ HTML报告已生成: {html_report_path}")
+                    broadcast_log("INFO", "  ✓ HTML报告生成成功（初查报告v4.html）")
             else:
                 logger.warning("  ✗ 报告构建器未加载，HTML报告生成失败")
         except Exception as e:
@@ -1553,15 +1599,9 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             "suspicions": serialize_suspicions(enhanced_suspicions),
             "analysisResults": serialize_analysis_results(analysis_results),
             "graphData": graph_data_cache,
-            "externalData": external_data,  # 🔄 新增: 外部数据也在结果中
-            "_profiles_raw": profiles,  # 🔧 修复: 保留完整画像供报告构建器使用
+            "externalData": external_data,
+            "_profiles_raw": profiles,
         }
-
-        # 保存到文件
-        logger.info("保存分析缓存...")
-        _save_analysis_cache_refactored(
-            analysis_state.results, output_dirs["analysis_cache"]
-        )
 
         # 内存清理
         logger.info("释放临时数据...")
@@ -2308,20 +2348,33 @@ async def generate_investigation_report_with_config(
                 # 保留原有数据
                 derived_data["all_family_summaries"] = updated_family_summaries
 
-                # 更新第一个家庭的summary
+                # 更新第一个家庭的summary（用于旧版兼容）
                 first_householder = list(updated_family_summaries.keys())[0]
                 derived_data["family_summary"] = updated_family_summaries[
                     first_householder
                 ]
 
                 f.seek(0)
+                f.truncate()  # 截断文件，避免旧数据残留
                 json.dump(derived_data, f, ensure_ascii=False, indent=2)
 
             logger.info(f"[家庭汇总] 已更新: {len(updated_family_summaries)} 个家庭")
 
-        # 4. 生成报告
-        case_background = request.case_background if request else None
-        data_scope = request.data_scope if request else None
+        # 【v4.1 修复】重新加载 builder，确保使用更新后的缓存数据
+        logger.info("[报告生成] 重新加载 builder（使用更新后的缓存数据）")
+        builder = load_investigation_report_builder("./output")
+
+        if builder is None:
+            logger.warning("[报告生成] 缓存数据不存在，请先运行分析")
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "分析缓存不存在，请先运行分析"},
+            )
+
+        builder.set_primary_config(config)
+        logger.info(
+            f"[报告生成] 已设置用户配置: {len(config.analysis_units)} 个分析单元"
+        )
 
         report = builder.build_report_with_config(
             config=config,

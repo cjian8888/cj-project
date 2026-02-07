@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from __future__ import annotations
+
 """
 报告 JSON Schema 定义模块 (Protocol Omega - Phase 1)
 
@@ -218,31 +220,25 @@ class UnifiedReportData:
     修改此数据结构 = 同时影响txt和HTML
     """
 
-    # 1. 元信息
-    meta: InvestigationMeta = field(default_factory=InvestigationMeta)
+    # 1. 元信息（使用 Any 类型避免前向引用问题）
+    meta: Any = None
 
     # 2. 家庭整体分析
-    family_overview: FamilyOverviewSection = field(
-        default_factory=FamilyOverviewSection
-    )
-    family_yearly_salary: List[FamilyYearlySalary] = field(default_factory=list)
-    family_financial_profile: FamilyFinancialProfile = field(
-        default_factory=FamilyFinancialProfile
-    )
+    family_overview: Any = None
+    family_yearly_salary: List[Any] = field(default_factory=list)
+    family_financial_profile: Any = None
 
     # 3. 成员详细分析
-    members: List[MemberReport] = field(default_factory=list)
+    members: List[Any] = field(default_factory=list)
 
     # 4. 公司报告
-    companies: List[CompanyReport] = field(default_factory=list)
+    companies: List[Any] = field(default_factory=list)
 
     # 5. 可疑交易分析
-    suspicious_transactions: SuspicionAnalysis = field(
-        default_factory=lambda: SuspicionAnalysis()
-    )
+    suspicious_transactions: Any = None
 
     # 6. 综合研判
-    conclusion: InvestigationConclusion = field(default_factory=InvestigationConclusion)
+    conclusion: Any = None
 
     def to_dict(self) -> Dict:
         """转换为字典"""
