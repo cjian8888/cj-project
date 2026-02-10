@@ -336,6 +336,14 @@ def serialize_profiles(profiles: Dict) -> Dict:
                 "wealthTotal": wealth_mgmt.get("total_transactions", 0),
                 "maxTransaction": income_structure.get("max_single_transaction", 0),
                 "salaryRatio": summary.get("salary_ratio", 0),
+                # 【修复】保留房产/车辆/理财等资产数据，供报告生成使用
+                "properties": profile_dict.get("properties", []),
+                "properties_precise": profile_dict.get("properties_precise", []),
+                "vehicles": profile_dict.get("vehicles", []),
+                "wealth_products": profile_dict.get("wealth_products", []),
+                "securities": profile_dict.get("securities", []),
+                "insurance": profile_dict.get("insurance", []),
+                "bank_accounts_official": profile_dict.get("bank_accounts_official", []),
             }
 
             result[name] = frontend_profile
@@ -1367,6 +1375,8 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             "large_transactions": analysis_results.get("large_transactions", []),
             "family_summary": analysis_results.get("family_summary", {}),
             "family_relations": analysis_results.get("family_relations", {}),
+            "family_units_v2": analysis_results.get("family_units_v2", []),
+            "all_family_summaries": analysis_results.get("all_family_summaries", {}),
         }
 
         phase8_start = time.time()
@@ -1470,74 +1480,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             logger.warning(f"  ✗ 报告目录清单生成失败: {e}")
             broadcast_log("WARN", f"  ✗ 报告目录清单生成失败: {str(e)[:50]}")
 
-        # 【修复】8.6 保存分析缓存（提前到 HTML 报告生成之前）
-        logger.info("保存分析缓存...")
-        _save_analysis_cache_refactored(
-            analysis_state.results, output_dirs["analysis_cache"]
-        )
-
-        # 8.7 生成初查报告v4.html（HTML报告，自动生成）
-        try:
-            builder = load_investigation_report_builder(output_dir)
-            if builder:
-                html_report_path = os.path.join(
-                    output_dirs["analysis_results"], "初查报告_v4.html"
-                )
-
-                # 加载归集配置
-                from report_config.primary_targets_service import PrimaryTargetsService
-
-                config_service = PrimaryTargetsService(
-                    data_dir="./data", output_dir="./output"
-                )
-                primary_targets_config, msg, is_new = (
-                    config_service.get_or_create_config()
-                )
-
-                if primary_targets_config is None:
-                    logger.warning(f"  ✗ 归集配置加载失败: {msg}")
-                    broadcast_log("WARN", f"  ✗ 归集配置加载失败")
-                else:
-                    # 使用新版配置接口生成报告
-                    report = builder.build_report_with_config(
-                        config=primary_targets_config,
-                        case_background="",
-                        data_scope="",
-                    )
-
-                    # 渲染为HTML
-                    html_content = _render_report_to_html(report)
-
-                    # 保存HTML文件
-                    with open(html_report_path, "w", encoding="utf-8") as f:
-                        f.write(html_content)
-
-                    logger.info(f"  ✓ HTML报告已生成: {html_report_path}")
-                    broadcast_log("INFO", "  ✓ HTML报告生成成功（初查报告v4.html）")
-            else:
-                logger.warning("  ✗ 报告构建器未加载，HTML报告生成失败")
-        except Exception as e:
-            logger.warning(f"  ✗ HTML报告生成失败: {e}")
-            broadcast_log("WARN", f"  ✗ HTML报告生成失败: {str(e)[:50]}")
-
-        phase8_duration = (time.time() - phase8_start) * 1000
-        logging_config.log_performance(
-            logger, "Phase 8-报告生成", phase8_duration, report_count=2
-        )
-
-        # ========================================================================
-        # 完成
-        # ========================================================================
-        analysis_state.update(progress=100, phase="分析完成")
-        broadcast_log("INFO", "✓ 分析完成")
-        analysis_state.end_time = datetime.now()
-        analysis_state.status = "completed"
-
-        enhanced_suspicions = _enhance_suspicions_with_analysis(
-            suspicions, analysis_results
-        )
-
-        # 预计算图谱数据
+        # 8.6 预计算图谱数据
         logger.info("预计算图谱数据...")
         graph_data_cache = None
         try:
@@ -1591,6 +1534,11 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         except Exception as e:
             logger.warning(f"  ✗ 图谱缓存失败: {e}")
 
+        # 增强疑点数据
+        enhanced_suspicions = _enhance_suspicions_with_analysis(
+            suspicions, analysis_results
+        )
+
         # 保存结果
         analysis_state.results = {
             "persons": all_persons,
@@ -1602,6 +1550,22 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             "externalData": external_data,
             "_profiles_raw": profiles,
         }
+
+        # 完成状态更新
+        analysis_state.update(progress=100, phase="分析完成")
+        broadcast_log("INFO", "✓ 分析完成")
+        analysis_state.end_time = datetime.now()
+        analysis_state.status = "completed"
+
+        # 【修复】保存分析缓存（必须在设置 results 之后，清理内存之前）
+        logger.info("保存分析缓存...")
+        try:
+            _save_analysis_cache_refactored(
+                analysis_state.results, output_dirs["analysis_cache"]
+            )
+            logger.info("  ✓ 分析缓存已保存")
+        except Exception as e:
+            logger.error(f"  ✗ 保存分析缓存失败: {e}")
 
         # 内存清理
         logger.info("释放临时数据...")
@@ -2280,6 +2244,10 @@ async def generate_investigation_report_with_config(
     logger = logging.getLogger(__name__)
     logger.info("[报告生成] 开始按配置生成 v3.0 报告")
 
+    # 从请求中提取参数（如果 request 为 None 则使用默认值）
+    case_background = request.case_background if request else None
+    data_scope = request.data_scope if request else None
+
     try:
         # 1. 加载归集配置服务
         service = PrimaryTargetsService(data_dir="./data", output_dir="./output")
@@ -2315,10 +2283,24 @@ async def generate_investigation_report_with_config(
         # 【v4.1 新增】根据用户配置重新计算家庭汇总
         logger.info("[报告生成] 检测到用户配置，重新计算家庭汇总...")
 
-        # 4.1. 加载 profiles.json
+        # 4.1. 加载 profiles.json 和外部数据
         cache_dir = os.path.join("./output", "analysis_cache")
         with open(os.path.join(cache_dir, "profiles.json"), "r", encoding="utf-8") as f:
             profiles = json.load(f)
+        
+        # 【修复】加载外部数据（房产、车辆）
+        external_data_cache = {}
+        try:
+            with open(os.path.join(cache_dir, "precisePropertyData.json"), "r", encoding="utf-8") as f:
+                external_data_cache["property"] = json.load(f)
+        except Exception:
+            external_data_cache["property"] = {}
+        
+        try:
+            with open(os.path.join(cache_dir, "vehicleData.json"), "r", encoding="utf-8") as f:
+                external_data_cache["vehicle"] = json.load(f)
+        except Exception:
+            external_data_cache["vehicle"] = {}
 
         # 4.2. 重新计算每个家庭的汇总
         from family_finance import calculate_family_summary
@@ -2329,12 +2311,46 @@ async def generate_investigation_report_with_config(
                 householder = unit.anchor
                 members = unit.members
 
+                # 【修复】聚合房产/车辆数据
+                all_properties = []
+                all_vehicles = []
+                
+                for member in members:
+                    # 从 profiles 获取
+                    profile = profiles.get(member, {})
+                    if profile.get("properties"):
+                        all_properties.extend(profile["properties"])
+                    if profile.get("properties_precise"):
+                        all_properties.extend(profile["properties_precise"])
+                    if profile.get("vehicles"):
+                        all_vehicles.extend(profile["vehicles"])
+                    
+                    # 从外部缓存获取（通过身份证号映射）
+                    # 需要找到成员对应的身份证号
+                    for pid, props in external_data_cache.get("property", {}).items():
+                        if props and len(props) > 0:
+                            # 检查产权人姓名是否匹配
+                            owner_name = props[0].get("owner_name", "")
+                            if owner_name == member:
+                                all_properties.extend(props)
+                    
+                    for pid, vehicles in external_data_cache.get("vehicle", {}).items():
+                        if vehicles and len(vehicles) > 0:
+                            # 检查车主姓名是否匹配
+                            owner_name = vehicles[0].get("owner_name", "")
+                            if owner_name == member:
+                                all_vehicles.extend(vehicles)
+
                 # 重新计算家庭财务汇总
                 try:
-                    unit_summary = calculate_family_summary(profiles, members)
+                    unit_summary = calculate_family_summary(
+                        profiles, members,
+                        properties=all_properties,
+                        vehicles=all_vehicles
+                    )
                     unit_summary["householder"] = householder
                     updated_family_summaries[householder] = unit_summary
-                    logger.info(f"[家庭汇总] 已重新计算 {householder} 家庭汇总")
+                    logger.info(f"[家庭汇总] 已重新计算 {householder} 家庭汇总: 房产{len(all_properties)}套, 车辆{len(all_vehicles)}辆")
                 except Exception as e:
                     logger.warning(f"计算 {householder} 家庭汇总失败: {e}")
 
@@ -2376,13 +2392,14 @@ async def generate_investigation_report_with_config(
             f"[报告生成] 已设置用户配置: {len(config.analysis_units)} 个分析单元"
         )
 
-        report = builder.build_report_with_config(
+        # 【v5.0】使用最新报告生成方法
+        report = builder.build_report_v5(
             config=config,
             case_background=case_background or config.case_notes,
             data_scope=data_scope,
         )
 
-        logger.info(f"[报告生成] v3.0 报告生成成功")
+        logger.info(f"[报告生成] v5.0 报告生成成功（完整四部分架构）")
 
         return {
             "success": True,
@@ -2400,6 +2417,91 @@ async def generate_investigation_report_with_config(
         return JSONResponse(
             status_code=500,
             content={"success": False, "error": f"报告生成失败: {str(e)}"},
+        )
+
+
+@app.post("/api/investigation-report/generate-v5")
+async def generate_investigation_report_v5(
+    request: InvestigationReportRequest = None,
+):
+    """
+    【v5.0】生成最新初查报告（完整四部分架构）
+
+    根据最新报告生成构架准则，生成包含以下四部分的完整报告：
+    - PART A: 家庭核查部分（家庭层级）
+    - PART B: 个人核查部分（16个板块）
+    - PART C: 公司核查部分（5个维度）
+    - PART D: 综合研判
+
+    Returns:
+        {
+            "success": True,
+            "report": { InvestigationReport v5.0 完整结构 },
+            "message": "v5.0报告生成成功"
+        }
+    """
+    logger = logging.getLogger(__name__)
+    logger.info("[报告生成v5] 开始生成v5.0报告（完整四部分架构）")
+
+    # 从请求中提取参数
+    case_background = request.case_background if request else None
+    data_scope = request.data_scope if request else None
+
+    try:
+        # 1. 加载归集配置服务
+        service = PrimaryTargetsService(data_dir="./data", output_dir="./output")
+
+        # 2. 获取或创建归集配置
+        config, msg, is_new = service.get_or_create_config()
+        if config is None:
+            logger.warning(f"[报告生成v5] 归集配置加载失败: {msg}")
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": f"归集配置加载失败: {msg}"},
+            )
+
+        logger.info(
+            f"[报告生成v5] 配置加载成功: {len(config.analysis_units)} 个分析单元"
+        )
+
+        # 3. 加载报告构建器
+        builder = load_investigation_report_builder("./output")
+        if builder is None:
+            logger.warning("[报告生成v5] 缓存数据不存在，请先运行分析")
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "分析缓存不存在，请先运行分析"},
+            )
+
+        # 4. 设置用户配置
+        builder.set_primary_config(config)
+
+        # 5. 使用v5.0方法生成报告
+        report = builder.build_report_v5(
+            config=config,
+            case_background=case_background or config.case_notes,
+            data_scope=data_scope,
+        )
+
+        logger.info(f"[报告生成v5] v5.0报告生成成功")
+
+        return {
+            "success": True,
+            "report": report,
+            "message": "v5.0报告生成成功（完整四部分架构）",
+            "version": "5.0.0",
+            "config_info": {
+                "analysis_units_count": len(config.analysis_units),
+                "doc_number": config.doc_number,
+                "employer": config.employer,
+            },
+        }
+
+    except Exception as e:
+        logger.exception(f"[报告生成v5] 生成失败: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": f"v5.0报告生成失败: {str(e)}"},
         )
 
 

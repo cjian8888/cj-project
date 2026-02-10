@@ -1117,6 +1117,8 @@ class InvestigationReportBuilder:
         # 资产聚合
         bank_accounts_count = 0
         wealth_total = 0.0
+        property_count = 0  # 【修复】添加房产计数
+        vehicle_count = 0   # 【修复】添加车辆计数
 
         # 成员相关数据
         member_profiles = []
@@ -1126,30 +1128,60 @@ class InvestigationReportBuilder:
             if not profile:
                 continue
 
+            # 获取收入结构数据（新格式在 income_structure 中）
+            income_struct = profile.get("income_structure", {})
+            
+            # 兼容两种格式：直接字段或 income_structure 子对象
+            member_income = income_struct.get("total_income") or profile.get("totalIncome", 0) or 0
+            member_expense = income_struct.get("total_expense") or profile.get("totalExpense", 0) or 0
+            member_salary = income_struct.get("salary_income") or profile.get("salaryTotal", 0) or 0
+            member_cash = income_struct.get("large_cash_count", 0) * 50000  # 估算大额现金
+            member_transactions = income_struct.get("transaction_count") or profile.get("transactionCount", 0) or 0
+
             member_profiles.append(
                 {
                     "name": name,
-                    "total_income": profile.get("totalIncome", 0) or 0,
-                    "total_expense": profile.get("totalExpense", 0) or 0,
+                    "total_income": member_income,
+                    "total_expense": member_expense,
                 }
             )
 
-            total_income += profile.get("totalIncome", 0) or 0
-            total_expense += profile.get("totalExpense", 0) or 0
-            salary_total += profile.get("salaryTotal", 0) or 0
-            cash_total += profile.get("cashTotal", 0) or 0
-            transaction_count += profile.get("transactionCount", 0) or 0
+            total_income += member_income
+            total_expense += member_expense
+            salary_total += member_salary
+            cash_total += member_cash
+            transaction_count += member_transactions
 
             # 银行账户
             bank_accounts = (
-                profile.get("bankAccounts", [])
-                or profile.get("bank_accounts", [])
+                profile.get("bank_accounts", [])
+                or profile.get("bankAccounts", [])
                 or []
             )
             bank_accounts_count += len(bank_accounts)
 
-            # 理财
-            wealth_total += profile.get("wealthTotal", 0) or 0
+            # 理财 - 从 wealth_transactions 估算
+            wealth_total += income_struct.get("wealth_transactions", 0) * 10000  # 粗略估算
+
+            # 【修复】聚合房产数据 - 从 profile 或外部缓存
+            properties = profile.get("properties", []) or profile.get("properties_precise", [])
+            if properties:
+                property_count += len(properties)
+            else:
+                # 从外部缓存查找
+                person_id = self._name_to_id_map.get(name)
+                if person_id and person_id in self._external_property_cache:
+                    property_count += len(self._external_property_cache[person_id])
+
+            # 【修复】聚合车辆数据 - 从 profile 或外部缓存
+            vehicles = profile.get("vehicles", [])
+            if vehicles:
+                vehicle_count += len(vehicles)
+            else:
+                # 从外部缓存查找
+                person_id = self._name_to_id_map.get(name)
+                if person_id and person_id in self._external_vehicle_cache:
+                    vehicle_count += len(self._external_vehicle_cache[person_id])
 
         # 计算派生指标
         salary_ratio = (salary_total / total_income * 100) if total_income > 0 else 0
@@ -1167,6 +1199,13 @@ class InvestigationReportBuilder:
             "wealth_total": wealth_total,
             "member_count": len(member_profiles),
             "member_breakdown": member_profiles,
+            # 【修复】添加房产/车辆统计
+            "property_count": property_count,
+            "vehicle_count": vehicle_count,
+            "assets": {
+                "real_estate_count": property_count,
+                "vehicle_count": vehicle_count,
+            }
         }
 
     def _build_family_unit_summary(self, members: List[str]) -> Dict:
@@ -2546,6 +2585,10 @@ class InvestigationReportBuilder:
         """构建家庭资产汇总"""
         deposits = 0.0
         wealth_holdings = 0.0
+        
+        # 【修复】统计房产和车辆
+        property_count = 0
+        vehicle_count = 0
 
         for name in members:
             profile = self.profiles.get(name, {})
@@ -2553,11 +2596,27 @@ class InvestigationReportBuilder:
             wealth_holdings += profile.get("wealthTotal", 0) or 0
             # 存款估算 (使用最后余额或其他方式)
             # TODO: 需要从 bank_accounts 获取真实余额
+            
+            # 【修复】从 profile 获取房产/车辆
+            if profile.get("properties"):
+                property_count += len(profile["properties"])
+            if profile.get("properties_precise"):
+                property_count += len(profile["properties_precise"])
+            if profile.get("vehicles"):
+                vehicle_count += len(profile["vehicles"])
+            
+            # 【修复】从外部缓存获取房产/车辆（通过身份证号映射）
+            person_id = self._name_to_id_map.get(name)
+            if person_id:
+                if person_id in self._external_property_cache:
+                    property_count += len(self._external_property_cache[person_id])
+                if person_id in self._external_vehicle_cache:
+                    vehicle_count += len(self._external_vehicle_cache[person_id])
 
         return FamilyAssetsSummary(
-            real_estate_count=0,  # 需外部数据
-            real_estate_value=0.0,
-            vehicle_count=0,  # 需外部数据
+            real_estate_count=property_count,  # 【修复】使用实际统计
+            real_estate_value=0.0,  # TODO: 需要计算房产价值
+            vehicle_count=vehicle_count,  # 【修复】使用实际统计
             deposits=deposits / 10000,  # 转万元
             wealth_holdings=wealth_holdings / 10000,
             total_assets=(deposits + wealth_holdings) / 10000,
@@ -2582,10 +2641,13 @@ class InvestigationReportBuilder:
         """构建单个成员详情"""
         profile = self.profiles.get(name, {})
 
-        # 基础信息
-        total_income = profile.get("totalIncome", 0) or 0
-        total_expense = profile.get("totalExpense", 0) or 0
-        transaction_count = profile.get("transactionCount", 0) or 0
+        # 获取收入结构数据（新格式在 income_structure 中）
+        income_struct = profile.get("income_structure", {})
+        
+        # 基础信息 - 兼容两种格式
+        total_income = income_struct.get("total_income") or profile.get("totalIncome", 0) or 0
+        total_expense = income_struct.get("total_expense") or profile.get("totalExpense", 0) or 0
+        transaction_count = income_struct.get("transaction_count") or profile.get("transactionCount", 0) or 0
 
         # 资产板块
         assets = self._build_person_assets(name, profile)
@@ -4131,6 +4193,131 @@ class InvestigationReportBuilder:
         )
         return report
 
+    # ==================== v5.0: 最新报告生成 ====================
+
+    def build_report_v5(
+        self,
+        config: PrimaryTargetsConfig = None,
+        case_background: str = None,
+        data_scope: str = None,
+    ) -> Dict:
+        """
+        【v5.0】最新报告生成 - 完整四部分架构
+
+        报告结构（遵循最新报告生成构架准则）：
+        1. 元信息 (meta)
+        2. PART A: 家庭核查部分（家庭层级）
+           - 家庭概况（成员构成、资产汇总、收支总览）
+           - 家庭年度工资汇总（表格）
+           - 家庭层面风险分析
+           - 综合话术
+        3. PART B: 个人核查部分（成员循环体，16个板块）
+           - 板块一：个人资产收入（静态盘点）
+             * 基本身份信息、房产情况、工资奖金收入
+             * 银行存款情况、理财情况、车辆情况
+           - 板块二：数据分析（动态排查）
+             * 家庭存款与家庭收入匹配分析
+             * 银行流水交易对象分析（含借贷、理财往来）
+             * 大额存取现金情况、大额转账记录分析
+             * 企业登记及纳税分析、反洗钱分析
+             * 同行人分析、时空碰撞分析
+             * 五维度风险评分、专业审计话术
+        4. PART C: 公司核查部分（5个维度）
+           - 资金流水总体规模
+           - 与调查单位资金往来
+           - 与关键人员关联交易
+           - 现金交易分析
+           - 基础信息核查
+        5. PART D: 综合研判
+           - 问题清单
+           - 研判意见
+           - 下一步工作建议
+           - 风险统计
+
+        Args:
+            config: 归集配置对象（可选，默认使用缓存中的家庭成员）
+            case_background: 案件背景
+            data_scope: 数据范围
+
+        Returns:
+            完整报告字典（v5.0格式）
+        """
+        logger.info(f"[初查报告v5] 开始生成最新报告（完整四部分架构）")
+
+        # 复用v4.0的核心逻辑构建基础数据
+        base_report = self.build_report_v4(config, case_background, data_scope)
+
+        # v5.0增强：构建完整四部分架构（同时保留v4.0字段用于HTML模板兼容）
+        report = {
+            # v4.0 兼容字段（用于HTML模板渲染）
+            "meta": {
+                "doc_number": base_report["meta"].get("doc_number", ""),
+                "case_background": case_background or "根据相关线索反映，现对相关人员进行资金穿透核查。",
+                "data_scope": data_scope or "银行流水、不动产、机动车、反洗钱、出行记录、企业登记信息",
+                "generated_at": datetime.now().isoformat(),
+                "version": "5.0.0",
+                "generator": "穿云审计初查报告引擎 v5.0.0（完整四部分架构）",
+                "core_persons": self._core_persons,
+                "companies": self._companies,
+            },
+            "preface": base_report.get("preface", {}),
+            "family_sections": base_report.get("family_sections", []),
+            "person_sections": base_report.get("person_sections", []),
+            "company_sections": base_report.get("company_sections", []),
+            "conclusion": base_report.get("conclusion", {}),
+            "next_steps": base_report.get("next_steps", []),
+            # v5.0 新增：四部分架构
+            "part_a_family_analysis": {
+                "family_sections": base_report.get("family_sections", []),
+                "summary": self._build_family_summary_v5(base_report.get("family_sections", [])),
+            },
+            "part_b_person_analysis": {
+                "person_sections": base_report.get("person_sections", []),
+            },
+            "part_c_company_analysis": {
+                "company_sections": base_report.get("company_sections", []),
+            },
+            "part_d_conclusion": {
+                "conclusion": base_report.get("conclusion", {}),
+                "next_steps": base_report.get("next_steps", []),
+                "risk_statistics": base_report.get("conclusion", {}).get("risk_statistics", {}),
+            },
+        }
+
+        logger.info(f"[初查报告v5] 报告生成完成，完整四部分架构（含v4.0兼容字段）")
+        return report
+
+    def _build_family_summary_v5(self, family_sections: List[Dict]) -> Dict:
+        """【v5.0】构建家庭汇总信息"""
+        total_families = len(family_sections)
+        total_members = sum(len(f.get("member_sections", [])) for f in family_sections)
+
+        # 汇总资产
+        total_property_value = 0.0
+        total_bank_balance = 0.0
+        total_wealth = 0.0
+
+        for family in family_sections:
+            family_overview = family.get("family_overview", {})
+            assets = family_overview.get("assets_overview", {})
+            total_property_value += assets.get("property_value", 0)
+            total_bank_balance += assets.get("bank_balance", 0)
+            total_wealth += assets.get("wealth_holding", 0)
+
+        return {
+            "total_families": total_families,
+            "total_members": total_members,
+            "total_assets_summary": {
+                "property_value_wan": round(total_property_value, 2),
+                "bank_balance_wan": round(total_bank_balance / 10000, 2),
+                "wealth_holding_wan": round(total_wealth / 10000, 2),
+                "total_assets_wan": round(
+                    (total_property_value * 10000 + total_bank_balance + total_wealth) / 10000, 2
+                ),
+            },
+            "narrative": f"本次核查共涉及{total_families}个家庭，{total_members}名人员，总资产约{(total_property_value * 10000 + total_bank_balance + total_wealth) / 10000:.1f}万元。",
+        }
+
     def _build_families_from_cache(self, all_persons: List[str]) -> Dict:
         """
         从缓存中的family_units_v2构建家庭分组（户主优先原则）
@@ -4375,8 +4562,9 @@ class InvestigationReportBuilder:
         cached_members = set(cached_summary.get("family_members", []))
         current_members = set(members)
 
-        # 检查是否可以使用缓存（成员列表完全匹配）
-        use_cache = cached_members == current_members and cached_summary
+        # 检查是否可以使用缓存（成员列表完全匹配且数据有效）
+        cache_income = cached_summary.get("total_income", 0) or 0
+        use_cache = (cached_members == current_members and cached_summary and cache_income > 0)
 
         if use_cache:
             # 从缓存获取收支数据
@@ -4406,15 +4594,21 @@ class InvestigationReportBuilder:
                 total_expense += profile.get("totalExpense", 0) or 0
                 total_wealth += profile.get("wealthTotal", 0) or 0
 
-                # 银行账户余额
-                accounts = profile.get("bankAccounts", []) or profile.get(
-                    "bank_accounts", []
+                # 银行账户余额（兼容多种字段名）
+                accounts = (
+                    profile.get("bankAccounts", [])
+                    or profile.get("bank_accounts", [])
+                    or profile.get("bank_accounts_official", [])
                 )
                 if isinstance(accounts, list):
                     for acc in accounts:
-                        total_bank_balance += (
-                            acc.get("last_balance", 0) or acc.get("balance", 0) or 0
+                        balance = (
+                            acc.get("last_balance", 0)
+                            or acc.get("balance", 0)
+                            or acc.get("账户余额", 0)
+                            or 0
                         )
+                        total_bank_balance += balance
 
         # ========== 工资数据仍从 profiles 获取（缓存中没有） ==========
         total_salary = 0.0
@@ -4678,11 +4872,34 @@ class InvestigationReportBuilder:
         # 【6.1修复】生成增强版结论文本
         conclusion_text = self._generate_enhanced_summary_text_v4(issues, risk_levels)
 
+        # 【v5.0】计算风险统计
+        total_amount = 0.0
+        for issue in issues:
+            # 尝试从描述中提取金额
+            desc = issue.get("description", "")
+            # 简单提取：查找 "X万元" 格式
+            import re
+            amounts = re.findall(r'(\d+\.?\d*)万元', desc)
+            for amt in amounts:
+                try:
+                    total_amount += float(amt) * 10000
+                except:
+                    pass
+
+        risk_statistics = {
+            "high_risk_count": risk_levels.get("high", 0),
+            "medium_risk_count": risk_levels.get("medium", 0),
+            "low_risk_count": risk_levels.get("low", 0),
+            "total_amount": total_amount,
+            "total_amount_wan": round(total_amount / 10000, 2),
+        }
+
         return {
             "issues": issues,
             "issue_count": len(issues),
             "risk_levels": risk_levels,
             "summary_narrative": conclusion_text,
+            "risk_statistics": risk_statistics,
         }
 
     def _generate_enhanced_summary_text_v4(
@@ -5749,6 +5966,10 @@ class InvestigationReportBuilder:
                 "counterparty_analysis": self._build_counterparty_analysis_v4(
                     name, profile
                 ),
+                "lending_analysis": self._build_lending_analysis_v4(name, profile),
+                "wealth_transaction_analysis": self._build_wealth_transaction_analysis_v4(
+                    name, profile
+                ),
                 "large_cash_analysis": self._build_large_cash_analysis_v4(
                     name, profile
                 ),
@@ -5758,6 +5979,15 @@ class InvestigationReportBuilder:
                 "aml_analysis": self._build_aml_analysis_v4(name, profile),
                 "tax_analysis": self._build_tax_analysis_v4(name, profile),
                 "travel_analysis": self._build_travel_analysis_v4(name, profile),
+                "timeline_collision_analysis": self._build_timeline_collision_analysis_v4(
+                    name, profile
+                ),
+                "five_dimension_score": self._build_five_dimension_score_v4(
+                    name, profile
+                ),
+                "professional_audit_narrative": self._generate_professional_audit_narrative_v4(
+                    name, profile
+                ),
             },
         }
 
@@ -6936,6 +7166,379 @@ class InvestigationReportBuilder:
             else "【待调取】出行数据",
         }
 
+    # ==================== v5.0 新增方法 ====================
+
+    def _build_lending_analysis_v4(self, name: str, profile: Dict) -> Dict:
+        """【v5.0】构建借贷往来分析"""
+        # 识别网贷平台关键词
+        lending_keywords = ["借呗", "微粒贷", "京东白条", "苏宁任性贷", "招联好期贷"]
+        
+        transactions = profile.get("transactions", [])
+        platforms = []
+        total_borrowing = 0.0
+        total_repayment = 0.0
+        
+        for kw in lending_keywords:
+            platform_inflow = 0.0
+            platform_outflow = 0.0
+            transaction_count = 0
+            
+            for tx in transactions:
+                counterparty = str(tx.get("counterparty", ""))
+                if kw in counterparty:
+                    amount = tx.get("amount", 0) or 0
+                    direction = tx.get("direction", "")
+                    if direction == "in":
+                        platform_inflow += amount
+                    else:
+                        platform_outflow += amount
+                    transaction_count += 1
+            
+            if transaction_count > 0:
+                platforms.append({
+                    "platform_name": kw,
+                    "total_inflow": platform_inflow,
+                    "total_outflow": platform_outflow,
+                    "transaction_count": transaction_count,
+                    "is_bidirectional": platform_inflow > 0 and platform_outflow > 0,
+                })
+                total_borrowing += platform_inflow
+                total_repayment += platform_outflow
+        
+        has_multi_platform = len(platforms) >= 2
+        risk_level = "high" if has_multi_platform else ("medium" if platforms else "low")
+        
+        # 生成描述
+        narrative_parts = []
+        if platforms:
+            narrative_parts.append(f"涉及{len(platforms)}个网贷平台")
+            if has_multi_platform:
+                narrative_parts.append("存在多头借贷风险")
+            narrative_parts.append(f"借款总额{total_borrowing / 10000:.1f}万元，还款总额{total_repayment / 10000:.1f}万元")
+        else:
+            narrative_parts.append("未发现网贷平台往来记录")
+        
+        return {
+            "platforms": platforms,
+            "total_platforms": len(platforms),
+            "total_borrowing": total_borrowing,
+            "total_repayment": total_repayment,
+            "has_multi_platform": has_multi_platform,
+            "risk_level": risk_level,
+            "narrative": "；".join(narrative_parts) + "。" if narrative_parts else "无借贷记录",
+        }
+
+    def _build_wealth_transaction_analysis_v4(self, name: str, profile: Dict) -> Dict:
+        """【v5.0】构建理财往来分析"""
+        transactions = profile.get("transactions", [])
+        
+        wealth_keywords = ["理财", "基金", "证券", "购买", "赎回", "收益"]
+        wealth_transactions = []
+        total_purchase = 0.0
+        total_redemption = 0.0
+        total_income = 0.0
+        
+        for tx in transactions:
+            summary = str(tx.get("summary", ""))
+            counterparty = str(tx.get("counterparty", ""))
+            
+            is_wealth = any(kw in summary or kw in counterparty for kw in wealth_keywords)
+            if is_wealth:
+                amount = tx.get("amount", 0) or 0
+                direction = tx.get("direction", "")
+                
+                wealth_transactions.append({
+                    "product_name": counterparty or summary,
+                    "transaction_type": "购买" if direction == "out" else ("赎回" if direction == "in" else "未知"),
+                    "amount": amount,
+                    "date": tx.get("date", ""),
+                    "counterparty": counterparty,
+                })
+                
+                if "购买" in summary or direction == "out":
+                    total_purchase += amount
+                elif "赎回" in summary or "收益" in summary or direction == "in":
+                    total_redemption += amount
+        
+        # 估算收益（简化计算）
+        total_income = max(0, total_redemption - total_purchase)
+        
+        product_names = set(tx["product_name"] for tx in wealth_transactions)
+        
+        narrative = f"理财交易{len(wealth_transactions)}笔，购买{total_purchase / 10000:.1f}万元，赎回{total_redemption / 10000:.1f}万元"
+        if total_income > 0:
+            narrative += f"，收益约{total_income / 10000:.1f}万元"
+        
+        return {
+            "transactions": wealth_transactions[:20],  # 限制返回数量
+            "total_purchase": total_purchase,
+            "total_redemption": total_redemption,
+            "total_income": total_income,
+            "product_count": len(product_names),
+            "narrative": narrative if wealth_transactions else "未发现理财交易记录",
+        }
+
+    def _build_timeline_collision_analysis_v4(self, name: str, profile: Dict) -> Dict:
+        """【v5.0】构建时空碰撞分析"""
+        collisions = []
+        
+        # 获取房产购置时间
+        properties = profile.get("properties", [])
+        for prop in properties:
+            reg_date = prop.get("registration_date", "")
+            if reg_date:
+                collisions.append({
+                    "event_type": "购房",
+                    "event_date": reg_date,
+                    "amount": prop.get("estimated_value", 0) or 0,
+                    "description": f"购置{prop.get('address', '房产')}，面积{prop.get('area', '未知')}",
+                    "risk_level": "medium",
+                })
+        
+        # 获取大额收入时间（简化：取最大的5笔收入）
+        transactions = profile.get("transactions", [])
+        large_inflows = sorted(
+            [tx for tx in transactions if tx.get("direction") == "in" and tx.get("amount", 0) > 100000],
+            key=lambda x: x.get("amount", 0),
+            reverse=True
+        )[:5]
+        
+        for tx in large_inflows:
+            collisions.append({
+                "event_type": "大额收入",
+                "event_date": tx.get("date", ""),
+                "amount": tx.get("amount", 0) or 0,
+                "description": f"收入{tx.get('amount', 0) / 10000:.1f}万元，来自{tx.get('counterparty', '未知')}",
+                "risk_level": "low",
+            })
+        
+        property_purchase_collisions = [c for c in collisions if c["event_type"] == "购房"]
+        income_timing_collisions = [c for c in collisions if c["event_type"] == "大额收入"]
+        
+        collision_count = len(collisions)
+        risk_level = "high" if collision_count >= 3 else ("medium" if collision_count >= 1 else "low")
+        
+        narrative_parts = []
+        if property_purchase_collisions:
+            narrative_parts.append(f"房产购置记录{collision_count}条")
+        if income_timing_collisions:
+            narrative_parts.append(f"大额收入记录{len(income_timing_collisions)}条")
+        if not narrative_parts:
+            narrative_parts.append("未发现明显时空碰撞")
+        
+        return {
+            "collisions": collisions,
+            "property_purchase_collisions": property_purchase_collisions,
+            "income_timing_collisions": income_timing_collisions,
+            "collision_count": collision_count,
+            "risk_level": risk_level,
+            "narrative": "；".join(narrative_parts) + "。",
+        }
+
+    def _build_five_dimension_score_v4(self, name: str, profile: Dict) -> Dict:
+        """【v5.0】构建五维度风险评分"""
+        from report_schema import DimensionScore, FiveDimensionScore
+        
+        # 1. 收支匹配度（25分满分）
+        total_income = profile.get("totalIncome", 0) or 0
+        total_expense = profile.get("totalExpense", 0) or 0
+        salary_total = profile.get("salaryTotal", 0) or 0
+        
+        if total_income > 0:
+            salary_ratio = salary_total / total_income
+            income_expense_score = 25 * min(1.0, salary_ratio) if salary_ratio < 0.5 else 25
+        else:
+            income_expense_score = 0
+        
+        income_expense = DimensionScore(
+            name="收支匹配度",
+            score=round(income_expense_score, 1),
+            max_score=25,
+            risk_level="low" if income_expense_score >= 20 else ("medium" if income_expense_score >= 10 else "high"),
+            description=f"工资收入占比{salary_ratio * 100:.1f}%" if total_income > 0 else "无收入数据",
+        )
+        
+        # 2. 借贷行为（20分满分）
+        lending_analysis = self._build_lending_analysis_v4(name, profile)
+        if lending_analysis["has_multi_platform"]:
+            lending_score = 5
+        elif lending_analysis["total_platforms"] > 0:
+            lending_score = 15
+        else:
+            lending_score = 20
+        
+        lending_behavior = DimensionScore(
+            name="借贷行为",
+            score=lending_score,
+            max_score=20,
+            risk_level="low" if lending_score >= 16 else ("medium" if lending_score >= 10 else "high"),
+            description=f"涉及{lending_analysis['total_platforms']}个借贷平台" if lending_analysis["total_platforms"] > 0 else "无借贷记录",
+        )
+        
+        # 3. 消费特征（15分满分）
+        # 简化：基于支出金额评估
+        if total_income > 0:
+            expense_ratio = total_expense / total_income
+            consumption_score = 15 * (1 - min(0.8, expense_ratio)) if expense_ratio < 0.8 else 3
+        else:
+            consumption_score = 10
+        
+        consumption_pattern = DimensionScore(
+            name="消费特征",
+            score=round(consumption_score, 1),
+            max_score=15,
+            risk_level="low" if consumption_score >= 12 else ("medium" if consumption_score >= 8 else "high"),
+            description=f"支出占收入{expense_ratio * 100:.1f}%" if total_income > 0 else "无法评估",
+        )
+        
+        # 4. 资金流向（25分满分）
+        # 简化：基于交易对手方多样性
+        counterparties = set()
+        for tx in profile.get("transactions", []):
+            counterparties.add(tx.get("counterparty", ""))
+        
+        diversity_score = min(25, len(counterparties) / 10 * 25) if counterparties else 15
+        fund_flow = DimensionScore(
+            name="资金流向",
+            score=round(diversity_score, 1),
+            max_score=25,
+            risk_level="low" if diversity_score >= 20 else ("medium" if diversity_score >= 12 else "high"),
+            description=f"交易对手方{len(counterparties)}个",
+        )
+        
+        # 5. 现金操作（15分满分）
+        cash_analysis = self._build_large_cash_analysis_v4(name, profile)
+        if cash_analysis.get("risk_level") == "high":
+            cash_score = 5
+        elif cash_analysis.get("risk_level") == "medium":
+            cash_score = 10
+        else:
+            cash_score = 15
+        
+        cash_operation = DimensionScore(
+            name="现金操作",
+            score=cash_score,
+            max_score=15,
+            risk_level=cash_analysis.get("risk_level", "low"),
+            description=cash_analysis.get("narrative", "无大额现金记录")[:50],
+        )
+        
+        # 总分
+        total_score = (
+            income_expense.score +
+            lending_behavior.score +
+            consumption_pattern.score +
+            fund_flow.score +
+            cash_operation.score
+        )
+        
+        risk_level = "low" if total_score >= 80 else ("medium" if total_score >= 60 else "high")
+        
+        narrative = f"五维度综合评分{total_score:.0f}分（满分100分），整体风险等级：{'低' if risk_level == 'low' else ('中' if risk_level == 'medium' else '高')}"
+        
+        return {
+            "income_expense_match": {
+                "name": income_expense.name,
+                "score": income_expense.score,
+                "max_score": income_expense.max_score,
+                "risk_level": income_expense.risk_level,
+                "description": income_expense.description,
+            },
+            "lending_behavior": {
+                "name": lending_behavior.name,
+                "score": lending_behavior.score,
+                "max_score": lending_behavior.max_score,
+                "risk_level": lending_behavior.risk_level,
+                "description": lending_behavior.description,
+            },
+            "consumption_pattern": {
+                "name": consumption_pattern.name,
+                "score": consumption_pattern.score,
+                "max_score": consumption_pattern.max_score,
+                "risk_level": consumption_pattern.risk_level,
+                "description": consumption_pattern.description,
+            },
+            "fund_flow": {
+                "name": fund_flow.name,
+                "score": fund_flow.score,
+                "max_score": fund_flow.max_score,
+                "risk_level": fund_flow.risk_level,
+                "description": fund_flow.description,
+            },
+            "cash_operation": {
+                "name": cash_operation.name,
+                "score": cash_operation.score,
+                "max_score": cash_operation.max_score,
+                "risk_level": cash_operation.risk_level,
+                "description": cash_operation.description,
+            },
+            "total_score": round(total_score, 1),
+            "total_max": 100,
+            "risk_level": risk_level,
+            "narrative": narrative,
+        }
+
+    def _generate_professional_audit_narrative_v4(self, name: str, profile: Dict) -> Dict:
+        """【v5.0】生成专业审计话术"""
+        # 资金特征综合描述
+        fund_characteristics_parts = []
+        
+        total_income = profile.get("totalIncome", 0) or 0
+        total_expense = profile.get("totalExpense", 0) or 0
+        salary_total = profile.get("salaryTotal", 0) or 0
+        
+        if total_income > 0:
+            salary_ratio = salary_total / total_income
+            if salary_ratio >= 0.7:
+                fund_characteristics_parts.append(f"{name}资金主要来源于工资收入，收入来源合法稳定")
+            elif salary_ratio >= 0.4:
+                fund_characteristics_parts.append(f"{name}资金来源较为多元，工资收入占比{salary_ratio * 100:.0f}%")
+            else:
+                fund_characteristics_parts.append(f"{name}非工资收入占比较高，需关注资金来源")
+        
+        # 检查借贷情况
+        lending = self._build_lending_analysis_v4(name, profile)
+        if lending["has_multi_platform"]:
+            fund_characteristics_parts.append(f"存在多头借贷行为，涉及{lending['total_platforms']}个平台")
+        
+        # 检查现金交易
+        cash = self._build_large_cash_analysis_v4(name, profile)
+        if cash.get("risk_level") == "high":
+            fund_characteristics_parts.append("存在大额现金交易，需关注资金来源及去向")
+        
+        fund_characteristics = "；".join(fund_characteristics_parts) + "。" if fund_characteristics_parts else f"{name}资金特征无明显异常。"
+        
+        # 结论性意见
+        five_dimension = self._build_five_dimension_score_v4(name, profile)
+        if five_dimension["risk_level"] == "low":
+            conclusion = f"经核查，{name}资金流水总体正常，未发现明显异常"
+        elif five_dimension["risk_level"] == "medium":
+            conclusion = f"经核查，{name}资金流水存在部分疑点，建议进一步核实"
+        else:
+            conclusion = f"经核查，{name}资金流水存在多项异常，建议重点关注"
+        
+        # 高风险预警清单
+        high_risk_warnings = []
+        
+        if five_dimension["income_expense_match"]["risk_level"] == "high":
+            high_risk_warnings.append("收支不匹配：工资收入占比较低，需关注其他收入来源")
+        
+        if lending["has_multi_platform"]:
+            high_risk_warnings.append(f"多头借贷：涉及{lending['total_platforms']}个网贷平台")
+        
+        if cash.get("risk_level") == "high":
+            high_risk_warnings.append("大额现金：存在异常大额现金存取行为")
+        
+        timeline = self._build_timeline_collision_analysis_v4(name, profile)
+        if timeline["collision_count"] >= 3:
+            high_risk_warnings.append("时空碰撞：存在多处资产购置与收入时点不匹配")
+        
+        return {
+            "fund_characteristics": fund_characteristics,
+            "conclusion": conclusion,
+            "high_risk_warnings": high_risk_warnings,
+        }
+
     def generate_complete_txt_report(self, output_path: str) -> str:
         """
         生成完整的核查结果分析报告.txt（增强版）
@@ -7509,19 +8112,38 @@ def load_investigation_report_builder(
     for key, filename in cache_files.items():
         filepath = os.path.join(cache_dir, filename)
 
-        # profiles 特殊处理，优先加载完整版
+        # profiles 特殊处理，优先加载完整版，但验证数据有效性
         if key == "profiles":
             full_filepath = os.path.join(cache_dir, "profiles_full.json")
+            profiles_full_valid = False
             if os.path.exists(full_filepath):
                 try:
                     with open(full_filepath, "r", encoding="utf-8") as f:
-                        analysis_cache[key] = json.load(f)
-                    logger.info(f"[初查报告] 已加载完整画像: profiles_full.json")
-                    continue
+                        profiles_full = json.load(f)
+                    # 验证数据是否有效（检查第一个人的totalIncome是否存在）
+                    first_person = list(profiles_full.keys())[0] if profiles_full else None
+                    if first_person and profiles_full[first_person].get("totalIncome"):
+                        analysis_cache[key] = profiles_full
+                        profiles_full_valid = True
+                        logger.info(f"[初查报告] 已加载完整画像: profiles_full.json (数据有效)")
+                        continue
+                    else:
+                        logger.warning(f"[初查报告] profiles_full.json 数据无效，回退到简化版")
                 except Exception as e:
                     logger.warning(
                         f"[初查报告] 加载 profiles_full.json 失败: {e}，回退到简化版"
                     )
+            
+            if not profiles_full_valid:
+                # 尝试加载简化版并合并数据
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        profiles_simple = json.load(f)
+                    analysis_cache[key] = profiles_simple
+                    logger.info(f"[初查报告] 已加载简化画像: profiles.json ({len(profiles_simple)} 个实体)")
+                    continue
+                except Exception as e2:
+                    logger.warning(f"[初查报告] 加载 profiles.json 也失败: {e2}")
 
         if os.path.exists(filepath):
             try:

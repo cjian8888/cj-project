@@ -1327,9 +1327,142 @@ class IssueItem:
     priority_score: int = 0  # 优先级评分（0-100，用于排序）
 
 
+# ============================================================
+# v5.0 新增：完整数据结构定义
+# ============================================================
+
+
+@dataclass
+class DimensionScore:
+    """五维度评分单项"""
+
+    name: str = ""  # 维度名称
+    score: float = 0.0  # 得分
+    max_score: float = 0.0  # 满分
+    risk_level: str = "low"  # 风险等级：low/medium/high
+    description: str = ""  # 描述
+
+
+@dataclass
+class FiveDimensionScore:
+    """五维度风险评分"""
+
+    income_expense_match: DimensionScore = field(default_factory=DimensionScore)
+    lending_behavior: DimensionScore = field(default_factory=DimensionScore)
+    consumption_pattern: DimensionScore = field(default_factory=DimensionScore)
+    fund_flow: DimensionScore = field(default_factory=DimensionScore)
+    cash_operation: DimensionScore = field(default_factory=DimensionScore)
+    total_score: float = 0.0  # 总分
+    total_max: float = 100.0  # 总分满分
+    risk_level: str = "low"  # 总体风险等级
+    narrative: str = ""  # 综合描述
+
+
+@dataclass
+class LendingPlatformRecord:
+    """网贷平台往来记录"""
+
+    platform_name: str = ""  # 平台名称
+    total_inflow: float = 0.0  # 总流入
+    total_outflow: float = 0.0  # 总流出
+    transaction_count: int = 0  # 交易笔数
+    first_date: str = ""  # 首次交易日期
+    last_date: str = ""  # 最后交易日期
+    is_bidirectional: bool = False  # 是否有双向往来
+
+
+@dataclass
+class LendingAnalysis:
+    """借贷往来分析"""
+
+    platforms: List[LendingPlatformRecord] = field(default_factory=list)
+    total_platforms: int = 0  # 平台数量
+    total_borrowing: float = 0.0  # 总借款金额
+    total_repayment: float = 0.0  # 总还款金额
+    has_multi_platform: bool = False  # 是否多头借贷
+    risk_level: str = "low"
+    narrative: str = ""  # 分析描述
+
+
+@dataclass
+class WealthTransactionRecord:
+    """理财交易记录"""
+
+    product_name: str = ""  # 产品名称
+    transaction_type: str = ""  # 交易类型：购买/赎回/收益
+    amount: float = 0.0  # 金额
+    date: str = ""  # 日期
+    counterparty: str = ""  # 对手方
+
+
+@dataclass
+class WealthTransactionAnalysis:
+    """理财往来分析"""
+
+    transactions: List[WealthTransactionRecord] = field(default_factory=list)
+    total_purchase: float = 0.0  # 总购买金额
+    total_redemption: float = 0.0  # 总赎回金额
+    total_income: float = 0.0  # 总收益
+    product_count: int = 0  # 产品数量
+    narrative: str = ""  # 分析描述
+
+
+@dataclass
+class TimelineCollisionItem:
+    """时空碰撞单项"""
+
+    event_type: str = ""  # 事件类型：购房/大额收入/入职/提拔
+    event_date: str = ""  # 事件日期
+    amount: float = 0.0  # 涉及金额
+    description: str = ""  # 描述
+    risk_level: str = "low"  # 风险等级
+
+
+@dataclass
+class TimelineCollisionAnalysis:
+    """时空碰撞分析"""
+
+    collisions: List[TimelineCollisionItem] = field(default_factory=list)
+    property_purchase_collisions: List[TimelineCollisionItem] = field(default_factory=list)
+    income_timing_collisions: List[TimelineCollisionItem] = field(default_factory=list)
+    collision_count: int = 0  # 碰撞点数量
+    risk_level: str = "low"
+    narrative: str = ""  # 分析描述
+
+
+@dataclass
+class ProfessionalAuditNarrative:
+    """专业审计话术"""
+
+    fund_characteristics: str = ""  # 个人资金特征综合描述
+    conclusion: str = ""  # 结论性意见
+    high_risk_warnings: List[str] = field(default_factory=list)  # 高风险预警清单
+
+
+@dataclass
+class FamilyRiskAnalysis:
+    """家庭层面风险分析"""
+
+    income_asset_match: Dict[str, Any] = field(default_factory=dict)
+    internal_transfer_risk: Dict[str, Any] = field(default_factory=dict)
+    overall_risk_level: str = "low"
+    narrative: str = ""  # 综合风险描述
+
+
+@dataclass
+class RiskStatistics:
+    """风险统计"""
+
+    high_risk_count: int = 0
+    medium_risk_count: int = 0
+    low_risk_count: int = 0
+    total_amount: float = 0.0  # 问题涉及总金额
+    total_amount_wan: float = 0.0  # 问题涉及总金额（万元）
+
+
 @dataclass
 class InvestigationConclusion:
-    """综合研判"""
+    """综合研判（v5.0增强版）"""
 
     summary_text: str = ""  # 研判意见
     issues: List[IssueItem] = field(default_factory=list)
@@ -1342,6 +1475,8 @@ class InvestigationConclusion:
     highly_suspicious_count: int = 0  # 高度可疑
     need_verification_count: int = 0  # 需核实
     total_amount: float = 0.0  # 问题涉及总金额
+    # v5.0 新增
+    risk_statistics: RiskStatistics = field(default_factory=RiskStatistics)
 
 
 @dataclass
