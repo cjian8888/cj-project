@@ -2130,24 +2130,46 @@ async def preview_report_file(filename: str):
     预览报告文件内容
 
     Args:
-        filename: 报告文件名
+        filename: 报告文件名（支持子目录路径如"专项报告/xxx.txt"）
 
     Returns:
         文件内容（txt/html/md）或下载链接（xlsx）
     """
     logger = logging.getLogger(__name__)
+    logger.info(f"[报告预览] 请求预览: {filename}")
 
     # 安全检查：防止路径遍历攻击
-    safe_filename = os.path.basename(filename)
-    filepath = os.path.join("output", "analysis_results", safe_filename)
-
-    if not os.path.exists(filepath):
+    # 1. 规范化路径（去除 .. 等）
+    # 2. 确保最终路径在允许的目录内
+    normalized_path = os.path.normpath(filename)
+    
+    # 检查是否包含路径遍历攻击（规范化后仍包含..）
+    if ".." in normalized_path or normalized_path.startswith("/") or normalized_path.startswith("\\"):
         return JSONResponse(
-            status_code=404,
-            content={"success": False, "error": f"文件不存在: {safe_filename}"},
+            status_code=400,
+            content={"success": False, "error": "非法文件路径"},
+        )
+    
+    # 构建完整路径
+    base_dir = os.path.abspath("output/analysis_results")
+    filepath = os.path.abspath(os.path.join("output", "analysis_results", normalized_path))
+    
+    # 确保路径在允许的目录内
+    if not filepath.startswith(base_dir):
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "error": "非法文件路径"},
         )
 
-    ext = os.path.splitext(safe_filename)[1].lower()
+    if not os.path.exists(filepath):
+        logger.warning(f"[报告预览] 文件不存在: {filepath}")
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "error": f"文件不存在: {filename}"},
+        )
+
+    # 获取文件扩展名（用于判断文件类型）
+    ext = os.path.splitext(filepath)[1].lower()
 
     try:
         if ext == ".txt" or ext == ".md":
@@ -2194,22 +2216,41 @@ async def download_report_file(filename: str):
     下载报告文件
 
     Args:
-        filename: 报告文件名
+        filename: 报告文件名（支持子目录路径如"专项报告/xxx.txt"）
     """
     from fastapi.responses import FileResponse
 
-    # 安全检查
-    safe_filename = os.path.basename(filename)
-    filepath = os.path.join("output", "analysis_results", safe_filename)
+    # 安全检查：防止路径遍历攻击
+    normalized_path = os.path.normpath(filename)
+    
+    # 检查是否包含路径遍历攻击
+    if ".." in normalized_path or normalized_path.startswith("/") or normalized_path.startswith("\\"):
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "error": "非法文件路径"},
+        )
+    
+    # 构建完整路径
+    base_dir = os.path.abspath("output/analysis_results")
+    filepath = os.path.abspath(os.path.join("output", "analysis_results", normalized_path))
+    
+    # 确保路径在允许的目录内
+    if not filepath.startswith(base_dir):
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "error": "非法文件路径"},
+        )
 
     if not os.path.exists(filepath):
         return JSONResponse(
             status_code=404,
-            content={"success": False, "error": f"文件不存在: {safe_filename}"},
+            content={"success": False, "error": f"文件不存在: {filename}"},
         )
 
+    # 下载时使用的文件名（取basename）
+    download_name = os.path.basename(filepath)
     return FileResponse(
-        path=filepath, filename=safe_filename, media_type="application/octet-stream"
+        path=filepath, filename=download_name, media_type="application/octet-stream"
     )
 
 

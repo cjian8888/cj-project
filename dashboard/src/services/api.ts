@@ -88,7 +88,7 @@ export interface WebSocketMessage {
 
 class ApiService {
     private baseUrl: string;
-    private timeout: number = 30000; // 30秒超时
+    private timeout: number = 60000; // 60秒超时
     private maxRetries: number = 3;
     private retryDelay: number = 1000; // 1秒
 

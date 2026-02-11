@@ -2704,11 +2704,40 @@ class InvestigationReportBuilder:
     def _build_bank_accounts(self, name: str, profile: Dict) -> List[BankAccountInfo]:
         """构建银行账户列表（剔除非真实账户，整合官方余额数据）"""
         accounts = []
+        
+        # 【修复】尝试从当前profile获取银行账户
         raw_accounts = (
-            profile.get("bankAccounts", []) or profile.get("bank_accounts", []) or []
+            profile.get("bankAccounts", []) 
+            or profile.get("bank_accounts", []) 
+            or profile.get("bank_accounts_official", [])
+            or []
         )
+        
+        # 【关键修复】如果从简化版profiles.json没有数据，尝试从profiles_full.json加载
+        if not raw_accounts and hasattr(self, '_profiles_full_cache'):
+            full_profile = self._profiles_full_cache.get(name, {})
+            raw_accounts = full_profile.get("bank_accounts", [])
+            if raw_accounts:
+                logger.info(f"[_build_bank_accounts] {name} 从profiles_full.json加载 {len(raw_accounts)} 个账户")
+        
+        # 如果还是没有，尝试从分析缓存加载profiles_full
+        if not raw_accounts:
+            try:
+                cache_dir = os.path.join(self.output_dir, "analysis_cache")
+                full_path = os.path.join(cache_dir, "profiles_full.json")
+                if os.path.exists(full_path):
+                    with open(full_path, "r", encoding="utf-8") as f:
+                        profiles_full = json.load(f)
+                    # 缓存到实例，避免重复加载
+                    self._profiles_full_cache = profiles_full
+                    full_profile = profiles_full.get(name, {})
+                    raw_accounts = full_profile.get("bank_accounts", [])
+                    if raw_accounts:
+                        logger.info(f"[_build_bank_accounts] {name} 从profiles_full.json加载 {len(raw_accounts)} 个账户")
+            except Exception as e:
+                logger.warning(f"[_build_bank_accounts] 加载profiles_full.json失败: {e}")
 
-        # 获取官方账户数据（含余额）用于匹配
+        # 获取官方账户数据（含余额）用于匹配和补充
         official_accounts = profile.get("bank_accounts_official", []) or []
         # 构建账号到余额的映射
         balance_map = {}
@@ -4548,7 +4577,7 @@ class InvestigationReportBuilder:
         构建家庭资产汇总
 
         【优化】优先使用缓存的 family_summary 数据，减少重复计算。
-        只有当成员列表与缓存不匹配时才从 profiles 重新计算。
+        【关键修复】银行余额总是从 profiles_full 重新计算，因为缓存中的 bank_balance 可能不准确。
 
         Args:
             anchor: 户主姓名
@@ -4557,44 +4586,81 @@ class InvestigationReportBuilder:
         Returns:
             家庭汇总字典
         """
-        # ========== 优先使用缓存数据 ==========
-        cached_summary = self.derived_data.get("family_summary", {})
-        cached_members = set(cached_summary.get("family_members", []))
-        current_members = set(members)
-
-        # 检查是否可以使用缓存（成员列表完全匹配且数据有效）
-        cache_income = cached_summary.get("total_income", 0) or 0
-        use_cache = (cached_members == current_members and cached_summary and cache_income > 0)
-
-        if use_cache:
-            # 从缓存获取收支数据
+        # ========== 【关键修复】所有数据优先从 profiles_full 计算 ==========
+        total_income = 0.0
+        total_expense = 0.0
+        total_wealth = 0.0
+        total_bank_balance = 0.0
+        total_property_value = 0.0
+        property_count = 0
+        vehicle_count = 0
+        
+        # 尝试加载 profiles_full
+        profiles_full = getattr(self, '_profiles_full_cache', None)
+        if not profiles_full:
+            try:
+                cache_dir = os.path.join(self.output_dir, "analysis_cache")
+                full_path = os.path.join(cache_dir, "profiles_full.json")
+                if os.path.exists(full_path):
+                    with open(full_path, "r", encoding="utf-8") as f:
+                        profiles_full = json.load(f)
+                    self._profiles_full_cache = profiles_full
+                    logger.info(f"[_build_family_summary_v4] 加载 profiles_full.json 成功")
+            except Exception as e:
+                logger.warning(f"[_build_family_summary_v4] 加载 profiles_full.json 失败: {e}")
+                profiles_full = None
+        
+        # 从 profiles_full 计算所有资产和收支数据
+        if profiles_full:
+            for member in members:
+                full_profile = profiles_full.get(member, {})
+                
+                # 收支数据（从summary或income_structure获取）
+                summary = full_profile.get("summary", {})
+                income_structure = full_profile.get("income_structure", {})
+                total_income += summary.get("total_income", 0) or income_structure.get("total_income", 0) or 0
+                total_expense += summary.get("total_expense", 0) or income_structure.get("total_expense", 0) or 0
+                
+                # 理财数据
+                wealth_mgmt = full_profile.get("wealth_management", {})
+                total_wealth += wealth_mgmt.get("estimated_holding", 0) or 0
+                
+                # 银行余额（只统计真实银行卡且有余额数据的账户）
+                accounts = full_profile.get("bank_accounts", [])
+                if isinstance(accounts, list):
+                    for acc in accounts:
+                        if acc.get("is_real_bank_card") and acc.get("has_balance_data"):
+                            balance = acc.get("last_balance", 0) or 0
+                            total_bank_balance += balance
+                
+                # 房产数据（从外部缓存获取）
+                property_data = self._get_external_property_data(member)
+                if isinstance(property_data, list):
+                    property_count += len(property_data)
+                    for prop in property_data:
+                        # 尝试从房产数据获取价值
+                        prop_value = prop.get("value", 0) or prop.get("price", 0) or 0
+                        total_property_value += prop_value
+                
+                # 车辆数据（从外部缓存获取）
+                vehicle_data = self._get_external_vehicle_data(member)
+                if isinstance(vehicle_data, list):
+                    vehicle_count += len(vehicle_data)
+            
+            logger.info(f"[_build_family_summary_v4] 从 profiles_full 计算: 收入={total_income}, 支出={total_expense}, 银行余额={total_bank_balance}")
+        else:
+            # 回退到从 self.profiles 计算（可能不准确）
+            logger.warning(f"[_build_family_summary_v4] profiles_full 不可用，回退到 profiles")
+            cached_summary = self.derived_data.get("family_summary", {})
             income_expense = cached_summary.get("total_income_expense", {})
             total_income = income_expense.get("total_income", 0) or 0
             total_expense = income_expense.get("total_expense", 0) or 0
-
-            # 从缓存获取资产数据
-            total_assets_cache = cached_summary.get("total_assets", {})
-            total_bank_balance = total_assets_cache.get("bank_balance", 0) or 0
-            total_wealth = total_assets_cache.get("wealth_balance", 0) or 0
-
-            logger.debug(f"[家庭汇总] 使用缓存数据: {anchor} 家庭, 成员匹配")
-        else:
-            # 成员列表不匹配，从 profiles 计算
-            logger.debug(
-                f"[家庭汇总] 成员不匹配，从 profiles 计算: cached={cached_members}, current={current_members}"
-            )
-            total_income = 0.0
-            total_expense = 0.0
-            total_bank_balance = 0.0
-            total_wealth = 0.0
-
+            
             for member in members:
                 profile = self.profiles.get(member, {})
-                total_income += profile.get("totalIncome", 0) or 0
-                total_expense += profile.get("totalExpense", 0) or 0
                 total_wealth += profile.get("wealthTotal", 0) or 0
-
-                # 银行账户余额（兼容多种字段名）
+                
+                # 银行余额
                 accounts = (
                     profile.get("bankAccounts", [])
                     or profile.get("bank_accounts", [])
@@ -4636,16 +4702,24 @@ class InvestigationReportBuilder:
             "member_count": len(members),
             "member_relations": member_relations,
             "total_income": total_income,
-            "total_income_wan": total_income / 10000,
+            "total_income_wan": round(total_income / 10000, 2),
             "total_expense": total_expense,
-            "total_expense_wan": total_expense / 10000,
+            "total_expense_wan": round(total_expense / 10000, 2),
             "total_bank_balance": total_bank_balance,
-            "total_bank_balance_wan": total_bank_balance / 10000,
+            "total_bank_balance_wan": round(total_bank_balance / 10000, 2),
             "total_salary": total_salary,
-            "total_salary_wan": total_salary / 10000,
+            "total_salary_wan": round(total_salary / 10000, 2),
             "total_wealth": total_wealth,
-            "total_wealth_wan": total_wealth / 10000,
+            "total_wealth_wan": round(total_wealth / 10000, 2),
             "salary_ratio": salary_ratio,
+            # 【新增】assets字段，供前端使用
+            "assets": {
+                "real_estate_count": property_count,
+                "property_value_wan": round(total_property_value / 10000, 2),
+                "vehicle_count": vehicle_count,
+                "bank_balance_wan": round(total_bank_balance / 10000, 2),
+                "wealth_holding_wan": round(total_wealth / 10000, 2),
+            },
             "narrative": (
                 f"{anchor}家庭共{len(members)}人，"
                 f"家庭总资金流入{total_income / 10000:.2f}万元，"
@@ -5945,6 +6019,24 @@ class InvestigationReportBuilder:
         """
         profile = self.profiles.get(name, {})
 
+        # 【修复】从profile获取收支数据（兼容多种字段路径）
+        # 优先从summary获取，其次从income_structure获取
+        summary = profile.get("summary", {})
+        income_structure = profile.get("income_structure", {})
+        
+        total_income = (
+            summary.get("total_income", 0) 
+            or income_structure.get("total_income", 0) 
+            or profile.get("totalIncome", 0) 
+            or 0
+        )
+        total_expense = (
+            summary.get("total_expense", 0) 
+            or income_structure.get("total_expense", 0) 
+            or profile.get("totalExpense", 0) 
+            or 0
+        )
+        
         section = {
             "name": name,
             "relation": relation,
@@ -5956,6 +6048,11 @@ class InvestigationReportBuilder:
                 "bank_deposits": self._build_bank_deposits_v4(name, profile),
                 "wealth_info": self._build_wealth_info_v4(name, profile),
                 "vehicle_info": self._build_vehicle_info_v4(name, profile),
+                # 【修复】添加收支汇总字段，供前端直接使用
+                "total_income": total_income,
+                "total_expense": total_expense,
+                "total_income_wan": round(total_income / 10000, 2),
+                "total_expense_wan": round(total_expense / 10000, 2),
             },
             # (二) 数据分析
             "data_analysis_section": {

@@ -158,9 +158,9 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
     setError(null);
 
     try {
-      // Add 60s timeout (graph-data API needs time to process large datasets)
+      // Add 180s timeout (graph-data API needs time to process large datasets)
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000);
+      const timeoutId = setTimeout(() => controller.abort(), 180000);
 
       const response = await fetch(`${API_BASE_URL}/api/analysis/graph-data`, {
         signal: controller.signal

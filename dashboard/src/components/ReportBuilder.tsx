@@ -212,10 +212,81 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
     // 报告转 HTML 预览
     const renderReportToHtml = (report: any): string => {
         const meta = report.meta || {};
-        const family = report.family || {};
-        const memberDetails = report.member_details || [];
-        const companies = report.companies || [];  // 使用 companies 而非 company_reports
-        const conclusion = report.conclusion || {};
+        
+        // 兼容v5和v4报告结构
+        // v5结构: part_a_family_analysis.family_sections
+        // v4结构: family_sections 或 family
+        const familySections = report.part_a_family_analysis?.family_sections 
+            || report.family_sections 
+            || [];
+        const personSections = report.part_b_person_analysis?.person_sections 
+            || report.person_sections 
+            || [];
+        const companySections = report.part_c_company_analysis?.company_sections 
+            || report.company_sections 
+            || [];
+        const conclusion = report.part_d_conclusion?.conclusion 
+            || report.conclusion 
+            || {};
+        
+        // 获取第一个家庭作为核心家庭（兼容处理）
+        const primaryFamily = familySections[0] || {};
+        
+        // v5结构：members是字符串数组，需要转换为对象数组
+        const rawMembers = primaryFamily.members || primaryFamily.family_members || [];
+        const memberDetailsFromFamily = primaryFamily.member_sections || [];
+        
+        // 将字符串数组转换为对象数组
+        const family = {
+            members: rawMembers.map((name: string) => {
+                const memberDetail = memberDetailsFromFamily.find((m: any) => m.name === name);
+                return {
+                    name: name,
+                    relation: memberDetail?.relation || (name === primaryFamily.anchor ? '本人' : '家庭成员'),
+                    has_data: true
+                };
+            }),
+            summary: primaryFamily.family_summary || primaryFamily.summary || {},
+            anchor: primaryFamily.anchor || ''
+        };
+        
+        // 成员详情从person_sections或member_sections获取（v5结构）
+        const memberDetails = (personSections.length > 0 ? personSections : memberDetailsFromFamily).map((p: any) => {
+            // v5结构：asset_income_section包含资产信息
+            const assetSection = p.asset_income_section || {};
+            const dataAnalysisSection = p.data_analysis_section || {};
+            
+            // 获取资金流数据（可能在data_analysis_section.fund_flow_analysis或直接从profile）
+            const fundFlow = dataAnalysisSection.fund_flow_analysis || {};
+            
+            return {
+                name: p.name || p.person_name || '',
+                relation: p.relation || (p.name === primaryFamily.anchor ? '本人' : '家庭成员'),
+                has_data: true,
+                // 优先使用fund_flow_analysis数据，其次使用assetSection数据
+                total_income: fundFlow.total_income || assetSection.total_income || assetSection.income?.total || 0,
+                total_expense: fundFlow.total_expense || assetSection.total_expense || assetSection.expense?.total || 0,
+                transaction_count: fundFlow.transaction_count || assetSection.transaction_count || 0,
+                // v5结构：银行账户在asset_income_section.bank_deposits
+                assets: {
+                    bank_accounts: assetSection.bank_deposits?.accounts || [],
+                    bank_account_count: assetSection.bank_deposits?.bank_count || assetSection.bank_deposits?.accounts?.length || 0,
+                    // 其他资产
+                    properties: assetSection.properties || [],
+                    vehicles: assetSection.vehicles || [],
+                    wealth_products: assetSection.wealth_products || []
+                },
+                analysis: dataAnalysisSection
+            };
+        });
+        
+        // 公司数据
+        const companies = companySections.map((c: any) => ({
+            name: c.company_name || c.name || '未知公司',
+            total_income: c.total_income || 0,
+            transaction_count: c.transaction_count || 0,
+            key_person_transfers: c.key_person_transfers || {}
+        }));
         
         // 格式化金额（分转万元）
         const formatWan = (amount: number) => ((amount || 0) / 10000).toFixed(2);

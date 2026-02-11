@@ -37,3 +37,8 @@ audit_system.log
 *.log
 backup_*/
 .agent/skills/global_library/
+
+# --- System Files ---
+nul
+api_server_pid.txt
+*.log.*

@@ -42,6 +42,16 @@ class CacheManager:
         "graph_data": "graph_data.json",
         "metadata": "metadata.json",
         "analysis_results": "analysis_results.json",
+        # 外部数据源缓存
+        "vehicleData": "vehicleData.json",
+        "precisePropertyData": "precisePropertyData.json",
+        "wealthProductData": "wealthProductData.json",
+        "securitiesData": "securitiesData.json",
+        "creditData": "creditData.json",
+        "amlData": "amlData.json",
+        "external_p0": "external_p0.json",
+        "external_p1": "external_p1.json",
+        "external_p2": "external_p2.json",
     }
 
     # 当前缓存格式版本
@@ -241,10 +251,6 @@ class CacheManager:
                 self.save_cache("external_p0", p0_data)
 
                 # 提取并保存单独的文件以便 InvestigationReportBuilder 使用
-                if "precise_property_data" in p0_data:
-                    self.save_cache(
-                        "precisePropertyData", p0_data["precise_property_data"]
-                    )
                 if "credit_data" in p0_data:
                     self.save_cache("creditData", p0_data["credit_data"])
                 if "aml_data" in p0_data:
@@ -262,6 +268,9 @@ class CacheManager:
                     self.save_cache("wealthProductData", p1_data["wealth_product_data"])
                 if "securities_data" in p1_data:
                     self.save_cache("securitiesData", p1_data["securities_data"])
+                # 【修复】保存房产数据（P1层）
+                if "precise_property_data" in p1_data:
+                    self.save_cache("precisePropertyData", p1_data["precise_property_data"])
 
         # 保存元数据
         metadata = {
