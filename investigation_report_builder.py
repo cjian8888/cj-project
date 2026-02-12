@@ -101,6 +101,9 @@ from report_config.primary_targets_schema import (
 )
 from report_config.primary_targets_service import PrimaryTargetsService
 
+# 【2026-02-12 新增】导入真实收入计算函数
+from financial_profiler import _calculate_real_income_expense
+
 logger = utils.setup_logger(__name__)
 
 
@@ -2667,12 +2670,18 @@ class InvestigationReportBuilder:
 
     def _build_person_assets(self, name: str, profile: Dict) -> PersonAssets:
         """构建个人资产板块"""
-        # 工资统计
-        salary_total = profile.get("salaryTotal", 0) or 0
-        salary_ratio = profile.get("salaryRatio", 0) or 0
+        # 【2026-02-12 修复】从 yearly_salary 获取工资数据
+        yearly_salary_dict = profile.get("yearly_salary", {}) or profile.get("yearlySalary", {})
+        salary_summary = yearly_salary_dict.get("summary", {}) if yearly_salary_dict else {}
+        salary_total = salary_summary.get("total", 0)
+        
+        # 【2026-02-12 修复】基于真实收入计算工资占比
+        summary = profile.get("summary", {})
+        real_income = summary.get("real_income", summary.get("total_income", 0))
+        salary_ratio = (salary_total / real_income * 100) if real_income > 0 else 0
 
         # 年度工资明细
-        yearly_salary_data = profile.get("yearlySalary", {}).get("yearly_stats", {})
+        yearly_salary_data = yearly_salary_dict.get("yearly", {}) if yearly_salary_dict else {}
         yearly_salary = []
         for year, stats in yearly_salary_data.items():
             yearly_salary.append(
@@ -2705,37 +2714,14 @@ class InvestigationReportBuilder:
         """构建银行账户列表（剔除非真实账户，整合官方余额数据）"""
         accounts = []
         
-        # 【修复】尝试从当前profile获取银行账户
+        # 【2026-02-12 改进】简化数据获取逻辑
+        # profiles.json 现在包含完整原始数据，统一从这里获取
         raw_accounts = (
-            profile.get("bankAccounts", []) 
-            or profile.get("bank_accounts", []) 
-            or profile.get("bank_accounts_official", [])
+            profile.get("bank_accounts", [])  # 原始数据字段
+            or profile.get("bankAccounts", [])  # 兼容驼峰命名
+            or profile.get("bank_accounts_official", [])  # 官方账户数据
             or []
         )
-        
-        # 【关键修复】如果从简化版profiles.json没有数据，尝试从profiles_full.json加载
-        if not raw_accounts and hasattr(self, '_profiles_full_cache'):
-            full_profile = self._profiles_full_cache.get(name, {})
-            raw_accounts = full_profile.get("bank_accounts", [])
-            if raw_accounts:
-                logger.info(f"[_build_bank_accounts] {name} 从profiles_full.json加载 {len(raw_accounts)} 个账户")
-        
-        # 如果还是没有，尝试从分析缓存加载profiles_full
-        if not raw_accounts:
-            try:
-                cache_dir = os.path.join(self.output_dir, "analysis_cache")
-                full_path = os.path.join(cache_dir, "profiles_full.json")
-                if os.path.exists(full_path):
-                    with open(full_path, "r", encoding="utf-8") as f:
-                        profiles_full = json.load(f)
-                    # 缓存到实例，避免重复加载
-                    self._profiles_full_cache = profiles_full
-                    full_profile = profiles_full.get(name, {})
-                    raw_accounts = full_profile.get("bank_accounts", [])
-                    if raw_accounts:
-                        logger.info(f"[_build_bank_accounts] {name} 从profiles_full.json加载 {len(raw_accounts)} 个账户")
-            except Exception as e:
-                logger.warning(f"[_build_bank_accounts] 加载profiles_full.json失败: {e}")
 
         # 获取官方账户数据（含余额）用于匹配和补充
         official_accounts = profile.get("bank_accounts_official", []) or []
@@ -3045,12 +3031,19 @@ class InvestigationReportBuilder:
 
     def _build_income_gap_analysis(self, profile: Dict) -> IncomeGapAnalysis:
         """构建收支匹配分析"""
-        total_income = profile.get("totalIncome", 0) or 0
-        salary_total = profile.get("salaryTotal", 0) or 0
-        ratio = profile.get("salaryRatio", 0) or 0
+        # 【2026-02-12 修复】使用真实收入和正确工资数据
+        summary = profile.get("summary", {})
+        total_income = summary.get("real_income", summary.get("total_income", 0))
+        
+        # 从 yearly_salary 获取工资数据
+        yearly_salary = profile.get("yearly_salary", {}) or profile.get("yearlySalary", {})
+        salary_summary = yearly_salary.get("summary", {}) if yearly_salary else {}
+        salary_total = salary_summary.get("total", 0)
+        
+        # 计算工资占比（基于真实收入）
+        ratio_percent = (salary_total / total_income * 100) if total_income > 0 else 0
 
         # 生成判定结论
-        ratio_percent = ratio * 100
         if ratio_percent >= 80:
             verdict = "正常，工资为主要收入来源"
         elif ratio_percent >= 50:
@@ -4577,7 +4570,8 @@ class InvestigationReportBuilder:
         构建家庭资产汇总
 
         【优化】优先使用缓存的 family_summary 数据，减少重复计算。
-        【关键修复】银行余额总是从 profiles_full 重新计算，因为缓存中的 bank_balance 可能不准确。
+        【2026-02-12 修复】使用真实收入（real_income）替代总流水（total_income）
+        【2026-02-12 修复】正确汇总工资收入（从yearly_salary获取）
 
         Args:
             anchor: 户主姓名
@@ -4586,43 +4580,62 @@ class InvestigationReportBuilder:
         Returns:
             家庭汇总字典
         """
-        # ========== 【关键修复】所有数据优先从 profiles_full 计算 ==========
-        total_income = 0.0
-        total_expense = 0.0
+        # 【2026-02-12 修复】使用真实收入计算
+        total_real_income = 0.0  # 真实收入（剔除后的）
+        total_real_expense = 0.0  # 真实支出
+        total_offset_detail = {  # 剔除详情汇总
+            "self_transfer": 0,
+            "wealth_principal": 0,
+            "wealth_historical": 0,
+            "deposit_redemption": 0,
+            "loan": 0,
+            "refund": 0,
+            "total_offset": 0
+        }
         total_wealth = 0.0
         total_bank_balance = 0.0
         total_property_value = 0.0
         property_count = 0
         vehicle_count = 0
         
-        # 尝试加载 profiles_full
-        profiles_full = getattr(self, '_profiles_full_cache', None)
-        if not profiles_full:
-            try:
-                cache_dir = os.path.join(self.output_dir, "analysis_cache")
-                full_path = os.path.join(cache_dir, "profiles_full.json")
-                if os.path.exists(full_path):
-                    with open(full_path, "r", encoding="utf-8") as f:
-                        profiles_full = json.load(f)
-                    self._profiles_full_cache = profiles_full
-                    logger.info(f"[_build_family_summary_v4] 加载 profiles_full.json 成功")
-            except Exception as e:
-                logger.warning(f"[_build_family_summary_v4] 加载 profiles_full.json 失败: {e}")
-                profiles_full = None
-        
-        # 从 profiles_full 计算所有资产和收支数据
-        if profiles_full:
+        # 从 profiles 计算所有资产和收支数据
+        if self.profiles:
             for member in members:
-                full_profile = profiles_full.get(member, {})
+                full_profile = self.profiles.get(member, {})
                 
-                # 收支数据（从summary或income_structure获取）
+                # 【2026-02-12 修复】使用真实收入计算函数
                 summary = full_profile.get("summary", {})
                 income_structure = full_profile.get("income_structure", {})
-                total_income += summary.get("total_income", 0) or income_structure.get("total_income", 0) or 0
-                total_expense += summary.get("total_expense", 0) or income_structure.get("total_expense", 0) or 0
+                wealth_mgmt = full_profile.get("wealth_management", {})
+                fund_flow = full_profile.get("fund_flow", {})
+                
+                # 检查是否有新的offset_detail（修复后的数据）
+                if "offset_detail" in summary:
+                    # 使用缓存的真实收入
+                    member_real_income = summary.get("real_income", 0)
+                    member_real_expense = summary.get("real_expense", 0)
+                    member_offset = summary.get("offset_detail", {})
+                else:
+                    # 旧数据，重新计算
+                    try:
+                        member_real_income, member_real_expense, member_offset = _calculate_real_income_expense(
+                            income_structure, wealth_mgmt, fund_flow
+                        )
+                    except Exception as e:
+                        logger.warning(f"[_build_family_summary_v4] 计算{member}真实收入失败: {e}")
+                        member_real_income = summary.get("real_income", 0)
+                        member_real_expense = summary.get("total_expense", 0)
+                        member_offset = {}
+                
+                total_real_income += member_real_income
+                total_real_expense += member_real_expense
+                
+                # 汇总剔除详情
+                for key in total_offset_detail:
+                    if key in member_offset:
+                        total_offset_detail[key] += member_offset[key]
                 
                 # 理财数据
-                wealth_mgmt = full_profile.get("wealth_management", {})
                 total_wealth += wealth_mgmt.get("estimated_holding", 0) or 0
                 
                 # 银行余额（只统计真实银行卡且有余额数据的账户）
@@ -4638,7 +4651,6 @@ class InvestigationReportBuilder:
                 if isinstance(property_data, list):
                     property_count += len(property_data)
                     for prop in property_data:
-                        # 尝试从房产数据获取价值
                         prop_value = prop.get("value", 0) or prop.get("price", 0) or 0
                         total_property_value += prop_value
                 
@@ -4647,42 +4659,22 @@ class InvestigationReportBuilder:
                 if isinstance(vehicle_data, list):
                     vehicle_count += len(vehicle_data)
             
-            logger.info(f"[_build_family_summary_v4] 从 profiles_full 计算: 收入={total_income}, 支出={total_expense}, 银行余额={total_bank_balance}")
-        else:
-            # 回退到从 self.profiles 计算（可能不准确）
-            logger.warning(f"[_build_family_summary_v4] profiles_full 不可用，回退到 profiles")
-            cached_summary = self.derived_data.get("family_summary", {})
-            income_expense = cached_summary.get("total_income_expense", {})
-            total_income = income_expense.get("total_income", 0) or 0
-            total_expense = income_expense.get("total_expense", 0) or 0
-            
-            for member in members:
-                profile = self.profiles.get(member, {})
-                total_wealth += profile.get("wealthTotal", 0) or 0
-                
-                # 银行余额
-                accounts = (
-                    profile.get("bankAccounts", [])
-                    or profile.get("bank_accounts", [])
-                    or profile.get("bank_accounts_official", [])
-                )
-                if isinstance(accounts, list):
-                    for acc in accounts:
-                        balance = (
-                            acc.get("last_balance", 0)
-                            or acc.get("balance", 0)
-                            or acc.get("账户余额", 0)
-                            or 0
-                        )
-                        total_bank_balance += balance
+            logger.info(f"[_build_family_summary_v4] 家庭真实收入: {total_real_income/10000:.2f}万, 真实支出: {total_real_expense/10000:.2f}万")
 
-        # ========== 工资数据仍从 profiles 获取（缓存中没有） ==========
+        # ========== 【2026-02-12 修复】正确汇总工资收入 ==========
         total_salary = 0.0
         member_relations = []
 
         for member in members:
             profile = self.profiles.get(member, {})
-            total_salary += profile.get("salaryTotal", 0) or 0
+            # 【修复】从yearly_salary获取真实工资数据
+            yearly_salary = profile.get("yearly_salary", {})
+            if yearly_salary and "summary" in yearly_salary:
+                member_salary = yearly_salary["summary"].get("total", 0)
+            else:
+                # 回退到旧字段
+                member_salary = profile.get("salaryTotal", 0) or 0
+            total_salary += member_salary
 
             # 成员关系
             relation = self._infer_relation_from_members(member, anchor, members)
@@ -4694,24 +4686,27 @@ class InvestigationReportBuilder:
                 }
             )
 
-        # 家庭收支匹配
-        salary_ratio = (total_salary / total_income * 100) if total_income > 0 else 0
+        # 【2026-02-12 修复】基于真实收入计算工资占比
+        salary_ratio = (total_salary / total_real_income * 100) if total_real_income > 0 else 0
 
         return {
             "anchor": anchor,
             "member_count": len(members),
             "member_relations": member_relations,
-            "total_income": total_income,
-            "total_income_wan": round(total_income / 10000, 2),
-            "total_expense": total_expense,
-            "total_expense_wan": round(total_expense / 10000, 2),
+            # 【2026-02-12 修复】使用真实收入
+            "total_income": total_real_income,  # 真实收入（非流水）
+            "total_income_wan": round(total_real_income / 10000, 2),
+            "total_expense": total_real_expense,  # 真实支出
+            "total_expense_wan": round(total_real_expense / 10000, 2),
             "total_bank_balance": total_bank_balance,
             "total_bank_balance_wan": round(total_bank_balance / 10000, 2),
-            "total_salary": total_salary,
+            "total_salary": total_salary,  # 【修复】正确汇总的工资
             "total_salary_wan": round(total_salary / 10000, 2),
             "total_wealth": total_wealth,
             "total_wealth_wan": round(total_wealth / 10000, 2),
             "salary_ratio": salary_ratio,
+            # 【2026-02-12 新增】剔除详情
+            "offset_detail": total_offset_detail,
             # 【新增】assets字段，供前端使用
             "assets": {
                 "real_estate_count": property_count,
@@ -4720,11 +4715,13 @@ class InvestigationReportBuilder:
                 "bank_balance_wan": round(total_bank_balance / 10000, 2),
                 "wealth_holding_wan": round(total_wealth / 10000, 2),
             },
+            # 【2026-02-12 修复】更新文本描述，明确是"真实收入"而非"流水"
             "narrative": (
-                f"{anchor}家庭共{len(members)}人，"
-                f"家庭总资金流入{total_income / 10000:.2f}万元，"
-                f"流出{total_expense / 10000:.2f}万元。"
-                f"其中工资收入{total_salary / 10000:.2f}万元，占比{salary_ratio:.1f}%。"
+                f"{anchor}家庭共{len(members)}人。"
+                f"家庭真实收入{total_real_income / 10000:.2f}万元，"
+                f"真实支出{total_real_expense / 10000:.2f}万元"
+                f"（已剔除内部转账、理财/定存本金循环等{total_offset_detail['total_offset'] / 10000:.2f}万元）。"
+                f"其中工资收入{total_salary / 10000:.2f}万元，占真实收入{salary_ratio:.1f}%。"
             ),
         }
 
@@ -5334,9 +5331,17 @@ class InvestigationReportBuilder:
         - 其他收入来源
         - 收入分类占比(合法/不明/可疑)
         """
-        total_income = profile.get("totalIncome", 0) or 0
-        salary_total = profile.get("salaryTotal", 0) or 0
-        salary_ratio = profile.get("salaryRatio", 0) or 0
+        # 【2026-02-12 修复】使用真实收入和正确工资数据
+        summary = profile.get("summary", {})
+        total_income = summary.get("real_income", summary.get("total_income", 0))
+        
+        # 从 yearly_salary 获取工资
+        yearly_salary = profile.get("yearly_salary", {}) or profile.get("yearlySalary", {})
+        salary_summary = yearly_salary.get("summary", {}) if yearly_salary else {}
+        salary_total = salary_summary.get("total", 0)
+        
+        # 计算工资占比
+        salary_ratio = (salary_total / total_income * 100) if total_income > 0 else 0
 
         # 收入分类
         income_classification = profile.get("income_classification", {})
@@ -6173,8 +6178,11 @@ class InvestigationReportBuilder:
         构建工资奖金收入（含年度分拆描述）
 
         【M-02修复】改进时间范围提取逻辑
+        【2026-02-12 改进】简化数据获取逻辑，profiles.json 现在包含完整原始数据
         """
-        yearly_salary = profile.get("yearlySalary", {})
+        # 从 profile 中获取 yearly_salary（现在统一从 profiles.json 获取，包含完整数据）
+        yearly_salary = profile.get("yearly_salary", {})
+        
         yearly_data = yearly_salary.get("yearly", {}) or yearly_salary.get(
             "yearly_stats", {}
         )
@@ -7436,15 +7444,22 @@ class InvestigationReportBuilder:
         """【v5.0】构建五维度风险评分"""
         from report_schema import DimensionScore, FiveDimensionScore
         
-        # 1. 收支匹配度（25分满分）
-        total_income = profile.get("totalIncome", 0) or 0
-        total_expense = profile.get("totalExpense", 0) or 0
-        salary_total = profile.get("salaryTotal", 0) or 0
+        # 【2026-02-12 修复】使用真实收入和正确工资数据
+        summary = profile.get("summary", {})
+        total_income = summary.get("real_income", summary.get("total_income", 0))
+        total_expense = summary.get("real_expense", summary.get("total_expense", 0))
         
+        # 从 yearly_salary 获取工资
+        yearly_salary = profile.get("yearly_salary", {}) or profile.get("yearlySalary", {})
+        salary_summary = yearly_salary.get("summary", {}) if yearly_salary else {}
+        salary_total = salary_summary.get("total", 0)
+        
+        # 1. 收支匹配度（25分满分）
         if total_income > 0:
             salary_ratio = salary_total / total_income
             income_expense_score = 25 * min(1.0, salary_ratio) if salary_ratio < 0.5 else 25
         else:
+            salary_ratio = 0
             income_expense_score = 0
         
         income_expense = DimensionScore(
@@ -8209,38 +8224,31 @@ def load_investigation_report_builder(
     for key, filename in cache_files.items():
         filepath = os.path.join(cache_dir, filename)
 
-        # profiles 特殊处理，优先加载完整版，但验证数据有效性
+        # 【2026-02-12 改进】简化 profiles 加载逻辑
+        # 背景：之前需要维护 profiles.json 和 profiles_full.json 两个文件
+        # 改进：serialize_profiles() 现在会保留完整原始数据，统一使用 profiles.json
         if key == "profiles":
-            full_filepath = os.path.join(cache_dir, "profiles_full.json")
-            profiles_full_valid = False
-            if os.path.exists(full_filepath):
-                try:
-                    with open(full_filepath, "r", encoding="utf-8") as f:
-                        profiles_full = json.load(f)
-                    # 验证数据是否有效（检查第一个人的totalIncome是否存在）
-                    first_person = list(profiles_full.keys())[0] if profiles_full else None
-                    if first_person and profiles_full[first_person].get("totalIncome"):
-                        analysis_cache[key] = profiles_full
-                        profiles_full_valid = True
-                        logger.info(f"[初查报告] 已加载完整画像: profiles_full.json (数据有效)")
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    profiles = json.load(f)
+                # 验证数据是否有效（检查第一个人的 totalIncome 或 summary.total_income 是否存在）
+                first_person = list(profiles.keys())[0] if profiles else None
+                if first_person:
+                    has_total_income = (
+                        profiles[first_person].get("totalIncome")  # 扁平化字段
+                        or profiles[first_person].get("summary", {}).get("total_income")  # 嵌套字段
+                    )
+                    if has_total_income:
+                        analysis_cache[key] = profiles
+                        logger.info(f"[初查报告] 已加载画像: profiles.json ({len(profiles)} 个实体)")
                         continue
                     else:
-                        logger.warning(f"[初查报告] profiles_full.json 数据无效，回退到简化版")
-                except Exception as e:
-                    logger.warning(
-                        f"[初查报告] 加载 profiles_full.json 失败: {e}，回退到简化版"
-                    )
-            
-            if not profiles_full_valid:
-                # 尝试加载简化版并合并数据
-                try:
-                    with open(filepath, "r", encoding="utf-8") as f:
-                        profiles_simple = json.load(f)
-                    analysis_cache[key] = profiles_simple
-                    logger.info(f"[初查报告] 已加载简化画像: profiles.json ({len(profiles_simple)} 个实体)")
-                    continue
-                except Exception as e2:
-                    logger.warning(f"[初查报告] 加载 profiles.json 也失败: {e2}")
+                        logger.warning(f"[初查报告] profiles.json 数据无效：缺少收入数据")
+                else:
+                    logger.warning(f"[初查报告] profiles.json 为空")
+            except Exception as e:
+                logger.warning(f"[初查报告] 加载 profiles.json 失败: {e}")
+            continue  # profiles 加载失败也不影响其他缓存
 
         if os.path.exists(filepath):
             try:

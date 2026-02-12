@@ -1453,6 +1453,10 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
     net_wealth_flow = wealth_purchase - wealth_redemption
     real_wealth_profit = _calculate_real_wealth_profit(wealth_purchase, wealth_redemption, wealth_income)
 
+    # 【2026-02-12 修复】单独统计定期存款，用于后续剔除定存到期
+    deposit_purchase = category_stats['定期存款']['购入']
+    deposit_redemption = category_stats['定期存款']['赎回']
+    
     result = {
         'wealth_purchase': wealth_purchase,
         'wealth_purchase_count': len(wealth_purchase_transactions),
@@ -1473,7 +1477,10 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
         'refund_inflow': refund_inflow,
         'category_stats': category_stats,
         'yearly_stats': yearly_stats,
-        'total_transactions': len(wealth_purchase_transactions) + len(wealth_redemption_transactions) + len(wealth_income_transactions)
+        'total_transactions': len(wealth_purchase_transactions) + len(wealth_redemption_transactions) + len(wealth_income_transactions),
+        # 【新增】定期存款单独统计
+        'deposit_purchase': deposit_purchase,
+        'deposit_redemption': deposit_redemption,
     }
 
     if result['total_transactions'] > 0:
@@ -1493,16 +1500,17 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
 
 def _calculate_real_income_expense(income_structure: Dict, wealth_management: Dict, fund_flow: Dict) -> tuple:
     """
-    计算真实收入/支出（改进版 - 2026-01-08）
+    计算真实收入/支出（改进版 - 2026-02-12）
+
+    【关键修复】
+    1. 定期存款到期是本金返还，不是收入，需要完全剔除
+    2. 理财赎回超出购买的部分（历史存量）也应剔除
+    3. 这些"其他收入"实际上是早年工资的积蓄回流
 
     核心原则：
     1. 自我转账理论上应该收支平衡（没数据完整时可能有差额）
-    2. 理财买入/赎回也应该基本平衡（赎回包含本金，除非购买记录缺失）
-    3. 为保守起见，我们使用"对冲"原则来剔除这些内部循环资金
-
-    改进策略：
-    - 自我转账：用min(收入,支出)来对冲，差额视为可能的外流/外来资金
-    - 理财：用min(购买,赎回)来对冲本金循环，剩余差额保守处理
+    2. 理财/定存的本金回流不是收入，只有收益才是收入
+    3. 为保守起见，我们剔除所有本金回流，只保留收益
 
     Args:
         income_structure: 收支结构
@@ -1510,7 +1518,7 @@ def _calculate_real_income_expense(income_structure: Dict, wealth_management: Di
         fund_flow: 资金流向分析结果
 
     Returns:
-        (real_income, real_expense) 元组
+        (real_income, real_expense, detail_dict) 元组，detail_dict包含剔除详情
     """
     self_in = wealth_management['self_transfer_income']
     self_out = wealth_management['self_transfer_expense']
@@ -1519,38 +1527,64 @@ def _calculate_real_income_expense(income_structure: Dict, wealth_management: Di
     wealth_yield = wealth_management['wealth_income']
     loan_in = wealth_management['loan_inflow']
     refund_in = wealth_management['refund_inflow']
+    
+    # 【2026-02-12 修复】获取定期存款数据
+    deposit_buy = wealth_management.get('deposit_purchase', 0)
+    deposit_redeem = wealth_management.get('deposit_redemption', 0)
 
-    # 自我转账对冲：取min值对冲，差额不自动排除（可能是外来资金）
+    # 自我转账对冲：取min值对冲
     self_transfer_offset = min(self_in, self_out)
 
-    # 理财本金对冲：假设买入和赎回中较小的部分是完整闭环
-    # 超出部分可能是：购买>赎回(存量增加)，赎回>购买(历史存量释放)
+    # 理财本金对冲：买入和赎回中较小的部分是完整闭环
     wealth_principal_offset = min(wealth_buy, wealth_redeem)
+    # 【修复】赎回超出购买的部分（历史存量）也应剔除
+    wealth_historical_redeem = max(0, wealth_redeem - wealth_buy)
+
+    # 【2026-02-12 关键修复】定期存款到期完全剔除（本金不是收入）
+    # 定存到期是本金返还，不应算作收入
+    deposit_offset = deposit_redeem  # 完全剔除定存到期本金
 
     # 计算真实收入
-    # = 总收入 - 自我转入对冲 - 理财本金对冲 - 贷款发放 - 退款
-    # 【注】理财收益(利息/分红)保留，因为它是真正的价值增量
     real_income = (income_structure['total_income']
-                  - self_transfer_offset  # 自我转入对冲
-                  - wealth_principal_offset  # 理财赎回中的本金部分
-                  - loan_in  # 贷款发放(借的钱，不是收入)
-                  - refund_in)  # 退款(原来的支出返还)
+                  - self_transfer_offset      # 自我转入对冲
+                  - wealth_principal_offset   # 理财本金对冲（当期闭环）
+                  - wealth_historical_redeem  # 【新增】理财历史存量赎回
+                  - deposit_offset            # 【新增】定存到期本金
+                  - loan_in                   # 贷款发放
+                  - refund_in)                # 退款
 
     # 计算真实支出
-    # = 总支出 - 自我转出对冲 - 理财购买对冲
+    # 支出端也需要相应调整
     real_expense = (income_structure['total_expense']
-                   - self_transfer_offset  # 自我转出对冲
-                   - wealth_principal_offset)  # 理财购买中能匹配赎回的部分
+                   - self_transfer_offset      # 自我转出对冲
+                   - wealth_principal_offset   # 理财购买对冲
+                   - deposit_buy)              # 【新增】定存购买（投资支出）
 
-    # 安全检查：真实收入/支出不应为负
+    # 安全检查
     real_income = max(0, real_income)
     real_expense = max(0, real_expense)
 
-    # 日志输出对冲详情
-    logger.info(f'资金对冲: 自我转账对冲{self_transfer_offset/10000:.2f}万, 理财本金对冲{wealth_principal_offset/10000:.2f}万')
-    logger.info(f'真实收入: {real_income/10000:.2f}万, 真实支出: {real_expense/10000:.2f}万, 净额: {(real_income-real_expense)/10000:.2f}万')
+    # 构建剔除详情（用于报告展示）
+    offset_detail = {
+        'self_transfer': self_transfer_offset,
+        'wealth_principal': wealth_principal_offset,
+        'wealth_historical': wealth_historical_redeem,
+        'deposit_redemption': deposit_offset,
+        'loan': loan_in,
+        'refund': refund_in,
+        'total_offset': (self_transfer_offset + wealth_principal_offset + 
+                        wealth_historical_redeem + deposit_offset + loan_in + refund_in)
+    }
 
-    return real_income, real_expense
+    # 日志输出
+    logger.info(f'【2026-02-12修复】资金对冲详情:')
+    logger.info(f'  - 自我转账: {self_transfer_offset/10000:.2f}万')
+    logger.info(f'  - 理财本金: {wealth_principal_offset/10000:.2f}万')
+    logger.info(f'  - 理财历史存量: {wealth_historical_redeem/10000:.2f}万')
+    logger.info(f'  - 定存到期: {deposit_offset/10000:.2f}万')
+    logger.info(f'真实收入: {real_income/10000:.2f}万, 真实支出: {real_expense/10000:.2f}万')
+
+    return real_income, real_expense, offset_detail
 
 
 def _build_profile_summary(income_structure: Dict, fund_flow: Dict, wealth_management: Dict,
@@ -1627,11 +1661,14 @@ def generate_profile_report(df: pd.DataFrame, entity_name: str) -> Dict:
     income_df = df[df['income'] > 0].copy()
     income_classification = classify_income_sources(income_df, entity_name=entity_name)
 
-    # 计算真实收入/支出
-    real_income, real_expense = _calculate_real_income_expense(income_structure, wealth_management, fund_flow)
+    # 计算真实收入/支出（【2026-02-12修复】现在返回剔除详情）
+    real_income, real_expense, offset_detail = _calculate_real_income_expense(income_structure, wealth_management, fund_flow)
 
     # 构建画像摘要
     summary = _build_profile_summary(income_structure, fund_flow, wealth_management, large_cash, real_income, real_expense, df)
+    
+    # 【2026-02-12新增】将剔除详情加入summary，供报告使用
+    summary['offset_detail'] = offset_detail
 
     profile = {
         'entity_name': entity_name,
@@ -1806,8 +1843,8 @@ def build_company_profile(df: pd.DataFrame, entity_name: str) -> Dict:
     large_cash = extract_large_cash(df)
     categories = categorize_transactions(df)
     
-    # 计算真实收入/支出
-    real_income, real_expense = _calculate_real_income_expense(income_structure, wealth_management, fund_flow)
+    # 计算真实收入/支出（【2026-02-12修复】）
+    real_income, real_expense, offset_detail = _calculate_real_income_expense(income_structure, wealth_management, fund_flow)
     
     # 公司特有分析
     company_specific = _analyze_company_specific(df, entity_name)
@@ -1824,7 +1861,8 @@ def build_company_profile(df: pd.DataFrame, entity_name: str) -> Dict:
         'large_cash_count': len(large_cash),
         'wealth_transactions': wealth_management['total_transactions'],
         'transaction_count': len(df),
-        'date_range': income_structure['date_range']
+        'date_range': income_structure['date_range'],
+        'offset_detail': offset_detail  # 【2026-02-12新增】
     }
     
     profile = {

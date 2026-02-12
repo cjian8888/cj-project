@@ -119,8 +119,11 @@ def extract_family_from_census(data_directory: str, person_name: str) -> List[Di
                     "出生日期": row.get("出生日期", ""),
                     "民族": row.get("民族", ""),
                     "户籍地": row.get("户籍地", ""),
+                    "籍贯": row.get("籍贯", ""),
                     "婚姻状况": row.get("婚姻状况", ""),
                     "文化程度": row.get("文化程度", ""),
+                    "从业单位": row.get("从业单位", ""),
+                    "职业": row.get("职业", ""),
                     "数据来源": "户籍人口",
                     "核心人员": person_name,
                 }

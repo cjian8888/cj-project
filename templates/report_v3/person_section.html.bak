@@ -1,0 +1,283 @@
+{#
+人员分析章节模板 - 适配 build_v4_person_section 返回的数据结构
+
+数据结构：
+unit = {
+name, relation,
+asset_income_section: {
+personal_background, property_info, salary_income,
+bank_deposits, wealth_info, vehicle_info
+},
+data_analysis_section: {
+property_analysis, income_match_analysis, counterparty_analysis,
+large_cash_analysis, large_transfer_analysis, aml_analysis,
+tax_analysis, travel_analysis
+}
+}
+#}
+
+{# ==================== (N) 成员资产收入情况 ==================== #}
+{# 中文序号映射 #}
+{% set cn_nums = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'] %}
+{% set section_num = cn_nums[unit.section_index - 1] if unit.section_index and unit.section_index <= 10 else
+    unit.section_index %} {# 成员主标题 - 使用成员编号 #} {% if unit.relation=='本人' %} <h2 class="subsection-title">（{{ section_num
+    }}）{{ unit.name }}（本人）</h2>
+    {% else %}
+    <h2 class="subsection-title">（{{ section_num }}）{{ unit.name }}（{{ unit.relation }}）</h2>
+    {% endif %}
+
+    {# 第一部分：资产收入情况 #}
+    <h3 class="part-title">第一部分 资产收入情况</h3>
+
+    {# 人员基本信息介绍段落 #}
+    {% set bg = unit.asset_income_section.personal_background %}
+    <p>
+        {{ bg.name }}，{{ bg.gender }}，{{ bg.birth_date }}出生，
+        {{ bg.birth_place }}人，{{ bg.entry_date }}{% if bg.employer != '【待调取】' %}进入{{ bg.employer }}工作{% endif %}，
+        {{ bg.current_position }}。
+        {% if bg.family_members_desc and bg.family_members_desc != '【待调取】家庭成员信息' %}
+        除本人外其家庭成员还有：{{ bg.family_members_desc }}。
+        {% endif %}
+    </p>
+
+    {# 1. 房产情况 #}
+    <h3 class="item-title">1、房产情况</h3>
+    {% set prop = unit.asset_income_section.property_info %}
+    {% if prop.has_data and prop.properties and prop.properties|length > 0 %}
+    <p>家庭成员名下房产{{ prop.count }}处：
+        {% for estate in prop.properties %}
+        第{{ loop.index }}处位于{{ estate.房地坐落 or estate.location or estate.坐落 }}，房屋面积{{ estate.建筑面积 or estate.area or
+        estate.面积 }}平方米，
+        于{{ estate.登记时间 or estate.registration_date or estate.register_date }}登记{% if estate.交易金额 or
+        estate.transaction_amount %}，交易金额{{ estate.交易金额 or estate.transaction_amount }}万{% endif %}{% if estate.共有人名称 or
+        estate.co_owners or estate.共有人 %}，与{{ estate.共有人名称 or estate.co_owners or estate.共有人 }}共有{% endif %}。
+        {% endfor %}
+    </p>
+
+    {# 房产详情表格 #}
+    <table>
+        <tr>
+            <th class="seq-col">序号</th>
+            <th>房地坐落</th>
+            <th>建筑面积 (平方米)</th>
+            <th>权属状态</th>
+            <th>登记时间</th>
+            <th>交易金额 (万元)</th>
+            <th>共有情况</th>
+            <th>共有人名称</th>
+        </tr>
+        {% for estate in prop.properties %}
+        <tr>
+            <td class="seq-col">{{ loop.index }}</td>
+            <td>{{ estate.房地坐落 or estate.location or estate.坐落 or '—' }}</td>
+            <td class="text-center">{{ estate.建筑面积 or estate.area or estate.面积 or '—' }}</td>
+            <td class="text-center">{{ estate.权属状态 or estate.status or '现势' }}</td>
+            <td class="text-center">{{ estate.登记时间 or estate.registration_date or estate.register_date or '—' }}</td>
+            <td class="money-col">{{ estate.交易金额 or estate.transaction_amount or '—' }}</td>
+            <td class="text-center">{{ estate.共有情况 or estate.ownership_type or '单独所有' }}</td>
+            <td>{{ estate.共有人名称 or estate.co_owners or estate.共有人 or '' }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <p>本人名下未查见房产信息。</p>
+    {% endif %}
+
+    {# 2. 工资奖金收入 #}
+    <h3 class="item-title">2、工资奖金收入</h3>
+    {% set salary = unit.asset_income_section.salary_income %}
+    <p>
+        {{ salary.narrative or (unit.name ~ (salary.period or '查询期间') ~ '共取得工资收入' ~ (salary.total_wan|round(2) if
+        salary.total_wan else 0) ~ '万元') }}
+    </p>
+
+    {# 3. 银行存款情况 #}
+    <h3 class="item-title">3、银行存款情况</h3>
+    {% set bank = unit.asset_income_section.bank_deposits %}
+    <p>
+        {{ unit.name }}持有银行卡余额{{ bank.total_balance|round(2) if bank.total_balance else 0 }}元，共涉及{{ bank.bank_count or 0
+        }}个银行账户。
+    </p>
+
+    {% if bank.accounts and bank.accounts|length > 0 %}
+    <table>
+        <tr>
+            <th class="seq-col">序号</th>
+            <th>反馈单位</th>
+            <th>卡号</th>
+            <th>账户类别</th>
+            <th>账户状态</th>
+            <th>账户余额 (元)</th>
+        </tr>
+        {% for account in bank.accounts %}
+        <tr>
+            <td class="seq-col">{{ account.序号 or loop.index }}</td>
+            <td>{{ account.反馈单位 or account.bank_name or '' }}</td>
+            <td>{{ account.卡号 or account.account_number or '' }}</td>
+            <td>{{ account.账户类别 or account.account_type or '' }}</td>
+            <td class="text-center">{{ account.账户状态 or account.status or '正常' }}</td>
+            <td class="money-col">{{ account.账户余额 or account.balance or 0 }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% endif %}
+
+    {# 4. 理财情况 #}
+    <h3 class="item-title">4、理财情况</h3>
+    {% set wealth = unit.asset_income_section.wealth_info %}
+    {% if wealth.has_data %}
+    {% if wealth.products and wealth.products|length > 0 %}
+    <p>{{ unit.name }}名下持有理财产品情况如下：</p>
+    <table>
+        <tr>
+            <th class="seq-col">序号</th>
+            <th>产品名称</th>
+            <th>产品类型</th>
+            <th>持有金额 (元)</th>
+        </tr>
+        {% for product in wealth.products %}
+        <tr>
+            <td class="seq-col">{{ loop.index }}</td>
+            <td>{{ product.name or product.产品名称 or '' }}</td>
+            <td>{{ product.type or product.产品类型 or '' }}</td>
+            <td class="money-col">{{ product.amount or product.持有金额 or 0 }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    {# 有数据但无产品列表，显示narrative汇总 #}
+    <p>{{ wealth.narrative or ('查见理财产品交易合计' ~ (wealth.total_wan|round(2) if wealth.total_wan else (wealth.total or
+        0)/10000|round(2)) ~ '万元。') }}</p>
+    {% endif %}
+    {% else %}
+    <p>未查见名下理财产品情况。</p>
+    {% endif %}
+
+    {# 5. 车辆情况 #}
+    <h3 class="item-title">5、车辆情况</h3>
+    {% set vehicle = unit.asset_income_section.vehicle_info %}
+    {% if vehicle.has_data and vehicle.count and vehicle.count > 0 %}
+    <p>
+        {{ unit.name }}本人名下{% for v in vehicle.vehicles %}
+        有一辆{{ v.color or v.颜色 or '' }}{{ v.brand or v.品牌 or '' }}汽车，车牌号{{ v.plate_number or v.车牌号 or '' }}，于{{
+        v.registration_date or v.登记时间 or '' }}登记购入{% if not loop.last %}；{% else %}。{% endif %}
+        {% endfor %}
+        {% if vehicle.violations %}
+        {{ vehicle.violations }}
+        {% endif %}
+    </p>
+    {% else %}
+    <p>未查见名下车辆情况。</p>
+    {% endif %}
+
+
+    {# ==================== 第二部分 数据分析 ==================== #}
+    <h3 class="part-title">第二部分 数据分析</h3>
+    {% set analysis = unit.data_analysis_section %}
+
+    {# 分析序号初始化 #}
+    {% set ns = namespace(idx=0) %}
+
+    {# 1. 购房数据分析（如有房产则显示） #}
+    {% set prop_analysis = analysis.property_analysis %}
+    {% if prop_analysis.has_data %}
+    {% set ns.idx = ns.idx + 1 %}
+    <h3 class="item-title">{{ ns.idx }}、购房数据分析</h3>
+    <p>
+        {{ prop_analysis.narrative or '家庭名下房产信息与常用邮政快递中信息相符，未查见其他常用邮寄地址，未发现可疑房产。' }}
+        {% if not prop_analysis.has_payment_record %}
+        房屋购置价{{ prop_analysis.total_value or '—' }}万元，从{{ unit.name }}银行流水中未查见购房款支付记录，需进一步确认其配偶的银行流水支付情况。
+        {% endif %}
+    </p>
+    {% endif %}
+
+    {# 2. 家庭存款与收入匹配分析 #}
+    {% set ns.idx = ns.idx + 1 %}
+    {% set income_match = analysis.income_match_analysis %}
+    <h3 class="item-title">{{ ns.idx }}、家庭存款与家庭收入匹配分析</h3>
+    <p>
+        查询{{ unit.name }}名下银行卡流水，{{ income_match.period or '查询期间' }}总资金流入{{ income_match.total_inflow_wan|round(2) if
+        income_match.total_inflow_wan else (income_match.total_inflow or 0)/10000|round(2) }}万元，
+        流出{{ income_match.total_outflow_wan|round(2) if income_match.total_outflow_wan else (income_match.total_outflow
+        or
+        0)/10000|round(2) }}万元，{{ income_match.balance_narrative or '收支基本相抵' }}。
+        {% if income_match.salary_ratio and income_match.salary_ratio < 50 %} 资金流入中仅{{
+            income_match.salary_ratio|round(1) }}%为正常工资收入，其正常工资收入金额不足以支撑月度消费。 {% endif %} </p>
+
+            {# 3. 银行流水交易对象分析 #}
+            {% set ns.idx = ns.idx + 1 %}
+            {% set counterparty = analysis.counterparty_analysis %}
+            <h3 class="item-title">{{ ns.idx }}、银行流水交易对象分析</h3>
+            <p>
+                <strong>资金流入方面：</strong>{{ counterparty.inflow.narrative or '总资金流入情况详见上文分析。' }}
+            </p>
+            <p>
+                <strong>资金流出方面：</strong>{{ counterparty.outflow.narrative or '总资金流出情况详见上文分析。' }}
+            </p>
+            {% if counterparty.summary_narrative %}
+            <p>{{ counterparty.summary_narrative }}</p>
+            {% endif %}
+
+            {# 4. 大额存取现分析 #}
+            {% set ns.idx = ns.idx + 1 %}
+            {% set cash = analysis.large_cash_analysis %}
+            <h3 class="item-title">{{ ns.idx }}、大额存取现分析</h3>
+            <p>
+                累计发生现金类收支{{ cash.total_wan|round(2) if cash.total_wan else (cash.total or 0)/10000|round(2) }}万元，
+                其中收款{{ cash.income_wan|round(2) if cash.income_wan else (cash.income or 0)/10000|round(2) }}万元，
+                支出{{ cash.expense_wan|round(2) if cash.expense_wan else (cash.expense or 0)/10000|round(2) }}万元。
+                {{ cash.relation_narrative or '未查见与相关涉案公司存在关联。' }}
+            </p>
+
+            {# 5. 大额转账记录分析 #}
+            {% set ns.idx = ns.idx + 1 %}
+            {% set transfer = analysis.large_transfer_analysis %}
+            <h3 class="item-title">{{ ns.idx }}、大额转账记录分析</h3>
+            <p>
+                查看单笔1万元以上银行流入流水，共{{ transfer.inflow.count if transfer.inflow else (transfer.inflow_count or 0) }}笔共计金额{{
+                (transfer.inflow.total/10000)|round(2) if transfer.inflow and transfer.inflow.total else (
+                transfer.inflow_amount_wan|round(2) if transfer.inflow_amount_wan else (transfer.inflow_amount or
+                0)/10000|round(2)
+                ) }}万元，
+                {{ transfer.inflow_breakdown or '主要是工资收入、个人转账等' }}，{{ transfer.inflow_relation or '未查见与涉案公司存在关联。' }}
+            </p>
+            <p>
+                查看单笔1万元以上银行支出流水，共{{ transfer.outflow.count if transfer.outflow else (transfer.outflow_count or 0)
+                }}笔共计金额{{
+                (transfer.outflow.total/10000)|round(2) if transfer.outflow and transfer.outflow.total else (
+                transfer.outflow_amount_wan|round(2) if transfer.outflow_amount_wan else (transfer.outflow_amount or
+                0)/10000|round(2)
+                ) }}万元，
+                {{ transfer.outflow_breakdown or '主要是消费支出、个人转账等' }}，{{ transfer.outflow_relation or '未查见与涉案公司存在关联。' }}
+            </p>
+            {% if transfer.detail_narrative %}
+            <p>{{ transfer.detail_narrative }}</p>
+            {% endif %}
+
+            {# 6. 企业登记及纳税分析 #}
+            {% set ns.idx = ns.idx + 1 %}
+            {% set tax = analysis.tax_analysis %}
+            <h3 class="item-title">{{ ns.idx }}、企业登记及纳税分析</h3>
+            <p>
+                {{ unit.name }}{{ tax.company_narrative or '本人名下无登记企业' }}，
+                {{ tax.tax_narrative or '本人仅缴纳个人所得税，无其他税款缴纳记录。' }}
+            </p>
+
+            {# 7. 反洗钱数据分析 #}
+            {% set ns.idx = ns.idx + 1 %}
+            {% set aml = analysis.aml_analysis %}
+            <h3 class="item-title">{{ ns.idx }}、反洗钱数据分析</h3>
+            <p>
+                涉及数据共{{ aml.count or 0 }}条{{ aml.amount_wan|round(2) if aml.amount_wan else (aml.amount or
+                0)/10000|round(2)
+                }}万元，
+                {{ aml.narrative or '主要是单位发放工资和报销款，未查见可疑大额转账记录。' }}
+            </p>
+
+            {# 8. 同行人分析 #}
+            {% set ns.idx = ns.idx + 1 %}
+            {% set travel = analysis.travel_analysis %}
+            <h3 class="item-title">{{ ns.idx }}、同行人分析</h3>
+            <p>
+                {{ travel.narrative or '未查见航班同行人、铁路同行人、同住宿人与本次核查的相关当事人存在关联。' }}
+            </p>

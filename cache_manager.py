@@ -34,9 +34,9 @@ class CacheManager:
     """
 
     # 缓存文件名称定义
+    # 【2026-02-12 改进】移除 profiles_full，现在统一使用 profiles.json
     CACHE_FILES = {
         "profiles": "profiles.json",
-        "profiles_full": "profiles_full.json",
         "suspicions": "suspicions.json",
         "derived_data": "derived_data.json",
         "graph_data": "graph_data.json",
@@ -229,8 +229,10 @@ class CacheManager:
         if "profiles" in results:
             self.save_cache("profiles", results["profiles"])
 
-        if "_profiles_raw" in results:
-            self.save_cache("profiles_full", results["_profiles_raw"])
+        # 【2026-02-12 改进】不再单独保存 profiles_full.json
+        # 因为 profiles.json 现在已包含完整数据
+        # if "_profiles_raw" in results:
+        #     self.save_cache("profiles_full", results["_profiles_raw"])
 
         if "suspicions" in results:
             self.save_cache("suspicions", results["suspicions"])
@@ -299,20 +301,27 @@ class CacheManager:
             return None
 
         # 加载各个模块
+        # 【2026-02-12 改进】profiles_full 不再是必需的，因为 profiles 已包含完整数据
+        profiles = self.load_cache("profiles")
+        if profiles is None:
+            self.logger.warning("[缓存加载] profiles 加载失败")
+            return None
+            
         results = {
-            "profiles": self.load_cache("profiles"),
-            "_profiles_raw": self.load_cache("profiles_full"),
+            "profiles": profiles,
+            "_profiles_raw": None,  # 不再使用
             "suspicions": self.load_cache("suspicions"),
             "analysisResults": self.load_cache("derived_data"),
             "graphData": self.load_cache("graph_data"),
         }
 
-        # 检查是否所有必需缓存都加载成功
-        if all(results.values()):
-            self.logger.info("[缓存加载] 所有缓存加载成功")
+        # 检查必需缓存（profiles_full 不再是必需的）
+        required_caches = ["profiles", "suspicions", "analysisResults", "graphData"]
+        if all(results[k] is not None for k in required_caches):
+            self.logger.info("[缓存加载] 所有必需缓存加载成功")
             return results
         else:
-            self.logger.warning("[缓存加载] 部分缓存加载失败")
+            self.logger.warning("[缓存加载] 部分必需缓存加载失败")
             return None
 
     def get_cache_info(self) -> Dict:

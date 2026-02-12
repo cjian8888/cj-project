@@ -33,8 +33,16 @@ tax_analysis, travel_analysis
     {% set bg = unit.asset_income_section.personal_background %}
     <p>
         {{ bg.name }}，{{ bg.gender }}，{{ bg.birth_date }}出生，
-        {{ bg.birth_place }}人，{{ bg.entry_date }}{% if bg.employer != '【待调取】' %}进入{{ bg.employer }}工作{% endif %}，
-        {{ bg.current_position }}。
+        {{ bg.birth_place }}人。
+        {% if bg.employer and bg.employer != '【待调取】' %}
+        从业单位为{{ bg.employer }}。
+        {% endif %}
+        {% if bg.current_position and bg.current_position != '【待调取】' %}
+        现任职务为{{ bg.current_position }}。
+        {% endif %}
+        {% if bg.entry_date and bg.entry_date != '【待调取】' %}
+        于{{ bg.entry_date }}进入现单位工作。
+        {% endif %}
         {% if bg.family_members_desc and bg.family_members_desc != '【待调取】家庭成员信息' %}
         除本人外其家庭成员还有：{{ bg.family_members_desc }}。
         {% endif %}
@@ -90,6 +98,31 @@ tax_analysis, travel_analysis
         {{ salary.narrative or (unit.name ~ (salary.period or '查询期间') ~ '共取得工资收入' ~ (salary.total_wan|round(2) if
         salary.total_wan else 0) ~ '万元') }}
     </p>
+    
+    {# 【修复】年度工资明细表格 #}
+    {% if salary.yearly_breakdown and salary.yearly_breakdown|length > 0 %}
+    <table>
+        <tr>
+            <th class="seq-col">序号</th>
+            <th>年份</th>
+            <th>工资金额 (万元)</th>
+            <th>交易笔数</th>
+        </tr>
+        {% for year_str in salary.yearly_breakdown %}
+        <tr>
+            <td class="seq-col">{{ loop.index }}</td>
+            <td class="text-center">{{ year_str[:4] }}</td>
+            <td class="money-col">{{ year_str[5:] }}</td>
+            <td class="text-center">—</td>
+        </tr>
+        {% endfor %}
+        <tr style="font-weight: bold; background-color: #f0f0f0;">
+            <td class="text-center" colspan="2">合计</td>
+            <td class="money-col">{{ salary.total_wan|round(2) }}</td>
+            <td class="text-center">—</td>
+        </tr>
+    </table>
+    {% endif %}
 
     {# 3. 银行存款情况 #}
     <h3 class="item-title">3、银行存款情况</h3>
@@ -202,7 +235,63 @@ tax_analysis, travel_analysis
         or
         0)/10000|round(2) }}万元，{{ income_match.balance_narrative or '收支基本相抵' }}。
         {% if income_match.salary_ratio and income_match.salary_ratio < 50 %} 资金流入中仅{{
-            income_match.salary_ratio|round(1) }}%为正常工资收入，其正常工资收入金额不足以支撑月度消费。 {% endif %} </p>
+            income_match.salary_ratio|round(1) }}%为正常工资收入，其正常工资收入金额不足以支撑月度消费。 {% endif %} 
+    </p>
+    
+    {# 【新增】收入来源结构分析 #}
+    {% set counterparty = analysis.counterparty_analysis %}
+    {% if counterparty and counterparty.inflow %}
+    <p><strong>收入来源结构分析：</strong></p>
+    <table>
+        <tr>
+            <th class="seq-col">序号</th>
+            <th>收入类型</th>
+            <th>金额 (万元)</th>
+            <th>占比</th>
+        </tr>
+        {% set inflow = counterparty.inflow %}
+        {% set total_inflow = inflow.total or income_match.total_inflow or 1 %}
+        {% if inflow.salary and inflow.salary > 0 %}
+        <tr>
+            <td class="seq-col">1</td>
+            <td>工资性收入</td>
+            <td class="money-col">{{ (inflow.salary / 10000)|round(2) }}</td>
+            <td class="text-center">{{ ((inflow.salary / total_inflow * 100)|round(1)) }}%</td>
+        </tr>
+        {% endif %}
+        {% if inflow.personal_transfers and inflow.personal_transfers > 0 %}
+        <tr>
+            <td class="seq-col">2</td>
+            <td>个人转账流入</td>
+            <td class="money-col">{{ (inflow.personal_transfers / 10000)|round(2) }}</td>
+            <td class="text-center">{{ ((inflow.personal_transfers / total_inflow * 100)|round(1)) }}%</td>
+        </tr>
+        {% endif %}
+        {% if inflow.cash and inflow.cash > 0 %}
+        <tr>
+            <td class="seq-col">3</td>
+            <td>现金存入</td>
+            <td class="money-col">{{ (inflow.cash / 10000)|round(2) }}</td>
+            <td class="text-center">{{ ((inflow.cash / total_inflow * 100)|round(1)) }}%</td>
+        </tr>
+        {% endif %}
+        {% set known_income = (inflow.salary or 0) + (inflow.personal_transfers or 0) + (inflow.cash or 0) %}
+        {% set other_income = total_inflow - known_income %}
+        {% if other_income > 0 %}
+        <tr>
+            <td class="seq-col">4</td>
+            <td>其他收入（理财赎回、利息等）</td>
+            <td class="money-col">{{ (other_income / 10000)|round(2) }}</td>
+            <td class="text-center">{{ ((other_income / total_inflow * 100)|round(1)) }}%</td>
+        </tr>
+        {% endif %}
+        <tr style="font-weight: bold; background-color: #f0f0f0;">
+            <td class="text-center" colspan="2">合计</td>
+            <td class="money-col">{{ (total_inflow / 10000)|round(2) }}</td>
+            <td class="text-center">100%</td>
+        </tr>
+    </table>
+    {% endif %}
 
             {# 3. 银行流水交易对象分析 #}
             {% set ns.idx = ns.idx + 1 %}
@@ -253,8 +342,225 @@ tax_analysis, travel_analysis
             {% if transfer.detail_narrative %}
             <p>{{ transfer.detail_narrative }}</p>
             {% endif %}
+            
+            {# 【新增】大额转账明细表格 #}
+            {% if transfer.inflow and transfer.inflow.transactions and transfer.inflow.transactions|length > 0 %}
+            <p><strong>大额收入明细（前10笔）：</strong></p>
+            <table>
+                <tr>
+                    <th class="seq-col">序号</th>
+                    <th>日期</th>
+                    <th>对手方</th>
+                    <th>金额 (万元)</th>
+                    <th>摘要</th>
+                </tr>
+                {% for tx in transfer.inflow.transactions[:10] %}
+                <tr>
+                    <td class="seq-col">{{ loop.index }}</td>
+                    <td class="text-center">{{ tx.date or tx.日期 or '—' }}</td>
+                    <td>{{ tx.counterparty or tx.对手方 or '—' }}</td>
+                    <td class="money-col">{{ ((tx.amount or tx.金额 or 0) / 10000)|round(2) }}</td>
+                    <td>{{ tx.description or tx.摘要 or '—' }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% endif %}
+            
+            {% if transfer.outflow and transfer.outflow.transactions and transfer.outflow.transactions|length > 0 %}
+            <p><strong>大额支出明细（前10笔）：</strong></p>
+            <table>
+                <tr>
+                    <th class="seq-col">序号</th>
+                    <th>日期</th>
+                    <th>对手方</th>
+                    <th>金额 (万元)</th>
+                    <th>摘要</th>
+                </tr>
+                {% for tx in transfer.outflow.transactions[:10] %}
+                <tr>
+                    <td class="seq-col">{{ loop.index }}</td>
+                    <td class="text-center">{{ tx.date or tx.日期 or '—' }}</td>
+                    <td>{{ tx.counterparty or tx.对手方 or '—' }}</td>
+                    <td class="money-col">{{ ((tx.amount or tx.金额 or 0) / 10000)|round(2) }}</td>
+                    <td>{{ tx.description or tx.摘要 or '—' }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% endif %}
 
-            {# 6. 企业登记及纳税分析 #}
+            {# 【新增】6. 借贷往来分析 #}
+            {% set ns.idx = ns.idx + 1 %}
+            {% set lending = analysis.lending_analysis %}
+            {% if lending and lending.total_platforms > 0 %}
+            <h3 class="item-title">{{ ns.idx }}、借贷往来分析</h3>
+            <p>
+                {{ lending.narrative }}
+                {% if lending.has_multi_platform %}
+                <span class="risk-high">【风险提示：存在多头借贷行为】</span>
+                {% endif %}
+            </p>
+            <table>
+                <tr>
+                    <th class="seq-col">序号</th>
+                    <th>平台名称</th>
+                    <th>借款金额 (万元)</th>
+                    <th>还款金额 (万元)</th>
+                    <th>交易笔数</th>
+                    <th>风险标识</th>
+                </tr>
+                {% for platform in lending.platforms %}
+                <tr>
+                    <td class="seq-col">{{ loop.index }}</td>
+                    <td class="text-center">{{ platform.platform_name }}</td>
+                    <td class="money-col">{{ (platform.total_inflow / 10000)|round(2) }}</td>
+                    <td class="money-col">{{ (platform.total_outflow / 10000)|round(2) }}</td>
+                    <td class="text-center">{{ platform.transaction_count }}</td>
+                    <td class="text-center {{ 'risk-high' if platform.is_bidirectional else '' }}">
+                        {{ '有借有还' if platform.is_bidirectional else '单向' }}
+                    </td>
+                </tr>
+                {% endfor %}
+                <tr style="font-weight: bold; background-color: #f0f0f0;">
+                    <td class="text-center" colspan="2">合计</td>
+                    <td class="money-col">{{ (lending.total_borrowing / 10000)|round(2) }}</td>
+                    <td class="money-col">{{ (lending.total_repayment / 10000)|round(2) }}</td>
+                    <td class="text-center">—</td>
+                    <td class="text-center">{{ '多头借贷' if lending.has_multi_platform else '正常' }}</td>
+                </tr>
+            </table>
+            {% else %}
+            {# 没有借贷记录，也增加序号 #}
+            {% set ns.idx = ns.idx + 0 %}
+            {% endif %}
+
+            {# 【新增】7. 理财往来分析 #}
+            {% set ns.idx = ns.idx + 1 %}
+            {% set wealth_tx = analysis.wealth_transaction_analysis %}
+            {% if wealth_tx and wealth_tx.transactions and wealth_tx.transactions|length > 0 %}
+            <h3 class="item-title">{{ ns.idx }}、理财往来分析</h3>
+            <p>{{ wealth_tx.narrative }}</p>
+            <table>
+                <tr>
+                    <th class="seq-col">序号</th>
+                    <th>产品名称</th>
+                    <th>交易类型</th>
+                    <th>金额 (万元)</th>
+                    <th>交易日期</th>
+                </tr>
+                {% for tx in wealth_tx.transactions[:10] %}
+                <tr>
+                    <td class="seq-col">{{ loop.index }}</td>
+                    <td>{{ tx.product_name or tx.产品名称 or '—' }}</td>
+                    <td class="text-center">{{ tx.transaction_type or tx.交易类型 or '—' }}</td>
+                    <td class="money-col">{{ ((tx.amount or tx.金额 or 0) / 10000)|round(2) }}</td>
+                    <td class="text-center">{{ tx.date or tx.日期 or '—' }}</td>
+                </tr>
+                {% endfor %}
+                <tr style="font-weight: bold; background-color: #f0f0f0;">
+                    <td class="text-center" colspan="2">汇总</td>
+                    <td class="text-center">购买/赎回/收益</td>
+                    <td class="money-col">{{ (wealth_tx.total_purchase / 10000)|round(2) }} / {{ (wealth_tx.total_redemption / 10000)|round(2) }} / {{ (wealth_tx.total_income / 10000)|round(2) }}</td>
+                    <td class="text-center">共{{ wealth_tx.product_count }}个产品</td>
+                </tr>
+            </table>
+            {% else %}
+            {% set ns.idx = ns.idx + 0 %}
+            {% endif %}
+
+            {# 【新增】8. 五维度风险评分 #}
+            {% set ns.idx = ns.idx + 1 %}
+            {% set five_dim = analysis.five_dimension_score %}
+            {% if five_dim and five_dim.total_score %}
+            <h3 class="item-title">{{ ns.idx }}、五维度风险评分</h3>
+            <p>
+                {{ five_dim.narrative or (unit.name ~ '五维度综合评分' ~ five_dim.total_score ~ '分（满分100分），整体风险等级：' ~ 
+                ('低' if five_dim.risk_level == 'low' else ('中' if five_dim.risk_level == 'medium' else '高')) ) }}
+            </p>
+            <table>
+                <tr>
+                    <th class="seq-col">序号</th>
+                    <th>评估维度</th>
+                    <th>得分</th>
+                    <th>满分</th>
+                    <th>风险等级</th>
+                    <th>评估说明</th>
+                </tr>
+                {% if five_dim.income_expense_match %}
+                <tr>
+                    <td class="seq-col">1</td>
+                    <td class="text-center">{{ five_dim.income_expense_match.name or '收支匹配度' }}</td>
+                    <td class="money-col">{{ five_dim.income_expense_match.score }}</td>
+                    <td class="text-center">{{ five_dim.income_expense_match.max_score or 25 }}</td>
+                    <td class="text-center {{ 'risk-high' if five_dim.income_expense_match.risk_level == 'high' else ('risk-medium' if five_dim.income_expense_match.risk_level == 'medium' else '') }}">
+                        {{ '高' if five_dim.income_expense_match.risk_level == 'high' else ('中' if five_dim.income_expense_match.risk_level == 'medium' else '低') }}
+                    </td>
+                    <td>{{ five_dim.income_expense_match.description or '—' }}</td>
+                </tr>
+                {% endif %}
+                {% if five_dim.lending_behavior %}
+                <tr>
+                    <td class="seq-col">2</td>
+                    <td class="text-center">{{ five_dim.lending_behavior.name or '借贷行为' }}</td>
+                    <td class="money-col">{{ five_dim.lending_behavior.score }}</td>
+                    <td class="text-center">{{ five_dim.lending_behavior.max_score or 20 }}</td>
+                    <td class="text-center {{ 'risk-high' if five_dim.lending_behavior.risk_level == 'high' else ('risk-medium' if five_dim.lending_behavior.risk_level == 'medium' else '') }}">
+                        {{ '高' if five_dim.lending_behavior.risk_level == 'high' else ('中' if five_dim.lending_behavior.risk_level == 'medium' else '低') }}
+                    </td>
+                    <td>{{ five_dim.lending_behavior.description or '—' }}</td>
+                </tr>
+                {% endif %}
+                {% if five_dim.consumption_pattern %}
+                <tr>
+                    <td class="seq-col">3</td>
+                    <td class="text-center">{{ five_dim.consumption_pattern.name or '消费特征' }}</td>
+                    <td class="money-col">{{ five_dim.consumption_pattern.score }}</td>
+                    <td class="text-center">{{ five_dim.consumption_pattern.max_score or 15 }}</td>
+                    <td class="text-center {{ 'risk-high' if five_dim.consumption_pattern.risk_level == 'high' else ('risk-medium' if five_dim.consumption_pattern.risk_level == 'medium' else '') }}">
+                        {{ '高' if five_dim.consumption_pattern.risk_level == 'high' else ('中' if five_dim.consumption_pattern.risk_level == 'medium' else '低') }}
+                    </td>
+                    <td>{{ five_dim.consumption_pattern.description or '—' }}</td>
+                </tr>
+                {% endif %}
+                {% if five_dim.fund_flow %}
+                <tr>
+                    <td class="seq-col">4</td>
+                    <td class="text-center">{{ five_dim.fund_flow.name or '资金流向' }}</td>
+                    <td class="money-col">{{ five_dim.fund_flow.score }}</td>
+                    <td class="text-center">{{ five_dim.fund_flow.max_score or 25 }}</td>
+                    <td class="text-center {{ 'risk-high' if five_dim.fund_flow.risk_level == 'high' else ('risk-medium' if five_dim.fund_flow.risk_level == 'medium' else '') }}">
+                        {{ '高' if five_dim.fund_flow.risk_level == 'high' else ('中' if five_dim.fund_flow.risk_level == 'medium' else '低') }}
+                    </td>
+                    <td>{{ five_dim.fund_flow.description or '—' }}</td>
+                </tr>
+                {% endif %}
+                {% if five_dim.cash_operation %}
+                <tr>
+                    <td class="seq-col">5</td>
+                    <td class="text-center">{{ five_dim.cash_operation.name or '现金操作' }}</td>
+                    <td class="money-col">{{ five_dim.cash_operation.score }}</td>
+                    <td class="text-center">{{ five_dim.cash_operation.max_score or 15 }}</td>
+                    <td class="text-center {{ 'risk-high' if five_dim.cash_operation.risk_level == 'high' else ('risk-medium' if five_dim.cash_operation.risk_level == 'medium' else '') }}">
+                        {{ '高' if five_dim.cash_operation.risk_level == 'high' else ('中' if five_dim.cash_operation.risk_level == 'medium' else '低') }}
+                    </td>
+                    <td>{{ five_dim.cash_operation.description or '—' }}</td>
+                </tr>
+                {% endif %}
+                <tr style="font-weight: bold; background-color: #f0f0f0;">
+                    <td class="text-center" colspan="2">综合评分</td>
+                    <td class="money-col">{{ five_dim.total_score }}</td>
+                    <td class="text-center">100</td>
+                    <td class="text-center {{ 'risk-high' if five_dim.risk_level == 'high' else ('risk-medium' if five_dim.risk_level == 'medium' else '') }}">
+                        {{ '高' if five_dim.risk_level == 'high' else ('中' if five_dim.risk_level == 'medium' else '低') }}
+                    </td>
+                    <td>{{ five_dim.risk_assessment or '综合评估' }}</td>
+                </tr>
+            </table>
+            {% else %}
+            {# 如果没有五维度数据，则增加序号占位 #}
+            {% set ns.idx = ns.idx + 0 %}
+            {% endif %}
+
+            {# 7. 企业登记及纳税分析 #}
             {% set ns.idx = ns.idx + 1 %}
             {% set tax = analysis.tax_analysis %}
             <h3 class="item-title">{{ ns.idx }}、企业登记及纳税分析</h3>
@@ -263,7 +569,7 @@ tax_analysis, travel_analysis
                 {{ tax.tax_narrative or '本人仅缴纳个人所得税，无其他税款缴纳记录。' }}
             </p>
 
-            {# 7. 反洗钱数据分析 #}
+            {# 8. 反洗钱数据分析 #}
             {% set ns.idx = ns.idx + 1 %}
             {% set aml = analysis.aml_analysis %}
             <h3 class="item-title">{{ ns.idx }}、反洗钱数据分析</h3>
@@ -274,7 +580,7 @@ tax_analysis, travel_analysis
                 {{ aml.narrative or '主要是单位发放工资和报销款，未查见可疑大额转账记录。' }}
             </p>
 
-            {# 8. 同行人分析 #}
+            {# 9. 同行人分析 #}
             {% set ns.idx = ns.idx + 1 %}
             {% set travel = analysis.travel_analysis %}
             <h3 class="item-title">{{ ns.idx }}、同行人分析</h3>

@@ -320,17 +320,22 @@ def serialize_profiles(profiles: Dict) -> Dict:
                 "third_party_expense", 0
             )
 
-            # 构建前端期望的扁平化结构
+            # 【2026-02-12 关键改进】保留完整的原始数据，供报告生成使用
+            # 问题背景：之前的简化版缺失 yearly_salary 等关键字段，导致报告生成器
+            # 必须同时维护 profiles.json 和 profiles_full.json 两个文件，造成混淆
+            # 解决方案：简化版保留所有原始数据，只是添加前端需要的扁平化字段
+            
+            # 构建前端期望的扁平化结构（同时保留完整原始数据）
             frontend_profile = {
                 # 基础标识
                 "entityName": name,
-                # 核心财务指标 (camelCase)
+                # 核心财务指标 (camelCase) - 前端展示用
                 "totalIncome": summary.get("total_income", 0)
                 or income_structure.get("total_income", 0),
                 "totalExpense": summary.get("total_expense", 0)
                 or income_structure.get("total_expense", 0),
                 "transactionCount": summary.get("transaction_count", 0),
-                # 审计关键字段
+                # 审计关键字段 - 前端展示用
                 "cashTotal": cash_total,
                 "thirdPartyTotal": third_party_total,
                 "wealthTotal": wealth_mgmt.get("total_transactions", 0),
@@ -344,6 +349,19 @@ def serialize_profiles(profiles: Dict) -> Dict:
                 "securities": profile_dict.get("securities", []),
                 "insurance": profile_dict.get("insurance", []),
                 "bank_accounts_official": profile_dict.get("bank_accounts_official", []),
+                # 【2026-02-12 新增】保留完整的原始嵌套数据，供报告生成使用
+                # 这样报告生成器只需要使用 profiles.json，无需再加载 profiles_full.json
+                "entity_name": profile_dict.get("entity_name", name),
+                "has_data": profile_dict.get("has_data", False),
+                "summary": summary,
+                "income_structure": income_structure,
+                "fund_flow": fund_flow,
+                "wealth_management": wealth_mgmt,
+                "large_cash": large_cash,
+                "categories": profile_dict.get("categories", {}),
+                "yearly_salary": profile_dict.get("yearly_salary", {}),
+                "income_classification": profile_dict.get("income_classification", {}),
+                "bank_accounts": profile_dict.get("bank_accounts", []),
             }
 
             result[name] = frontend_profile
@@ -2546,12 +2564,98 @@ async def generate_investigation_report_v5(
         )
 
 
+@app.post("/api/investigation-report/generate-html")
+async def generate_investigation_report_html(
+    request: InvestigationReportRequest = None,
+):
+    """
+    【v5.1 新增】生成HTML格式初查报告（所见即所得）
+
+    严格遵循"所见即所得"原则：
+    - 使用与正式报告完全相同的 Jinja2 模板 (templates/report_v3/)
+    - 使用与正式报告完全相同的数据生成逻辑 (build_report_v5)
+    - 预览中看到的，就是最终下载的正式报告
+
+    Returns:
+        {
+            "success": True,
+            "html": "<html>...</html>",  # 完整HTML报告
+            "message": "HTML报告生成成功"
+        }
+    """
+    logger = logging.getLogger(__name__)
+    logger.info("[HTML报告生成] 开始生成正式HTML报告（所见即所得）")
+
+    # 从请求中提取参数
+    case_background = request.case_background if request else None
+    data_scope = request.data_scope if request else None
+
+    try:
+        # 1. 加载归集配置服务
+        service = PrimaryTargetsService(data_dir="./data", output_dir="./output")
+
+        # 2. 获取或创建归集配置
+        config, msg, is_new = service.get_or_create_config()
+        if config is None:
+            logger.warning(f"[HTML报告生成] 归集配置加载失败: {msg}")
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": f"归集配置加载失败: {msg}"},
+            )
+
+        logger.info(f"[HTML报告生成] 配置加载成功: {len(config.analysis_units)} 个分析单元")
+
+        # 3. 加载报告构建器
+        builder = load_investigation_report_builder("./output")
+        if builder is None:
+            logger.warning("[HTML报告生成] 缓存数据不存在，请先运行分析")
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "分析缓存不存在，请先运行分析"},
+            )
+
+        # 4. 设置用户配置
+        builder.set_primary_config(config)
+
+        # 5. 【关键】使用 build_report_v5 生成完整报告数据
+        report = builder.build_report_v5(
+            config=config,
+            case_background=case_background or config.case_notes,
+            data_scope=data_scope,
+        )
+
+        logger.info(f"[HTML报告生成] 报告数据生成完成，开始渲染HTML模板")
+
+        # 6. 【关键】使用 Jinja2 模板渲染正式HTML
+        html_content = builder.render_html_report_v3(report)
+
+        logger.info(f"[HTML报告生成] HTML渲染完成，长度: {len(html_content)} 字符")
+
+        return {
+            "success": True,
+            "html": html_content,
+            "message": "HTML报告生成成功（所见即所得）",
+            "config_info": {
+                "analysis_units_count": len(config.analysis_units),
+                "doc_number": config.doc_number,
+            },
+        }
+
+    except Exception as e:
+        logger.exception(f"[HTML报告生成] 生成失败: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": f"HTML报告生成失败: {str(e)}"},
+        )
+
+
 @app.post("/api/investigation-report/save-html")
 async def save_html_report(request: dict):
     """
     保存HTML报告到输出目录
 
-    前端生成的HTML报告，保存到 output/analysis_results/ 目录
+    【v5.1 修改】前端传来的HTML应该是从 /generate-html 获取的正式报告
+    保存到 output/analysis_results/ 目录
     """
     logger = logging.getLogger(__name__)
     logger.info("[报告保存] 开始保存HTML报告")
