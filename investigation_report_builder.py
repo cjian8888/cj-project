@@ -3062,10 +3062,18 @@ class InvestigationReportBuilder:
 
     def _build_large_cash_analysis(self, profile: Dict) -> LargeCashAnalysis:
         """构建大额现金分析"""
-        cash_total = profile.get("cashTotal", 0) or 0
-        cash_income = profile.get("cashIncome", 0) or 0
-        cash_expense = profile.get("cashExpense", 0) or 0
-        cash_transactions = profile.get("cashTransactions", []) or []
+        # 【2026-02-13 修复】现金交易数据存储在 fund_flow 中
+        fund_flow = profile.get("fund_flow", {})
+        
+        # 优先从 fund_flow 获取现金数据
+        cash_total = fund_flow.get("cash_total", profile.get("cashTotal", 0)) or 0
+        cash_income = fund_flow.get("cash_income", profile.get("cashIncome", 0)) or 0
+        cash_expense = fund_flow.get("cash_expense", profile.get("cashExpense", 0)) or 0
+        cash_transactions = fund_flow.get("cash_transactions", []) or []
+        
+        # 如果没有从fund_flow获取到，再尝试顶层字段
+        if not cash_transactions:
+            cash_transactions = profile.get("cashTransactions", []) or []
 
         return LargeCashAnalysis(
             total_amount=cash_total,
@@ -3836,18 +3844,34 @@ class InvestigationReportBuilder:
         issues = []
 
         # 1. 个人收支不抵问题
+        # 【2026-02-13 修复】使用修复后的 profiles 数据获取真实工资占比
         for member in member_details:
-            ratio = member.analysis.income_gap.ratio
-            total_income = member.analysis.income_gap.total_income
-            salary_income = member.analysis.income_gap.salary_income
-            unknown_amount = total_income - salary_income
+            name = member.name
+            # 从 profiles 获取修复后的数据
+            profile = self.profiles.get(name, {})
+            summary = profile.get("summary", {})
+            
+            # 获取真实收入（剔除后的）
+            real_income = summary.get("real_income", summary.get("total_income", 0))
+            
+            # 从 yearly_salary 获取正确工资数据
+            yearly_salary = profile.get("yearly_salary", {}) or profile.get("yearlySalary", {})
+            salary_total = 0
+            if yearly_salary and "summary" in yearly_salary:
+                salary_total = yearly_salary["summary"].get("total", 0)
+            else:
+                salary_total = profile.get("salaryTotal", 0)
+            
+            # 计算真实工资占比
+            ratio = (salary_total / real_income * 100) if real_income > 0 else 0
+            unknown_amount = real_income - salary_total
 
             if ratio < 30:
                 # 工资占比不足30%，高度可疑
                 issues.append(
                     IssueItem(
                         person=member.name,
-                        issue_type="收支不抵",
+                        issue_type="收支不匹配",
                         description=f"工资收入占比仅{ratio:.1f}%，远低于50%，收入来源不明",
                         severity="high",
                         verification_status="highly_suspicious",
@@ -3859,7 +3883,7 @@ class InvestigationReportBuilder:
                 issues.append(
                     IssueItem(
                         person=member.name,
-                        issue_type="收支不抵",
+                        issue_type="收支不匹配",
                         description=f"工资收入占比{ratio:.1f}%，低于50%，需核实其他收入来源",
                         severity="medium",
                         verification_status="need_verification",
@@ -3948,7 +3972,7 @@ class InvestigationReportBuilder:
         steps = set()
 
         STEP_TEMPLATES = {
-            "收支不抵": "对相关人员的不明收入来源进行约谈核实",
+            "收支不匹配": "对相关人员的不明收入来源进行约谈核实",
             "异常资金往来": "调取相关银行凭证原件进行核对",
             "大额现金": "核实大额现金交易的来源及去向",
             "借贷异常": "核实相关借贷关系的真实性",
@@ -4595,6 +4619,7 @@ class InvestigationReportBuilder:
         total_wealth = 0.0
         total_bank_balance = 0.0
         total_property_value = 0.0
+        total_property_area = 0.0  # 【2026-02-13 新增】房产总面积
         property_count = 0
         vehicle_count = 0
         
@@ -4653,6 +4678,21 @@ class InvestigationReportBuilder:
                     for prop in property_data:
                         prop_value = prop.get("value", 0) or prop.get("price", 0) or 0
                         total_property_value += prop_value
+                        # 【2026-02-13 新增】累加房产面积（面积字段可能是字符串如"182.29平方米"）
+                        prop_area = prop.get("area", 0)
+                        if prop_area:
+                            try:
+                                # 如果已经是数字，直接使用
+                                if isinstance(prop_area, (int, float)):
+                                    total_property_area += float(prop_area)
+                                else:
+                                    # 从字符串中提取数字（如 "182.29平方米" -> 182.29）
+                                    import re
+                                    area_match = re.search(r'([\d.]+)', str(prop_area))
+                                    if area_match:
+                                        total_property_area += float(area_match.group(1))
+                            except (ValueError, TypeError):
+                                pass
                 
                 # 车辆数据（从外部缓存获取）
                 vehicle_data = self._get_external_vehicle_data(member)
@@ -4711,17 +4751,24 @@ class InvestigationReportBuilder:
             "assets": {
                 "real_estate_count": property_count,
                 "property_value_wan": round(total_property_value / 10000, 2),
+                "property_area_sqm": round(total_property_area, 2),  # 【2026-02-13 新增】房产总面积
                 "vehicle_count": vehicle_count,
                 "bank_balance_wan": round(total_bank_balance / 10000, 2),
                 "wealth_holding_wan": round(total_wealth / 10000, 2),
             },
             # 【2026-02-12 修复】更新文本描述，明确是"真实收入"而非"流水"
+            # 【2026-02-13 新增】添加家庭资产快照
             "narrative": (
                 f"{anchor}家庭共{len(members)}人。"
                 f"家庭真实收入{total_real_income / 10000:.2f}万元，"
                 f"真实支出{total_real_expense / 10000:.2f}万元"
                 f"（已剔除内部转账、理财/定存本金循环等{total_offset_detail['total_offset'] / 10000:.2f}万元）。"
                 f"其中工资收入{total_salary / 10000:.2f}万元，占真实收入{salary_ratio:.1f}%。"
+                f"\n家庭资产：房产{property_count}套"
+                f"{'（' + f'{total_property_area:.2f}' + '㎡）' if total_property_area > 0 else ''}"
+                f" | 车辆{vehicle_count}辆"
+                f" | 理财{total_wealth / 10000:.2f}万"
+                f" | 存款{total_bank_balance / 10000:.2f}万。"
             ),
         }
 
@@ -6750,6 +6797,7 @@ class InvestigationReportBuilder:
         # 初始化外部数据缓存
         if not hasattr(self, "_external_vehicle_cache"):
             self._external_vehicle_cache = None
+        if not hasattr(self, "_external_name_to_id_map"):
             self._external_name_to_id_map = {}
 
         # 首次调用时加载所有车辆数据
@@ -6878,16 +6926,24 @@ class InvestigationReportBuilder:
 
     def _build_income_match_analysis_v4(self, name: str, profile: Dict) -> Dict:
         """构建家庭存款与家庭收入匹配分析"""
-        total_income = profile.get("totalIncome", 0)
-        total_expense = profile.get("totalExpense", 0)
+        # 【2026-02-13 修复】使用真实收入和正确工资数据
+        summary = profile.get("summary", {})
+        total_income = summary.get("real_income", profile.get("totalIncome", 0))
+        total_expense = summary.get("real_expense", profile.get("totalExpense", 0))
         net_balance = total_income - total_expense
 
         # 获取银行余额
         bank_accounts = self._build_bank_accounts(name, profile)
         bank_balance = sum(acc.balance for acc in bank_accounts)
 
-        # 工资数据
-        salary_total = profile.get("salaryTotal", 0)
+        # 【2026-02-13 修复】从 yearly_salary 获取正确工资数据
+        yearly_salary = profile.get("yearly_salary", {}) or profile.get("yearlySalary", {})
+        if yearly_salary and "summary" in yearly_salary:
+            salary_total = yearly_salary["summary"].get("total", 0)
+        else:
+            salary_total = profile.get("salaryTotal", 0)
+        
+        # 计算工资占比（基于真实收入）
         salary_ratio = (salary_total / total_income * 100) if total_income > 0 else 0
 
         # 分析判断
@@ -7047,9 +7103,13 @@ class InvestigationReportBuilder:
 
     def _build_large_cash_analysis_v4(self, name: str, profile: Dict) -> Dict:
         """构建大额存取现分析"""
-        cash_transactions = profile.get("cashTransactions", [])
-        cash_income = profile.get("cashIncome", 0)
-        cash_expense = profile.get("cashExpense", 0)
+        # 【2026-02-13 修复】现金交易数据存储在 fund_flow 中
+        fund_flow = profile.get("fund_flow", {})
+        
+        # 优先从 fund_flow 获取现金数据
+        cash_transactions = fund_flow.get("cash_transactions", profile.get("cashTransactions", [])) or []
+        cash_income = fund_flow.get("cash_income", profile.get("cashIncome", 0)) or 0
+        cash_expense = fund_flow.get("cash_expense", profile.get("cashExpense", 0)) or 0
         cash_total = cash_income + cash_expense
 
         # 判断是否与调查公司存在关联
@@ -7073,6 +7133,9 @@ class InvestigationReportBuilder:
                 company_names = "、".join(include_companies[:3])
                 narrative += f"未查见与{company_names}存在关联。"
 
+        # 【2026-02-13 新增】现金风险预警
+        risk_warnings = self._detect_cash_risk_warnings(name, profile, cash_transactions, cash_income, cash_expense)
+
         return {
             "total": cash_total,
             "income": cash_income,
@@ -7083,7 +7146,106 @@ class InvestigationReportBuilder:
             ],  # 【审计修复】清理nan
             "has_company_relation": has_company_relation,
             "narrative": narrative,
+            "risk_warnings": risk_warnings,  # 【新增】风险预警
         }
+
+    def _detect_cash_risk_warnings(self, name: str, profile: Dict, cash_transactions: List[Dict], 
+                                   cash_income: float, cash_expense: float) -> List[Dict]:
+        """
+        【2026-02-13 新增】现金存取风险预警检测
+        
+        预警规则：
+        1. 单笔大额现金存入（≥5万）→ 中风险
+        2. 单笔大额现金取出（≥5万）→ 中风险
+        3. 累计现金超标（≥50万）→ 高风险
+        4. 现金收入占比过高（≥30%）→ 中风险
+        5. 现金支出占比过高（≥30%）→ 中风险
+        6. 存取时间异常（深夜0-6点大额存取）→ 高风险
+        """
+        warnings = []
+        
+        # 获取总收入/支出用于计算占比
+        summary = profile.get("summary", {})
+        total_income = summary.get("real_income", summary.get("total_income", 0))
+        total_expense = summary.get("real_expense", profile.get("totalExpense", 0))
+        
+        # 1. 检测单笔大额现金交易
+        for tx in cash_transactions:
+            amount = tx.get("金额") or tx.get("amount", 0)
+            tx_type = tx.get("类型") or tx.get("type", "")
+            date = tx.get("日期") or tx.get("date", "")
+            desc = tx.get("摘要") or tx.get("description", "")
+            
+            # 检测单笔≥5万
+            if amount >= 50000:
+                if tx_type == "存现" or "存" in desc:
+                    warnings.append({
+                        "type": "单笔大额现金存入",
+                        "level": "medium",
+                        "level_text": "中风险",
+                        "date": date,
+                        "amount": amount,
+                        "description": f"单笔现金存入{amount/10000:.2f}万元，需核实现金来源",
+                    })
+                elif tx_type == "取现" or "取" in desc:
+                    warnings.append({
+                        "type": "单笔大额现金取出",
+                        "level": "medium",
+                        "level_text": "中风险",
+                        "date": date,
+                        "amount": amount,
+                        "description": f"单笔现金取出{amount/10000:.2f}万元，需核实资金流向",
+                    })
+            
+            # 检测时间异常（深夜0-6点）且金额≥2万
+            if amount >= 20000 and date:
+                try:
+                    from datetime import datetime
+                    if isinstance(date, str) and "T" in date:
+                        hour = int(date.split("T")[1].split(":")[0])
+                        if 0 <= hour < 6:
+                            warnings.append({
+                                "type": "异常时间存取",
+                                "level": "high",
+                                "level_text": "高风险",
+                                "date": date,
+                                "amount": amount,
+                                "description": f"深夜{hour}点现金交易{amount/10000:.2f}万元，时间异常需关注",
+                            })
+                except:
+                    pass
+        
+        # 2. 检测累计现金超标
+        if cash_income + cash_expense >= 500000:
+            warnings.append({
+                "type": "累计现金超标",
+                "level": "high",
+                "level_text": "高风险",
+                "amount": cash_income + cash_expense,
+                "description": f"累计现金交易{(cash_income+cash_expense)/10000:.2f}万元，超过50万阈值，需全面核查",
+            })
+        
+        # 3. 检测现金收入占比
+        if total_income > 0 and cash_income / total_income >= 0.3:
+            warnings.append({
+                "type": "现金收入占比过高",
+                "level": "medium",
+                "level_text": "中风险",
+                "ratio": cash_income / total_income * 100,
+                "description": f"现金收入占比{(cash_income/total_income*100):.1f}%，收入来源需核实",
+            })
+        
+        # 4. 检测现金支出占比
+        if total_expense > 0 and cash_expense / total_expense >= 0.3:
+            warnings.append({
+                "type": "现金支出占比过高",
+                "level": "medium",
+                "level_text": "中风险",
+                "ratio": cash_expense / total_expense * 100,
+                "description": f"现金支出占比{(cash_expense/total_expense*100):.1f}%，资金去向需核实",
+            })
+        
+        return warnings
 
     def _build_large_transfer_analysis_v4(self, name: str, profile: Dict) -> Dict:
         """
@@ -7128,17 +7290,46 @@ class InvestigationReportBuilder:
             f"主要是生活消费、个人转账等。{company_clause}"
         )
 
+        # 【2026-02-13 新增】计算对手方Top 10统计（按对手方汇总）
+        def _calc_counterparty_top10(transactions):
+            """按对手方汇总计算Top 10"""
+            cp_stats = {}
+            for t in transactions:
+                cp = t.get("counterparty", "未知")
+                if not cp or cp == "nan":
+                    cp = "未知"
+                if cp not in cp_stats:
+                    cp_stats[cp] = {"amount": 0, "count": 0}
+                cp_stats[cp]["amount"] += t.get("amount", 0)
+                cp_stats[cp]["count"] += 1
+            
+            # 排序取Top 10
+            sorted_cp = sorted(cp_stats.items(), key=lambda x: x[1]["amount"], reverse=True)[:10]
+            return [
+                {
+                    "counterparty": cp,
+                    "amount": data["amount"],
+                    "count": data["count"],
+                }
+                for cp, data in sorted_cp
+            ]
+        
+        inflow_top10 = _calc_counterparty_top10(person_transfers_in)
+        outflow_top10 = _calc_counterparty_top10(person_transfers_out)
+
         return {
             "threshold": threshold,
             "inflow": {
                 "count": len(person_transfers_in),
                 "total": in_total,
                 "transactions": person_transfers_in[:20],
+                "top10_counterparties": inflow_top10,  # 【新增】对手方Top 10
             },
             "outflow": {
                 "count": len(person_transfers_out),
                 "total": out_total,
                 "transactions": person_transfers_out[:20],
+                "top10_counterparties": outflow_top10,  # 【新增】对手方Top 10
             },
             "inflow_narrative": in_narrative,
             "outflow_narrative": out_narrative,

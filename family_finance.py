@@ -519,8 +519,10 @@ def calculate_family_summary(
         total_family_transfers += to_family
 
     # 3. 汇总家庭收支(剔除互转)
+    # 【2026-02-13 修复】使用真实收入和正确工资数据
     total_income = 0.0
     total_expense = 0.0
+    total_salary = 0.0  # 【新增】正确汇总的工资
 
     for member in family_members:
         if member not in all_profiles:
@@ -531,8 +533,21 @@ def calculate_family_summary(
             continue
 
         summary = profile.get("summary", {})
-        total_income += summary.get("total_income", 0)
-        total_expense += summary.get("total_expense", 0)
+        
+        # 【修复】优先使用真实收入(real_income)，如果没有则使用原始total_income
+        real_income = summary.get("real_income", summary.get("total_income", 0))
+        real_expense = summary.get("real_expense", summary.get("total_expense", 0))
+        total_income += real_income
+        total_expense += real_expense
+        
+        # 【修复】从yearly_salary获取正确工资数据
+        yearly_salary = profile.get("yearly_salary", {}) or profile.get("yearlySalary", {})
+        if yearly_salary and "summary" in yearly_salary:
+            member_salary = yearly_salary["summary"].get("total", 0)
+        else:
+            # 回退到旧字段
+            member_salary = profile.get("salaryTotal", 0) or 0
+        total_salary += member_salary
 
     # 剔除互转（互转会被双方都记录，所以家庭内部互转不应该计入家庭收支）
     # 家庭对外收入 = 总收入 - 家庭成员转入
@@ -550,11 +565,16 @@ def calculate_family_summary(
     )
 
     # 【修复】返回扁平化结构，兼容前端
+    # 【2026-02-13 新增】计算工资占比
+    salary_ratio = (total_salary / total_income * 100) if total_income > 0 else 0
+    
     return {
         "family_members": family_members,
         "total_assets": total_assets,
-        "total_income": total_income,
-        "total_expense": total_expense,
+        "total_income": total_income,  # 【修复】现在使用真实收入
+        "total_expense": total_expense,  # 【修复】现在使用真实支出
+        "total_salary": total_salary,  # 【2026-02-13 新增】正确汇总的工资
+        "salary_ratio": salary_ratio,  # 【2026-02-13 新增】工资占比
         "internal_transfers_in": total_transfers_in,  # 家庭成员转入总额
         "internal_transfers_out": total_transfers_out,  # 家庭成员转出总额
         "external_income": external_income,

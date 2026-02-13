@@ -280,7 +280,7 @@ tax_analysis, travel_analysis
         {% if other_income > 0 %}
         <tr>
             <td class="seq-col">4</td>
-            <td>其他收入（理财赎回、利息等）</td>
+            <td>其他收入<small>（已剔除理财/定存本金、内部互转）</small></td>
             <td class="money-col">{{ (other_income / 10000)|round(2) }}</td>
             <td class="text-center">{{ ((other_income / total_inflow * 100)|round(1)) }}%</td>
         </tr>
@@ -291,6 +291,10 @@ tax_analysis, travel_analysis
             <td class="text-center">100%</td>
         </tr>
     </table>
+    <p class="note" style="font-size: 12px; color: #666; margin-top: 5px;">
+        <strong>注：</strong>以上收入统计为银行流水原始数据，其中"其他收入"已剔除理财/定期存款本金赎回、家庭成员内部转账等非真实收入项目。
+        真实收入计算请参考"家庭存款与家庭收入匹配分析"章节。
+    </p>
     {% endif %}
 
             {# 3. 银行流水交易对象分析 #}
@@ -317,6 +321,60 @@ tax_analysis, travel_analysis
                 支出{{ cash.expense_wan|round(2) if cash.expense_wan else (cash.expense or 0)/10000|round(2) }}万元。
                 {{ cash.relation_narrative or '未查见与相关涉案公司存在关联。' }}
             </p>
+            
+            {# 【2026-02-13 新增】大额现金交易明细 #}
+            {% if cash.transactions and cash.transactions|length > 0 %}
+            <p><strong>大额现金交易明细：</strong></p>
+            <table>
+                <tr>
+                    <th class="seq-col">序号</th>
+                    <th>日期</th>
+                    <th>类型</th>
+                    <th>金额 (万元)</th>
+                    <th>摘要</th>
+                </tr>
+                {% for tx in cash.transactions %}
+                <tr>
+                    <td class="seq-col">{{ loop.index }}</td>
+                    <td class="text-center">{{ tx.日期 or tx.date or '—' }}</td>
+                    <td class="text-center">{{ tx.类型 or tx.type or '—' }}</td>
+                    <td class="money-col">{{ ((tx.金额 or tx.amount or 0) / 10000)|round(2) }}</td>
+                    <td>{{ tx.摘要 or tx.description or '—' }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% endif %}
+            
+            {# 【2026-02-13 新增】现金风险预警 #}
+            {% if cash.risk_warnings and cash.risk_warnings|length > 0 %}
+            <p><strong>现金风险预警：</strong></p>
+            <table>
+                <tr>
+                    <th class="seq-col">序号</th>
+                    <th>预警类型</th>
+                    <th>风险等级</th>
+                    <th>涉及金额/占比</th>
+                    <th>预警说明</th>
+                </tr>
+                {% for warning in cash.risk_warnings %}
+                <tr class="{{ 'risk-high' if warning.level == 'high' else 'risk-medium' }}">
+                    <td class="seq-col">{{ loop.index }}</td>
+                    <td>{{ warning.type }}</td>
+                    <td class="text-center">{{ warning.level_text }}</td>
+                    <td class="money-col">
+                        {% if warning.amount %}
+                            {{ (warning.amount / 10000)|round(2) }}万元
+                        {% elif warning.ratio %}
+                            {{ warning.ratio|round(1) }}%
+                        {% else %}
+                            —
+                        {% endif %}
+                    </td>
+                    <td>{{ warning.description }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% endif %}
 
             {# 5. 大额转账记录分析 #}
             {% set ns.idx = ns.idx + 1 %}
@@ -383,6 +441,47 @@ tax_analysis, travel_analysis
                     <td>{{ tx.counterparty or tx.对手方 or '—' }}</td>
                     <td class="money-col">{{ ((tx.amount or tx.金额 or 0) / 10000)|round(2) }}</td>
                     <td>{{ tx.description or tx.摘要 or '—' }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% endif %}
+            
+            {# 【2026-02-13 新增】大额资金往来对手方Top 10统计 #}
+            {% if transfer.inflow and transfer.inflow.top10_counterparties and transfer.inflow.top10_counterparties|length > 0 %}
+            <p><strong>主要资金来源对手方Top 10：</strong></p>
+            <table>
+                <tr>
+                    <th class="seq-col">序号</th>
+                    <th>对手方名称</th>
+                    <th>累计金额 (万元)</th>
+                    <th>交易笔数</th>
+                </tr>
+                {% for cp in transfer.inflow.top10_counterparties %}
+                <tr>
+                    <td class="seq-col">{{ loop.index }}</td>
+                    <td>{{ cp.counterparty }}</td>
+                    <td class="money-col">{{ (cp.amount / 10000)|round(2) }}</td>
+                    <td class="text-center">{{ cp.count }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% endif %}
+            
+            {% if transfer.outflow and transfer.outflow.top10_counterparties and transfer.outflow.top10_counterparties|length > 0 %}
+            <p><strong>主要资金去向对手方Top 10：</strong></p>
+            <table>
+                <tr>
+                    <th class="seq-col">序号</th>
+                    <th>对手方名称</th>
+                    <th>累计金额 (万元)</th>
+                    <th>交易笔数</th>
+                </tr>
+                {% for cp in transfer.outflow.top10_counterparties %}
+                <tr>
+                    <td class="seq-col">{{ loop.index }}</td>
+                    <td>{{ cp.counterparty }}</td>
+                    <td class="money-col">{{ (cp.amount / 10000)|round(2) }}</td>
+                    <td class="text-center">{{ cp.count }}</td>
                 </tr>
                 {% endfor %}
             </table>
