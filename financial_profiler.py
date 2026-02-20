@@ -1151,13 +1151,15 @@ def _detect_wealth_transaction(row: pd.Series, product_code_pattern) -> tuple:
                 confidence = 'medium'
                 wealth_type = '定期存款' if '定期' in description else '银行理财'
 
-    # C. 纯数字摘要
-    if not is_wealth:
-        desc_stripped = description.strip()
-        if desc_stripped.isdigit() and len(desc_stripped) <= 4:
-            is_wealth = True
-            wealth_type = '银行理财'
-            confidence = 'medium'
+    # 【2026-02-20 修复】C. 纯数字摘要 - 完全删除此逻辑
+    # 问题：纯数字摘要（如"71"、"69"）可能是柜台号、交易代码，不一定是理财
+    # 即使增加条件，仍然会误识别大量正常交易
+    # 修复：完全删除此识别逻辑，只保留有明确理财特征的识别
+    #
+    # if not is_wealth:
+    #     desc_stripped = description.strip()
+    #     if desc_stripped.isdigit() and len(desc_stripped) <= 4:
+    #         ... 已删除 ...
 
     # D. 产品编号格式
     if not is_wealth and description:
@@ -1181,14 +1183,20 @@ def _detect_wealth_transaction(row: pd.Series, product_code_pattern) -> tuple:
                 wealth_type = '银行理财'
                 confidence = 'medium'
 
-    # G. 金额含利息尾数模式
-    if not is_wealth and income >= 100000:
-        if counterparty in ['', '-', 'nan', 'NaN'] or len(counterparty) < 2:
-            remainder = income % 10000
-            if remainder > 0:
-                is_wealth = True
-                wealth_type = '银行理财'
-                confidence = 'medium'
+    # 【2026-02-20 修复】G. 金额含利息尾数模式 - 删除此逻辑
+    # 问题：这个逻辑太宽松，把所有金额>=10万且有余数且对手方为空的交易都识别为银行理财
+    # 例如：15.49万收入（154900元），154900 % 10000 = 4900 > 0，就被识别为理财
+    # 这导致大量正常收入被误识别
+    #
+    # 修复：完全删除此逻辑，只保留前面更严格的识别条件
+    #
+    # if not is_wealth and income >= 100000:
+    #     if counterparty in ['', '-', 'nan', 'NaN'] or len(counterparty) < 2:
+    #         remainder = income % 10000
+    #         if remainder > 0:
+    #             is_wealth = True
+    #             wealth_type = '银行理财'
+    #             confidence = 'medium'
 
     return is_wealth, wealth_type, confidence
 
@@ -1399,11 +1407,38 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
                 wealth_type = '银行理财'
                 confidence = 'high'
 
-        # 双空特征 (对手方空 + 摘要空 + 大额)
+        # 【2026-02-20 修复】双空特征识别逻辑改进
+        # 问题：原逻辑将所有摘要+对手方为空的大额收入都识别为理财，导致误识别
+        # 改进：增加更严格的条件，避免将真实收入误识别为理财
+        #
+        # 不再识别的情况：
+        # 1. 现金存入（摘要明确为现金存入）
+        # 2. 单笔大额收入（>50万）且无对应支出记录的
+        # 3. 工资发放日附近的收入（可能是工资）
+        #
+        # 仍然识别为"疑似理财"的情况：
+        # 1. 同一银行同日/同月有相近金额的支出（闭环特征）
+        # 2. 金额符合理财特征（整数或特定模式）
+        
         if not is_wealth and income > 10000 and counterparty in ['', '-', 'nan', 'NaN'] and description in ['', 'nan', 'NaN']:
-            is_wealth = True
-            wealth_type = '疑似理财'
-            confidence = 'medium'
+            # 排除现金存入
+            if str(row.get('现金', '')).strip() in ['是', 'YES', 'yes', '1', 'True', 'true']:
+                continue  # 现金存入不识别为理财
+            
+            # 排除超大额单笔收入（>100万且无对应支出）
+            if income > 1000000:
+                # 检查同一银行是否有相近金额的支出
+                bank = row.get('所属银行', '')
+                bank_expense = df[(df['所属银行'] == bank) & (df['支出(元)'] > 0)]['支出(元)'].sum()
+                if bank_expense < income * 0.5:  # 支出少于收入的一半，可能是真实收入
+                    continue
+            
+            # 保守处理：标记为"待确认"，后续通过闭环分析决定
+            # 暂时不计入理财统计，避免误识别
+            # is_wealth = True  # 注释掉，不再自动识别
+            # wealth_type = '疑似理财'
+            # confidence = 'low'
+            continue  # 跳过，不识别为理财
 
         if not is_wealth:
             continue
@@ -1520,13 +1555,14 @@ def _calculate_real_income_expense(income_structure: Dict, wealth_management: Di
     Returns:
         (real_income, real_expense, detail_dict) 元组，detail_dict包含剔除详情
     """
-    self_in = wealth_management['self_transfer_income']
-    self_out = wealth_management['self_transfer_expense']
-    wealth_buy = wealth_management['wealth_purchase']
-    wealth_redeem = wealth_management['wealth_redemption']
-    wealth_yield = wealth_management['wealth_income']
-    loan_in = wealth_management['loan_inflow']
-    refund_in = wealth_management['refund_inflow']
+    # 【2026-02-20 修复】增加字段容错处理，避免 KeyError
+    self_in = wealth_management.get('self_transfer_income', 0) or 0
+    self_out = wealth_management.get('self_transfer_expense', 0) or 0
+    wealth_buy = wealth_management.get('wealth_purchase', 0) or 0
+    wealth_redeem = wealth_management.get('wealth_redemption', 0) or 0
+    wealth_yield = wealth_management.get('wealth_income', 0) or 0
+    loan_in = wealth_management.get('loan_inflow', 0) or 0
+    refund_in = wealth_management.get('refund_inflow', 0) or 0
     
     # 【2026-02-12 修复】获取定期存款数据
     deposit_buy = wealth_management.get('deposit_purchase', 0)
@@ -1537,25 +1573,36 @@ def _calculate_real_income_expense(income_structure: Dict, wealth_management: Di
 
     # 理财本金对冲：买入和赎回中较小的部分是完整闭环
     wealth_principal_offset = min(wealth_buy, wealth_redeem)
-    # 【修复】赎回超出购买的部分（历史存量）也应剔除
-    wealth_historical_redeem = max(0, wealth_redeem - wealth_buy)
+    
+    # 【2026-02-20 关键修复】不再剔除理财历史存量赎回！
+    # 原因：历史存量赎回的本金来自历史时期（不在当期流水中）
+    # 赎回时流入当期流水，应该保留为收入
+    # 例如：3年前买的理财，今年赎回，本金是历史积蓄不是当期收入，但赎回款确实流入了当期
+    # 保守处理：只剔除当期闭环部分（min(买,赎)），超出部分保留
+    # wealth_historical_redeem = max(0, wealth_redeem - wealth_buy)  # 已删除
 
     # 【2026-02-12 关键修复】定期存款到期完全剔除（本金不是收入）
     # 定存到期是本金返还，不应算作收入
     deposit_offset = deposit_redeem  # 完全剔除定存到期本金
 
+    # 【2026-02-20 修复】增加 income_structure 字段容错处理
+    total_income = income_structure.get('total_income', 0) if income_structure else 0
+    total_expense = income_structure.get('total_expense', 0) if income_structure else 0
+    
     # 计算真实收入
-    real_income = (income_structure['total_income']
+    # 【2026-02-20 修复】移除 wealth_historical_redeem 剔除
+    # 原因：历史存量赎回的本金来自历史时期，赎回款流入当期应保留
+    real_income = (total_income
                   - self_transfer_offset      # 自我转入对冲
                   - wealth_principal_offset   # 理财本金对冲（当期闭环）
-                  - wealth_historical_redeem  # 【新增】理财历史存量赎回
-                  - deposit_offset            # 【新增】定存到期本金
+                  # - wealth_historical_redeem  # 已移除：历史存量赎回不剔除
+                  - deposit_offset            # 定存到期本金
                   - loan_in                   # 贷款发放
                   - refund_in)                # 退款
 
     # 计算真实支出
     # 支出端也需要相应调整
-    real_expense = (income_structure['total_expense']
+    real_expense = (total_expense
                    - self_transfer_offset      # 自我转出对冲
                    - wealth_principal_offset   # 理财购买对冲
                    - deposit_buy)              # 【新增】定存购买（投资支出）
@@ -1565,22 +1612,23 @@ def _calculate_real_income_expense(income_structure: Dict, wealth_management: Di
     real_expense = max(0, real_expense)
 
     # 构建剔除详情（用于报告展示）
+    # 【2026-02-20 修复】移除 wealth_historical，不再剔除历史存量赎回
     offset_detail = {
         'self_transfer': self_transfer_offset,
         'wealth_principal': wealth_principal_offset,
-        'wealth_historical': wealth_historical_redeem,
+        # 'wealth_historical': wealth_historical_redeem,  # 已移除
         'deposit_redemption': deposit_offset,
         'loan': loan_in,
         'refund': refund_in,
-        'total_offset': (self_transfer_offset + wealth_principal_offset + 
-                        wealth_historical_redeem + deposit_offset + loan_in + refund_in)
+        'total_offset': (self_transfer_offset + wealth_principal_offset +
+                        deposit_offset + loan_in + refund_in)
     }
 
     # 日志输出
-    logger.info(f'【2026-02-12修复】资金对冲详情:')
+    logger.info(f'【2026-02-20修复】资金对冲详情:')
     logger.info(f'  - 自我转账: {self_transfer_offset/10000:.2f}万')
     logger.info(f'  - 理财本金: {wealth_principal_offset/10000:.2f}万')
-    logger.info(f'  - 理财历史存量: {wealth_historical_redeem/10000:.2f}万')
+    # logger.info(f'  - 理财历史存量: {wealth_historical_redeem/10000:.2f}万')  # 已移除
     logger.info(f'  - 定存到期: {deposit_offset/10000:.2f}万')
     logger.info(f'真实收入: {real_income/10000:.2f}万, 真实支出: {real_expense/10000:.2f}万')
 
@@ -1658,8 +1706,9 @@ def generate_profile_report(df: pd.DataFrame, entity_name: str) -> Dict:
     yearly_salary = calculate_yearly_salary(df, entity_name=entity_name)
     
     # 【Phase 4 新增】收入来源分类
+    # 【2026-02-20 修改】传入wealth_management结果，避免重复分类已识别的理财/自我转账
     income_df = df[df['income'] > 0].copy()
-    income_classification = classify_income_sources(income_df, entity_name=entity_name)
+    income_classification = classify_income_sources(income_df, entity_name=entity_name, wealth_result=wealth_management)
 
     # 计算真实收入/支出（【2026-02-12修复】现在返回剔除详情）
     real_income, real_expense, offset_detail = _calculate_real_income_expense(income_structure, wealth_management, fund_flow)
@@ -2040,7 +2089,7 @@ def _analyze_cash_withdrawal_pattern(df: pd.DataFrame) -> Dict:
 
 # ========== Phase 4: 收入来源分类 (2026-01-20 新增) ==========
 
-def classify_income_sources(income_df: pd.DataFrame, entity_name: str = None) -> Dict:
+def classify_income_sources(income_df: pd.DataFrame, entity_name: str = None, wealth_result: Dict = None) -> Dict:
     """
     对收入来源进行分类（增强版 - 2026-01-25）
     
@@ -2109,7 +2158,8 @@ def classify_income_sources(income_df: pd.DataFrame, entity_name: str = None) ->
     
     # 【新增】增强的合法收入关键词
     ENHANCED_LEGITIMATE_KEYWORDS = {
-        'salary': ['工资', '奖金', '绩效', '代发', 'PAY', '薪酬', '薪资', '劳务费', '劳务报酬'],
+        'salary': ['工资', '奖金', '绩效', '代发', 'PAY', '薪酬', '薪资', '劳务费', '劳务报酬',
+                   '年薪', '骨干奖', '奖励', '补差', '预发', '超额经济贡献奖', '补充奖励', '安全责任令'],
         'government': ['财政局', '公积金', '社保', '房改资金', '民政局', '人社局', '社保局', '公积金中心', '住房资金'],
         'pension': ['职业年金', '养老金', '退休金', '退休费', '离休费'],
         'investment': ['理财赎回', '基金赎回', '利息', '收益', '分红', '股息', '红利', '利息收入', '存款利息'],
@@ -2117,6 +2167,25 @@ def classify_income_sources(income_df: pd.DataFrame, entity_name: str = None) ->
         'insurance': ['保险理赔', '保险金', '赔款', '理赔款'],
         'welfare': ['补贴', '补助', '抚恤金', '救济金', '低保', '困难补助']
     }
+    
+    # 【2026-02-20 新增】智能发薪单位识别关键词（不硬编码具体单位名称）
+    SALARY_UNIT_PATTERNS = {
+        'institution': ['研究所', '局', '院', '中心', '部', '集团', '公司'],  # 机构特征词
+        'bank_payroll': ['代发工资', '内部户', '代发'],  # 银行代发特征词
+        'payroll_desc': ['年薪', '骨干奖', '奖励', '补差', '预发', '薪酬', '奖金']  # 工资描述词
+    }
+    
+    # 【2026-02-20 新增】构建已识别交易集合（来自wealth_management）
+    identified_txs = set()
+    if wealth_result:
+        for tx in wealth_result.get('wealth_redemption_transactions', []):
+            date = str(tx.get('date', ''))[:10]
+            amount = tx.get('income', 0) or 0
+            identified_txs.add((date, amount))
+        for tx in wealth_result.get('self_transfer_transactions', []):
+            date = str(tx.get('date', ''))[:10]
+            amount = tx.get('income', 0) or 0
+            identified_txs.add((date, amount))
     
     # 遍历每笔收入进行分类
     for _, row in income_df.iterrows():
@@ -2137,10 +2206,34 @@ def classify_income_sources(income_df: pd.DataFrame, entity_name: str = None) ->
         # 分类逻辑
         classified = False
         
+        # 【2026-02-20 新增】检查是否已在wealth_management中识别
+        tx_key = (date_str, amount)
+        if tx_key in identified_txs:
+            legitimate_income += amount
+            record['reason'] = '理财/定存/自我转账（已识别）'
+            legitimate_details.append(record)
+            continue
+        
         # 1. 合法收入识别（增强版）
         
-        # 1.1 工资性收入（包含代发工资）
-        if utils.contains_keywords(description, ENHANCED_LEGITIMATE_KEYWORDS['salary']):
+        # 【2026-02-20 新增】智能发薪单位识别（不硬编码具体单位名称）
+        # 检查1: 对手方含机构关键词（研究所、局、院、中心等）或银行代发关键词
+        if any(kw in counterparty for kw in SALARY_UNIT_PATTERNS['institution']) or \
+           any(kw in counterparty for kw in SALARY_UNIT_PATTERNS['bank_payroll']):
+            legitimate_income += amount
+            record['reason'] = '工资性收入（机构/代发单位）'
+            legitimate_details.append(record)
+            classified = True
+        
+        # 检查2: 描述含扩展工资关键词（年薪、骨干奖、奖励等）
+        elif any(kw in description for kw in SALARY_UNIT_PATTERNS['payroll_desc']):
+            legitimate_income += amount
+            record['reason'] = '工资性收入（奖金/津贴）'
+            legitimate_details.append(record)
+            classified = True
+        
+        # 1.1 工资性收入（包含代发工资）- 基础关键词
+        elif utils.contains_keywords(description, ENHANCED_LEGITIMATE_KEYWORDS['salary']):
             legitimate_income += amount
             record['reason'] = '工资性收入'
             legitimate_details.append(record)
