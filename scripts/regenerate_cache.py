@@ -206,49 +206,73 @@ def main():
             if amounts is not None and len(amounts) > 0:
                 max_transaction = float(amounts.abs().max())
             
-            # Phase 2.1: 提取银行账户信息
+            # 【2026-02-20 修复】使用 generate_profile_report 生成完整画像
+            # 这样可以包含 income_structure, wealth_management, fund_flow 等完整数据
             try:
-                bank_accounts = financial_profiler.extract_bank_accounts(df, entity)
+                full_profile = financial_profiler.generate_profile_report(df, entity)
+                
+                # 从完整画像中提取数据
+                income_structure = full_profile.get('income_structure', {})
+                wealth_management = full_profile.get('wealth_management', {})
+                fund_flow = full_profile.get('fund_flow', {})
+                summary = full_profile.get('summary', {})
+                yearly_salary = full_profile.get('yearly_salary', {})
+                large_cash = full_profile.get('large_cash', [])
+                categories = full_profile.get('categories', {})
+                
+                # 计算工资总额和工资占比
+                salary_total = yearly_salary.get('summary', {}).get('total', 0) if yearly_salary else 0
+                salary_ratio = salary_total / income if income > 0 else 0.0
+                
+                profiles[entity] = {
+                    "entityName": entity,
+                    "entityType": "person",
+                    "totalIncome": income,
+                    "totalExpense": expense,
+                    "transactionCount": len(df),
+                    # 审计关键字段
+                    "cashTotal": cash_total,
+                    "cashTransactions": cash_transactions,
+                    "thirdPartyTotal": third_party_total,
+                    "wealthTotal": wealth_total,
+                    "maxTransaction": max_transaction,
+                    "salaryTotal": salary_total,
+                    "salaryRatio": salary_ratio,
+                    # Phase 2.1: 银行账户和年度工资
+                    "bankAccounts": full_profile.get('bank_accounts', []),
+                    "yearlySalary": yearly_salary,
+                    # 【2026-02-20 新增】完整分析数据
+                    "has_data": True,
+                    "income_structure": income_structure,
+                    "wealth_management": wealth_management,
+                    "fund_flow": fund_flow,
+                    "large_cash": large_cash,
+                    "categories": categories,
+                    "summary": summary,
+                }
             except Exception as e:
-                print(f"  提取 {entity} 银行账户失败: {e}")
-                bank_accounts = []
-            
-            # Phase 2.1: 计算年度工资统计
-            try:
-                yearly_salary = financial_profiler.calculate_yearly_salary(df, entity)
-            except Exception as e:
-                print(f"  计算 {entity} 年度工资失败: {e}")
-                yearly_salary = {}
-            
-            # 🆕 计算工资总额和工资占比
-            salary_total = yearly_salary.get('summary', {}).get('total', 0) if yearly_salary else 0
-            salary_ratio = salary_total / income if income > 0 else 0.0
-            
-            profiles[entity] = {
-                "entityName": entity,
-                "entityType": "person",  # 标识为个人实体
-                "totalIncome": income,
-                "totalExpense": expense,
-                "transactionCount": len(df),
-                # 新增审计关键字段
-                "cashTotal": cash_total,
-                "cashTransactions": cash_transactions,  # 🆕 现金交易明细
-                "thirdPartyTotal": third_party_total,
-                "wealthTotal": wealth_total,
-                "maxTransaction": max_transaction,
-                "salaryTotal": salary_total,  # 🆕 工资总额
-                "salaryRatio": salary_ratio,  # 🆕 正确计算工资占比
-                # Phase 2.1: 银行账户和年度工资
-                "bankAccounts": bank_accounts,
-                "yearlySalary": yearly_salary,
-                # Phase 3: 家庭汇总所需字段
-                "has_data": True,
-                "summary": {
-                    "total_income": income,
-                    "total_expense": expense,
-                    "net_flow": income - expense,
-                },
-            }
+                print(f"  生成 {entity} 完整画像失败: {e}，使用简化版本")
+                # 回退到简化版本
+                profiles[entity] = {
+                    "entityName": entity,
+                    "entityType": "person",
+                    "totalIncome": income,
+                    "totalExpense": expense,
+                    "transactionCount": len(df),
+                    "cashTotal": cash_total,
+                    "cashTransactions": cash_transactions,
+                    "thirdPartyTotal": third_party_total,
+                    "wealthTotal": wealth_total,
+                    "maxTransaction": max_transaction,
+                    "salaryTotal": 0,
+                    "salaryRatio": 0.0,
+                    "has_data": True,
+                    "summary": {
+                        "total_income": income,
+                        "total_expense": expense,
+                        "net_flow": income - expense,
+                    },
+                }
         except Exception as e:
             print(f"  生成 {entity} 画像失败: {e}")
     
@@ -435,13 +459,17 @@ def main():
         family_summary = {}
     
     # 6.7 Phase 5: 收入来源分类
+    # 【2026-02-20 修改】先计算wealth_management，再传入classify_income_sources
     print("计算收入来源分类...")
     income_classifications = {}
     for entity, df in cleaned_data.items():
         if entity in companies:  # 公司不计算收入分类
             continue
         try:
-            classification = financial_profiler.classify_income_sources(df, entity)
+            # 先分析wealth_management
+            wealth_mgmt = financial_profiler.analyze_wealth_management(df, entity_name=entity)
+            # 再传入classify_income_sources
+            classification = financial_profiler.classify_income_sources(df, entity, wealth_result=wealth_mgmt)
             income_classifications[entity] = classification
         except Exception as e:
             print(f"  {entity} 收入分类失败: {e}")
