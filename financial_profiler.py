@@ -2176,15 +2176,18 @@ def classify_income_sources(income_df: pd.DataFrame, entity_name: str = None, we
     }
     
     # 【2026-02-20 新增】构建已识别交易集合（来自wealth_management）
+    # 注意：wealth_management中的交易使用中文字段名（日期、金额/收入）
     identified_txs = set()
     if wealth_result:
         for tx in wealth_result.get('wealth_redemption_transactions', []):
-            date = str(tx.get('date', ''))[:10]
-            amount = tx.get('income', 0) or 0
+            # 使用中文字段名
+            date = str(tx.get('日期', ''))[:10]
+            amount = tx.get('金额', 0) or tx.get('收入', 0) or 0
             identified_txs.add((date, amount))
         for tx in wealth_result.get('self_transfer_transactions', []):
-            date = str(tx.get('date', ''))[:10]
-            amount = tx.get('income', 0) or 0
+            # 使用中文字段名
+            date = str(tx.get('日期', ''))[:10]
+            amount = tx.get('收入', 0) or tx.get('金额', 0) or 0
             identified_txs.add((date, amount))
     
     # 遍历每笔收入进行分类
