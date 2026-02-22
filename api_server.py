@@ -337,6 +337,8 @@ def serialize_profiles(profiles: Dict) -> Dict:
                 "transactionCount": summary.get("transaction_count", 0),
                 # 审计关键字段 - 前端展示用
                 "cashTotal": cash_total,
+                # 将 cash_transactions 提升到顶层字段，以便前端直接访问
+                "cashTransactions": fund_flow.get("cash_transactions", []),
                 "thirdPartyTotal": third_party_total,
                 "wealthTotal": wealth_mgmt.get("total_transactions", 0),
                 "maxTransaction": income_structure.get("max_single_transaction", 0),
@@ -1341,9 +1343,14 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         phase7_start = time.time()
 
         # 7.1 基础疑点检测
-        suspicions = suspicion_detector.run_all_detections(
-            cleaned_data, all_persons, all_companies
-        )
+        try:
+            engine = SuspicionEngine()
+            suspicions = engine.run_all(cleaned_data, all_persons, all_companies)
+        except Exception as e:
+            logger.warning(f"SuspicionEngine 失败，回退到旧检测器: {e}")
+            suspicions = suspicion_detector.run_all_detections(
+                cleaned_data, all_persons, all_companies
+            )
 
         # 7.2 🔄 融合外部疑点数据
         # 反洗钱预警
@@ -3284,3 +3291,4 @@ if __name__ == "__main__":
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
     uvicorn.run(app, host="0.0.0.0", port=8000)
+from suspicion_engine import SuspicionEngine
