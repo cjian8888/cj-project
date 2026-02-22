@@ -283,6 +283,14 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
         # 注意：根据实际列名调整，这里假设 amount 为正数，或者分列 income/expense
         # 如果是单列 amount，正负表示方向；如果是双列，income表示进，expense表示出
         
+        # 列名映射（中文列名兼容）
+        # 将收入(元) -> income，支出(元) -> expense，以兼容后续统一处理
+        if '收入(元)' in cash_df.columns or '支出(元)' in cash_df.columns:
+            cash_df = cash_df.rename(columns={
+                '收入(元)': 'income',
+                '支出(元)': 'expense',
+            })
+
         # 策略：如果有 income/expense 列
         if 'income' in cash_df.columns and 'expense' in cash_df.columns:
             withdrawals = cash_df[cash_df['expense'] > 0].copy()
@@ -356,10 +364,15 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
                 
                 # 检测：人员 -> 公司 (支出)
                 df_person = cleaned_data[person]
-                transfers_out = df_person[df_person['counterparty'].str.contains(company, na=False)]
+                # 列名映射（中文列名兼容）
+                counterparty_col = '交易对手' if '交易对手' in df_person.columns else 'counterparty'
+                expense_col = '支出(元)' if '支出(元)' in df_person.columns else 'expense'
+                income_col = '收入(元)' if '收入(元)' in df_person.columns else 'income'
+                description_col = '交易摘要' if '交易摘要' in df_person.columns else 'description'
+                transfers_out = df_person[df_person[counterparty_col].str.contains(company, na=False)]
                 if not transfers_out.empty:
                     for _, row in transfers_out.iterrows():
-                        amount = row.get('expense', 0)
+                        amount = row.get(expense_col, 0)
                         # 简单的风险定级
                         if amount > config.INCOME_HIGH_RISK_MIN:
                             risk = 'high'
@@ -380,7 +393,7 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
                             'date': row['date'],
                             'amount': amount,
                             'direction': 'payment',  # 付款
-                            'description': row.get('description', ''),
+                        'description': row.get(description_col, ''),
                             'bank': bank,
                             'source_file': source_file,
                             'risk_level': risk,
@@ -395,10 +408,10 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
                 
                 # 检测：公司 -> 人员 (收入)
                 df_company = cleaned_data[company]
-                transfers_in = df_company[df_company['counterparty'].str.contains(person, na=False)]
+                transfers_in = df_company[df_company[counterparty_col].str.contains(person, na=False)]
                 if not transfers_in.empty:
                     for _, row in transfers_in.iterrows():
-                        amount = row.get('income', 0)
+                        amount = row.get(income_col, 0)
                         # 简单的风险定级
                         if amount > config.INCOME_HIGH_RISK_MIN:
                             risk = 'high'
@@ -419,7 +432,7 @@ def run_all_detections(cleaned_data: Dict, all_persons: List[str], all_companies
                             'date': row['date'],
                             'amount': amount,
                             'direction': 'receive',  # 收款
-                            'description': row.get('description', ''),
+                        'description': row.get(description_col, ''),
                             'bank': bank,
                             'source_file': source_file,
                             'risk_level': risk,
