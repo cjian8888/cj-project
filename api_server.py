@@ -88,6 +88,9 @@ import flight_extractor
 import family_assets_helper
 import family_finance
 
+# 导入键名映射层
+from adapters.key_mapper import to_camel_case
+
 # 导入报告构建器（v3.0 新架构）
 from investigation_report_builder import (
     InvestigationReportBuilder,
@@ -1761,6 +1764,8 @@ async def get_results():
     # 如果内存中有结果，直接返回
     if analysis_state.status == "completed" and analysis_state.results:
         results_data = serialize_for_json(analysis_state.results)
+        # 使用 key_mapper 将数据键名转换为 camelCase，确保前后端一致
+        results_data = to_camel_case(results_data)
         return {"message": "分析结果获取成功", "data": results_data}
 
     # 内存中没有结果，尝试从缓存文件读取
@@ -1773,9 +1778,12 @@ async def get_results():
             # 将缓存结果加载到内存
             analysis_state.results = results_data
             analysis_state.status = "completed"
+            # 序列化后再 camelCase 转换，确保前端字段名风格一致
+            results_serialized = serialize_for_json(results_data)
+            results_serialized = to_camel_case(results_serialized)
             return {
                 "message": "分析结果获取成功（来自缓存）",
-                "data": serialize_for_json(results_data),
+                "data": results_serialized,
             }
         else:
             raise HTTPException(status_code=400, detail="分析尚未完成且缓存无效")
@@ -2598,8 +2606,13 @@ async def generate_investigation_report_html(
     data_scope = request.data_scope if request else None
 
     try:
+        # 【2026-02-22 修复】使用绝对路径，避免工作目录不一致导致的问题
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        data_dir = os.path.join(base_dir, "data")
+        output_dir = os.path.join(base_dir, "output")
+        
         # 1. 加载归集配置服务
-        service = PrimaryTargetsService(data_dir="./data", output_dir="./output")
+        service = PrimaryTargetsService(data_dir=data_dir, output_dir=output_dir)
 
         # 2. 获取或创建归集配置
         config, msg, is_new = service.get_or_create_config()
@@ -2613,7 +2626,7 @@ async def generate_investigation_report_html(
         logger.info(f"[HTML报告生成] 配置加载成功: {len(config.analysis_units)} 个分析单元")
 
         # 3. 加载报告构建器
-        builder = load_investigation_report_builder("./output")
+        builder = load_investigation_report_builder(output_dir)
         if builder is None:
             logger.warning("[HTML报告生成] 缓存数据不存在，请先运行分析")
             return JSONResponse(
@@ -2776,246 +2789,6 @@ class LegacyReportGenerateRequest(BaseModel):
     case_background: Optional[str] = None
 
 
-@app.post("/api/reports/generate")
-async def generate_legacy_report(request: LegacyReportGenerateRequest):
-    """
-    传统报告生成 API
-
-    支持 html / json 格式输出
-    """
-    logger = logging.getLogger(__name__)
-    logger.info(
-        f"[报告生成] 传统报告生成请求: format={request.format}, subjects={request.subjects}"
-    )
-
-    try:
-        # 1. 加载报告构建器
-        builder = load_investigation_report_builder("./output")
-        if builder is None:
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "error": "分析缓存不存在，请先运行分析"},
-            )
-
-        # 2. 确定核查对象
-        primary_person = request.primary_person
-        if not primary_person and request.subjects:
-            primary_person = request.subjects[0]
-        if not primary_person:
-            # 使用第一个可用的人员
-            available_persons = [p for p in builder._core_persons if p]
-            if available_persons:
-                primary_person = available_persons[0]
-            else:
-                return JSONResponse(
-                    status_code=400,
-                    content={"success": False, "error": "未找到可用的核查对象"},
-                )
-
-        # 3. 生成报告
-        report = builder.build_complete_report(
-            primary_person=primary_person,
-            doc_number=request.doc_number,
-            case_background=request.case_background or request.case_name,
-            include_companies=request.subjects if request.subjects else None,
-        )
-
-        # 4. 根据格式返回
-        if request.format == "json":
-            return {
-                "success": True,
-                "format": "json",
-                "report": report,
-                "message": "报告生成成功",
-            }
-        else:
-            # 生成 HTML 预览
-            html_content = _render_report_to_html(report)
-            return Response(content=html_content, media_type="text/html; charset=utf-8")
-
-    except Exception as e:
-        logger.exception(f"[报告生成] 传统报告生成失败: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": f"报告生成失败: {str(e)}"},
-        )
-
-
-def _render_report_to_html(report: Dict) -> str:
-    """将报告字典渲染为 HTML"""
-    meta = report.get("meta", {})
-    family = report.get("family", {})
-    member_details = report.get("member_details", [])
-    conclusion = report.get("conclusion", {})
-
-    # 格式化金额
-    def format_amount(amount):
-        if amount is None:
-            return "0"
-        return f"{amount:,.2f}" if isinstance(amount, (int, float)) else str(amount)
-
-    def format_wan(amount):
-        if amount is None:
-            return "0.00"
-        return (
-            f"{amount / 10000:,.2f}"
-            if isinstance(amount, (int, float))
-            else str(amount)
-        )
-
-    html = f"""
-    <!DOCTYPE html>
-    <html lang="zh-CN">
-    <head>
-        <meta charset="UTF-8">
-        <title>初查报告 - {meta.get("doc_number", "")}</title>
-        <style>
-            body {{ font-family: "SimSun", "Songti SC", serif; background: #f5f5f5; padding: 20px; margin: 0; }}
-            .container {{ max-width: 900px; margin: 0 auto; background: white; padding: 40px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
-            h1 {{ text-align: center; font-size: 24px; margin-bottom: 30px; }}
-            h2 {{ font-size: 18px; border-bottom: 2px solid #333; padding-bottom: 5px; margin-top: 30px; }}
-            h3 {{ font-size: 16px; margin-top: 20px; }}
-            .meta {{ background: #f9f9f9; padding: 15px; margin-bottom: 20px; border-left: 4px solid #0066cc; }}
-            .meta p {{ margin: 5px 0; }}
-            table {{ width: 100%; border-collapse: collapse; margin: 15px 0; }}
-            th, td {{ border: 1px solid #ddd; padding: 10px; text-align: left; }}
-            th {{ background: #f0f0f0; font-weight: bold; }}
-            .amount {{ text-align: right; font-family: monospace; }}
-            .highlight {{ color: #c00; font-weight: bold; }}
-            .issue {{ background: #fff0f0; padding: 10px; margin: 10px 0; border-left: 4px solid #c00; }}
-            .issue.high {{ border-color: #c00; }}
-            .issue.medium {{ border-color: #f90; }}
-            .issue.low {{ border-color: #090; }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>资金穿透审计初查报告</h1>
-             
-            <div class="meta">
-                <p><strong>文号：</strong>{meta.get("doc_number", "待填写")}</p>
-                <p><strong>生成时间：</strong>{meta.get("generated_at", "")}</p>
-                <p><strong>数据范围：</strong>{meta.get("data_scope", "待补充")}</p>
-                <p><strong>案件背景：</strong>{meta.get("case_background", "")}</p>
-            </div>
-             
-            <h2>一、家庭基本情况</h2>
-            <p>核查对象：<strong>{family.get("primary_person", "")}</strong></p>
-            <p>家庭成员共 {len(family.get("members", []))} 人</p>
-             
-            <table>
-                <tr><th>姓名</th><th>关系</th><th>有流水数据</th></tr>
-    """
-
-    for m in family.get("members", []):
-        has_data = "✓" if m.get("has_data") else "✗"
-        html += f"<tr><td>{m.get('name', '')}</td><td>{m.get('relation', '')}</td><td>{has_data}</td></tr>"
-
-    # 家庭汇总 - 修复数据单位为万元
-    summary = family.get("summary", {})
-    html += f"""
-            </table>
-             
-            <h3>家庭财务汇总</h3>
-            <table>
-                <tr><th>项目</th><th>金额（万元）</th></tr>
-                <tr><td>总收入</td><td class="amount">{format_wan(summary.get("total_income", 0))}</td></tr>
-                <tr><td>总支出</td><td class="amount">{format_wan(summary.get("total_expense", 0))}</td></tr>
-                <tr><td>净收入（剔除互转）</td><td class="amount">{format_wan(summary.get("net_income", 0))}</td></tr>
-                <tr><td>家庭内部互转</td><td class="amount">{format_wan(summary.get("internal_transfers", 0))}</td></tr>
-            </table>
-             
-            <h3>家庭年度工资收入（按年统计）</h3>
-            <table>
-                <tr><th>年份</th><th>家庭总工资(万元)</th></tr>
-    """
-
-    # 提取年度工资数据
-    family_yearly_salary = {}
-    for md in member_details:
-        assets = md.get("assets", {})
-        yearly_salary_list = assets.get("yearly_salary", [])
-        for ys in yearly_salary_list:
-            year = ys.get("year", "")
-            if year:
-                if year not in family_yearly_salary:
-                    family_yearly_salary[year] = 0
-                family_yearly_salary[year] += ys.get("total", 0)
-
-    # 按年份排序并添加到HTML
-    for year in sorted(family_yearly_salary.keys()):
-        total_wan = family_yearly_salary[year] / 10000
-        html += f"<tr><td>{year}</td><td class='amount'>{total_wan:.2f}</td></tr>"
-
-    html += """
-            </table>
-            
-            <h2>二、成员详细分析</h2>
-    """
-
-    for i, md in enumerate(member_details, 1):
-        html += f"""
-            <h3>{i}. {md.get("name", "")} ({md.get("relation", "")})</h3>
-            <table>
-                <tr><th>项目</th><th>数值</th></tr>
-                <tr><td>总收入</td><td class="amount">{format_wan(md.get("total_income", 0))} 万元</td></tr>
-                <tr><td>总支出</td><td class="amount">{format_wan(md.get("total_expense", 0))} 万元</td></tr>
-                <tr><td>交易笔数</td><td>{md.get("transaction_count", 0)}</td></tr>
-            </table>
-        """
-
-        # 资产信息
-        assets = md.get("assets", {})
-        if assets:
-            salary_ratio = assets.get("salary_ratio", 0)
-            # 统一处理：salaryRatio 是小数形式（如 0.2396 = 23.96%），需要乘以100
-            salary_ratio_percent = salary_ratio * 100
-            html += f"""
-            <p><strong>资产情况：</strong></p>
-            <ul>
-                <li>工资总额: {format_wan(assets.get("salary_total", 0))} 万元</li>
-                <li>工资占比: {salary_ratio_percent:.1f}%</li>
-                <li>银行账户数: {assets.get("bank_account_count", 0)}</li>
-                <li>理财持仓: {format_wan(assets.get("wealth_holding", 0))} 万元</li>
-            </ul>
-            """
-
-    # 综合研判
-    html += f"""
-            <h2>三、综合研判</h2>
-            <p>{conclusion.get("summary_text", "待补充研判意见")}</p>
-             
-            <h3>发现问题</h3>
-    """
-
-    issues = conclusion.get("issues", [])
-    if issues:
-        for issue in issues:
-            severity = issue.get("severity", "medium")
-            html += f"""
-            <div class="issue {severity}">
-                <strong>[{issue.get("issue_type", "")}]</strong> {issue.get("person", "")}：
-                {issue.get("description", "")}
-            </div>
-            """
-    else:
-        html += "<p>暂无明显问题</p>"
-
-    # 下一步建议
-    next_steps = conclusion.get("next_steps", [])
-    if next_steps:
-        html += "<h3>下一步建议</h3><ul>"
-        for step in next_steps:
-            html += f"<li>{step}</li>"
-        html += "</ul>"
-
-    html += """
-        </div>
-    </body>
-    </html>
-    """
-
-    return html
 
 
 class OpenFolderRequest(BaseModel):

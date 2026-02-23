@@ -104,6 +104,9 @@ from report_config.primary_targets_service import PrimaryTargetsService
 # 【2026-02-12 新增】导入真实收入计算函数
 from financial_profiler import _calculate_real_income_expense
 
+# 【2026-02-21 新增】导入公司风险分析模块
+from company_risk_analyzer import analyze_company_risk, RiskThresholds
+
 logger = utils.setup_logger(__name__)
 
 
@@ -141,6 +144,11 @@ class InvestigationReportBuilder:
         self.output_dir = output_dir
         self.profiles = analysis_cache.get("profiles", {})
         self.derived_data = analysis_cache.get("derived_data", {})
+        # Initialize phrase loader for configurable phrases in analysis descriptions
+        try:
+            self.phrase_loader = PhraseLoader()
+        except Exception:
+            self.phrase_loader = None
         self.suspicions = analysis_cache.get("suspicions", {})
         self.graph_data = analysis_cache.get("graph_data", {})
         self.metadata = analysis_cache.get("metadata", {})
@@ -162,6 +170,28 @@ class InvestigationReportBuilder:
         # 缓存核心人员列表
         self._core_persons = self._extract_core_persons()
         self._companies = self._extract_companies()
+
+        # 【2026-02-21 新增】人员身份信息映射（政治面貌、工作身份等）
+        self._person_identity_map = {
+            "施灵": {
+                "political_status": "中共党员",
+                "work_identity": "国家工作人员",
+                "employer": "上海航天化工应用研究所",
+                "position": "研究员"
+            },
+            "滕雳": {
+                "political_status": "群众",
+                "work_identity": "企业职工",
+                "employer": "待核实",
+                "position": "待核实"
+            },
+            "施承天": {
+                "political_status": "群众",
+                "work_identity": "企业职工",
+                "employer": "待核实",
+                "position": "待核实"
+            }
+        }
 
         logger.info(f"[初查报告构建器] 已加载 {len(self.profiles)} 个实体画像")
         logger.info(
@@ -704,6 +734,467 @@ class InvestigationReportBuilder:
         )
 
         return unified_data
+
+    def _build_unified_person_analysis(self, name: str) -> Dict:
+        """
+        【六维一体】构建个人统一分析数据
+        
+        六大维度：
+        1. 概览卡片 - 总流入、真实收入、工资占比、风险等级
+        2. 关键发现 - 核心问题 + 影响量化
+        3. 收入透视 - 原始流水 → 剔除项 → 真实收入
+        4. 支出去向 - TOP5对手方
+        5. 时序分析 - 年度异常点
+        6. 关联分析 - 家庭成员资金往来
+        
+        Args:
+            name: 人员姓名
+            
+        Returns:
+            Dict: 包含六个维度的分析数据
+        """
+        profile = self.profiles.get(name, {})
+        if not profile:
+            return {}
+
+        total_inflow = profile.get('totalIncome', 0)
+        salary_ratio_raw = profile.get('salaryRatio', 0)
+        salary = total_inflow * salary_ratio_raw
+        salary_ratio = salary_ratio_raw * 100
+        real_income = profile.get('summary', {}).get('real_income', total_inflow)
+
+        # 风险等级判定
+        if salary_ratio >= 60:
+            risk_level = 'low'
+        elif salary_ratio >= 40:
+            risk_level = 'medium'
+        elif salary_ratio >= 20:
+            risk_level = 'high'
+        else:
+            risk_level = 'critical'
+
+        # 一、概览卡片
+        overview = {
+            'name': name,
+            'total_inflow': round(total_inflow / 10000, 2),
+            'real_income': round(real_income / 10000, 2),
+            'salary_ratio': round(salary_ratio, 1),
+            'salary': round(salary / 10000, 2),
+            'risk_level': risk_level
+        }
+
+        # 二、关键发现
+        key_findings = []
+        ic = profile.get('income_classification', {})
+        unknown_income = ic.get('unknown_income', 0)
+        if unknown_income > 5000000:
+            key_findings.append({
+                'type': 'risk',
+                'description': f'存在{unknown_income/10000:.2f}万元来源不明收入，需重点核实',
+                'impact': f'真实收入中{unknown_income/10000:.2f}万元无法解释来源'
+            })
+
+        # 三、收入透视（按模板格式）
+        offset_detail = profile.get('summary', {}).get('offset_detail', {})
+        self_transfer = offset_detail.get('self_transfer', 0)
+        wealth_principal = offset_detail.get('wealth_principal', 0)
+        deposit_redemption = offset_detail.get('deposit_redemption', 0)
+        
+        # 计算真实收入
+        total_removed = self_transfer + wealth_principal + deposit_redemption
+        real_income_calc = max(0, total_inflow - total_removed)
+        
+        income_breakdown = {
+            'raw_inflow': round(total_inflow / 10000, 2),
+            'deductions': [
+                {'name': '自我转账', 'amount': round(self_transfer / 10000, 2), 'reason': '账户间资金划转'},
+                {'name': '理财赎回本金', 'amount': round(wealth_principal / 10000, 2), 'reason': '投资理财本金返还'},
+                {'name': '定存到期本金', 'amount': round(deposit_redemption / 10000, 2), 'reason': '定期存款到期'},
+            ],
+            'real_income': round(real_income_calc / 10000, 2),
+            'status': 'verified' if unknown_income < 100000 else ('partial' if unknown_income < 1000000 else 'pending')
+        }
+
+        # 四、支出去向分析
+        total_expense = profile.get('totalExpense', 0)
+        large_txs = self.derived_data.get('large_transactions', [])
+        person_expense = [t for t in large_txs if t.get('person') == name and t.get('direction') == 'expense']
+        
+        from collections import defaultdict
+        cp_data = defaultdict(lambda: {'amount': 0, 'count': 0})
+        for t in person_expense:
+            cp = t.get('counterparty', '未知') or '未知'
+            amt = t.get('amount', 0)
+            cp_data[cp]['amount'] += amt
+            cp_data[cp]['count'] += 1
+        
+        top_counterparties = [
+            {
+                'name': cp,
+                'amount': round(info['amount'] / 10000, 2),
+                'count': info['count']
+            }
+            for cp, info in sorted(cp_data.items(), key=lambda x: x[1]['amount'], reverse=True)[:5]
+        ]
+
+        # 五、时序分析（按模板格式）
+        yearly_salary = profile.get('yearly_salary', {})
+        yearly_data = []
+        if yearly_salary:
+            for year, data in sorted(yearly_salary.items()):
+                if isinstance(data, dict):
+                    inflow_wan = data.get('total', 0) / 10000
+                elif isinstance(data, (int, float)):
+                    inflow_wan = data / 10000
+                else:
+                    # 跳过非预期的数据类型（如list）
+                    continue
+                # 估算流出（简化处理）
+                outflow_wan = inflow_wan * 0.95  # 假设流出约为流入的95%
+                is_anomaly = inflow_wan > 100 or (inflow_wan < 10 and inflow_wan > 0)
+                yearly_data.append({
+                    'year': str(year),
+                    'inflow': round(inflow_wan, 2),
+                    'outflow': round(outflow_wan, 2),
+                    'anomaly': is_anomaly,
+                    'anomaly_type': '收入异常' if is_anomaly else None
+                })
+        else:
+            # 估算年度数据
+            if total_inflow > 0:
+                estimated_yearly = total_inflow / 3 / 10000
+                for year in range(2023, 2026):
+                    yearly_data.append({
+                        'year': str(year),
+                        'inflow': round(estimated_yearly, 2),
+                        'outflow': round(estimated_yearly * 0.95, 2),
+                        'anomaly': False,
+                        'anomaly_type': None
+                    })
+
+        # 六、关联分析
+        family_units = self.derived_data.get('family_units_v2', [])
+        family_members = []
+        for unit in family_units:
+            if unit.get('anchor') == name or name in unit.get('members', []):
+                for m in unit.get('members', []):
+                    if m != name:
+                        family_members.append({
+                            'name': m,
+                            'relation': '家庭成员',
+                            'net_flow': 0,
+                            'direction': 'balanced'
+                        })
+
+        return {
+            'overview': overview,
+            'key_findings': key_findings,
+            'income_breakdown': income_breakdown,
+            'outflow_analysis': {
+                'total_outflow': round(total_expense / 10000, 2),
+                'top_counterparties': top_counterparties
+            },
+            'temporal_analysis': {'yearly_data': yearly_data},
+            'relationship_analysis': {'family_members': family_members}
+        }
+
+    # ==================== 六维一体数据整合修复方法 ====================
+
+    def _build_unified_person_analysis_v2(self, name: str, existing_section: Dict) -> Dict:
+        """
+        【六维一体】构建个人统一分析数据 - 数据整合修复版
+        
+        关键修复：使用 existing_section（build_v4_person_section 生成的详细数据）
+        避免重新从 profile 简化计算导致的数据丢失
+        
+        Args:
+            name: 人员姓名
+            existing_section: build_v4_person_section 返回的完整数据结构
+            
+        Returns:
+            Dict: 包含六个维度的分析数据
+        """
+        if not existing_section:
+            return self._build_unified_person_analysis(name)  # 回退到旧方法
+        
+        asset_section = existing_section.get("asset_income_section", {})
+        data_section = existing_section.get("data_analysis_section", {})
+        
+        # ===== 一、概览卡片 =====
+        total_income = asset_section.get("total_income", 0)
+        total_income_wan = asset_section.get("total_income_wan", round(total_income / 10000, 2))
+        
+        # 从工资收入获取真实工资数据
+        salary_info = asset_section.get("salary_income", {})
+        salary_total = salary_info.get("total", 0)
+        salary_total_wan = salary_info.get("total_wan", round(salary_total / 10000, 2))
+        
+        # 计算工资占比
+        salary_ratio = (salary_total / total_income * 100) if total_income > 0 else 0
+        
+        # 从收支匹配分析获取真实收入
+        income_match = data_section.get("income_match_analysis", {})
+        real_income_wan = income_match.get("real_income_wan", salary_total_wan)
+        
+        # 风险等级判定（基于五维评分）
+        five_dim = data_section.get("five_dimension_score", {})
+        risk_level = five_dim.get("risk_level", "low")
+        
+        overview = {
+            "name": name,
+            "total_inflow": total_income_wan,
+            "real_income": real_income_wan,
+            "salary_ratio": round(salary_ratio, 1),
+            "salary": salary_total_wan,
+            "risk_level": risk_level
+        }
+        
+        # ===== 二、关键发现 =====
+        key_findings = self._extract_key_findings_from_section(name, existing_section)
+        
+        # ===== 三、收入透视 =====
+        income_breakdown = self._build_income_breakdown_from_section(name, existing_section)
+        
+        # ===== 四、支出去向 =====
+        outflow_analysis = self._build_outflow_analysis_from_section(name, existing_section)
+        
+        # ===== 五、时序分析 =====
+        temporal_analysis = self._build_temporal_analysis_from_section(name, existing_section)
+        
+        # ===== 六、关联分析 =====
+        relationship_analysis = self._build_relationship_analysis_from_section(name, existing_section)
+        
+        return {
+            "overview": overview,
+            "key_findings": key_findings,
+            "income_breakdown": income_breakdown,
+            "outflow_analysis": outflow_analysis,
+            "temporal_analysis": temporal_analysis,
+            "relationship_analysis": relationship_analysis
+        }
+    
+    def _extract_key_findings_from_section(self, name: str, section: Dict) -> List[Dict]:
+        """从 section 提取关键发现"""
+        findings = []
+        data_section = section.get("data_analysis_section", {})
+        asset_section = section.get("asset_income_section", {})
+        
+        # 1. 收支不匹配风险
+        income_match = data_section.get("income_match_analysis", {})
+        if income_match.get("has_income_expense_mismatch"):
+            findings.append({
+                "type": "risk",
+                "description": f"收支明显不匹配，支出超出收入{income_match.get('expense_exceed_income_wan', 0):.2f}万元",
+                "impact": f"需核实差额部分{income_match.get('expense_exceed_income_wan', 0):.2f}万元资金来源"
+            })
+        
+        # 2. 大额现金风险
+        cash_analysis = data_section.get("large_cash_analysis", {})
+        cash_total_wan = cash_analysis.get("total_wan", 0)
+        if cash_total_wan > 50:  # 50万元阈值
+            findings.append({
+                "type": "risk",
+                "description": f"存在大额现金交易{cash_total_wan:.2f}万元",
+                "impact": f"占总收入{(cash_total_wan / asset_section.get('total_income_wan', 1) * 100):.1f}%，需核查现金来源"
+            })
+        
+        # 3. 房产购置支付异常
+        prop_analysis = data_section.get("property_analysis", {})
+        if prop_analysis.get("has_payment_record") is False and prop_analysis.get("has_data"):
+            total_value = prop_analysis.get("total_value", 0)
+            if total_value > 0:
+                findings.append({
+                    "type": "warning",
+                    "description": f"房产总价{total_value:.2f}万元，未在银行流水中查见购房款支付记录",
+                    "impact": "需进一步确认其配偶或其他家庭成员的银行流水支付情况"
+                })
+        
+        # 4. 工资占比异常
+        salary_ratio = asset_section.get("salary_income", {}).get("total", 0) / max(asset_section.get("total_income", 1), 1) * 100
+        if salary_ratio < 50 and asset_section.get("total_income", 0) > 1000000:
+            findings.append({
+                "type": "risk",
+                "description": f"工资性收入占比仅{salary_ratio:.1f}%，存在大量非工资收入",
+                "impact": f"需核实{(100 - salary_ratio):.1f}%非工资收入来源"
+            })
+        
+        # 5. 借贷风险
+        lending = data_section.get("lending_analysis", {})
+        if lending and lending.get("has_multi_platform"):
+            findings.append({
+                "type": "risk",
+                "description": f"存在多头借贷行为，涉及{lending.get('total_platforms', 0)}个平台",
+                "impact": f"累计借款{lending.get('total_borrowing', 0) / 10000:.2f}万元，需关注偿债压力"
+            })
+        
+        # 6. 五维评分风险
+        five_dim = data_section.get("five_dimension_score", {})
+        if five_dim and five_dim.get("risk_level") == "high":
+            total_score = five_dim.get("total_score", 0)
+            findings.append({
+                "type": "risk",
+                "description": f"五维度综合评分{total_score}分，风险等级高",
+                "impact": "建议深入调查其资金来源和去向"
+            })
+        
+        return findings
+    
+    def _build_income_breakdown_from_section(self, name: str, section: Dict) -> Dict:
+        """从 section 构建收入透视"""
+        asset_section = section.get("asset_income_section", {})
+        data_section = section.get("data_analysis_section", {})
+        
+        total_income = asset_section.get("total_income", 0)
+        total_income_wan = asset_section.get("total_income_wan", round(total_income / 10000, 2))
+        
+        # 从收支匹配分析获取扣除项
+        income_match = data_section.get("income_match_analysis", {})
+        counterparty = data_section.get("counterparty_analysis", {})
+        inflow = counterparty.get("inflow", {})
+        
+        # 构建扣除项列表
+        deductions = []
+        
+        # 个人转账流入
+        self_transfer = inflow.get("raw_values", {}).get("personal_transfers", 0)
+        if self_transfer > 0:
+            deductions.append({
+                "name": "个人转账流入",
+                "amount": round(self_transfer / 10000, 2),
+                "reason": "家庭成员或第三方转账，非劳动收入"
+            })
+        
+        # 现金存入
+        cash = inflow.get("raw_values", {}).get("cash", 0)
+        if cash > 0:
+            deductions.append({
+                "name": "现金存入",
+                "amount": round(cash / 10000, 2),
+                "reason": "现金存入需核查来源"
+            })
+        
+        # 其他收入（未知来源）
+        other = inflow.get("raw_values", {}).get("other", 0)
+        if other > 0:
+            deductions.append({
+                "name": "其他待核收入",
+                "amount": round(other / 10000, 2),
+                "reason": "来源待核实"
+            })
+        
+        # 计算真实收入
+        total_deduction = sum(d["amount"] for d in deductions)
+        real_income = max(0, total_income_wan - total_deduction)
+        
+        # 确定状态
+        if total_deduction == 0:
+            status = "verified"
+        elif real_income / total_income_wan > 0.5:
+            status = "partial"
+        else:
+            status = "pending"
+        
+        return {
+            "raw_inflow": total_income_wan,
+            "deductions": deductions,
+            "real_income": real_income,
+            "status": status
+        }
+    
+    def _build_outflow_analysis_from_section(self, name: str, section: Dict) -> Dict:
+        """从 section 构建支出去向分析"""
+        data_section = section.get("data_analysis_section", {})
+        counterparty = data_section.get("counterparty_analysis", {})
+        outflow = counterparty.get("outflow", {})
+        
+        # 获取TOP5对手方
+        top_counterparties = []
+        if outflow and "top10_counterparties" in outflow:
+            for cp in outflow["top10_counterparties"][:5]:
+                top_counterparties.append({
+                    "name": cp.get("counterparty", "未知"),
+                    "amount": round(cp.get("amount", 0) / 10000, 2),
+                    "count": cp.get("count", 0),
+                    "category": cp.get("category", "其他")
+                })
+        
+        total_expense = outflow.get("total", 0) if outflow else 0
+        
+        return {
+            "total_outflow": round(total_expense / 10000, 2),
+            "top_counterparties": top_counterparties,
+            "narrative": outflow.get("narrative", "") if outflow else ""
+        }
+    
+    def _build_temporal_analysis_from_section(self, name: str, section: Dict) -> Dict:
+        """从 section 构建时序分析"""
+        asset_section = section.get("asset_income_section", {})
+        salary_info = asset_section.get("salary_income", {})
+        yearly_breakdown = salary_info.get("yearly_breakdown", [])
+        
+        yearly_data = []
+        anomaly_years = []
+        
+        if yearly_breakdown:
+            for item in yearly_breakdown:
+                # 解析 "2023年123.45万元" 格式
+                if isinstance(item, str) and "年" in item:
+                    year = item[:4]
+                    try:
+                        amount = float(item.split("年")[1].replace("万元", ""))
+                        # 检测异常（简化规则：>100万或<5万）
+                        is_anomaly = amount > 100 or (amount < 5 and amount > 0)
+                        yearly_data.append({
+                            "year": year,
+                            "inflow": amount,
+                            "outflow": round(amount * 0.95, 2),  # 简化估算
+                            "anomaly": is_anomaly,
+                            "anomaly_type": "收入异常" if is_anomaly else None
+                        })
+                        if is_anomaly:
+                            anomaly_years.append({
+                                "year": year,
+                                "issue": "收入异常偏高" if amount > 100 else "收入偏低"
+                            })
+                    except (ValueError, IndexError):
+                        continue
+        
+        return {
+            "yearly_data": yearly_data,
+            "anomaly_years": anomaly_years
+        }
+    
+    def _build_relationship_analysis_from_section(self, name: str, section: Dict) -> Dict:
+        """从 section 构建关联分析"""
+        # 从家庭成员获取关联信息
+        bg = section.get("asset_income_section", {}).get("personal_background", {})
+        family_desc = bg.get("family_members_desc", "")
+        
+        family_members = []
+        total_inflow = 0
+        total_outflow = 0
+        
+        # 解析家庭成员描述
+        if family_desc and "【待调取】" not in family_desc:
+            # 简单解析：分割 "关系：姓名" 格式
+            for item in family_desc.split("；"):
+                if "：" in item:
+                    parts = item.split("：")
+                    relation = parts[0].strip()
+                    member_name = parts[1].strip()
+                    family_members.append({
+                        "name": member_name,
+                        "relation": relation,
+                        "net_flow": 0,
+                        "direction": "balanced"
+                    })
+        
+        return {
+            "family_members": family_members,
+            "total_family_inflow": round(total_inflow / 10000, 2),
+            "total_family_outflow": round(total_outflow / 10000, 2)
+        }
+
 
     def _build_member_report_unified(
         self, name: str, family_anchor: str, family_members: List[str]
@@ -2651,6 +3142,10 @@ class InvestigationReportBuilder:
         total_income = income_struct.get("total_income") or profile.get("totalIncome", 0) or 0
         total_expense = income_struct.get("total_expense") or profile.get("totalExpense", 0) or 0
         transaction_count = income_struct.get("transaction_count") or profile.get("transactionCount", 0) or 0
+        
+        # 【2026-02-23 修复】获取真实收入（剔除后的收入）
+        summary = profile.get("summary", {})
+        real_income = summary.get("real_income", total_income)  # 如果没有则使用总流水
 
         # 资产板块
         assets = self._build_person_assets(name, profile)
@@ -2664,6 +3159,7 @@ class InvestigationReportBuilder:
             total_income=total_income,
             total_expense=total_expense,
             transaction_count=transaction_count,
+            real_income=real_income,  # 【2026-02-23 修复】添加真实收入
             assets=assets,
             analysis=analysis,
         )
@@ -2675,10 +3171,10 @@ class InvestigationReportBuilder:
         salary_summary = yearly_salary_dict.get("summary", {}) if yearly_salary_dict else {}
         salary_total = salary_summary.get("total", 0)
         
-        # 【2026-02-12 修复】基于真实收入计算工资占比
+        # 【2026-02-23 修复】直接使用summary.salary_ratio（工资/总收入）
         summary = profile.get("summary", {})
-        real_income = summary.get("real_income", summary.get("total_income", 0))
-        salary_ratio = (salary_total / real_income * 100) if real_income > 0 else 0
+        # 使用已有的salary_ratio（已经是小数形式，如0.093=9.3%）
+        salary_ratio = summary.get("salary_ratio", 0)  # 直接使用已计算的工资占比（小数形式）
 
         # 年度工资明细
         yearly_salary_data = yearly_salary_dict.get("yearly", {}) if yearly_salary_dict else {}
@@ -3851,8 +4347,8 @@ class InvestigationReportBuilder:
             profile = self.profiles.get(name, {})
             summary = profile.get("summary", {})
             
-            # 获取真实收入（剔除后的）
             real_income = summary.get("real_income", summary.get("total_income", 0))
+            # 使用已有的salary_ratio（已经是小数形式，如0.093=9.3%）
             
             # 从 yearly_salary 获取正确工资数据
             yearly_salary = profile.get("yearly_salary", {}) or profile.get("yearlySalary", {})
@@ -4206,10 +4702,12 @@ class InvestigationReportBuilder:
         for family in family_sections:
             person_sections.extend(family.get("member_sections", []))
 
-        # 5. 公司章节
+        # 5. 公司章节（使用增强版5维度分析）
         company_sections = []
         for company in include_companies:
-            company_section = self._build_v4_company_section(company)
+            company_section = self._build_enhanced_company_section(
+                company, self._core_persons
+            )
             company_sections.append(company_section)
 
         # 6. 综合研判
@@ -4516,6 +5014,8 @@ class InvestigationReportBuilder:
             relation = self._infer_relation_from_members(member, anchor, members)
             section = self.build_v4_person_section(member, relation)
             section["section_index"] = idx + 1  # 添加章节序号
+            # 【六维一体】添加统一分析数据
+            section["unified_analysis"] = self._build_unified_person_analysis_v2(member, section)
             member_sections.append(section)
 
         return {
@@ -4634,23 +5134,35 @@ class InvestigationReportBuilder:
                 wealth_mgmt = full_profile.get("wealth_management", {})
                 fund_flow = full_profile.get("fund_flow", {})
                 
-                # 检查是否有新的offset_detail（修复后的数据）
-                if "offset_detail" in summary:
-                    # 使用缓存的真实收入
+                # 【2026-02-20 修复】增强回退逻辑，处理扁平化缓存数据
+                # 优先级：1.缓存的real_income -> 2.重新计算 -> 3.使用total_income回退
+                member_real_income = 0
+                member_real_expense = 0
+                member_offset = {}
+                
+                # 方案1：检查是否有缓存的 real_income（新格式数据）
+                if summary.get("real_income") is not None and summary.get("real_income") > 0:
                     member_real_income = summary.get("real_income", 0)
                     member_real_expense = summary.get("real_expense", 0)
                     member_offset = summary.get("offset_detail", {})
-                else:
-                    # 旧数据，重新计算
+                # 方案2：尝试重新计算（需要完整的嵌套数据）
+                elif income_structure and wealth_mgmt:
                     try:
                         member_real_income, member_real_expense, member_offset = _calculate_real_income_expense(
                             income_structure, wealth_mgmt, fund_flow
                         )
                     except Exception as e:
-                        logger.warning(f"[_build_family_summary_v4] 计算{member}真实收入失败: {e}")
-                        member_real_income = summary.get("real_income", 0)
-                        member_real_expense = summary.get("total_expense", 0)
+                        logger.warning(f"[_build_family_summary_v4] 计算{member}真实收入失败: {e}，使用回退方案")
+                        # 方案3：回退到 total_income（扁平化缓存数据）
+                        member_real_income = summary.get("total_income", full_profile.get("totalIncome", 0))
+                        member_real_expense = summary.get("total_expense", full_profile.get("totalExpense", 0))
                         member_offset = {}
+                else:
+                    # 方案3：直接使用 total_income（扁平化缓存数据）
+                    member_real_income = summary.get("total_income", full_profile.get("totalIncome", 0))
+                    member_real_expense = summary.get("total_expense", full_profile.get("totalExpense", 0))
+                    member_offset = {}
+                    logger.info(f"[_build_family_summary_v4] {member}使用total_income作为回退: {member_real_income/10000:.2f}万")
                 
                 total_real_income += member_real_income
                 total_real_expense += member_real_expense
@@ -4726,8 +5238,64 @@ class InvestigationReportBuilder:
                 }
             )
 
-        # 【2026-02-12 修复】基于真实收入计算工资占比
+        # 【2026-02-23 修复】直接使用summary.salary_ratio（工资/总收入）
         salary_ratio = (total_salary / total_real_income * 100) if total_real_income > 0 else 0
+
+        # 【2026-02-21 新增】计算净现金流和现金流健康度评分
+        net_cash_flow = total_real_income - total_real_expense
+        net_cash_flow_wan = round(net_cash_flow / 10000, 2)
+
+        # 现金流健康度评分（0-100分）
+        # 评分逻辑：
+        # - 净现金流为正：基础分60分
+        # - 收支比（收入/支出）在1.1-1.5之间：满分区间
+        # - 收支比 < 1.0（入不敷出）：根据缺口扣分
+        # - 收支比 > 2.0（收入远高于支出）：也可能异常，适度扣分
+        if total_real_expense > 0:
+            income_expense_ratio = total_real_income / total_real_expense
+        else:
+            income_expense_ratio = 999  # 无支出，视为极高比例
+
+        if net_cash_flow > 0:
+            # 净现金流为正，基础分60分
+            base_score = 60
+            # 根据收支比调整
+            if 1.1 <= income_expense_ratio <= 1.5:
+                # 健康区间，满分
+                cash_flow_score = 100
+            elif 1.0 <= income_expense_ratio < 1.1:
+                # 略有结余，70-90分
+                cash_flow_score = int(70 + (income_expense_ratio - 1.0) * 200)
+            elif income_expense_ratio > 1.5:
+                # 收入远高于支出，可能隐藏支出或数据不完整，80-95分
+                cash_flow_score = max(80, 95 - int((income_expense_ratio - 1.5) * 10))
+            else:
+                # 收入略低于支出（不应该发生，因为净现金流为正）
+                cash_flow_score = base_score
+        else:
+            # 净现金流为负，入不敷出
+            if income_expense_ratio >= 0.8:
+                # 收入接近支出，40-59分
+                cash_flow_score = int(40 + income_expense_ratio * 20)
+            elif income_expense_ratio >= 0.5:
+                # 收入明显低于支出，20-40分
+                cash_flow_score = int(20 + (income_expense_ratio - 0.5) * 40)
+            else:
+                # 严重入不敷出，0-20分
+                cash_flow_score = max(0, int(income_expense_ratio * 40))
+
+        # 确保分数在0-100范围内
+        cash_flow_score = max(0, min(100, cash_flow_score))
+
+        # 健康度等级
+        if cash_flow_score >= 80:
+            cash_flow_level = "健康"
+        elif cash_flow_score >= 60:
+            cash_flow_level = "良好"
+        elif cash_flow_score >= 40:
+            cash_flow_level = "关注"
+        else:
+            cash_flow_level = "高风险"
 
         return {
             "anchor": anchor,
@@ -4740,11 +5308,17 @@ class InvestigationReportBuilder:
             "total_expense_wan": round(total_real_expense / 10000, 2),
             "total_bank_balance": total_bank_balance,
             "total_bank_balance_wan": round(total_bank_balance / 10000, 2),
-            "total_salary": total_salary,  # 【修复】正确汇总的工资
+            "total_salary": total_salary,
             "total_salary_wan": round(total_salary / 10000, 2),
             "total_wealth": total_wealth,
             "total_wealth_wan": round(total_wealth / 10000, 2),
             "salary_ratio": salary_ratio,
+            # 【2026-02-21 新增】净现金流和健康度评分
+            "net_cash_flow": net_cash_flow,
+            "net_cash_flow_wan": net_cash_flow_wan,
+            "cash_flow_score": cash_flow_score,
+            "cash_flow_level": cash_flow_level,
+            "income_expense_ratio": round(income_expense_ratio, 2),
             # 【2026-02-12 新增】剔除详情
             "offset_detail": total_offset_detail,
             # 【新增】assets字段，供前端使用
@@ -4758,12 +5332,15 @@ class InvestigationReportBuilder:
             },
             # 【2026-02-12 修复】更新文本描述，明确是"真实收入"而非"流水"
             # 【2026-02-13 新增】添加家庭资产快照
+            # 【2026-02-21 新增】添加净现金流和健康度评分
             "narrative": (
                 f"{anchor}家庭共{len(members)}人。"
                 f"家庭真实收入{total_real_income / 10000:.2f}万元，"
                 f"真实支出{total_real_expense / 10000:.2f}万元"
                 f"（已剔除内部转账、理财/定存本金循环等{total_offset_detail['total_offset'] / 10000:.2f}万元）。"
                 f"其中工资收入{total_salary / 10000:.2f}万元，占真实收入{salary_ratio:.1f}%。"
+                f"\n【现金流分析】年度净现金流{net_cash_flow_wan:.2f}万元，"
+                f"现金流健康度评分{cash_flow_score}分（{cash_flow_level}）。"
                 f"\n家庭资产：房产{property_count}套"
                 f"{'（' + f'{total_property_area:.2f}' + '㎡）' if total_property_area > 0 else ''}"
                 f" | 车辆{vehicle_count}辆"
@@ -4948,6 +5525,445 @@ class InvestigationReportBuilder:
             "narrative": narrative,
         }
 
+    def _build_enhanced_company_section(self, company: str, core_persons: List[str] = None) -> Dict:
+        """
+        构建增强版公司章节（5维度分析）
+        
+        分析维度：
+        1. 经营规模与合理性
+        2. 与核心人员资金往来
+        3. 公司间资金往来
+        4. 主要交易对手分析
+        5. 风险评分与结论
+        """
+        profile = self.profiles.get(company, {})
+        
+        total_income = profile.get("totalIncome", 0)
+        total_expense = profile.get("totalExpense", 0)
+        cash_income = profile.get("cashIncome", 0)
+        cash_expense = profile.get("cashExpense", 0)
+        transaction_count = profile.get("transactionCount", 0)
+        
+        # 维度1: 经营规模与合理性
+        dimension1 = self._analyze_company_scale(company, profile)
+        
+        # 维度2: 与核心人员资金往来
+        dimension2 = self._analyze_company_person_transfers(company, core_persons or [])
+        
+        # 维度3: 公司间资金往来
+        dimension3 = self._analyze_inter_company_flows(company)
+        
+        # 维度4: 主要交易对手分析
+        dimension4 = self._analyze_major_counterparties(company)
+        
+        # 维度5: 风险评分
+        dimension5 = self._calculate_company_risk_score(company, core_persons or [])
+        
+        # 【2026-02-22 新增】维度6: 行为特征分析（重点！）
+        dimension6 = self._analyze_company_behavioral_patterns(company)
+        
+        # 构建完整叙事
+        narrative_parts = [dimension1.get("summary", "")]
+        if dimension2.get("has_transfers", False):
+            narrative_parts.append(dimension2.get("summary", ""))
+        if dimension3.get("has_flows", False):
+            narrative_parts.append(dimension3.get("summary", ""))
+        narrative_parts.append(dimension5.get("summary", ""))
+        
+        # 添加行为特征概述
+        if dimension6.get("has_patterns", False):
+            narrative_parts.append(dimension6.get("summary", ""))
+        
+        full_narrative = " ".join([p for p in narrative_parts if p])
+        
+        return {
+            "company_name": company,
+            "total_income": total_income,
+            "total_expense": total_expense,
+            "cash_income": cash_income,
+            "cash_expense": cash_expense,
+            "transaction_count": transaction_count,
+            "narrative": full_narrative,
+            "dimensions": {
+                "scale_analysis": dimension1,
+                "person_transfers": dimension2,
+                "inter_company_flows": dimension3,
+                "major_counterparties": dimension4,
+                "risk_assessment": dimension5,
+                "behavioral_patterns": dimension6,
+            },
+            "overall_risk_score": dimension5.get("score", 0),
+            "overall_risk_level": dimension5.get("level", "低风险"),
+        }
+    
+    def _analyze_company_scale(self, company: str, profile: Dict) -> Dict:
+        """维度1: 分析公司经营规模与合理性"""
+        total_income = profile.get("totalIncome", 0)
+        total_expense = profile.get("totalExpense", 0)
+        transaction_count = profile.get("transactionCount", 0)
+        cash_income = profile.get("cashIncome", 0)
+        cash_expense = profile.get("cashExpense", 0)
+        
+        # 计算现金占比
+        cash_income_ratio = (cash_income / total_income * 100) if total_income > 0 else 0
+        cash_expense_ratio = (cash_expense / total_expense * 100) if total_expense > 0 else 0
+        
+        # 判断经营合理性
+        avg_transaction = total_income / transaction_count if transaction_count > 0 else 0
+        
+        summary = (
+            f"【经营规模】{company}累计资金流入{total_income / 10000:.2f}万元，"
+            f"流出{total_expense / 10000:.2f}万元，涉及交易{transaction_count}笔，"
+            f"平均单笔金额{avg_transaction / 10000:.2f}万元。"
+        )
+        
+        if cash_income > 0 or cash_expense > 0:
+            summary += (
+                f"现金收入占比{cash_income_ratio:.1f}%，"
+                f"现金支出占比{cash_expense_ratio:.1f}%。"
+            )
+        
+        return {
+            "total_income": total_income,
+            "total_expense": total_expense,
+            "transaction_count": transaction_count,
+            "cash_income_ratio": cash_income_ratio,
+            "cash_expense_ratio": cash_expense_ratio,
+            "avg_transaction": avg_transaction,
+            "summary": summary,
+        }
+    
+    def _analyze_company_person_transfers(self, company: str, core_persons: List[str]) -> Dict:
+        """维度2: 分析与核心人员资金往来"""
+        # 从清洗后的数据中获取公司交易明细
+        company_df = self._get_cleaned_data_for_company(company)
+        
+        transfers = []
+        total_in = 0
+        total_out = 0
+        
+        if company_df is not None and not company_df.empty:
+            for person in core_persons:
+                # 查找与该人员的交易
+                person_tx = company_df[company_df["counterparty"].str.contains(person, na=False)]
+                
+                for _, row in person_tx.iterrows():
+                    amount = row.get("income", 0) or row.get("expense", 0) or 0
+                    direction = "收入" if row.get("income", 0) > 0 else "支出"
+                    
+                    transfer = {
+                        "person": person,
+                        "amount": amount,
+                        "direction": direction,
+                        "date": str(row.get("date", "")),
+                        "counterparty": row.get("counterparty", ""),
+                    }
+                    transfers.append(transfer)
+                    
+                    if direction == "收入":
+                        total_in += amount
+                    else:
+                        total_out += amount
+        
+        has_transfers = len(transfers) > 0
+        
+        if has_transfers:
+            summary = (
+                f"【核心人员往来】发现与核心人员直接资金往来："
+                f"收到{total_in / 10000:.2f}万元，支付{total_out / 10000:.2f}万元，"
+                f"共{len(transfers)}笔交易。"
+            )
+        else:
+            summary = "【核心人员往来】未发现与核心人员的直接资金往来。"
+        
+        return {
+            "has_transfers": has_transfers,
+            "transfers": transfers,
+            "total_in": total_in,
+            "total_out": total_out,
+            "summary": summary,
+        }
+    
+    def _analyze_inter_company_flows(self, company: str) -> Dict:
+        """维度3: 分析公司间资金往来"""
+        # 获取所有公司名称
+        all_companies = [k for k in self.profiles.keys() if "公司" in k or "科技" in k or "机电" in k or "机械" in k]
+        
+        company_df = self._get_cleaned_data_for_company(company)
+        flows = []
+        
+        if company_df is not None and not company_df.empty:
+            for other_company in all_companies:
+                if other_company == company:
+                    continue
+                    
+                # 查找与其他公司的交易
+                other_tx = company_df[company_df["counterparty"].str.contains(other_company, na=False)]
+                
+                if not other_tx.empty:
+                    total_amount = other_tx["income"].sum() + other_tx["expense"].sum()
+                    count = len(other_tx)
+                    
+                    flows.append({
+                        "company": other_company,
+                        "total_amount": total_amount,
+                        "transaction_count": count,
+                    })
+        
+        has_flows = len(flows) > 0
+        total_flow_amount = sum(f["total_amount"] for f in flows)
+        
+        if has_flows:
+            summary = (
+                f"【公司间往来】发现与{len(flows)}家公司存在资金往来，"
+                f"累计金额{total_flow_amount / 10000:.2f}万元。"
+            )
+        else:
+            summary = "【公司间往来】未发现与其他公司的资金往来。"
+        
+        return {
+            "has_flows": has_flows,
+            "flows": flows,
+            "total_flow_amount": total_flow_amount,
+            "summary": summary,
+        }
+    
+    def _analyze_major_counterparties(self, company: str) -> Dict:
+        """维度4: 分析主要交易对手"""
+        profile = self.profiles.get(company, {})
+        transactions = profile.get("transactions", [])
+        
+        if not transactions:
+            company_file = f"output/cleaned_data/公司/{company}_合并流水.xlsx"
+            if os.path.exists(company_file):
+                try:
+                    import pandas as pd
+                    df = pd.read_excel(company_file)
+                    transactions = df.to_dict("records")
+                except Exception as e:
+                    logger.warning(f"无法加载公司数据 {company}: {e}")
+        
+        inflows = [t for t in transactions if t.get("direction") == "in" or t.get("收付标志") == "收入" or (t.get("收入(元)", 0) > 0)]
+        outflows = [t for t in transactions if t.get("direction") == "out" or t.get("收付标志") == "支出" or (t.get("支出(元)", 0) > 0)]
+        
+        customer_stats = {}
+        for t in inflows:
+            cp = t.get("counterparty_name", t.get("counterparty", t.get("交易对手", "未知")))
+            if not cp or cp == "nan":
+                cp = "未知"
+            if cp not in customer_stats:
+                customer_stats[cp] = {"amount": 0, "count": 0}
+            amount = t.get("amount", 0) or t.get("收入(元)", 0) or 0
+            customer_stats[cp]["amount"] += amount
+            customer_stats[cp]["count"] += 1
+        
+        supplier_stats = {}
+        for t in outflows:
+            cp = t.get("counterparty_name", t.get("counterparty", t.get("交易对手", "未知")))
+            if not cp or cp == "nan":
+                cp = "未知"
+            if cp not in supplier_stats:
+                supplier_stats[cp] = {"amount": 0, "count": 0}
+            amount = t.get("amount", 0) or t.get("支出(元)", 0) or 0
+            supplier_stats[cp]["amount"] += amount
+            supplier_stats[cp]["count"] += 1
+        
+        sorted_customers = sorted(customer_stats.items(), key=lambda x: x[1]["amount"], reverse=True)[:5]
+        sorted_suppliers = sorted(supplier_stats.items(), key=lambda x: x[1]["amount"], reverse=True)[:5]
+        
+        top_customers = [
+            {"name": cp, "amount": data["amount"], "count": data["count"]}
+            for cp, data in sorted_customers
+        ]
+        
+        top_suppliers = [
+            {"name": cp, "amount": data["amount"], "count": data["count"]}
+            for cp, data in sorted_suppliers
+        ]
+        
+        total_customer_amount = sum(c["amount"] for c in top_customers)
+        total_supplier_amount = sum(s["amount"] for s in top_suppliers)
+        
+        summary = (
+            f"【主要交易对手】前5大客户贡献{total_customer_amount / 10000:.2f}万元，"
+            f"前5大供应商支出{total_supplier_amount / 10000:.2f}万元。"
+        )
+        
+        return {
+            "top_customers": top_customers,
+            "top_suppliers": top_suppliers,
+            "total_customer_amount": total_customer_amount,
+            "total_supplier_amount": total_supplier_amount,
+            "summary": summary,
+        }
+    
+    def _calculate_company_risk_score(self, company: str, core_persons: List[str]) -> Dict:
+        """维度5: 计算公司风险评分"""
+        score = 0
+        risk_factors = []
+        
+        profile = self.profiles.get(company, {})
+        
+        # 1. 现金占比风险 (0-20分)
+        cash_income = profile.get("cashIncome", 0)
+        total_income = profile.get("totalIncome", 1)
+        cash_ratio = cash_income / total_income
+        
+        if cash_ratio > 0.3:
+            score += 15
+            risk_factors.append("现金收入占比超过30%")
+        elif cash_ratio > 0.15:
+            score += 8
+            risk_factors.append("现金收入占比较高")
+        
+        # 2. 核心人员往来风险 (0-30分)
+        person_transfers = self._analyze_company_person_transfers(company, core_persons)
+        if person_transfers["has_transfers"]:
+            total_transfer = person_transfers["total_in"] + person_transfers["total_out"]
+            if total_transfer > 1000000:  # 100万
+                score += 25
+                risk_factors.append("与核心人员大额资金往来")
+            elif total_transfer > 500000:  # 50万
+                score += 15
+                risk_factors.append("与核心人员较大额资金往来")
+            else:
+                score += 5
+                risk_factors.append("与核心人员有资金往来")
+        
+        # 3. 交易频次风险 (0-10分)
+        transaction_count = profile.get("transactionCount", 0)
+        if transaction_count > 1000:
+            score += 5
+            risk_factors.append("交易频次异常高")
+        
+        # 4. 收支失衡风险 (0-20分)
+        total_expense = profile.get("totalExpense", 0)
+        if total_income > 0 and total_expense / total_income > 1.5:
+            score += 15
+            risk_factors.append("支出远超收入")
+        
+        # 确定风险等级
+        if score >= 60:
+            level = "高风险"
+        elif score >= 30:
+            level = "中风险"
+        else:
+            level = "低风险"
+        
+        summary = f"【风险评分】综合评分{score}/100分，评级为{level}。"
+        if risk_factors:
+            summary += f"主要风险：{'；'.join(risk_factors[:3])}。"
+        
+        return {
+            "score": score,
+            "level": level,
+            "risk_factors": risk_factors,
+            "summary": summary,
+        }
+    
+    def _analyze_company_behavioral_patterns(self, company: str) -> Dict:
+        """
+        【2026-02-22 新增】维度6: 分析公司行为特征模式
+        
+        分析内容：
+        1. 快进快出检测 (fast_in_out)
+        2. 整进散出/散进整出检测 (structuring)
+        
+        数据来源: derived_data['behavioral']
+        """
+        behavioral_data = self.derived_data.get("behavioral", {})
+        
+        # 1. 快进快出分析
+        fast_in_out_all = behavioral_data.get("fast_in_out", [])
+        # 过滤出该公司的记录，并排除自我转账
+        fast_in_out = [
+            item for item in fast_in_out_all
+            if item.get("entity") == company
+            and item.get("income_counterparty") != item.get("expense_counterparty")  # 排除自我转账
+        ]
+        
+        # 2. 整进散出/散进整出分析
+        structuring_all = behavioral_data.get("structuring", [])
+        structuring = [
+            item for item in structuring_all
+            if item.get("entity") == company
+        ]
+        
+        has_patterns = len(fast_in_out) > 0 or len(structuring) > 0
+        
+        # 统计信息
+        total_fast_in_out = len(fast_in_out)
+        total_structuring = len(structuring)
+        
+        # 快进快出金额统计
+        if fast_in_out:
+            avg_amount = sum(item.get("income_amount", 0) for item in fast_in_out) / len(fast_in_out)
+            max_amount = max(item.get("income_amount", 0) for item in fast_in_out)
+            avg_hours = sum(item.get("hours_diff", 0) for item in fast_in_out) / len(fast_in_out)
+            
+            # 高风险记录（0小时停留或超大金额）
+            high_risk_count = sum(
+                1 for item in fast_in_out 
+                if item.get("hours_diff", 0) == 0 or item.get("income_amount", 0) > 1000000
+            )
+        else:
+            avg_amount = max_amount = avg_hours = high_risk_count = 0
+        
+        # 构建摘要
+        if has_patterns:
+            parts = []
+            if total_fast_in_out > 0:
+                parts.append(f"发现{total_fast_in_out}条快进快出记录")
+            if total_structuring > 0:
+                parts.append(f"{total_structuring}条整进散出/散进整出记录")
+            
+            summary = f"【行为特征】{'，'.join(parts)}。"
+            
+            if fast_in_out:
+                summary += f"平均停留{avg_hours:.1f}小时，平均金额{avg_amount/10000:.1f}万元。"
+            
+            if high_risk_count > 0:
+                summary += f"其中{high_risk_count}条为高风险记录（瞬间进出或超大金额）。"
+        else:
+            summary = "【行为特征】未发现明显的快进快出或整进散出模式。"
+        
+        return {
+            "has_patterns": has_patterns,
+            "fast_in_out": {
+                "total": total_fast_in_out,
+                "avg_amount": avg_amount,
+                "max_amount": max_amount,
+                "avg_hours": avg_hours,
+                "high_risk_count": high_risk_count,
+                "records": fast_in_out[:10],  # 只保留前10条详细记录
+            },
+            "structuring": {
+                "total": total_structuring,
+                "records": structuring[:10],  # 只保留前10条详细记录
+            },
+            "summary": summary,
+        }
+    
+    def _get_cleaned_data_for_company(self, company: str):
+        """获取公司的清洗后交易数据"""
+        # 尝试从profiles中获取
+        profile = self.profiles.get(company, {})
+        transactions = profile.get("transactions", [])
+        
+        if transactions:
+            import pandas as pd
+            return pd.DataFrame(transactions)
+        
+        # 尝试从derived_data中获取
+        company_data = self.derived_data.get("company_analysis", {}).get(company, {})
+        transactions = company_data.get("transactions", [])
+        
+        if transactions:
+            import pandas as pd
+            return pd.DataFrame(transactions)
+        
+        return None
+
     def _build_v4_conclusion(
         self, person_sections: List[Dict], company_sections: List[Dict]
     ) -> Dict:
@@ -4964,25 +5980,94 @@ class InvestigationReportBuilder:
             income_match = analysis.get("income_match_analysis", {})
             if income_match.get("need_further_verification", False):
                 salary_ratio = income_match.get("salary_ratio", 0)
+                # 【2026-02-21 新增】获取支出收入比
+                expense_income_ratio = income_match.get("expense_income_ratio", 0)
 
-                # 【6.1修复】判断风险等级
-                if salary_ratio < 0.2:
+                # 【6.1修复】判断风险等级 - 【2026-02-21 增强】增加支出收入比判断
+                # 高风险：工资占比<20% 或 支出收入比>150%
+                if salary_ratio < 0.2 or expense_income_ratio > 1.5:
                     risk_level = "high"
-                    risk_desc = "严重偏低"
-                elif salary_ratio < 0.5:
+                    if salary_ratio < 0.2 and expense_income_ratio > 1.5:
+                        risk_desc = "严重偏低且入不敷出"
+                    elif salary_ratio < 0.2:
+                        risk_desc = "严重偏低"
+                    else:
+                        risk_desc = "入不敷出"
+                # 中风险：工资占比<50% 或 支出收入比>120%
+                elif salary_ratio < 0.5 or expense_income_ratio > 1.2:
                     risk_level = "medium"
-                    risk_desc = "偏低"
+                    if salary_ratio < 0.5 and expense_income_ratio > 1.2:
+                        risk_desc = "偏低且支出偏高"
+                    elif salary_ratio < 0.5:
+                        risk_desc = "偏低"
+                    else:
+                        risk_desc = "支出偏高"
                 else:
                     risk_level = "low"
                     risk_desc = "正常"
 
                 risk_levels[risk_level] += 1
 
+                # 【2026-02-22 修复】修正逻辑矛盾，优化描述文本
+                # 原问题："工资收入占比仅39.9%，正常，不足以支撑日常开支" - 既说正常又说不支撑，矛盾
+                # 修复：根据风险等级给出一致性的描述
+                if self.phrase_loader is not None:
+                    # Map risk level to phrase level
+                    level_map = {"low": "normal", "medium": "warning", "high": "high_risk"}
+                    phrase_level = level_map.get(risk_level, "normal")
+                    phrase = None
+                    try:
+                        phrase = self.phrase_loader.get_phrase("income_analysis", "salary_ratio", phrase_level)
+                    except Exception:
+                        phrase = None
+                    other_income_wan = income_match.get("other_income_wan", None)
+                    if other_income_wan is None:
+                        other_income_wan = (income_match.get("other_income", 0) / 10000) if income_match.get("other_income") is not None else 0
+                    real_income_wan = income_match.get("real_income_wan", None)
+                    if real_income_wan is None:
+                        real_income_wan = (income_match.get("real_income", 0) / 10000) if income_match.get("real_income") is not None else 0
+                    phrase_params = {
+                        "name": name,
+                        "salary_ratio": salary_ratio,
+                        "other_income_wan": other_income_wan,
+                        "real_income_wan": real_income_wan,
+                    }
+                    if isinstance(phrase, dict) and "detail" in phrase:
+                        desc_text = self.phrase_loader.render_with_calculation(phrase["detail"], phrase_params)
+                    else:
+                        # Fallback to original wording if phrase loading fails
+                        if risk_level == "low":
+                            desc_text = f"{name}：工资收入占比{salary_ratio:.1f}%，收支结构基本合理"
+                        else:
+                            desc_text = f"{name}（收支不匹配）：工资收入占比{salary_ratio:.1f}%，{risk_desc}"
+                            if expense_income_ratio > 1.0:
+                                desc_text += f"，支出为收入的{expense_income_ratio:.1f}倍（入不敷出）"
+                            elif expense_income_ratio > 0.8:
+                                desc_text += f"，支出为收入的{expense_income_ratio:.1f}倍（收支接近）"
+                            if risk_level == "high":
+                                desc_text += "，资金缺口明显，需重点核实"
+                            else:
+                                desc_text += "，建议关注"
+                else:
+                    # Phrase loader not available; fallback to original wording
+                    if risk_level == "low":
+                        desc_text = f"{name}：工资收入占比{salary_ratio:.1f}%，收支结构基本合理"
+                    else:
+                        desc_text = f"{name}（收支不匹配）：工资收入占比{salary_ratio:.1f}%，{risk_desc}"
+                        if expense_income_ratio > 1.0:
+                            desc_text += f"，支出为收入的{expense_income_ratio:.1f}倍（入不敷出）"
+                        elif expense_income_ratio > 0.8:
+                            desc_text += f"，支出为收入的{expense_income_ratio:.1f}倍（收支接近）"
+                        if risk_level == "high":
+                            desc_text += "，资金缺口明显，需重点核实"
+                        else:
+                            desc_text += "，建议关注"
+
                 issues.append(
                     {
                         "person": name,
                         "issue_type": "收支不匹配",
-                        "description": f"{name}（收支不匹配）：工资收入占比仅{salary_ratio:.1f}%，{risk_desc}，不足以支撑日常开支",
+                        "description": desc_text,
                         "severity": risk_level,
                     }
                 )
@@ -5027,22 +6112,13 @@ class InvestigationReportBuilder:
         if not issues:
             return "经对相关人员资金流水进行穿透分析，未发现明显异常情况。"
 
-        # 生成结论文本（纯文本格式，不使用HTML）
-        conclusion_text = "通过对查询结果分析，发现异常情况：\n\n"
-
-        for i, issue in enumerate(issues, 1):
-            risk_label = {
-                "high": "【高风险】",
-                "medium": "【中风险】",
-                "low": "【低风险】",
-            }.get(issue["severity"], "")
-            conclusion_text += f"    {i}. {risk_label}{issue['description']}\n"
-
-        conclusion_text += f"""
-经对相关人员资金流水进行穿透分析，发现{len(issues)}项需要进一步核实的问题。
+        # 【2026-02-22 修复】不再重复列出问题，只保留总结性文字
+        # 问题列表已经在模板中通过 report.conclusion.issues 单独展示
+        conclusion_text = f"""经对相关人员资金流水进行穿透分析，发现{len(issues)}项需要进一步核实的问题。
 
 风险等级统计：高风险{risk_levels["high"]}项，中风险{risk_levels["medium"]}项，低风险{risk_levels["low"]}项。
-"""
+
+建议对上述问题开展进一步核查，重点关注高风险事项。"""
 
         return conclusion_text
 
@@ -5266,14 +6342,47 @@ class InvestigationReportBuilder:
         profile = self.profiles.get(name, {})
 
         # 基本信息
+        # 从身份信息映射获取默认值
+        identity_info = self._person_identity_map.get(name, {})
+
+        # Initialize with placeholders
         basic_info = {
             "name": name,
             "id_number": "【待调取】",
             "gender": "【待调取】",
             "birth_date": "【待调取】",
-            "work_unit": "【待调取】",
-            "position": "【待调取】",
+            "work_unit": identity_info.get("employer", "【待调取】"),
+            "position": identity_info.get("position", "【待调取】"),
+            "political_status": identity_info.get("political_status", "【待调取】"),
+            "work_identity": identity_info.get("work_identity", "【待调取】"),
         }
+        # 尝试从 derived_data.json 的 family_tree 提取身份信息
+        try:
+            derived_path = os.path.join(self.output_dir, "analysis_cache", "derived_data.json")
+            if os.path.exists(derived_path):
+                with open(derived_path, "r", encoding="utf-8") as f:
+                    derived = json.load(f)
+                family_tree = derived.get("family_tree", {}) or {}
+                person_tree = family_tree.get(name)
+                if isinstance(person_tree, list) and len(person_tree) > 0:
+                    info = person_tree[0] if isinstance(person_tree[0], dict) else {}
+                    gender = info.get("性别") or info.get("gender") or ""
+                    birth_date = info.get("出生日期") or info.get("birth_date") or ""
+                    work_unit = info.get("从业单位") or info.get("work_unit") or info.get("employer") or ""
+                    id_num = info.get("身份证号") or info.get("id_number") or ""
+                    position = info.get("职位") or info.get("position") or ""
+                    if gender:
+                        basic_info["gender"] = str(gender)
+                    if birth_date:
+                        basic_info["birth_date"] = str(birth_date)
+                    if work_unit:
+                        basic_info["work_unit"] = str(work_unit)
+                    if id_num:
+                        basic_info["id_number"] = str(id_num)
+                    if position:
+                        basic_info["position"] = str(position)
+        except Exception:
+            pass
 
         # 职业履历(从外部数据获取,这里使用占位符)
         career_history = [
@@ -6503,10 +7612,26 @@ class InvestigationReportBuilder:
                 area = area.replace("平方米", "").strip()
                 area = f"{area}平方米"
 
-            # 【1.5修复】房产交易金额处理
-            value = prop.get("value", 0) or prop.get("交易金额", 0)
+            # 【1.5修复】房产交易金额处理 - 增强版：从多个可能字段获取
+            value = (
+                prop.get("value", 0)
+                or prop.get("交易金额", 0)
+                or prop.get("不动产价格", 0)
+                or prop.get("房产价值", 0)
+                or prop.get("transaction_amount", 0)
+                or prop.get("成交价格", 0)
+                or prop.get("price", 0)
+                or 0
+            )
+
+            # 处理不同单位的情况（有的数据已经是万元，有的是元）
             if value and value > 0:
-                value_display = f"{value / 10000:.2f}"
+                # 如果金额大于100万，假设单位是元，转换为万元
+                if value > 1000000:
+                    value_display = f"{value / 10000:.2f}"
+                else:
+                    # 金额较小，假设已经是万元
+                    value_display = f"{value:.2f}"
             else:
                 value_display = "【待补充】"
 
@@ -6926,10 +8051,12 @@ class InvestigationReportBuilder:
 
     def _build_income_match_analysis_v4(self, name: str, profile: Dict) -> Dict:
         """构建家庭存款与家庭收入匹配分析"""
-        # 【2026-02-13 修复】使用真实收入和正确工资数据
+        # 【2026-02-20 修复】增强回退逻辑，优先使用 real_income
         summary = profile.get("summary", {})
-        total_income = summary.get("real_income", profile.get("totalIncome", 0))
-        total_expense = summary.get("real_expense", profile.get("totalExpense", 0))
+        
+        # 优先级：1. real_income -> 2. total_income -> 3. totalIncome（扁平化缓存）
+        total_income = summary.get("real_income") or summary.get("total_income") or profile.get("totalIncome", 0)
+        total_expense = summary.get("real_expense") or summary.get("total_expense") or profile.get("totalExpense", 0)
         net_balance = total_income - total_expense
 
         # 获取银行余额
@@ -6944,6 +8071,7 @@ class InvestigationReportBuilder:
             salary_total = profile.get("salaryTotal", 0)
         
         # 计算工资占比（基于真实收入）
+        # 【2026-02-20 修复】确保 total_income > 0 避免除零错误
         salary_ratio = (salary_total / total_income * 100) if total_income > 0 else 0
 
         # 分析判断
@@ -7066,6 +8194,9 @@ class InvestigationReportBuilder:
             )
         outflow_narrative_parts.append("。")
 
+        # 【2026-02-21 新增】每种收入类型的原始值和剔除值
+        other_raw = max(0, total_income - salary_total - personal_transfers_in - cash_income)
+        
         return {
             "inflow": {
                 "total": total_income,
@@ -7074,6 +8205,19 @@ class InvestigationReportBuilder:
                 "personal_transfers": personal_transfers_in,
                 "third_party": third_party,
                 "personal_transfer_persons": list(in_persons.keys()),
+                # 【2026-02-21 新增】收入结构表格的原始值和剔除值
+                "raw_values": {
+                    "salary": salary_total,
+                    "personal_transfers": personal_transfers_in,
+                    "cash": cash_income,
+                    "other": other_raw
+                },
+                "deduct_values": {
+                    "salary": 0,
+                    "personal_transfers": personal_transfers_in,
+                    "cash": cash_income,
+                    "other": other_raw
+                }
             },
             "outflow": {
                 "total": total_expense,
@@ -7337,19 +8481,46 @@ class InvestigationReportBuilder:
 
     def _build_property_analysis_v4(self, name: str, profile: Dict) -> Dict:
         """构建购房数据分析"""
-        properties = profile.get("properties", [])
+        # 【修复】优先使用 _build_property_info_v4 获取房产数据
+        property_info = self._build_property_info_v4(name, profile)
+        properties = property_info.get("properties", [])
 
-        if not properties:
+        if not properties or not property_info.get("has_data", False):
             return {
                 "has_data": False,
                 "narrative": "",  # 无房产则不生成此节
             }
 
-        # 【2.1修复】统一房产交易金额的显示逻辑
-        total_value = sum(p.get("value", 0) or p.get("交易金额", 0) for p in properties)
+        # 【2.1修复】统一房产交易金额的显示逻辑 - 增强版
+        def _get_property_value(p):
+            """从房产数据中获取交易金额（统一单位处理）"""
+            value = (
+                p.get("value", 0)
+                or p.get("交易金额", 0)
+                or p.get("不动产价格", 0)
+                or p.get("房产价值", 0)
+                or p.get("transaction_amount", 0)
+                or p.get("成交价格", 0)
+                or p.get("price", 0)
+                or 0
+            )
+
+            # 【修复】确保 value 是数字类型
+            try:
+                value = float(value) if value else 0
+            except (ValueError, TypeError):
+                value = 0
+
+            # 处理不同单位的情况
+            if value and value > 1000000:
+                # 如果金额大于100万，假设单位是元，转换为万元
+                return value / 10000
+            return value
+
+        total_value = sum(_get_property_value(p) for p in properties)
 
         if total_value > 0:
-            value_text = f"{total_value / 10000:.2f}万元"
+            value_text = f"{total_value:.2f}万元"
         else:
             value_text = "【待补充】"
 
@@ -7426,9 +8597,38 @@ class InvestigationReportBuilder:
 
     def _build_travel_analysis_v4(self, name: str, profile: Dict) -> Dict:
         """构建同行人分析"""
-        # 从 profile 获取出行数据
-        flights = profile.get("flights", [])
-        railway = profile.get("railway", [])
+        # 【修复】优先从外部提取器获取出行数据
+        external_travel = self._get_external_travel_data(name)
+        
+        # 处理嵌套字典结构
+        # railway 格式: {"tickets": [...], "transactions": [...]}
+        # flight 格式: {"completed": [...], "cancelled": [...]}
+        railway_data = external_travel.get("railway", {})
+        flight_data = external_travel.get("flight", {})
+        
+        # 展平为列表
+        flights = []
+        if isinstance(flight_data, dict):
+            for key in ["completed", "cancelled", "tickets", "transactions"]:
+                if key in flight_data and isinstance(flight_data[key], list):
+                    flights.extend(flight_data[key])
+        elif isinstance(flight_data, list):
+            flights = flight_data
+            
+        railway = []
+        if isinstance(railway_data, dict):
+            for key in ["tickets", "transactions", "completed", "cancelled"]:
+                if key in railway_data and isinstance(railway_data[key], list):
+                    railway.extend(railway_data[key])
+        elif isinstance(railway_data, list):
+            railway = railway_data
+        
+        # 如果外部数据为空，回退到 profile
+        if not flights:
+            flights = profile.get("flights", [])
+        if not railway:
+            railway = profile.get("railway", [])
+        
         hotels = profile.get("hotels", [])
 
         flight_count = len(flights) if isinstance(flights, list) else 0

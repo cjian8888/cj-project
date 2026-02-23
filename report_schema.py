@@ -1240,6 +1240,7 @@ class MemberDetails:
     total_income: float = 0.0
     total_expense: float = 0.0
     transaction_count: int = 0
+    real_income: float = 0.0  # 真实收入（剔除后）
     assets: PersonAssets = field(default_factory=PersonAssets)
     analysis: PersonAnalysis = field(default_factory=PersonAnalysis)
 

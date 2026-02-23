@@ -6,11 +6,74 @@
 """
 
 import pandas as pd
+from dateutil.relativedelta import relativedelta
 from typing import Dict, List
 import config
 import utils
 
 logger = utils.setup_logger(__name__)
+
+
+def _find_expenses_near_date(expense_history: List[Dict], target_date, amount: float, tolerance: float) -> bool:
+    """
+    在给定的支出历史中，查找接近目标日期且金额与给定金额在容忍度范围内的记录。
+    仅用于窄化匹配范围，返回布尔值指示是否存在符合条件的记录。
+    """
+    if not expense_history:
+        return False
+    tol = abs(amount) * tolerance
+    for e in expense_history:
+        try:
+            ex_date = e.get('date')
+            ex_amt = float(e.get('amount', e.get('金额', 0) or 0))
+        except Exception:
+            continue
+        if ex_date is None:
+            continue
+        # 将日期统一为 datetime.date 或 datetime-like
+        try:
+            if hasattr(ex_date, 'to_pydatetime'):
+                ex_dt = ex_date.to_pydatetime()
+            else:
+                ex_dt = pd.to_datetime(ex_date)
+            ex_day = ex_dt.date() if hasattr(ex_dt, 'date') else ex_dt
+        except Exception:
+            continue
+        if abs(ex_amt - amount) <= tol:
+            # 简单时间匹配：与目标日期在 +/- 30 天内
+            if isinstance(target_date, pd.Timestamp):
+                t_date = target_date.to_pydatetime().date()
+            else:
+                t_date = target_date
+            if isinstance(ex_day, pd.Timestamp):
+                ex_day = ex_day.to_pydatetime().date()
+            days_diff = abs((t_date - ex_day).days)
+            if days_diff <= 30:
+                return True
+    return False
+
+
+def _find_expenses_near_date_from_history(expense_history: List[Dict], target_date, amount: float, tolerance: float) -> bool:
+    return _find_expenses_near_date(expense_history, target_date, amount, tolerance)
+
+
+def match_historical_expense(income_record: Dict, expense_history: List[Dict], tolerance: float = 0.05) -> (bool, int):
+    """
+    匹配空摘要/空对手方的收入记录在历史支出中是否有近似金额且近似日期的支出。
+    返回 (matched: bool, months_ago: int or None)。若未匹配，months_ago 为 None。
+    """
+    amount = float(income_record.get('amount', 0) or 0)
+    date = income_record.get('date')
+    if date is None:
+        return False, None
+    for months_ago in [3, 6, 12, 24, 36, 48]:
+        try:
+            target_date = date - relativedelta(months=months_ago)
+        except Exception:
+            continue
+        if _find_expenses_near_date(expense_history, target_date, amount, tolerance):
+            return True, months_ago
+    return False, None
 
 
 def _calculate_stable_cv(amounts: List[float], remove_outliers: bool = True) -> float:
@@ -1151,15 +1214,22 @@ def _detect_wealth_transaction(row: pd.Series, product_code_pattern) -> tuple:
                 confidence = 'medium'
                 wealth_type = '定期存款' if '定期' in description else '银行理财'
 
-    # 【2026-02-20 修复】C. 纯数字摘要 - 完全删除此逻辑
-    # 问题：纯数字摘要（如"71"、"69"）可能是柜台号、交易代码，不一定是理财
-    # 即使增加条件，仍然会误识别大量正常交易
-    # 修复：完全删除此识别逻辑，只保留有明确理财特征的识别
-    #
-    # if not is_wealth:
-    #     desc_stripped = description.strip()
-    #     if desc_stripped.isdigit() and len(desc_stripped) <= 4:
-    #         ... 已删除 ...
+    # 【2026-02-20 修复】C. 纯数字摘要识别（Wave1 新增）银行内部代码
+    # 识别摘要为纯数字且在 BANK_INTERNAL_CODES 中的情况
+    if not is_wealth:
+        code_candidate = None
+        if description:
+            ds = str(description).strip()
+            if ds.isdigit():
+                code_candidate = ds
+        if not code_candidate and counterparty:
+            cs = str(counterparty).strip()
+            if cs.isdigit():
+                code_candidate = cs
+        if code_candidate and code_candidate in config.BANK_INTERNAL_CODES:
+            is_wealth = True
+            wealth_type = config.BANK_INTERNAL_CODES[code_candidate]
+            confidence = 'high'
 
     # D. 产品编号格式
     if not is_wealth and description:
@@ -1342,6 +1412,10 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
         '证券': {'购入': 0.0, '赎回': 0.0, '笔数': 0},
         '其他理财': {'购入': 0.0, '赎回': 0.0, '笔数': 0},
         '疑似理财': {'购入': 0.0, '赎回': 0.0, '笔数': 0},
+        '银行内部转账-大额存单': {'购入': 0.0, '赎回': 0.0, '笔数': 0},
+        '银行内部转账-结构性存款': {'购入': 0.0, '赎回': 0.0, '笔数': 0},
+        '银行内部转账-理财产品': {'购入': 0.0, '赎回': 0.0, '笔数': 0},
+        '银行内部转账-定期到期': {'购入': 0.0, '赎回': 0.0, '笔数': 0},
     }
 
     # 年度统计
@@ -1380,20 +1454,31 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
         is_self_transfer = _identify_self_transfer(row, entity_name, my_accounts)
 
         if is_self_transfer:
-            if income > 0:
-                self_transfer_income += income
-                if year:
-                    yearly_stats[year]['自我转入'] += income
+            # 【2026-02-22 关键修复】只计算支出端，避免跨行转账重复计算
+            # 问题：同一笔转账在不同银行文件中同时存在收入和支出记录
+            # 修复：只计算支出端（转出），因为每笔转账只有一个转出源
             if expense > 0:
                 self_transfer_expense += expense
                 if year:
                     yearly_stats[year]['自我转出'] += expense
-
-            self_transfer_transactions.append({
-                '日期': row['date'], '收入': income, '支出': expense,
-                '摘要': description, '对手方': counterparty,
-                '备注': '识别为自我转账'
-            })
+                
+                self_transfer_transactions.append({
+                    '日期': row['date'], '收入': 0, '支出': expense,
+                    '摘要': description, '对手方': counterparty,
+                    '备注': '识别为自我转账-转出'
+                })
+            elif income > 0:
+                # 对于只有收入没有支出的记录（如漏掉转出文件的情况）
+                # 也记录下来，但标记为特殊情况
+                self_transfer_income += income
+                if year:
+                    yearly_stats[year]['自我转入'] += income
+                
+                self_transfer_transactions.append({
+                    '日期': row['date'], '收入': income, '支出': 0,
+                    '摘要': description, '对手方': counterparty,
+                    '备注': '识别为自我转账-转入（无对应转出记录）'
+                })
             continue
 
         # 步骤 3: 识别理财/基金
@@ -1574,12 +1659,10 @@ def _calculate_real_income_expense(income_structure: Dict, wealth_management: Di
     # 理财本金对冲：买入和赎回中较小的部分是完整闭环
     wealth_principal_offset = min(wealth_buy, wealth_redeem)
     
-    # 【2026-02-20 关键修复】不再剔除理财历史存量赎回！
-    # 原因：历史存量赎回的本金来自历史时期（不在当期流水中）
-    # 赎回时流入当期流水，应该保留为收入
-    # 例如：3年前买的理财，今年赎回，本金是历史积蓄不是当期收入，但赎回款确实流入了当期
-    # 保守处理：只剔除当期闭环部分（min(买,赎)），超出部分保留
-    # wealth_historical_redeem = max(0, wealth_redeem - wealth_buy)  # 已删除
+    # 【2026-02-23 关键修复】恢复剔除理财历史存量赎回
+    # 原因：历史存量赎回的本金是早年工资积蓄的回流，不是当期收入
+    # 必须剔除，否则收入虚高
+    wealth_historical_redeem = max(0, wealth_redeem - wealth_buy)
 
     # 【2026-02-12 关键修复】定期存款到期完全剔除（本金不是收入）
     # 定存到期是本金返还，不应算作收入
@@ -1590,12 +1673,11 @@ def _calculate_real_income_expense(income_structure: Dict, wealth_management: Di
     total_expense = income_structure.get('total_expense', 0) if income_structure else 0
     
     # 计算真实收入
-    # 【2026-02-20 修复】移除 wealth_historical_redeem 剔除
-    # 原因：历史存量赎回的本金来自历史时期，赎回款流入当期应保留
+    # 【2026-02-23 修复】恢复剔除 wealth_historical_redeem
     real_income = (total_income
                   - self_transfer_offset      # 自我转入对冲
                   - wealth_principal_offset   # 理财本金对冲（当期闭环）
-                  # - wealth_historical_redeem  # 已移除：历史存量赎回不剔除
+                  - wealth_historical_redeem  # 【恢复】理财历史存量赎回
                   - deposit_offset            # 定存到期本金
                   - loan_in                   # 贷款发放
                   - refund_in)                # 退款
@@ -1612,20 +1694,19 @@ def _calculate_real_income_expense(income_structure: Dict, wealth_management: Di
     real_expense = max(0, real_expense)
 
     # 构建剔除详情（用于报告展示）
-    # 【2026-02-20 修复】移除 wealth_historical，不再剔除历史存量赎回
     offset_detail = {
         'self_transfer': self_transfer_offset,
         'wealth_principal': wealth_principal_offset,
-        # 'wealth_historical': wealth_historical_redeem,  # 已移除
+        'wealth_historical': wealth_historical_redeem,  # 【恢复】
         'deposit_redemption': deposit_offset,
         'loan': loan_in,
         'refund': refund_in,
         'total_offset': (self_transfer_offset + wealth_principal_offset +
-                        deposit_offset + loan_in + refund_in)
+                        wealth_historical_redeem + deposit_offset + loan_in + refund_in)
     }
 
     # 日志输出
-    logger.info(f'【2026-02-20修复】资金对冲详情:')
+    logger.info(f'【2026-02-23修复】资金对冲详情（恢复历史存量剔除）:')
     logger.info(f'  - 自我转账: {self_transfer_offset/10000:.2f}万')
     logger.info(f'  - 理财本金: {wealth_principal_offset/10000:.2f}万')
     # logger.info(f'  - 理财历史存量: {wealth_historical_redeem/10000:.2f}万')  # 已移除
@@ -1658,7 +1739,7 @@ def _build_profile_summary(income_structure: Dict, fund_flow: Dict, wealth_manag
         'net_flow': income_structure['net_flow'],
         'real_income': real_income,
         'real_expense': real_expense,
-        'salary_ratio': income_structure['salary_ratio'],
+        'salary_ratio': income_structure['salary_income'] / real_income if real_income > 0 else 0,  # 【2026-02-23修复】工资/真实收入
         'third_party_ratio': fund_flow['third_party_ratio'],
         'large_cash_count': len(large_cash),
         'wealth_transactions': wealth_management['total_transactions'],
@@ -1679,6 +1760,57 @@ def generate_profile_report(df: pd.DataFrame, entity_name: str) -> Dict:
         完整的资金画像报告
     """
     logger.info(f'正在为 {entity_name} 生成资金画像...')
+
+    # 【关键修复】列名映射：支持中英文列名
+    # data_cleaner输出中文列名，但本模块期望英文列名
+    COLUMN_MAPPING = {
+        '交易时间': 'date',
+        '收入(元)': 'income',
+        '支出(元)': 'expense',
+        '交易对手': 'counterparty',
+        '交易摘要': 'description',
+        '本方账号': 'account_number',
+        '余额(元)': 'balance',
+        '所属银行': 'bank_source',
+        '数据来源': 'source_file',
+    }
+
+    # 创建DataFrame副本，避免修改原始数据
+    df = df.copy()
+
+    # 执行列名映射
+    for chinese_col, english_col in COLUMN_MAPPING.items():
+        if chinese_col in df.columns and english_col not in df.columns:
+            df.rename(columns={chinese_col: english_col}, inplace=True)
+            logger.debug(f'列名映射: {chinese_col} -> {english_col}')
+
+    # 确保关键列存在
+    required_cols = ['date', 'income', 'expense']
+    for col in required_cols:
+        if col not in df.columns:
+            logger.error(f'缺少关键列: {col}。可用列: {list(df.columns)}')
+            return {
+                'entity_name': entity_name,
+                'has_data': False,
+                'error': f'缺少关键列: {col}'
+            }
+
+    # 转换日期列
+    if 'date' in df.columns and not pd.api.types.is_datetime64_any_dtype(df['date']):
+        try:
+            df['date'] = pd.to_datetime(df['date'])
+        except Exception as e:
+            logger.warning(f'日期转换失败: {e}')
+
+    # 转换金额列为数值类型
+    for col in ['income', 'expense']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    if 'balance' in df.columns:
+        df['balance'] = pd.to_numeric(df['balance'], errors='coerce').fillna(0)
+
+    logger.info(f'数据准备完成: {len(df)} 行, 列: {list(df.columns)}')
+
 
     if df.empty:
         logger.warning(f'{entity_name} 无交易数据')
@@ -1719,6 +1851,16 @@ def generate_profile_report(df: pd.DataFrame, entity_name: str) -> Dict:
     # 【2026-02-12新增】将剔除详情加入summary，供报告使用
     summary['offset_detail'] = offset_detail
 
+    # 计算银行账户列表（用于 bank_accounts 字段）
+    bank_accounts = []
+    try:
+        if hasattr(df, 'columns') and '所属银行' in df.columns:
+            bank_accounts = df['所属银行'].astype(str).dropna().unique().tolist()
+        elif hasattr(df, 'columns') and '银行' in df.columns:
+            bank_accounts = df['银行'].astype(str).dropna().unique().tolist()
+    except Exception:
+        bank_accounts = []
+
     profile = {
         'entity_name': entity_name,
         'has_data': True,
@@ -1729,7 +1871,8 @@ def generate_profile_report(df: pd.DataFrame, entity_name: str) -> Dict:
         'categories': categories,
         'yearly_salary': yearly_salary,  # Phase 2 新增字段
         'income_classification': income_classification,  # Phase 4 新增字段
-        'summary': summary
+        'summary': summary,
+        'bank_accounts': bank_accounts
     }
 
     logger.info(f'{entity_name} 资金画像生成完成')
@@ -2183,15 +2326,71 @@ def classify_income_sources(income_df: pd.DataFrame, entity_name: str = None, we
             # 使用中文字段名
             date = str(tx.get('日期', ''))[:10]
             amount = tx.get('金额', 0) or tx.get('收入', 0) or 0
-            identified_txs.add((date, amount))
+            if amount > 0:
+                identified_txs.add((date, float(amount)))
         for tx in wealth_result.get('self_transfer_transactions', []):
-            # 使用中文字段名
-            date = str(tx.get('日期', ''))[:10]
-            amount = tx.get('收入', 0) or tx.get('金额', 0) or 0
-            identified_txs.add((date, amount))
+            # 使用中文字段名，只添加收入大于0的记录（忽略支出记录）
+            income = tx.get('收入', 0)
+            if income > 0:
+                date = str(tx.get('日期', ''))[:10]
+                identified_txs.add((date, float(income)))
+    
+    # Debug logging
+    def _identify_time_pattern_for_empty_desc(target_df: pd.DataFrame) -> set:
+        idxs = set()
+        if target_df is None or target_df.empty:
+            return idxs
+        # 摘要为空且收入>0的候选记录
+        empty_desc_mask = target_df['description'].astype(str).str.strip() == ''
+        cand_df = target_df[empty_desc_mask & (target_df['income'] > 0)].copy()
+        if cand_df.empty:
+            return idxs
+        # 按金额桶分组，避免不同金额混淆
+        cand_df['amount_bucket'] = (cand_df['income'] // 1000) * 1000
+        for bucket, g in cand_df.groupby('amount_bucket'):
+            sub = g.sort_values('date')
+            if len(sub) < 3:
+                continue
+            dates = sub['date'].tolist()
+            months = [d.year * 12 + d.month for d in dates]
+            idx_list = sub.index.tolist()
+            if len(months) < 3:
+                continue
+            diffs = [months[i+1] - months[i] for i in range(len(months) - 1)]
+            for i in range(len(diffs) - 1):
+                d1 = diffs[i]
+                d2 = diffs[i+1]
+                def in_cycle(x):
+                    return x in (2,3,4,5,6,7,11,12,13)
+                if in_cycle(d1) and in_cycle(d2):
+                    idxs.update(idx_list[i:i+3])
+        return idxs
+
+    time_pattern_idxs = _identify_time_pattern_for_empty_desc(income_df)
+    if entity_name == '施灵':
+        logger.info(f'【调试】施灵 identified_txs 数量: {len(identified_txs)}')
+        logger.info(f'【调试】施灵 wealth_result 自我转账交易数: {len(wealth_result.get("self_transfer_transactions", []))}')
     
     # 遍历每笔收入进行分类
-    for _, row in income_df.iterrows():
+    for idx, row in income_df.iterrows():
+    
+        if idx in time_pattern_idxs:
+            amount = row['income']
+            date_val = row['date']
+            if wealth_result is not None:
+                # 更新 wealth_redemption 及其明细
+                wealth_result['wealth_redemption'] = wealth_result.get('wealth_redemption', 0) + (amount or 0)
+                wealth_result.setdefault('wealth_redemption_transactions', [])
+                wealth_result['wealth_redemption_transactions'].append({
+                    '日期': date_val,
+                    '金额': amount,
+                    '摘要': '空摘要-时间模式:定期存款到期',
+                    '对手方': str(row.get('counterparty', '')),
+                    '类型': '定期存款到期',
+                    '判断依据': '时间模式识别'
+                })
+        
+            continue
         amount = row['income']
         counterparty = str(row.get('counterparty', '')).strip()
         description = str(row.get('description', '')).strip()
@@ -2210,7 +2409,8 @@ def classify_income_sources(income_df: pd.DataFrame, entity_name: str = None, we
         classified = False
         
         # 【2026-02-20 新增】检查是否已在wealth_management中识别
-        tx_key = (date_str, amount)
+        # 使用float(amount)确保类型一致（identified_txs中的金额也是float）
+        tx_key = (date_str, float(amount))
         if tx_key in identified_txs:
             legitimate_income += amount
             record['reason'] = '理财/定存/自我转账（已识别）'
@@ -2361,6 +2561,11 @@ def classify_income_sources(income_df: pd.DataFrame, entity_name: str = None, we
                 record['reason'] = '来源不明'
                 unknown_details.append(record)
                 classified = True
+    
+    # Debug: Count self-transfer records
+    self_transfer_count = len([d for d in legitimate_details if '自我转账' in d.get('reason', '')])
+    if entity_name == '施灵':
+        logger.info(f'【调试】施灵 分类完成: legitimate={len(legitimate_details)}, unknown={len(unknown_details)}, 自我转账={self_transfer_count}')
     
     # 计算占比
     legitimate_ratio = legitimate_income / total_income if total_income > 0 else 0
