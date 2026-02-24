@@ -219,8 +219,9 @@ def _generate_summary_sheet(writer, profiles):
         if not has_data:
             continue
 
-        # 根据实际数据结构获取字段 - 使用嵌套的summary和income_structure结构
-        summary = profile.get('summary', profile).get('summary', {})
+        # 根据实际数据结构获取字段 - 使用summary和income_structure结构
+        # 【修复】直接获取summary，不要嵌套.get('summary', {})
+        summary = profile.get('summary', {})
         income_structure = profile.get('income_structure', {})
         fund_flow = profile.get('fund_flow', {})
 

@@ -224,6 +224,46 @@ class InvestigationReportBuilder:
         company_keywords = ["公司", "集团", "有限", "股份", "企业", "中心", "事务所"]
         return any(kw in name for kw in company_keywords)
 
+    def _normalize_property_address(self, address: str) -> str:
+        """
+        【新增】标准化房产地址，用于模糊匹配去重
+        
+        处理规则：
+        1. 去除首尾空格
+        2. 统一全角/半角括号
+        3. 车位地址：去除末尾的"室"字（车位不应该有"室"）
+        4. 统一"地下1层"为"地下一层"
+        5. 去除多余空格
+        
+        Examples:
+            "鑫都路2688弄4号地下1层车位(人防)366室" -> "鑫都路2688弄4号地下一层车位（人防）366"
+            "鑫都路2688弄4号地下1层车位(人防)366" -> "鑫都路2688弄4号地下一层车位（人防）366"
+        """
+        if not address:
+            return ""
+        
+        import re
+        
+        normalized = address.strip()
+        
+        # 1. 统一全角/半角括号 -> 全角
+        normalized = normalized.replace("(", "（").replace(")", "）")
+        
+        # 2. 车位特殊处理：如果包含"车位"，去除末尾的"室"
+        if "车位" in normalized:
+            normalized = re.sub(r"室$", "", normalized)
+        
+        # 3. 统一"地下1层"等数字层为中文
+        floor_map = {"1": "一", "2": "二", "3": "三", "4": "四", "5": "五"}
+        for num, cn in floor_map.items():
+            normalized = re.sub(f"地下{num}层", f"地下{cn}层", normalized)
+            normalized = re.sub(f"{num}层", f"{cn}层", normalized)
+        
+        # 4. 去除多余空格
+        normalized = re.sub(r"\s+", "", normalized)
+        
+        return normalized
+
     def _build_id_name_mapping(self, analysis_cache: Dict):
         """
         【修复】建立身份证号↔姓名的双向映射
@@ -923,18 +963,22 @@ class InvestigationReportBuilder:
         # ===== 一、概览卡片 =====
         total_income = asset_section.get("total_income", 0)
         total_income_wan = asset_section.get("total_income_wan", round(total_income / 10000, 2))
+        total_expense = asset_section.get("total_expense", 0)
+        total_expense_wan = asset_section.get("total_expense_wan", round(total_expense / 10000, 2))
         
         # 从工资收入获取真实工资数据
         salary_info = asset_section.get("salary_income", {})
         salary_total = salary_info.get("total", 0)
         salary_total_wan = salary_info.get("total_wan", round(salary_total / 10000, 2))
         
-        # 计算工资占比
-        salary_ratio = (salary_total / total_income * 100) if total_income > 0 else 0
+        # 【修复】从profile获取真正的真实收入（剔除后的收入）
+        profile = self.profiles.get(name, {})
+        summary = profile.get("summary", {})
+        real_income_raw = summary.get("real_income", 0)
+        real_income_wan = round(real_income_raw / 10000, 2) if real_income_raw else 0
         
-        # 从收支匹配分析获取真实收入
-        income_match = data_section.get("income_match_analysis", {})
-        real_income_wan = income_match.get("real_income_wan", salary_total_wan)
+        # 计算工资占真实收入的比例
+        salary_ratio = (salary_total_wan / real_income_wan * 100) if real_income_wan > 0 else 0
         
         # 风险等级判定（基于五维评分）
         five_dim = data_section.get("five_dimension_score", {})
@@ -943,9 +987,10 @@ class InvestigationReportBuilder:
         overview = {
             "name": name,
             "total_inflow": total_income_wan,
+            "total_outflow": total_expense_wan,
             "real_income": real_income_wan,
-            "salary_ratio": round(salary_ratio, 1),
             "salary": salary_total_wan,
+            "salary_ratio": round(salary_ratio, 1),
             "risk_level": risk_level
         }
         
@@ -1010,8 +1055,14 @@ class InvestigationReportBuilder:
                 })
         
         # 4. 工资占比异常
-        salary_ratio = asset_section.get("salary_income", {}).get("total", 0) / max(asset_section.get("total_income", 1), 1) * 100
-        if salary_ratio < 50 and asset_section.get("total_income", 0) > 1000000:
+        # 【修复】使用真实收入作为分母，而非原始流水
+        salary_total = asset_section.get("salary_income", {}).get("total", 0)
+        # 从profile获取真实收入
+        profile = self.profiles.get(name, {})
+        real_income = profile.get("summary", {}).get("real_income", 0)
+        salary_ratio = (salary_total / real_income * 100) if real_income > 0 else 0
+        
+        if salary_ratio < 50 and real_income > 1000000:
             findings.append({
                 "type": "risk",
                 "description": f"工资性收入占比仅{salary_ratio:.1f}%，存在大量非工资收入",
@@ -1043,53 +1094,81 @@ class InvestigationReportBuilder:
         """从 section 构建收入透视"""
         asset_section = section.get("asset_income_section", {})
         data_section = section.get("data_analysis_section", {})
-        
         total_income = asset_section.get("total_income", 0)
         total_income_wan = asset_section.get("total_income_wan", round(total_income / 10000, 2))
-        
-        # 从收支匹配分析获取扣除项
+        # 【修复】优先使用 income_match 中已计算好的真实收入，如果不存在则从 profile 获取
         income_match = data_section.get("income_match_analysis", {})
-        counterparty = data_section.get("counterparty_analysis", {})
-        inflow = counterparty.get("inflow", {})
+        real_income_wan = income_match.get("real_income_wan", 0)
         
-        # 构建扣除项列表
+        # 如果 income_match 中没有，从 profile summary 获取
+        if real_income_wan == 0:
+            profile = self.profiles.get(name, {})
+            real_income_raw = profile.get("summary", {}).get("real_income", 0)
+            real_income_wan = round(real_income_raw / 10000, 2) if real_income_raw else 0
+        
+        # 【修复】从profile获取真正的扣除项（只包含确定非收入的项目）
+        profile = self.profiles.get(name, {})
+        offset_detail = profile.get("summary", {}).get("offset_detail", {})
+        
+        # 【修复】只显示真正的非收入项目（本金返还、内部转账）
         deductions = []
+        total_deduction = 0
         
-        # 个人转账流入
-        self_transfer = inflow.get("raw_values", {}).get("personal_transfers", 0)
+        # 1. 自我转账（账户间划转）- 确定不是收入
+        self_transfer = offset_detail.get("self_transfer", 0)
         if self_transfer > 0:
             deductions.append({
-                "name": "个人转账流入",
+                "name": "自我转账",
                 "amount": round(self_transfer / 10000, 2),
-                "reason": "家庭成员或第三方转账，非劳动收入"
+                "reason": "账户间资金划转，非真实收入"
             })
+            total_deduction += self_transfer
         
-        # 现金存入
-        cash = inflow.get("raw_values", {}).get("cash", 0)
-        if cash > 0:
+        # 2. 理财赎回本金 - 确定不是收入
+        wealth_principal = offset_detail.get("wealth_principal", 0)
+        if wealth_principal > 0:
             deductions.append({
-                "name": "现金存入",
-                "amount": round(cash / 10000, 2),
-                "reason": "现金存入需核查来源"
+                "name": "理财赎回本金",
+                "amount": round(wealth_principal / 10000, 2),
+                "reason": "投资理财本金返还，非新增收入"
             })
+            total_deduction += wealth_principal
         
-        # 其他收入（未知来源）
-        other = inflow.get("raw_values", {}).get("other", 0)
-        if other > 0:
+        # 3. 定存到期本金 - 确定不是收入
+        deposit_redemption = offset_detail.get("deposit_redemption", 0)
+        if deposit_redemption > 0:
             deductions.append({
-                "name": "其他待核收入",
-                "amount": round(other / 10000, 2),
-                "reason": "来源待核实"
+                "name": "定存到期本金",
+                "amount": round(deposit_redemption / 10000, 2),
+                "reason": "定期存款到期，非新增收入"
             })
+            total_deduction += deposit_redemption
         
-        # 计算真实收入
-        total_deduction = sum(d["amount"] for d in deductions)
-        real_income = max(0, total_income_wan - total_deduction)
+        # 4. 其他本金类返还
+        refund = offset_detail.get("refund", 0)
+        if refund > 0:
+            deductions.append({
+                "name": "退款/返还",
+                "amount": round(refund / 10000, 2),
+                "reason": "款项退回，非新增收入"
+            })
+            total_deduction += refund
         
-        # 确定状态
+        # 5. 历史理财（如果有）
+        wealth_historical = offset_detail.get("wealth_historical", 0)
+        if wealth_historical > 0:
+            deductions.append({
+                "name": "历史理财赎回",
+                "amount": round(wealth_historical / 10000, 2),
+                "reason": "历史理财本金返还"
+            })
+            total_deduction += wealth_historical
+        
+        # 【修复】计算剩余的真实收入
+        total_deduction_wan = round(total_deduction / 10000, 2)
         if total_deduction == 0:
             status = "verified"
-        elif real_income / total_income_wan > 0.5:
+        elif real_income_wan / total_income_wan > 0.5:
             status = "partial"
         else:
             status = "pending"
@@ -1097,7 +1176,7 @@ class InvestigationReportBuilder:
         return {
             "raw_inflow": total_income_wan,
             "deductions": deductions,
-            "real_income": real_income,
+            "real_income": real_income_wan,  # 【修复】使用已计算的真实收入
             "status": status
         }
     
@@ -1611,7 +1690,8 @@ class InvestigationReportBuilder:
         # 资产聚合
         bank_accounts_count = 0
         wealth_total = 0.0
-        property_count = 0  # 【修复】添加房产计数
+        # 【修复】使用字典去重统计房产（避免夫妻共有房产重复计算）
+        unique_properties = {}  # 地址 -> property
         vehicle_count = 0   # 【修复】添加车辆计数
 
         # 成员相关数据
@@ -1657,15 +1737,34 @@ class InvestigationReportBuilder:
             # 理财 - 从 wealth_transactions 估算
             wealth_total += income_struct.get("wealth_transactions", 0) * 10000  # 粗略估算
 
-            # 【修复】聚合房产数据 - 从 profile 或外部缓存
+            # 【修复】聚合房产数据 - 使用字典去重
+            # 1. 从 profile.properties 读取
             properties = profile.get("properties", []) or profile.get("properties_precise", [])
-            if properties:
-                property_count += len(properties)
-            else:
-                # 从外部缓存查找
-                person_id = self._name_to_id_map.get(name)
-                if person_id and person_id in self._external_property_cache:
-                    property_count += len(self._external_property_cache[person_id])
+            for prop in properties:
+                location = (
+                    prop.get("location", "")
+                    or prop.get("address", "")
+                    or prop.get("房地坐落", "")
+                    or prop.get("坐落", "")
+                )
+                if location:
+                    # 【修复】使用标准化地址去重
+                    normalized_loc = self._normalize_property_address(location)
+                    if normalized_loc and normalized_loc not in unique_properties:
+                        unique_properties[normalized_loc] = prop
+            
+            # 2. 从外部缓存查找
+            person_id = self._name_to_id_map.get(name)
+            if person_id and person_id in self._external_property_cache:
+                for prop in self._external_property_cache[person_id]:
+                    location = (
+                        prop.get("房地坐落", "")
+                        or prop.get("location", "")
+                        or prop.get("坐落", "")
+                        or prop.get("address", "")
+                    )
+                    if location and location not in unique_properties:
+                        unique_properties[location] = prop
 
             # 【修复】聚合车辆数据 - 从 profile 或外部缓存
             vehicles = profile.get("vehicles", [])
@@ -1694,10 +1793,10 @@ class InvestigationReportBuilder:
             "member_count": len(member_profiles),
             "member_breakdown": member_profiles,
             # 【修复】添加房产/车辆统计
-            "property_count": property_count,
+            "property_count": len(unique_properties),
             "vehicle_count": vehicle_count,
             "assets": {
-                "real_estate_count": property_count,
+                "real_estate_count": len(unique_properties),
                 "vehicle_count": vehicle_count,
             }
         }
@@ -2216,13 +2315,8 @@ class InvestigationReportBuilder:
             if not profile:
                 continue
 
-            # 房产
-            properties = profile.get("properties", []) or []
-            property_count += len(properties)
-            for prop in properties:
-                # 尝试获取估值（如果有）
-                value = prop.get("estimated_value", 0) or prop.get("value", 0) or 0
-                property_value += value
+            # 房产（去重逻辑在下面统一处理）
+            pass  # 去重逻辑移到循环外统一处理
 
             # 银行存款（使用银行账户余额总和）
             bank_accounts = (
@@ -2249,6 +2343,48 @@ class InvestigationReportBuilder:
             # 车辆
             vehicles = profile.get("vehicles", []) or []
             vehicle_count += len(vehicles)
+
+        # 【修复】房产去重统计（避免夫妻共有房产重复计算）
+        unique_properties = {}
+        for name in members:
+            profile = self.profiles.get(name, {})
+            if not profile:
+                continue
+            
+            # 1. 从 profile.properties 读取
+            properties = profile.get("properties", []) or []
+            for prop in properties:
+                location = (
+                    prop.get("location", "")
+                    or prop.get("address", "")
+                    or prop.get("房地坐落", "")
+                    or prop.get("坐落", "")
+                )
+                if location and location not in unique_properties:
+                    unique_properties[location] = prop
+                    value = prop.get("estimated_value", 0) or prop.get("value", 0) or 0
+                    property_value += value
+            
+            # 2. 从 _external_property_cache 读取（关键修复！）
+            person_id = self._name_to_id_map.get(name)
+            if person_id and person_id in self._external_property_cache:
+                external_props = self._external_property_cache[person_id]
+                for prop in external_props:
+                    location = (
+                        prop.get("房地坐落", "")
+                        or prop.get("location", "")
+                        or prop.get("坐落", "")
+                        or prop.get("address", "")
+                    )
+                    if location:
+                        # 【修复】使用标准化地址去重
+                        normalized_loc = self._normalize_property_address(location)
+                        if normalized_loc and normalized_loc not in unique_properties:
+                            unique_properties[normalized_loc] = prop
+                        value = prop.get("不动产价格", 0) or prop.get("value", 0) or 0
+                        property_value += value
+
+        property_count = len(unique_properties)
 
         # 总资产
         total_assets = bank_balance + wealth_holding + property_value
@@ -3080,32 +3216,37 @@ class InvestigationReportBuilder:
         deposits = 0.0
         wealth_holdings = 0.0
         
-        # 【修复】统计房产和车辆
-        property_count = 0
+        # 【修复】统计房产和车辆（去重统计）
         vehicle_count = 0
+        unique_properties = {}  # 用于去重
 
         for name in members:
             profile = self.profiles.get(name, {})
             # 理财持仓
             wealth_holdings += profile.get("wealthTotal", 0) or 0
-            # 存款估算 (使用最后余额或其他方式)
-            # TODO: 需要从 bank_accounts 获取真实余额
             
-            # 【修复】从 profile 获取房产/车辆
-            if profile.get("properties"):
-                property_count += len(profile["properties"])
-            if profile.get("properties_precise"):
-                property_count += len(profile["properties_precise"])
-            if profile.get("vehicles"):
-                vehicle_count += len(profile["vehicles"])
-            
-            # 【修复】从外部缓存获取房产/车辆（通过身份证号映射）
+            # 【修复】从外部缓存获取房产（去重统计）
             person_id = self._name_to_id_map.get(name)
-            if person_id:
-                if person_id in self._external_property_cache:
-                    property_count += len(self._external_property_cache[person_id])
-                if person_id in self._external_vehicle_cache:
-                    vehicle_count += len(self._external_vehicle_cache[person_id])
+            if person_id and person_id in self._external_property_cache:
+                for prop in self._external_property_cache[person_id]:
+                    location = (
+                        prop.get("房地坐落", "")
+                        or prop.get("location", "")
+                        or prop.get("坐落", "")
+                        or prop.get("address", "")
+                    )
+                    if location:
+                        # 【修复】使用标准化地址去重
+                        normalized_loc = self._normalize_property_address(location)
+                        if normalized_loc and normalized_loc not in unique_properties:
+                            unique_properties[normalized_loc] = prop
+            
+            # 【修复】从外部缓存获取车辆
+            if person_id and person_id in self._external_vehicle_cache:
+                vehicle_count += len(self._external_vehicle_cache[person_id])
+        
+        # 去重后的房产数量
+        property_count = len(unique_properties)
 
         return FamilyAssetsSummary(
             real_estate_count=property_count,  # 【修复】使用实际统计
@@ -5120,7 +5261,8 @@ class InvestigationReportBuilder:
         total_bank_balance = 0.0
         total_property_value = 0.0
         total_property_area = 0.0  # 【2026-02-13 新增】房产总面积
-        property_count = 0
+        # 【修复】使用字典去重统计房产（避免夫妻共有房产重复计算）
+        unique_properties = {}  # 地址 -> property
         vehicle_count = 0
         
         # 从 profiles 计算所有资产和收支数据
@@ -5183,11 +5325,21 @@ class InvestigationReportBuilder:
                             balance = acc.get("last_balance", 0) or 0
                             total_bank_balance += balance
                 
-                # 房产数据（从外部缓存获取）
+                # 房产数据（从外部缓存获取，使用字典去重）
                 property_data = self._get_external_property_data(member)
                 if isinstance(property_data, list):
-                    property_count += len(property_data)
                     for prop in property_data:
+                        # 【修复】使用标准化地址去重
+                        location = (
+                            prop.get("房地坐落", "")
+                            or prop.get("location", "")
+                            or prop.get("坐落", "")
+                            or prop.get("address", "")
+                        )
+                        if location:
+                            normalized_loc = self._normalize_property_address(location)
+                            if normalized_loc and normalized_loc not in unique_properties:
+                                unique_properties[normalized_loc] = prop
                         prop_value = prop.get("value", 0) or prop.get("price", 0) or 0
                         total_property_value += prop_value
                         # 【2026-02-13 新增】累加房产面积（面积字段可能是字符串如"182.29平方米"）
@@ -5323,7 +5475,7 @@ class InvestigationReportBuilder:
             "offset_detail": total_offset_detail,
             # 【新增】assets字段，供前端使用
             "assets": {
-                "real_estate_count": property_count,
+                "real_estate_count": len(unique_properties),
                 "property_value_wan": round(total_property_value / 10000, 2),
                 "property_area_sqm": round(total_property_area, 2),  # 【2026-02-13 新增】房产总面积
                 "vehicle_count": vehicle_count,
@@ -5341,7 +5493,7 @@ class InvestigationReportBuilder:
                 f"其中工资收入{total_salary / 10000:.2f}万元，占真实收入{salary_ratio:.1f}%。"
                 f"\n【现金流分析】年度净现金流{net_cash_flow_wan:.2f}万元，"
                 f"现金流健康度评分{cash_flow_score}分（{cash_flow_level}）。"
-                f"\n家庭资产：房产{property_count}套"
+                f"\n家庭资产：房产{len(unique_properties)}套"
                 f"{'（' + f'{total_property_area:.2f}' + '㎡）' if total_property_area > 0 else ''}"
                 f" | 车辆{vehicle_count}辆"
                 f" | 理财{total_wealth / 10000:.2f}万"
@@ -7241,6 +7393,12 @@ class InvestigationReportBuilder:
                     name, profile
                 ),
                 "five_dimension_score": self._build_five_dimension_score_v4(
+                    name, profile
+                ),
+                "abnormal_transaction_analysis": self._build_person_section_6_abnormal_tx(
+                    name, profile
+                ),
+                "related_party_analysis": self._build_person_section_7_related_party(
                     name, profile
                 ),
                 "professional_audit_narrative": self._generate_professional_audit_narrative_v4(

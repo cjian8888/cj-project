@@ -1,0 +1,328 @@
+# ============================================================
+# 通用变量定义
+# ============================================================
+variables:
+  # 人员信息
+  name: "姓名"
+  period: "查询期间"
+  
+  # 收入相关
+  total_inflow: "总资金流入（元）"
+  total_inflow_wan: "总资金流入（万元）"
+  real_income: "真实收入（元）"
+  real_income_wan: "真实收入（万元）"
+  salary_total: "工资收入（元）"
+  salary_total_wan: "工资收入（万元）"
+  salary_ratio: "工资收入占比（%）"
+  other_income: "其他收入（元）"
+  other_income_wan: "其他收入（万元）"
+  
+  # 支出相关
+  total_outflow: "总资金流出（元）"
+  total_outflow_wan: "总资金流出（万元）"
+  real_expense: "真实支出（元）"
+  real_expense_wan: "真实支出（万元）"
+  savings_rate: "储蓄率（%）"
+  
+  # 剔除相关
+  offset_total: "总剔除金额（元）"
+  offset_total_wan: "总剔除金额（万元）"
+  offset_self_transfer: "自我转账剔除（元）"
+  offset_wealth_principal: "理财本金剔除（元）"
+  offset_wealth_excess: "理财赎回超出部分（元）"
+  offset_deposit: "定存到期剔除（元）"
+  offset_loan: "贷款流入剔除（元）"
+  
+  # 异常金额
+  anomaly_amount: "异常金额（元）"
+  anomaly_amount_wan: "异常金额（万元）"
+  anomaly_ratio: "异常占比（%）"
+  
+  # 时间相关
+  year: "年份"
+  month: "月份"
+  change_ratio: "变动比例（%）"
+  
+  # 对手方
+  counterparty_name: "对手方名称"
+  counterparty_type: "对手方类型"
+  
+  # 借贷相关
+  loan_inflow: "借贷流入（元）"
+  loan_outflow: "借贷流出（元）"
+  loan_balance: "借贷净额（元）"
+  loan_count: "借贷笔数"
+  
+  # 现金相关
+  cash_income: "现金存入（元）"
+  cash_expense: "现金支出（元）"
+  cash_total: "现金交易总额（元）"
+
+# ============================================================
+# 场景一：收入分析话术
+# ============================================================
+income_analysis:
+  # 工资占比分析
+  salary_ratio:
+    description: "工资收入占比判断"
+    conditions:
+      - level: "normal"  # >= 60%
+        phrases:
+          summary: "{name}的工资性收入占比较高，收入来源稳定"
+          detail: "工资收入占总收入的{salary_ratio}%，收入结构合理，以正常劳动报酬为主"
+          suggestion: "建议重点关注非工资性大额收入来源"
+      
+      - level: "warning"  # 40% - 60%
+        phrases:
+          summary: "{name}存在多元化收入来源，需关注非工资收入占比"
+          detail: "工资收入仅占总收入的{salary_ratio}%，其他收入{other_income_wan}万元占比较高"
+          suggestion: "建议深入核查其他收入来源的合法性和合理性"
+      
+      - level: "high_risk"  # 20% - 40%
+        phrases:
+          summary: "{name}工资收入占比偏低，非工资收入占主导地位，存在资金来源不明风险"
+          detail: "工资收入仅{salary_ratio}%，远低于正常水平。非工资收入{other_income_wan}万元来源需重点核实"
+          suggestion: "【重点关注】建议立即核查其他收入来源，包括但不限于：投资收益、兼职收入、家庭成员资助、借贷资金等"
+      
+      - level: "critical"  # < 20%
+        phrases:
+          summary: "⚠️ {name}工资收入占比极低，存在重大资金来源不明嫌疑"
+          detail: "工资收入仅占{salary_ratio}%，异常偏低。真实收入{real_income_wan}万元中{other_income_wan}万元来源不明，需彻查"
+          suggestion: "【高度可疑】建议：1)立即约谈本人核实资金来源；2)调取相关合同、发票等证明材料；3)核查是否存在权钱交易、利益输送等违法违纪行为"
+ 
+  # 历史存量赎回分析（针对施灵这类人群）
+  historical_redemption:
+    description: "理财/定存历史存量赎回分析"
+    conditions:
+      - level: "normal"  # <= 10万
+        phrases:
+          summary: "未发现大额历史存量赎回"
+          detail: "理财/定存赎回金额正常，均为当期正常资金周转"
+          suggestion: "无需特别处理"
+      
+      - level: "warning"  # 10万 - 50万
+        phrases:
+          summary: "发现{offset_wealth_excess}万元历史存量理财赎回计入收入"
+          detail: "理财赎回超出本金部分{offset_wealth_excess}万元，本质为历史积蓄回流，非当期新增收入"
+          suggestion: "建议：在计算真实收入时剔除该部分，重新评估工资收入占比"
+          impact: "剔除后真实收入从{real_income_wan}万元调整为{adjusted_income_wan}万元，工资占比从{salary_ratio}%上升至{adjusted_ratio}%"
+      
+      - level: "high_risk"  # > 50万
+        phrases:
+          summary: "⚠️ 发现大额历史存量赎回{offset_wealth_excess}万元，严重虚增当期收入"
+          detail: "理财/定存赎回超出本金购买部分达{offset_wealth_excess}万元，该部分为历史积蓄变现，不应计入当期真实收入"
+          suggestion: "【必须剔除】建议重新计算：1)将{offset_wealth_excess}万元从历史存量赎回中剔除；2)重新核定真实收入为{adjusted_income_wan}万元；3)重新评估收支匹配性和工资收入占比"
+          impact: "剔除后真实收入减少{(offset_wealth_excess/10000):.2f}万元，工资占比从{salary_ratio}%上升至{adjusted_ratio}%，收支结构趋于合理"
+
+# ============================================================
+# 场景二：支出分析话术（月光族识别）
+# ============================================================
+expense_analysis:
+  savings_rate:
+    description: "储蓄率判断（收支结余情况）"
+    conditions:
+      - level: "excellent"  # >= 30%
+        phrases:
+          summary: "{name}储蓄习惯良好，财务状况健康"
+          detail: "储蓄率达{savings_rate}%，收支余{savings_amount_wan}万元，有较强的资金积累能力"
+          suggestion: "重点关注大额储蓄资金来源是否合法"
+      
+      - level: "normal"  # 10% - 30%
+        phrases:
+          summary: "{name}收支基本平衡，有一定储蓄"
+          detail: "储蓄率{savings_rate}%，年度结余{savings_amount_wan}万元，财务状况正常"
+          suggestion: "无需特别处理"
+      
+      - level: "warning"  # 0% - 10%
+        phrases:
+          summary: "{name}储蓄率较低，收支接近（月光族特征）"
+          detail: "储蓄率仅{savings_rate}%，接近月光状态，年度结余仅{savings_amount_wan}万元"
+          suggestion: "建议关注大额支出去向，核查是否存在异常消费或资金转移"
+      
+      - level: "high_risk"  # < 0%
+        phrases:
+          summary: "⚠️ {name}入不敷出，存在资金缺口"
+          detail: "支出超过收入{abs_savings_amount_wan}万元，储蓄率为负（{savings_rate}%），存在重大资金缺口"
+          suggestion: "【重点关注】建议：1)核查超额支出来源；2)排查是否存在借贷、套现等行为；3)关注是否涉及贪腐资金"
+  
+  cash_expense:
+    description: "现金交易分析"
+    conditions:
+      - level: "normal"  # <= 10万
+        phrases:
+          summary: "现金交易规模正常"
+          detail: "现金支出{cash_expense_wan}万元，在正常范围内"
+          suggestion: "无需特别处理"
+      
+      - level: "warning"  # 10万 - 50万
+        phrases:
+          summary: "现金支出较多，需关注用途"
+          detail: "现金支出达{cash_expense_wan}万元，占支出的{anomaly_ratio}%"
+          suggestion: "建议了解现金使用场景，核查是否存在规避监管行为"
+      
+      - level: "high_risk"  # > 50万
+        phrases:
+          summary: "⚠️ 大额现金支出，存在洗钱嫌疑"
+          detail: "现金支出高达{cash_expense_wan}万元，占比{anomaly_ratio}%，异常偏高"
+          suggestion: "【重点关注】建议：1)核查现金用途；2)排查是否用于行贿、受贿；3)关注现金时空伴随"
+
+# ============================================================
+# 场景三：行为异常检测话术
+# ============================================================
+behavioral_analysis:
+  fast_in_out:
+    description: "快进快出检测"
+    conditions:
+      - level: "normal"  # <= 3笔
+        phrases:
+          summary: "未发现明显的快进快出行为"
+          detail: "资金周转正常，未查见当日大额进出"
+          suggestion: "无需特别处理"
+      
+      - level: "warning"  # 3-10笔
+        phrases:
+          summary: "发现{anomaly_count}笔快进快出交易"
+          detail: "资金快进快出{anomaly_count}笔，累计金额{anomaly_amount_wan}万元，可能存在资金过桥或过渡行为"
+          suggestion: "建议关注对手方身份，核查是否存在洗钱嫌疑"
+      
+      - level: "high_risk"  # > 10笔
+        phrases:
+          summary: "⚠️ 频繁快进快出，疑似资金通道"
+          detail: "快进快出高达{anomaly_count}笔，金额{anomaly_amount_wan}万元，符合过账通道特征"
+          suggestion: "【重点关注】建议：1)分析对手方网络；2)排查是否为他人代收代付；3)核查是否涉及非法资金转移"
+  
+  loan_behavior:
+    description: "借贷行为分析"
+    conditions:
+      - level: "normal"
+        phrases:
+          summary: "借贷行为正常"
+          detail: "借贷往来规模适中，属正常资金周转"
+          suggestion: "无需特别处理"
+      
+      - level: "frequent_borrower"
+        phrases:
+          summary: "{name}借贷流入频繁，疑似资金紧张"
+          detail: "累计借入{loan_inflow_wan}万元，偿还{loan_outflow_wan}万元，净借贷{loan_balance_wan}万元"
+          suggestion: "建议核查借贷来源，关注是否涉及高利贷或非法集资"
+      
+      - level: "frequent_lender"
+        phrases:
+          summary: "{name}资金借出频繁，疑似资金充裕"
+          detail: "累计借出{loan_outflow_wan}万元，收回{loan_inflow_wan}万元，净借出{abs_loan_balance_wan}万元"
+          suggestion: "建议核查借出资金来源，关注是否存在利益输送"
+      
+      - level: "high_risk"
+        phrases:
+          summary: "⚠️ 频繁借贷，资金往来复杂"
+          detail: "借贷笔数达{loan_count}笔，涉及金额{max(loan_inflow, loan_outflow)/10000:.2f}万元，资金往来异常频繁"
+          suggestion: "【重点关注】建议：1)绘制借贷关系图谱；2)排查是否涉及职业放贷；3)核查资金来源合法性"
+
+# ============================================================
+# 场景四：时序异常分析话术
+# ============================================================
+temporal_analysis:
+  yearly_fluctuation:
+    description: "年度收入波动分析"
+    conditions:
+      - level: "normal"  # <= 30%
+        phrases:
+          summary: "年度收入稳定"
+          detail: "各年度收入波动在合理范围内"
+          suggestion: "无需特别处理"
+      
+      - level: "warning"  # 30% - 100%
+        phrases:
+          summary: "{year}年收入异常增长{change_ratio}%"
+          detail: "{year}年收入较上一年增长{change_ratio}%，增加{increase_amount_wan}万元"
+          suggestion: "建议核实该年度大额收入来源"
+      
+      - level: "high_risk"  # > 100%
+        phrases:
+          summary: "⚠️ {year}年收入激增{change_ratio}%"
+          detail: "{year}年收入{current_year_income_wan}万元，较上一年增长{change_ratio}%，激增{increase_amount_wan}万元"
+          suggestion: "【重点关注】建议彻查该年度：1)收入来源明细；2)对应时间段的交易对手；3)是否存在突击收入"
+
+# ============================================================
+# 场景五：关联分析话术
+# ============================================================
+relationship_analysis:
+  family_transfer:
+    description: "家庭成员资金往来分析"
+    conditions:
+      - level: "normal"  # <= 20万
+        phrases:
+          summary: "家庭成员间资金往来正常"
+          detail: "与{family_member}资金往来{transfer_amount_wan}万元，属正常家庭互助"
+          suggestion: "无需特别处理"
+      
+      - level: "warning"  # 20万 - 50万
+        phrases:
+          summary: "与{family_member}有大额资金往来"
+          detail: "向{family_member}{flow_direction}{transfer_amount_wan}万元，金额较大"
+          suggestion: "建议了解资金用途，核查是否存在规避监管行为"
+      
+      - level: "high_risk"  # > 50万
+        phrases:
+          summary: "⚠️ 与{family_member}巨额资金往来"
+          detail: "向{family_member}{flow_direction}{transfer_amount_wan}万元，金额巨大"
+          suggestion: "【重点关注】建议：1)核查{family_member}身份背景；2)分析资金最终去向；3)排查利益输送"
+
+# ============================================================
+# 场景六：特殊人群话术
+# ============================================================
+persona_specific:
+  # 月光族
+  moonlight_clan:
+    description: "月光族特征描述"
+    phrases:
+      summary: "{name}储蓄率极低，符合月光族特征"
+      detail: "年度收入{total_inflow_wan}万元，支出{total_outflow_wan}万元，储蓄率仅{savings_rate}%，结余{savings_amount_wan}万元"
+      characteristics:
+        - "收支基本相抵，缺乏资金积累"
+        - "可能存在超前消费习惯"
+        - "对突发性大额支出应对能力弱"
+      suggestion: "建议重点关注：1)是否存在借贷消费；2)大额支出去向；3)是否有隐性资产"
+  
+  # 理财型（施灵这类）
+  wealth_management_type:
+    description: "理财活跃型描述"
+    phrases:
+      summary: "{name}理财交易频繁，资金在金融账户间循环"
+      detail: "理财购买{wealth_purchase_wan}万元，赎回{wealth_redemption_wan}万元，收益{wealth_income_wan}万元"
+      characteristics:
+        - "理财意识强，投资组合多样"
+        - "资金流动性管理活跃"
+        - "可能存在历史存量资金"
+      suggestion: "建议重点关注：1)理财赎回是否完全剔除；2)历史存量与当期收入边界；3)收益与实际收入水平匹配性"
+  
+  # 借贷型
+  loan_dependent:
+    description: "借贷依赖型描述"
+    phrases:
+      summary: "{name}频繁借贷，资金周转压力较大"
+      detail: "累计借贷流入{loan_inflow_wan}万元，流出{loan_outflow_wan}万元，涉及{loan_count}笔"
+      characteristics:
+        - "资金缺口明显，依赖外部融资"
+        - "可能存在以贷养贷"
+        - "需关注借贷成本和风险"
+      suggestion: "建议重点关注：1)借贷用途是否合法；2)是否存在高利贷；3)还款来源是否可靠"
+  
+  # 现金型
+  cash_preferred:
+    description: "现金偏好型描述"
+    phrases:
+      summary: "{name}偏好现金交易，资金透明度低"
+      detail: "现金存入{cash_income_wan}万元，支出{cash_expense_wan}万元，占交易总额{cash_ratio}%"
+      characteristics:
+        - "规避银行监管意图明显"
+        - "资金流向难以追踪"
+        - "可能存在洗白资金"
+      suggestion: "建议重点关注：1)现金来源；2)现金用途；3)是否存在行贿受贿"
+
+# ============================================================
+# 版本信息
+# ============================================================
+version: "1.0.0"
+last_updated: "2026-02-23"
+description: "资金穿透审计报告话术模板配置文件"

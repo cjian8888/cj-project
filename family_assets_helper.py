@@ -10,8 +10,44 @@
 """
 
 from typing import Dict, List
+import re
 
 import utils
+
+
+def _normalize_property_address(address: str) -> str:
+    """
+    【新增】标准化房产地址，用于模糊匹配去重
+    
+    处理规则：
+    1. 去除首尾空格
+    2. 统一全角/半角括号
+    3. 车位地址：去除末尾的"室"字（车位不应该有"室"）
+    4. 统一"地下1层"为"地下一层"
+    5. 去除多余空格
+    """
+    if not address:
+        return ""
+    
+    normalized = address.strip()
+    
+    # 1. 统一全角/半角括号 -> 全角
+    normalized = normalized.replace("(", "（").replace(")", "）")
+    
+    # 2. 车位特殊处理：如果包含"车位"，去除末尾的"室"
+    if "车位" in normalized:
+        normalized = re.sub(r"室$", "", normalized)
+    
+    # 3. 统一"地下1层"等数字层为中文
+    floor_map = {"1": "一", "2": "二", "3": "三", "4": "四", "5": "五"}
+    for num, cn in floor_map.items():
+        normalized = re.sub(f"地下{num}层", f"地下{cn}层", normalized)
+        normalized = re.sub(f"{num}层", f"{cn}层", normalized)
+    
+    # 4. 去除多余空格
+    normalized = re.sub(r"\s+", "", normalized)
+    
+    return normalized
 
 logger = utils.setup_logger(__name__)
 
@@ -47,21 +83,44 @@ def build_family_assets_from_data(precise_property_data: Dict, vehicle_data: Dic
         if not family_members:
             family_members = [person]
 
-        # 收集房产数据（本人 + 家族成员）并进行字段映射
-        all_properties = []
+        # 收集房产数据（本人 + 家族成员）并进行字段映射【去重】
+        unique_properties = {}  # 用于去重：地址 -> property
 
         # 添加本人的房产
         if person in precise_property_data:
             for prop in precise_property_data[person]:
                 mapped_prop = _map_property_fields(prop)
-                all_properties.append(mapped_prop)
+                location = (
+                    mapped_prop.get('房地坐落', '')
+                    or mapped_prop.get('坐落', '')
+                    or mapped_prop.get('location', '')
+                    or mapped_prop.get('address', '')
+                )
+                if location:
+                    # 【修复】使用标准化地址去重
+                    normalized_loc = _normalize_property_address(location)
+                    if normalized_loc and normalized_loc not in unique_properties:
+                        unique_properties[normalized_loc] = mapped_prop
 
         # 添加家族成员的房产
         for member in family_members:
             if member in precise_property_data and member != person:
                 for prop in precise_property_data[member]:
                     mapped_prop = _map_property_fields(prop)
-                    all_properties.append(mapped_prop)
+                    location = (
+                        mapped_prop.get('房地坐落', '')
+                        or mapped_prop.get('坐落', '')
+                        or mapped_prop.get('location', '')
+                        or mapped_prop.get('address', '')
+                    )
+                    if location:
+                        # 【修复】使用标准化地址去重
+                        normalized_loc = _normalize_property_address(location)
+                        if normalized_loc and normalized_loc not in unique_properties:
+                            unique_properties[normalized_loc] = mapped_prop
+        
+        # 转换为列表
+        all_properties = list(unique_properties.values())
 
         # 收集车辆数据（本人 + 家族成员）并进行字段映射
         all_vehicles = []

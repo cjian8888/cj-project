@@ -219,6 +219,13 @@ def main():
                 yearly_salary = full_profile.get('yearly_salary', {})
                 large_cash = full_profile.get('large_cash', [])
                 categories = full_profile.get('categories', {})
+                income_classification = full_profile.get('income_classification', {})
+                
+                # Debug: Check if self-transfer records exist
+                if entity == '施灵':
+                    legit_details = income_classification.get('legitimate_details', [])
+                    self_transfer_count = len([d for d in legit_details if '自我转账' in d.get('reason', '')])
+                    print(f"【调试regenerate】施灵 legitimate_details: {len(legit_details)}, 自我转账: {self_transfer_count}")
                 
                 # 计算工资总额和工资占比
                 salary_total = yearly_salary.get('summary', {}).get('total', 0) if yearly_salary else 0
@@ -248,7 +255,8 @@ def main():
                     "fund_flow": fund_flow,
                     "large_cash": large_cash,
                     "categories": categories,
-                    "summary": summary,
+"summary": summary,
+"income_classification": income_classification,
                 }
             except Exception as e:
                 print(f"  生成 {entity} 完整画像失败: {e}，使用简化版本")
@@ -909,6 +917,16 @@ def main():
                 return list(obj)
             return str(obj)
     
+    # Final check before saving
+    if '施灵' in result.get('profiles', {}):
+        shiling_ic = result['profiles']['施灵'].get('income_classification', {})
+        legit_details = shiling_ic.get('legitimate_details', [])
+        self_transfer_count = len([d for d in legit_details if '自我转账' in d.get('reason', '')])
+        print(f"【调试最终】施灵保存前: legitimate={len(legit_details)}, 自我转账={self_transfer_count}")
+        if self_transfer_count > 0:
+            sample = [d for d in legit_details if '自我转账' in d.get('reason', '')][0]
+            print(f"【调试样本】{sample}")
+    
     print(f"保存缓存到 {cache_path}...")
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     with open(cache_path, 'w', encoding='utf-8') as f:
@@ -917,6 +935,14 @@ def main():
     # 验证
     with open(cache_path, 'r', encoding='utf-8') as f:
         verify = json.load(f)
+    
+    # Check if data is correct after loading
+    if '施灵' in verify.get('profiles', {}):
+        verify_ic = verify['profiles']['施灵'].get('income_classification', {})
+        verify_legit = verify_ic.get('legitimate_details', [])
+        verify_self_count = len([d for d in verify_legit if '自我转账' in d.get('reason', '')])
+        print(f"【调试验证】施灵保存后: legitimate={len(verify_legit)}, 自我转账={verify_self_count}")
+    
     print(f"✓ 缓存验证成功: {len(verify.get('persons', []))} 人员")
     
     # 释放内存

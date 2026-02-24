@@ -26,6 +26,132 @@ tax_analysis, travel_analysis
     <h2 class="subsection-title">（{{ section_num }}）{{ unit.name }}（{{ unit.relation }}）</h2>
     {% endif %}
 
+    {# ========== 六维一体资金分析概览 ========== #}
+    {% if unit.unified_analysis %}
+    {% set ua = unit.unified_analysis %}
+    <h3 class="part-title">资金分析概览（六维一体）</h3>
+    
+    {# 1. 概览卡片 #}
+    <div class="overview-card" style="background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); border: 1px solid #dee2e6; border-radius: 8px; padding: 15px; margin: 15px 0;">
+        <div style="display: flex; flex-wrap: wrap; gap: 20px;">
+            <div style="flex: 1; min-width: 120px; text-align: center; padding: 10px; background: #fff; border-radius: 4px;">
+                <div style="font-size: 12px; color: #666;">总流入</div>
+                <div style="font-size: 16px; font-weight: bold;">{{ ua.overview.total_inflow }}万元</div>
+            </div>
+            <div style="flex: 1; min-width: 120px; text-align: center; padding: 10px; background: #fff; border-radius: 4px;">
+                <div style="font-size: 12px; color: #666;">总流出</div>
+                <div style="font-size: 16px; font-weight: bold;">{{ ua.overview.total_outflow }}万元</div>
+            </div>
+            <div style="flex: 1; min-width: 120px; text-align: center; padding: 10px; background: #fff; border-radius: 4px;">
+                <div style="font-size: 12px; color: #666;">工资收入</div>
+                <div style="font-size: 16px; font-weight: bold;">{{ ua.overview.salary }}万元</div>
+            </div>
+            <div style="flex: 1; min-width: 120px; text-align: center; padding: 10px; background: #fff; border-radius: 4px;">
+                <div style="font-size: 12px; color: #666;">真实收入</div>
+                <div style="font-size: 16px; font-weight: bold; color: #5cb85c;">{{ ua.overview.real_income }}万元</div>
+            </div>
+            <div style="flex: 1; min-width: 120px; text-align: center; padding: 10px; background: #fff; border-radius: 4px;">
+                <div style="font-size: 12px; color: #666;">工资占比</div>
+                <div style="font-size: 16px; font-weight: bold;">{{ ua.overview.salary_ratio }}%</div>
+            </div>
+            <div style="flex: 1; min-width: 120px; text-align: center; padding: 10px; background: #fff; border-radius: 4px;">
+                <div style="font-size: 12px; color: #666;">风险等级</div>
+                <div style="font-size: 16px; font-weight: bold; {% if ua.overview.risk_level == 'high' %}color: #d9534f;{% elif ua.overview.risk_level == 'medium' %}color: #f0ad4e;{% else %}color: #5cb85c;{% endif %}">
+                    {% if ua.overview.risk_level == 'high' %}高{% elif ua.overview.risk_level == 'medium' %}中{% else %}低{% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    {# 2. 关键发现 #}
+    {% if ua.key_findings and ua.key_findings|length > 0 %}
+    <div style="margin: 15px 0; padding: 15px; background: #fff9e6; border-left: 4px solid #f0ad4e;">
+        <h4 style="margin: 0 0 10px 0;">关键发现</h4>
+        <ul style="margin: 0; padding-left: 20px;">
+            {% for finding in ua.key_findings %}
+            <li style="padding: 5px 0;">
+                <strong>{{ finding.description }}</strong>
+                {% if finding.impact %}（影响：{{ finding.impact }}）{% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+    
+    {# 3. 收入透视 #}
+    <h4 style="margin: 15px 0 10px 0;">收入透视</h4>
+    <table style="width: 100%; border-collapse: collapse; margin: 10px 0;">
+        <tr style="background: #f0f0f0;">
+            <th style="border: 1px solid #000; padding: 8px;">原始流水</th>
+            <th style="border: 1px solid #000; padding: 8px;">剔除项</th>
+            <th style="border: 1px solid #000; padding: 8px;">真实收入</th>
+            <th style="border: 1px solid #000; padding: 8px;">状态</th>
+        </tr>
+        <tr>
+            <td style="border: 1px solid #000; padding: 8px; text-align: center;">{{ ua.income_breakdown.raw_inflow }}万元</td>
+            <td style="border: 1px solid #000; padding: 8px; text-align: center;">
+                {% for d in ua.income_breakdown.deductions %}
+                {% if d.amount > 0 %}
+                {{ d.name }}: {{ d.amount }}万元<br>
+                {% endif %}
+                {% endfor %}
+            </td>
+            <td style="border: 1px solid #000; padding: 8px; text-align: center; font-weight: bold;">{{ ua.income_breakdown.real_income }}万元</td>
+            <td style="border: 1px solid #000; padding: 8px; text-align: center;">
+                {% if ua.income_breakdown.status == 'verified' %}✓ 已核实
+                {% elif ua.income_breakdown.status == 'partial' %}◐ 部分核实
+                {% else %}○ 待核实{% endif %}
+            </td>
+        </tr>
+    </table>
+    
+    {# 4. 支出去向 #}
+    {% if ua.outflow_analysis.top_counterparties and ua.outflow_analysis.top_counterparties|length > 0 %}
+    <h4 style="margin: 15px 0 10px 0;">主要支出去向（TOP5）</h4>
+    <table style="width: 100%; border-collapse: collapse; margin: 10px 0;">
+        <tr style="background: #f0f0f0;">
+            <th style="border: 1px solid #000; padding: 8px;">序号</th>
+            <th style="border: 1px solid #000; padding: 8px;">对手方</th>
+            <th style="border: 1px solid #000; padding: 8px;">金额（万元）</th>
+            <th style="border: 1px solid #000; padding: 8px;">笔数</th>
+        </tr>
+        {% for cp in ua.outflow_analysis.top_counterparties[:5] %}
+        <tr>
+            <td style="border: 1px solid #000; padding: 8px; text-align: center;">{{ loop.index }}</td>
+            <td style="border: 1px solid #000; padding: 8px;">{{ cp.name }}</td>
+            <td style="border: 1px solid #000; padding: 8px; text-align: center;">{{ cp.amount }}</td>
+            <td style="border: 1px solid #000; padding: 8px; text-align: center;">{{ cp.count }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% endif %}
+    
+    {# 5. 时序分析 #}
+    {% if ua.temporal_analysis.yearly_data and ua.temporal_analysis.yearly_data|length > 0 %}
+    <h4 style="margin: 15px 0 10px 0;">年度资金时序</h4>
+    <table style="width: 100%; border-collapse: collapse; margin: 10px 0;">
+        <tr style="background: #f0f0f0;">
+            <th style="border: 1px solid #000; padding: 8px;">年份</th>
+            <th style="border: 1px solid #000; padding: 8px;">流入（万元）</th>
+            <th style="border: 1px solid #000; padding: 8px;">流出（万元）</th>
+            <th style="border: 1px solid #000; padding: 8px;">状态</th>
+        </tr>
+        {% for year_data in ua.temporal_analysis.yearly_data %}
+        <tr {% if year_data.anomaly %}style="background: #fff9e6;"{% endif %}>
+            <td style="border: 1px solid #000; padding: 8px; text-align: center;">{{ year_data.year }}</td>
+            <td style="border: 1px solid #000; padding: 8px; text-align: center;">{{ year_data.inflow }}</td>
+            <td style="border: 1px solid #000; padding: 8px; text-align: center;">{{ year_data.outflow }}</td>
+            <td style="border: 1px solid #000; padding: 8px; text-align: center;">
+                {% if year_data.anomaly %}<span style="color: #d9534f; font-weight: bold;">{{ year_data.anomaly_type or '异常' }}</span>
+                {% else %}<span style="color: #5cb85c;">正常</span>{% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% endif %}
+    {% endif %}
+
+
     {# 第一部分：资产收入情况 #}
     <h3 class="part-title">第一部分 资产收入情况</h3>
 
@@ -118,7 +244,7 @@ tax_analysis, travel_analysis
         {% endfor %}
         <tr style="font-weight: bold; background-color: #f0f0f0;">
             <td class="text-center" colspan="2">合计</td>
-            <td class="money-col">{{ salary.total_wan|round(2) }}</td>
+            <td class="money-col">{{ salary.total_wan|round(2) }}万元</td>
             <td class="text-center">—</td>
         </tr>
     </table>
@@ -246,7 +372,9 @@ tax_analysis, travel_analysis
         <tr>
             <th class="seq-col">序号</th>
             <th>收入类型</th>
-            <th>金额 (万元)</th>
+            <th>原始流水 (万元)</th>
+            <th>剔除金额 (万元)</th>
+            <th>真实收入 (万元)</th>
             <th>占比</th>
         </tr>
         {% set inflow = counterparty.inflow %}
@@ -255,6 +383,8 @@ tax_analysis, travel_analysis
         <tr>
             <td class="seq-col">1</td>
             <td>工资性收入</td>
+            <td class="money-col">{{ ((inflow.raw_values.salary if inflow.raw_values else inflow.salary) / 10000)|round(2) }}</td>
+            <td class="money-col">{{ ((inflow.deduct_values.salary if inflow.deduct_values else 0) / 10000)|round(2) }}</td>
             <td class="money-col">{{ (inflow.salary / 10000)|round(2) }}</td>
             <td class="text-center">{{ ((inflow.salary / total_inflow * 100)|round(1)) }}%</td>
         </tr>
@@ -263,7 +393,9 @@ tax_analysis, travel_analysis
         <tr>
             <td class="seq-col">2</td>
             <td>个人转账流入</td>
-            <td class="money-col">{{ (inflow.personal_transfers / 10000)|round(2) }}</td>
+            <td class="money-col">{{ ((inflow.raw_values.personal_transfers if inflow.raw_values else inflow.personal_transfers) / 10000)|round(2) }}</td>
+            <td class="money-col">{{ ((inflow.deduct_values.personal_transfers if inflow.deduct_values else inflow.personal_transfers) / 10000)|round(2) }}</td>
+            <td class="money-col">0.00</td>
             <td class="text-center">{{ ((inflow.personal_transfers / total_inflow * 100)|round(1)) }}%</td>
         </tr>
         {% endif %}
@@ -271,7 +403,9 @@ tax_analysis, travel_analysis
         <tr>
             <td class="seq-col">3</td>
             <td>现金存入</td>
-            <td class="money-col">{{ (inflow.cash / 10000)|round(2) }}</td>
+            <td class="money-col">{{ ((inflow.raw_values.cash if inflow.raw_values else inflow.cash) / 10000)|round(2) }}</td>
+            <td class="money-col">{{ ((inflow.deduct_values.cash if inflow.deduct_values else inflow.cash) / 10000)|round(2) }}</td>
+            <td class="money-col">0.00</td>
             <td class="text-center">{{ ((inflow.cash / total_inflow * 100)|round(1)) }}%</td>
         </tr>
         {% endif %}
@@ -281,13 +415,17 @@ tax_analysis, travel_analysis
         <tr>
             <td class="seq-col">4</td>
             <td>其他收入<small>（已剔除理财/定存本金、内部互转）</small></td>
-            <td class="money-col">{{ (other_income / 10000)|round(2) }}</td>
+            <td class="money-col">{{ ((inflow.raw_values.other if inflow.raw_values else other_income) / 10000)|round(2) }}</td>
+            <td class="money-col">{{ ((inflow.deduct_values.other if inflow.deduct_values else other_income) / 10000)|round(2) }}</td>
+            <td class="money-col">0.00</td>
             <td class="text-center">{{ ((other_income / total_inflow * 100)|round(1)) }}%</td>
         </tr>
         {% endif %}
         <tr style="font-weight: bold; background-color: #f0f0f0;">
             <td class="text-center" colspan="2">合计</td>
-            <td class="money-col">{{ (total_inflow / 10000)|round(2) }}</td>
+            <td class="money-col">{{ (total_inflow / 10000)|round(2) }}万元</td>
+            <td class="money-col">-</td>
+            <td class="money-col">-</td>
             <td class="text-center">100%</td>
         </tr>
     </table>
@@ -521,8 +659,8 @@ tax_analysis, travel_analysis
                 {% endfor %}
                 <tr style="font-weight: bold; background-color: #f0f0f0;">
                     <td class="text-center" colspan="2">合计</td>
-                    <td class="money-col">{{ (lending.total_borrowing / 10000)|round(2) }}</td>
-                    <td class="money-col">{{ (lending.total_repayment / 10000)|round(2) }}</td>
+                    <td class="money-col">{{ (lending.total_borrowing / 10000)|round(2) }}万元</td>
+                    <td class="money-col">{{ (lending.total_repayment / 10000)|round(2) }}万元</td>
                     <td class="text-center">—</td>
                     <td class="text-center">{{ '多头借贷' if lending.has_multi_platform else '正常' }}</td>
                 </tr>
@@ -561,6 +699,92 @@ tax_analysis, travel_analysis
                     <td class="money-col">{{ (wealth_tx.total_purchase / 10000)|round(2) }} / {{ (wealth_tx.total_redemption / 10000)|round(2) }} / {{ (wealth_tx.total_income / 10000)|round(2) }}</td>
                     <td class="text-center">共{{ wealth_tx.product_count }}个产品</td>
                 </tr>
+            </table>
+            {% else %}
+            {% set ns.idx = ns.idx + 0 %}
+            {% endif %}
+
+            {# 【新增】6. 异常交易分析 #}
+            {% set ns.idx = ns.idx + 1 %}
+            {% set abnormal_tx = analysis.abnormal_transaction_analysis %}
+            {% if abnormal_tx and (abnormal_tx.large_cash or abnormal_tx.large_transfers) %}
+            <h3 class="item-title">{{ ns.idx }}、异常交易分析</h3>
+            {% if abnormal_tx.large_cash %}
+            <p><strong>大额现金交易：</strong></p>
+            <table>
+                <tr>
+                    <th class="seq-col">类型</th>
+                    <th>交易笔数</th>
+                    <th>交易金额 (万元)</th>
+                </tr>
+                <tr>
+                    <td class="text-center">现金存入</td>
+                    <td class="text-center">{{ abnormal_tx.large_cash.deposit_count or 0 }}</td>
+                    <td class="money-col">{{ ((abnormal_tx.large_cash.deposit_total or 0) / 10000)|round(2) }}</td>
+                </tr>
+                <tr>
+                    <td class="text-center">现金取出</td>
+                    <td class="text-center">{{ abnormal_tx.large_cash.withdrawal_count or 0 }}</td>
+                    <td class="money-col">{{ ((abnormal_tx.large_cash.withdrawal_total or 0) / 10000)|round(2) }}</td>
+                </tr>
+            </table>
+            {% endif %}
+            {% if abnormal_tx.large_transfers and abnormal_tx.large_transfers|length > 0 %}
+            <p><strong>大额转账交易（前10笔）：</strong></p>
+            <table>
+                <tr>
+                    <th class="seq-col">序号</th>
+                    <th>日期</th>
+                    <th>对手方</th>
+                    <th>金额 (万元)</th>
+                    <th>摘要</th>
+                </tr>
+                {% for tx in abnormal_tx.large_transfers[:10] %}
+                <tr>
+                    <td class="seq-col">{{ loop.index }}</td>
+                    <td class="text-center">{{ tx.date or tx.transaction_date or '—' }}</td>
+                    <td>{{ tx.counterparty or '—' }}</td>
+                    <td class="money-col">{{ ((tx.amount or 0) / 10000)|round(2) }}</td>
+                    <td>{{ tx.description or tx.summary or '—' }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% endif %}
+            {% else %}
+            {% set ns.idx = ns.idx + 0 %}
+            {% endif %}
+
+            {# 【新增】7. 关联方往来分析 #}
+            {% set ns.idx = ns.idx + 1 %}
+            {% set related_party = analysis.related_party_analysis %}
+            {% if related_party and related_party.bidirectional_relations and related_party.bidirectional_relations|length > 0 %}
+            <h3 class="item-title">{{ ns.idx }}、关联方往来分析</h3>
+            <p>以下人员或单位与{{ unit.name }}存在双向资金往来：</p>
+            <table>
+                <tr>
+                    <th class="seq-col">序号</th>
+                    <th>关联方名称</th>
+                    <th>流入金额 (万元)</th>
+                    <th>流出金额 (万元)</th>
+                    <th>流入笔数</th>
+                    <th>流出笔数</th>
+                    <th>关联类型</th>
+                    <th>风险等级</th>
+                </tr>
+                {% for rel in related_party.bidirectional_relations %}
+                <tr>
+                    <td class="seq-col">{{ loop.index }}</td>
+                    <td>{{ rel.counterparty }}</td>
+                    <td class="money-col">{{ ((rel.income_total or 0) / 10000)|round(2) }}</td>
+                    <td class="money-col">{{ ((rel.expense_total or 0) / 10000)|round(2) }}</td>
+                    <td class="text-center">{{ rel.income_count }}</td>
+                    <td class="text-center">{{ rel.expense_count }}</td>
+                    <td class="text-center">{{ rel.loan_type or '—' }}</td>
+                    <td class="text-center {{ 'risk-high' if rel.risk_level == 'high' else ('risk-medium' if rel.risk_level == 'medium' else '') }}">
+                        {{ '高' if rel.risk_level == 'high' else ('中' if rel.risk_level == 'medium' else '低') }}
+                    </td>
+                </tr>
+                {% endfor %}
             </table>
             {% else %}
             {% set ns.idx = ns.idx + 0 %}

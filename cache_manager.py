@@ -313,6 +313,15 @@ class CacheManager:
             "suspicions": self.load_cache("suspicions"),
             "analysisResults": self.load_cache("derived_data"),
             "graphData": self.load_cache("graph_data"),
+            # 【修复】加载外部数据缓存（供InvestigationReportBuilder使用）
+            "precisePropertyData": self.load_cache("precisePropertyData"),
+            "vehicleData": self.load_cache("vehicleData"),
+            "wealthProductData": self.load_cache("wealthProductData"),
+            "securitiesData": self.load_cache("securitiesData"),
+            "creditData": self.load_cache("creditData"),
+            "amlData": self.load_cache("amlData"),
+            "external_p0": self.load_cache("external_p0"),
+            "external_p1": self.load_cache("external_p1"),
         }
 
         # 检查必需缓存（profiles_full 不再是必需的）

@@ -49,7 +49,6 @@
         <h1 class="section-title">{{ ['一','二','三','四','五','六','七','八','九','十'][section_num-1] if section_num <= 10 else
                 section_num }}、{{ person.name }}家庭资产收入情况及数据分析</h1>
 
-                {# 引入人员详细分析模板，传递unit变量 #}
                 {% set unit = person %}
                 {% include 'person_section.html' %}
 

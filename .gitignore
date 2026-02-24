@@ -43,3 +43,32 @@ nul
 api_server_pid.txt
 *.log.*
 .worktrees/
+
+# --- AI Agent 工作目录 (2026-02-24 添加) ---
+.sisyphus/
+.agent/
+.cline/
+.roo/
+.benchmarks/
+
+# --- 输出和报告 ---
+reports/
+*.png
+!docs/**/*.png
+
+# --- 临时文件 ---
+
+# --- AI Agent 工作目录 (2026-02-24 添加) ---
+.sisyphus/
+.benchmarks/
+
+# --- 临时输出文件 ---
+reports/
+*.png
+!docs/**/*.png
+
+# --- 临时文档 ---
+*测试报告*.md
+*WORK_LOG*.md
+*COMPLETION-REPORT*.md
+*OPCODE-HANDOVER*.md

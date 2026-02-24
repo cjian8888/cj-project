@@ -457,7 +457,8 @@ class SpecializedReportGenerator:
         lines.append("一、现金时空伴随检测")
         lines.append("-" * 70)
 
-        cash_collisions = self.suspicions.get('cashCollisions', [])
+        # 支持两种键名格式：snake_case 与 camelCase，确保向后兼容
+        cash_collisions = self.suspicions.get('cash_collisions', []) or self.suspicions.get('cashCollisions', [])
         if cash_collisions:
             for i, collision in enumerate(cash_collisions, 1):
                 lines.append(f"【现金伴随 {i}】")
@@ -484,7 +485,8 @@ class SpecializedReportGenerator:
         lines.append("二、直接资金往来分析")
         lines.append("-" * 70)
 
-        direct_transfers = self.suspicions.get('directTransfers', [])
+        # 支持两种键名格式：snake_case 与 camelCase，确保向后兼容
+        direct_transfers = self.suspicions.get('direct_transfers', []) or self.suspicions.get('directTransfers', [])
         if direct_transfers:
             for i, transfer in enumerate(direct_transfers, 1):
                 lines.append(f"【直接往来 {i}】")

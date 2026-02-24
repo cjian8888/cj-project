@@ -1,0 +1,27 @@
+{
+  "primary_target": "施灵",
+  "analysis_units": [
+    {
+      "unit_id": "AU-001",
+      "name": "背景与行为分析",
+      "topics": ["人口轨迹", "金融交易", "社交媒体"]
+    },
+    {
+      "unit_id": "AU-002",
+      "name": "关系网络梳理",
+      "topics": ["亲属关系", "工作关系", "商业往来"]
+    }
+  ],
+  "family_relations": [
+    {
+      "relation_type": "父母",
+      "relative_name": "父亲 张伟",
+      "notes": "出生地: 某省某市"
+    },
+    {
+      "relation_type": "兄妹",
+      "relative_name": "妹妹 张婷",
+      "notes": "同层分析"
+    }
+  ]
+}
