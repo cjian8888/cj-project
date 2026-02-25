@@ -240,11 +240,16 @@ def identify_wealth_management_transaction(
     # 规则1: 摘要中直接包含强理财关键词
     WEALTH_STRONG_KEYWORDS = [
         '赎回', '到期', '本息', '理财', '结息', '基金赎回', '基金申购',
-        '活期宝', '余额宝', '天天宝', '如意宝', '银证转账',
+        '活期宝', '余额宝', '天天宝', '如意宝', '银证转账', '证转银', '银转证',
         '定期到期', '本息转活', '约定定期'
     ]
     if utils.contains_keywords(desc, WEALTH_STRONG_KEYWORDS):
         return WealthIdentificationResult(True, '摘要含强理财关键词', 'high')
+    
+    # 规则1b: 对手方包含"证券"关键词（证券转账）
+    if counterparty and ('证券' in counterparty or '证劵' in counterparty):
+        if '转银' in desc or '转出' in desc or '转账' in desc:
+            return WealthIdentificationResult(True, '证券转银行', 'high')
     
     # 规则2: 匹配知名理财产品白名单
     if utils.contains_keywords(desc, config.KNOWN_WEALTH_PRODUCTS):
