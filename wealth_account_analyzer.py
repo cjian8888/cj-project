@@ -405,9 +405,32 @@ def analyze_wealth_accounts(df: pd.DataFrame, entity_name: str = None) -> Dict:
 if __name__ == '__main__':
     # 测试
     import sys
+    import os
+    
+    # 从命令行参数获取文件路径，或使用环境变量，或使用默认路径
+    if len(sys.argv) > 1:
+        test_file = sys.argv[1]
+    else:
+        # 使用相对于当前工作目录的路径
+        test_file = os.path.join('output', 'cleaned_data', '个人', '示例_合并流水.xlsx')
+    
+    # 从文件路径提取人员名称
+    import re
+    filename = os.path.basename(test_file)
+    match = re.match(r'(.+?)_合并流水\.xlsx', filename)
+    if match:
+        person_name = match.group(1)
+    else:
+        person_name = '测试人员'
+    
+    if not os.path.exists(test_file):
+        print(f"错误: 文件不存在: {test_file}")
+        print(f"请提供正确的文件路径，例如:")
+        print(f"  python wealth_account_analyzer.py output/cleaned_data/个人/某人_合并流水.xlsx")
+        sys.exit(1)
     
     # 加载测试数据
-    df = pd.read_excel('d:/CJ/project/output/cleaned_data/个人/施灵_合并流水.xlsx')
+    df = pd.read_excel(test_file)
     
-    result = analyze_wealth_accounts(df, '施灵')
+    result = analyze_wealth_accounts(df, person_name)
     print(result['report'])

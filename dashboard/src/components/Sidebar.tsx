@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState } from 'react';
 import {
     FileText,
     Play,
@@ -23,6 +23,7 @@ import {
 import Logo from '../assets/logo.png';
 import { useApp } from '../contexts/AppContext';
 import type { TabType } from '../types';
+import { api } from '../services/api';
 
 export function Sidebar() {
     const {
@@ -45,36 +46,31 @@ export function Sidebar() {
         navigation: true  // 快捷导航默认展开
     });
 
-    // 文件夹选择的隐藏 input refs
-    const inputDirRef = useRef<HTMLInputElement>(null);
-    const outputDirRef = useRef<HTMLInputElement>(null);
-
     const toggleSection = (section: keyof typeof expandedSections) => {
         setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
     };
 
-    // 处理文件夹选择
-    const handleFolderSelect = (type: 'input' | 'output') => {
-        const ref = type === 'input' ? inputDirRef : outputDirRef;
-        ref.current?.click();
-    };
-
-    // 处理文件夹选择结果
-    const handleFolderChange = (event: React.ChangeEvent<HTMLInputElement>, type: 'input' | 'output') => {
-        const files = event.target.files;
-        if (files && files.length > 0) {
-            // 从文件路径中提取目录路径
-            const firstFile = files[0];
-            const relativePath = firstFile.webkitRelativePath;
-            const folderName = relativePath.split('/')[0];
-
-            if (type === 'input') {
-                updateDataSources({ inputDirectory: folderName });
-            } else {
-                updateDataSources({ outputDirectory: folderName });
+    // 处理文件夹选择 - 调用后端 API 弹出文件对话框
+    const handleFolderSelect = async (type: 'input' | 'output') => {
+        try {
+            const currentPath = type === 'input' 
+                ? config.dataSources.inputDirectory 
+                : config.dataSources.outputDirectory;
+            
+            const result = await api.selectDirectory(type, currentPath);
+            
+            if (result.success && result.path) {
+                if (type === 'input') {
+                    updateDataSources({ inputDirectory: result.path });
+                } else {
+                    updateDataSources({ outputDirectory: result.path });
+                }
+            } else if (result.error) {
+                console.log('选择目录:', result.error);
             }
+        } catch (error) {
+            console.error('选择目录失败:', error);
         }
-        event.target.value = '';
     };
 
     const modulesList = [
@@ -99,24 +95,6 @@ export function Sidebar() {
 
     return (
         <>
-            {/* 隐藏的文件夹选择 input */}
-            <input
-                ref={inputDirRef}
-                type="file"
-                {...{ webkitdirectory: '', directory: '' } as React.InputHTMLAttributes<HTMLInputElement>}
-                multiple
-                className="hidden"
-                onChange={(e) => handleFolderChange(e, 'input')}
-            />
-            <input
-                ref={outputDirRef}
-                type="file"
-                {...{ webkitdirectory: '', directory: '' } as React.InputHTMLAttributes<HTMLInputElement>}
-                multiple
-                className="hidden"
-                onChange={(e) => handleFolderChange(e, 'output')}
-            />
-
             {/* Mobile Toggle Button */}
             <button
                 onClick={toggleSidebar}
@@ -248,7 +226,7 @@ export function Sidebar() {
                                 <div className="flex rounded-lg border theme-border overflow-hidden focus-within:border-blue-500/50 focus-within:ring-1 focus-within:ring-blue-500/30 transition-all theme-bg-muted/40">
                                     <input
                                         type="text"
-                                        value={config.dataSources.inputDirectory.startsWith('./') ? config.dataSources.inputDirectory.slice(2) : config.dataSources.inputDirectory}
+                                        value={config.dataSources.inputDirectory}
                                         onChange={(e) => updateDataSources({ inputDirectory: e.target.value })}
                                         className="flex-1 min-w-0 bg-transparent text-sm px-3 py-2.5 theme-text placeholder:theme-text-dim outline-none"
                                         placeholder="选择数据文件夹"
@@ -269,7 +247,7 @@ export function Sidebar() {
                                 <div className="flex rounded-lg border theme-border overflow-hidden focus-within:border-cyan-500/50 focus-within:ring-1 focus-within:ring-cyan-500/30 transition-all theme-bg-muted/40">
                                     <input
                                         type="text"
-                                        value={config.dataSources.outputDirectory.startsWith('./') ? config.dataSources.outputDirectory.slice(2) : config.dataSources.outputDirectory}
+                                        value={config.dataSources.outputDirectory}
                                         onChange={(e) => updateDataSources({ outputDirectory: e.target.value })}
                                         className="flex-1 min-w-0 bg-transparent text-sm px-3 py-2.5 theme-text placeholder:theme-text-dim outline-none"
                                         placeholder="选择输出文件夹"

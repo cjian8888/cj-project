@@ -232,6 +232,18 @@ class AnalysisConfig(BaseModel):
     modules: Optional[Dict[str, bool]] = None
 
 
+class DirectorySelectRequest(BaseModel):
+    """目录选择请求"""
+    type: str  # "input" 或 "output"
+    current_path: Optional[str] = None
+
+
+class DirectorySelectResponse(BaseModel):
+    """目录选择响应"""
+    success: bool
+    path: Optional[str] = None
+    error: Optional[str] = None
+
 # ==================== 辅助函数 ====================
 def serialize_for_json(obj):
     """
@@ -647,6 +659,30 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
     analysis_state.update(status="running", progress=0, phase="初始化分析引擎...")
 
     try:
+        data_dir = analysis_config.inputDirectory
+        output_dir = analysis_config.outputDirectory or os.path.join(
+            os.path.dirname(data_dir), "output"
+        )
+        
+        # 转换为绝对路径
+        data_dir = os.path.abspath(os.path.expanduser(data_dir))
+        output_dir = os.path.abspath(os.path.expanduser(output_dir))
+        
+        # 验证输入目录存在
+        if not os.path.exists(data_dir):
+            error_msg = f"输入目录不存在: {data_dir}"
+            logger.error(error_msg)
+            analysis_state.update(status="failed", phase=error_msg)
+            return
+        
+        if not os.path.isdir(data_dir):
+            error_msg = f"输入路径不是目录: {data_dir}"
+            logger.error(error_msg)
+            analysis_state.update(status="failed", phase=error_msg)
+            return
+        
+        logger.info(f"输入目录 (绝对路径): {data_dir}")
+        logger.info(f"输出目录 (绝对路径): {output_dir}")
         data_dir = analysis_config.inputDirectory
         output_dir = analysis_config.outputDirectory or os.path.join(
             os.path.dirname(data_dir), "output"
@@ -1957,7 +1993,99 @@ async def invalidate_cache(cache_name: Optional[str] = None):
         return {"success": False, "error": str(e)}
 
 
-# ==================== 归集配置 API (Primary Targets) ====================
+# ==================== 路径管理 API ====================
+
+
+
+@app.get("/api/default-paths")
+async def get_default_paths():
+    """
+    获取默认的 data 和 output 目录的绝对路径
+    
+    用于前端初始化时获取默认路径
+    """
+    try:
+        # 获取项目根目录（api_server.py 所在目录）
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        
+        # 构建默认路径（绝对路径）
+        default_input = os.path.join(project_root, "data")
+        default_output = os.path.join(project_root, "output")
+        
+        # 确保目录存在
+        os.makedirs(default_input, exist_ok=True)
+        os.makedirs(default_output, exist_ok=True)
+        
+        return {
+            "success": True,
+            "data": {
+                "inputDirectory": default_input,
+                "outputDirectory": default_output,
+                "projectRoot": project_root
+            }
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/select-directory")
+async def select_directory(request: DirectorySelectRequest):
+    """
+    弹出文件选择对话框，让用户选择目录
+    
+    注意：此端点只能在本地运行时正常工作（需要 GUI 环境）
+    在服务器/远程环境可能无法弹出对话框
+    """
+    import threading
+    import queue
+    
+    result_queue = queue.Queue()
+    
+    def run_dialog():
+        try:
+            # 尝试导入 tkinter
+            try:
+                import tkinter as tk
+                from tkinter import filedialog
+            except ImportError:
+                result_queue.put({"success": False, "error": "GUI 环境不可用，无法弹出文件选择对话框"})
+                return
+            
+            # 创建隐藏的主窗口
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+            
+            # 确定初始目录
+            initial_dir = request.current_path if request.current_path and os.path.exists(request.current_path) else os.getcwd()
+            
+            # 弹出选择对话框
+            selected_path = filedialog.askdirectory(
+                title="选择" + ("输入目录 (data)" if request.type == "input" else "输出目录 (output)"),
+                initialdir=initial_dir
+            )
+            
+            root.destroy()
+            
+            if selected_path:
+                result_queue.put({"success": True, "path": selected_path})
+            else:
+                result_queue.put({"success": False, "error": "用户取消了选择"})
+                
+        except Exception as e:
+            result_queue.put({"success": False, "error": str(e)})
+    
+    # 在单独的线程中运行对话框（避免阻塞 FastAPI）
+    dialog_thread = threading.Thread(target=run_dialog)
+    dialog_thread.start()
+    dialog_thread.join(timeout=60)  # 最多等待60秒
+    
+    if dialog_thread.is_alive():
+        return {"success": False, "error": "文件选择超时"}
+    
+    result = result_queue.get()
+    return result
+
 
 
 @app.get("/api/primary-targets")

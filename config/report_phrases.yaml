@@ -90,7 +90,7 @@ income_analysis:
           detail: "工资收入仅占{salary_ratio}%，异常偏低。真实收入{real_income_wan}万元中{other_income_wan}万元来源不明，需彻查"
           suggestion: "【高度可疑】建议：1)立即约谈本人核实资金来源；2)调取相关合同、发票等证明材料；3)核查是否存在权钱交易、利益输送等违法违纪行为"
  
-  # 历史存量赎回分析（针对施灵这类人群）
+  # 历史存量赎回分析（针对有理财赎回行为的人群）
   historical_redemption:
     description: "理财/定存历史存量赎回分析"
     conditions:
@@ -284,7 +284,7 @@ persona_specific:
         - "对突发性大额支出应对能力弱"
       suggestion: "建议重点关注：1)是否存在借贷消费；2)大额支出去向；3)是否有隐性资产"
   
-  # 理财型（施灵这类）
+  # 理财型（理财交易频繁的人群）
   wealth_management_type:
     description: "理财活跃型描述"
     phrases:

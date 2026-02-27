@@ -339,6 +339,39 @@ class ApiService {
             method: 'POST',
         });
     }
+
+
+    /**
+     * 获取默认路径配置
+     */
+    async getDefaultPaths(): Promise<{
+        success: boolean;
+        data?: {
+            inputDirectory: string;
+            outputDirectory: string;
+            projectRoot: string;
+        };
+        error?: string;
+    }> {
+        return this.request('/api/default-paths');
+    }
+
+    /**
+     * 弹出目录选择对话框
+     */
+    async selectDirectory(type: 'input' | 'output', currentPath?: string): Promise<{
+        success: boolean;
+        path?: string;
+        error?: string;
+    }> {
+        return this.request('/api/select-directory', {
+            method: 'POST',
+            body: JSON.stringify({
+                type,
+                current_path: currentPath,
+            }),
+        });
+    }
 }
 
 // ==================== WebSocket Service ====================

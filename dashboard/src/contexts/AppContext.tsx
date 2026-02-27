@@ -538,6 +538,43 @@ export function AppProvider({ children }: AppProviderProps) {
         };
 
         initializeFromBackend();
+
+        // 获取默认路径配置
+        const fetchDefaultPaths = async () => {
+            try {
+                const result = await api.getDefaultPaths();
+                if (result.success && result.data) {
+                    // 更新默认路径为绝对路径
+                    setConfig(prev => ({
+                        ...prev,
+                        dataSources: {
+                            inputDirectory: result.data!.inputDirectory,
+                            outputDirectory: result.data!.outputDirectory,
+                        }
+                    }));
+                    addLog({ 
+                        time: new Date().toLocaleTimeString(), 
+                        level: 'INFO', 
+                        msg: `已加载默认路径: 输入=${result.data.inputDirectory}, 输出=${result.data.outputDirectory}` 
+                    });
+                }
+            } catch (error) {
+                // 获取默认路径失败不影响主流程，保持原有默认值
+                console.warn('获取默认路径失败:', error);
+            }
+        };
+
+        fetchDefaultPaths();
+    }, []); // 只在组件挂载时执行一次
+                const errorMsg = error instanceof Error ? error.message : '未知错误';
+                console.error('初始化失败:', error);
+                // 初始化失败不阻塞用户操作
+                setAnalysis(prev => ({ ...prev, isLoading: false }));
+                addLog({ time: new Date().toLocaleTimeString(), level: 'WARN', msg: `后端连接失败: ${errorMsg}，请确保后端服务已启动` });
+            }
+        };
+
+        initializeFromBackend();
     }, []); // 只在组件挂载时执行一次
 
     // ==================== UI Actions ====================

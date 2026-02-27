@@ -780,7 +780,7 @@ def build_family_units(core_persons: List[str], data_directory: str) -> List[Dic
     return units
 
 
-if __name__ == "__main__":
+
     # 测试代码
     import sys
 

@@ -8,7 +8,7 @@ def test_historical_redemption_high_risk_rendering():
     phrase = loader.get_phrase("income_analysis", "historical_redemption", "high_risk")
 
     test_data = {
-        "name": "施灵",
+        "name": "测试人员",
         "salary_ratio": 39.9,
         "real_income_wan": 1600.84,
         "offset_wealth_excess": 6053900,

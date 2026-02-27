@@ -2367,10 +2367,7 @@ def classify_income_sources(income_df: pd.DataFrame, entity_name: str = None, we
         return idxs
 
     time_pattern_idxs = _identify_time_pattern_for_empty_desc(income_df)
-    if entity_name == '施灵':
-        logger.info(f'【调试】施灵 identified_txs 数量: {len(identified_txs)}')
-        logger.info(f'【调试】施灵 wealth_result 自我转账交易数: {len(wealth_result.get("self_transfer_transactions", []))}')
-    
+
     # 遍历每笔收入进行分类
     for idx, row in income_df.iterrows():
     
@@ -2562,11 +2559,10 @@ def classify_income_sources(income_df: pd.DataFrame, entity_name: str = None, we
                 unknown_details.append(record)
                 classified = True
     
-    # Debug: Count self-transfer records
+    # 计算占比
     self_transfer_count = len([d for d in legitimate_details if '自我转账' in d.get('reason', '')])
-    if entity_name == '施灵':
-        logger.info(f'【调试】施灵 分类完成: legitimate={len(legitimate_details)}, unknown={len(unknown_details)}, 自我转账={self_transfer_count}')
-    
+
+    # 计算占比
     # 计算占比
     legitimate_ratio = legitimate_income / total_income if total_income > 0 else 0
     unknown_ratio = unknown_income / total_income if total_income > 0 else 0
