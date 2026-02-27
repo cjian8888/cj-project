@@ -18,56 +18,45 @@ build/
 .vscode/
 .idea/
 
-# --- Roo Code / Cline ---
-# 保留 skills，忽略其他缓存
-.roo/*
-!.roo/skills/
-
-# --- Project Specific (你的项目特有) ---
-# 忽略输出的大量 Excel 报表和缓存
-output/
-*.xlsx
-*.csv
-MISSION_SNAPSHOT.md
-
-# --- Updated Ignore Rules ---
-data/
-analysis_cache/
-audit_system.log
+# --- Logs ---
+logs/
 *.log
-backup_*/
-.agent/skills/global_library/
-
-# --- System Files ---
-nul
-api_server_pid.txt
 *.log.*
-.worktrees/
 
-# --- AI Agent 工作目录 (2026-02-24 添加) ---
+# --- Temporary & Backup Files ---
+*.bak
+*.tmp
+*.old
+*.swp
+*~
+
+# --- AI Agent 工作目录 ---
 .sisyphus/
 .agent/
 .cline/
 .roo/
 .benchmarks/
 
-# --- 输出和报告 ---
+# --- Project Specific ---
+output/
+*.xlsx
+*.csv
+MISSION_SNAPSHOT.md
+data/
+analysis_cache/
+backup_*/
 reports/
 *.png
 !docs/**/*.png
+.worktrees/
 
-# --- 临时文件 ---
+# --- PID Files ---
+api_server_pid.txt
 
-# --- AI Agent 工作目录 (2026-02-24 添加) ---
-.sisyphus/
-.benchmarks/
+# --- System Files ---
+nul
 
-# --- 临时输出文件 ---
-reports/
-*.png
-!docs/**/*.png
-
-# --- 临时文档 ---
+# --- Temporary Documents ---
 *测试报告*.md
 *WORK_LOG*.md
 *COMPLETION-REPORT*.md
