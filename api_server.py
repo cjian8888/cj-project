@@ -683,10 +683,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         
         logger.info(f"输入目录 (绝对路径): {data_dir}")
         logger.info(f"输出目录 (绝对路径): {output_dir}")
-        data_dir = analysis_config.inputDirectory
-        output_dir = analysis_config.outputDirectory or os.path.join(
-            os.path.dirname(data_dir), "output"
-        )
+
 
         # 更新全局配置
         global _current_config
@@ -2033,58 +2030,91 @@ async def select_directory(request: DirectorySelectRequest):
     """
     弹出文件选择对话框，让用户选择目录
     
-    注意：此端点只能在本地运行时正常工作（需要 GUI 环境）
-    在服务器/远程环境可能无法弹出对话框
+    macOS: 使用 AppleScript 弹出访达
+    Windows: 使用 tkinter
     """
-    import threading
-    import queue
+    import platform
+    import subprocess
     
-    result_queue = queue.Queue()
+    system = platform.system()
     
-    def run_dialog():
-        try:
-            # 尝试导入 tkinter
-            try:
-                import tkinter as tk
-                from tkinter import filedialog
-            except ImportError:
-                result_queue.put({"success": False, "error": "GUI 环境不可用，无法弹出文件选择对话框"})
-                return
+    try:
+        if system == "Darwin":  # macOS
+            # 使用 AppleScript 弹出访达选择文件夹
+            initial_dir = request.current_path if request.current_path and os.path.exists(request.current_path) else os.path.expanduser("~")
             
-            # 创建隐藏的主窗口
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes('-topmost', True)
+            # AppleScript 代码
+            script = f'''
+            set chosenFolder to choose folder with prompt "选择{('输入目录 (data)' if request.type == 'input' else '输出目录 (output)')}" default location (POSIX file "{initial_dir}")
+            return POSIX path of chosenFolder
+            '''
             
-            # 确定初始目录
-            initial_dir = request.current_path if request.current_path and os.path.exists(request.current_path) else os.getcwd()
-            
-            # 弹出选择对话框
-            selected_path = filedialog.askdirectory(
-                title="选择" + ("输入目录 (data)" if request.type == "input" else "输出目录 (output)"),
-                initialdir=initial_dir
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=60
             )
             
-            root.destroy()
-            
-            if selected_path:
-                result_queue.put({"success": True, "path": selected_path})
+            if result.returncode == 0:
+                selected_path = result.stdout.strip()
+                if selected_path:
+                    return {"success": True, "path": selected_path}
+                else:
+                    return {"success": False, "error": "用户取消了选择"}
             else:
-                result_queue.put({"success": False, "error": "用户取消了选择"})
+                error_msg = result.stderr.strip() if result.stderr else "AppleScript 执行失败"
+                return {"success": False, "error": error_msg}
                 
-        except Exception as e:
-            result_queue.put({"success": False, "error": str(e)})
-    
-    # 在单独的线程中运行对话框（避免阻塞 FastAPI）
-    dialog_thread = threading.Thread(target=run_dialog)
-    dialog_thread.start()
-    dialog_thread.join(timeout=60)  # 最多等待60秒
-    
-    if dialog_thread.is_alive():
+        elif system == "Windows":
+            # Windows 使用 tkinter
+            import threading
+            import queue
+            
+            result_queue = queue.Queue()
+            
+            def run_dialog():
+                try:
+                    import tkinter as tk
+                    from tkinter import filedialog
+                    
+                    root = tk.Tk()
+                    root.withdraw()
+                    root.attributes('-topmost', True)
+                    
+                    initial_dir = request.current_path if request.current_path and os.path.exists(request.current_path) else os.getcwd()
+                    
+                    selected_path = filedialog.askdirectory(
+                        title="选择" + ("输入目录 (data)" if request.type == "input" else "输出目录 (output)"),
+                        initialdir=initial_dir
+                    )
+                    
+                    root.destroy()
+                    
+                    if selected_path:
+                        result_queue.put({"success": True, "path": selected_path})
+                    else:
+                        result_queue.put({"success": False, "error": "用户取消了选择"})
+                        
+                except Exception as e:
+                    result_queue.put({"success": False, "error": str(e)})
+            
+            dialog_thread = threading.Thread(target=run_dialog)
+            dialog_thread.start()
+            dialog_thread.join(timeout=60)
+            
+            if dialog_thread.is_alive():
+                return {"success": False, "error": "文件选择超时"}
+            
+            return result_queue.get()
+        else:
+            return {"success": False, "error": f"不支持的操作系统: {system}"}
+            
+    except subprocess.TimeoutExpired:
         return {"success": False, "error": "文件选择超时"}
-    
-    result = result_queue.get()
-    return result
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 
 
 

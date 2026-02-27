@@ -566,16 +566,6 @@ export function AppProvider({ children }: AppProviderProps) {
 
         fetchDefaultPaths();
     }, []); // 只在组件挂载时执行一次
-                const errorMsg = error instanceof Error ? error.message : '未知错误';
-                console.error('初始化失败:', error);
-                // 初始化失败不阻塞用户操作
-                setAnalysis(prev => ({ ...prev, isLoading: false }));
-                addLog({ time: new Date().toLocaleTimeString(), level: 'WARN', msg: `后端连接失败: ${errorMsg}，请确保后端服务已启动` });
-            }
-        };
-
-        initializeFromBackend();
-    }, []); // 只在组件挂载时执行一次
 
     // ==================== UI Actions ====================
 
