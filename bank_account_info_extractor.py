@@ -64,7 +64,7 @@ def extract_bank_account_info(data_dir: str, person_id: str = None) -> Dict[str,
     info_path = Path(info_dir)
     
     # 遍历所有xlsx文件
-    xlsx_files = list(info_path.glob("*.xlsx"))
+    xlsx_files = [f for f in info_path.glob("*.xlsx") if not f.name.startswith("~$")]
     logger.info(f"找到 {len(xlsx_files)} 个银行账户信息文件")
     
     for xlsx_file in xlsx_files:

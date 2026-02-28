@@ -16,8 +16,10 @@ import json
 from datetime import datetime
 from typing import Dict, List, Tuple
 from collections import defaultdict
-import pandas as pd
 import config
+
+# 导入统一路径管理器
+from paths import APP_ROOT
 import utils
 
 logger = utils.setup_logger(__name__)
@@ -308,8 +310,8 @@ def _generate_html_visualization(
     
     # 读取本地 vis-network.min.js（用于内联到 HTML，实现离线渲染）
     vis_js_paths = [
-        os.path.join(os.path.dirname(__file__), 'dashboard/node_modules/vis-network/standalone/umd/vis-network.min.js'),
-        os.path.join(os.path.dirname(__file__), 'node_modules/vis-network/standalone/umd/vis-network.min.js'),
+        os.path.join(str(APP_ROOT), 'dashboard/node_modules/vis-network/standalone/umd/vis-network.min.js'),
+        os.path.join(str(APP_ROOT), 'node_modules/vis-network/standalone/umd/vis-network.min.js'),
     ]
     vis_js_content = ''
     for vis_js_path in vis_js_paths:
@@ -485,8 +487,8 @@ def _generate_fallback_html(nodes_json: str, edges_json: str,
     """生成备用HTML（当模板文件不存在时使用）- 使用本地 vis-network，支持离线"""
     # 尝试读取本地 vis-network.min.js
     vis_js_paths = [
-        os.path.join(os.path.dirname(__file__), 'dashboard/node_modules/vis-network/standalone/umd/vis-network.min.js'),
-        os.path.join(os.path.dirname(__file__), 'node_modules/vis-network/standalone/umd/vis-network.min.js'),
+        os.path.join(str(APP_ROOT), 'dashboard/node_modules/vis-network/standalone/umd/vis-network.min.js'),
+        os.path.join(str(APP_ROOT), 'node_modules/vis-network/standalone/umd/vis-network.min.js'),
     ]
     
     vis_js_content = None

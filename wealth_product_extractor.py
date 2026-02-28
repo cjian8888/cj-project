@@ -64,7 +64,7 @@ def extract_wealth_product_data(data_dir: str, person_id: str = None) -> Dict[st
             
             # 遍历所有xlsx文件
             wealth_path = Path(wealth_dir)
-            xlsx_files = list(wealth_path.glob("*.xlsx"))
+            xlsx_files = [f for f in wealth_path.glob("*.xlsx") if not f.name.startswith("~$")]
             
             for file_path in xlsx_files:
                 try:

@@ -31,8 +31,11 @@ def _get_logger():
 
 logger = _get_logger()  # 初始化 logger
 
-# 默认配置文件路径
-DEFAULT_CONFIG_PATH = 'config/risk_thresholds.yaml'
+# 导入统一路径管理器
+from paths import CONFIG_DIR
+
+# 默认配置文件路径（使用 paths 模块统一管理）
+DEFAULT_CONFIG_PATH = str(CONFIG_DIR / 'risk_thresholds.yaml')
 
 
 def load_risk_thresholds(config_path: str = None) -> Dict[str, Any]:

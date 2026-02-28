@@ -377,7 +377,7 @@ def extract_precise_property_info(data_dir: str, person_id: str = None) -> Dict[
     
     # 遍历所有xlsx文件
     precise_path = Path(precise_dir)
-    xlsx_files = list(precise_path.glob("*.xlsx"))
+    xlsx_files = [f for f in precise_path.glob("*.xlsx") if not f.name.startswith("~$")]
     
     for file_path in xlsx_files:
         try:

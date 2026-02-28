@@ -16,6 +16,10 @@
 from typing import List, Dict, Any, Tuple, Optional, Union
 import config_loader
 
+# 导入统一路径管理器
+from paths import DATA_DIR as _DATA_DIR
+from paths import OUTPUT_DIR as _OUTPUT_DIR
+from paths import CACHE_PATH as _CACHE_PATH
 # ============================================================
 # 从YAML配置文件加载阈值（问题1修复）
 # ============================================================
@@ -554,10 +558,9 @@ BALANCE_COLUMNS: List[str] = [
 # 文件路径配置
 # ============================================================
 
-# 输出目录
-DATA_DIR: str = './data'
-OUTPUT_DIR: str = './output'
-
+# 输出目录（使用 paths 模块统一管理）
+DATA_DIR: str = str(_DATA_DIR)
+OUTPUT_DIR: str = str(_OUTPUT_DIR)
 # 输出文件名
 OUTPUT_EXCEL_FILE: str = '资金核查底稿.xlsx'
 OUTPUT_REPORT_FILE: str = '核查结果分析报告.docx'
@@ -727,8 +730,8 @@ RISK_SCORE_LOAN_MAX: int = _get_config('risk_score', 'loan_max', default=16)
 
 CACHE_VERSION: str = "3.2.0"  # 升级版本号
 CACHE_VERSION_MAJOR: int = 3  # 缓存主版本号（用于兼容性检查）
-CACHE_PATH: str = "./output/analysis_cache.json"  # 缓存文件路径
-GRAPH_MAX_NODES: int = _get_config('cache', 'max_nodes', default=200)
+CACHE_PATH: str = str(_CACHE_PATH)  # 缓存文件路径（使用 paths 模块统一管理）
+GRAPH_MAX_NODES: int = _get_config('cache', 'max_nodes', default=100)
 GRAPH_MAX_EDGES: int = _get_config('cache', 'max_edges', default=500)
 
 # ============================================================

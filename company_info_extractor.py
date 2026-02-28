@@ -62,7 +62,7 @@ def extract_company_info(data_dir: str) -> Dict[str, Dict]:
     logger.info(f"开始解析企业登记信息: {company_dir}")
     
     # 遍历目录下的所有xlsx文件
-    xlsx_files = list(Path(company_dir).glob("*.xlsx"))
+    xlsx_files = [f for f in Path(company_dir).glob("*.xlsx") if not f.name.startswith("~$")]
     logger.info(f"找到 {len(xlsx_files)} 个xlsx文件")
     
     for file_path in xlsx_files:
@@ -512,7 +512,7 @@ def extract_credit_code_info(data_dir: str) -> Dict[str, Dict]:
     
     logger.info(f"开始解析统一社会信用代码数据: {credit_dir}")
     
-    xlsx_files = list(Path(credit_dir).glob("*.xlsx"))
+    xlsx_files = [f for f in Path(credit_dir).glob("*.xlsx") if not f.name.startswith("~$")]
     
     for file_path in xlsx_files:
         try:

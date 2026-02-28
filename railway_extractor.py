@@ -51,7 +51,7 @@ def extract_railway_data(data_dir: str, person_id: str = None) -> Dict[str, Dict
     logger.info(f"开始解析铁路票面信息: {railway_dir}")
     
     railway_path = Path(railway_dir)
-    xlsx_files = list(railway_path.glob("*.xlsx"))
+    xlsx_files = [f for f in railway_path.glob("*.xlsx") if not f.name.startswith("~$")]
     
     for file_path in xlsx_files:
         try:

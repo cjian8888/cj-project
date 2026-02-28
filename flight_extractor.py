@@ -51,7 +51,7 @@ def extract_flight_data(data_dir: str, person_id: str = None) -> Dict[str, Dict]
     logger.info(f"开始解析中航信航班进出港信息: {flight_dir}")
     
     flight_path = Path(flight_dir)
-    xlsx_files = list(flight_path.glob("*.xlsx"))
+    xlsx_files = [f for f in flight_path.glob("*.xlsx") if not f.name.startswith("~$")]
     
     for file_path in xlsx_files:
         try:

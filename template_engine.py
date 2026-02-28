@@ -21,8 +21,11 @@ import utils
 
 logger = utils.setup_logger(__name__)
 
-# 模板目录路径
-TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
+# 导入统一路径管理器
+from paths import TEMPLATES_DIR
+
+# 模板目录路径（使用 paths 模块统一管理）
+TEMPLATE_DIR = str(TEMPLATES_DIR)
 
 
 class TemplateEngine:

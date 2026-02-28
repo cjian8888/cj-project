@@ -313,6 +313,9 @@ class CacheManager:
             "suspicions": self.load_cache("suspicions"),
             "analysisResults": self.load_cache("derived_data"),
             "graphData": self.load_cache("graph_data"),
+            # 【修复】从元数据中提取 persons 和 companies
+            "persons": metadata.get("persons", []),
+            "companies": metadata.get("companies", []),
             # 【修复】加载外部数据缓存（供InvestigationReportBuilder使用）
             "precisePropertyData": self.load_cache("precisePropertyData"),
             "vehicleData": self.load_cache("vehicleData"),
@@ -323,7 +326,6 @@ class CacheManager:
             "external_p0": self.load_cache("external_p0"),
             "external_p1": self.load_cache("external_p1"),
         }
-
         # 检查必需缓存（profiles_full 不再是必需的）
         required_caches = ["profiles", "suspicions", "analysisResults", "graphData"]
         if all(results[k] is not None for k in required_caches):

@@ -56,7 +56,10 @@ def classify_accounts(df: pd.DataFrame) -> Dict:
     # 确保description列存在
     if 'description' not in df.columns:
         df['description'] = ''
-
+    
+    # 【修复】将 account_id 转换为字符串类型，避免 Categorical 类型比较问题
+    if 'account_id' in df.columns:
+        df['account_id'] = df['account_id'].astype(str)
     accounts = df['account_id'].dropna().unique()
     classification = {
         'physical_cards': [],

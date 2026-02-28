@@ -55,7 +55,7 @@ def extract_insurance_data(data_dir: str, person_id: str = None) -> Dict[str, Di
     
     # 遍历所有xlsx文件
     insurance_path = Path(insurance_dir)
-    xlsx_files = list(insurance_path.glob("*.xlsx"))
+    xlsx_files = [f for f in insurance_path.glob("*.xlsx") if not f.name.startswith("~$")]
     
     for file_path in xlsx_files:
         try:

@@ -47,7 +47,7 @@ def extract_immigration_data(data_dir: str, person_id: str = None) -> Dict[str, 
     
     # 遍历所有xlsx文件
     immigration_path = Path(immigration_dir)
-    xlsx_files = list(immigration_path.glob("*.xlsx"))
+    xlsx_files = [f for f in immigration_path.glob("*.xlsx") if not f.name.startswith("~$")]
     
     for file_path in xlsx_files:
         try:

@@ -57,7 +57,7 @@ def extract_aml_data(data_dir: str) -> Dict[str, Dict]:
     logger.info(f"开始解析反洗钱数据: {aml_dir}")
     
     # 遍历目录下的所有xlsx文件
-    xlsx_files = list(Path(aml_dir).glob("*.xlsx"))
+    xlsx_files = [f for f in Path(aml_dir).glob("*.xlsx") if not f.name.startswith("~$")]
     logger.info(f"找到 {len(xlsx_files)} 个xlsx文件")
     
     for file_path in xlsx_files:

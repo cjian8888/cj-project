@@ -52,23 +52,47 @@ def to_camel_case(obj: Any) -> Any:
     Uses the KEY_MAPPING dictionary. Values are preserved as-is (unless they are
     nested dict/list, in which case they are transformed recursively).
     
+    Also converts numpy/pandas types to native Python types for JSON serialization.
+    
     Args:
         obj: Input object (dict, list, or any other type)
         
     Returns:
-        Transformed object with camelCase keys
+        Transformed object with camelCase keys and JSON-serializable values
     """
+    import numpy as np
+    import pandas as pd
+    from datetime import datetime
+    
+    # Handle numpy/pandas types first (before dict/list check)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, np.ndarray):
+        return to_camel_case(obj.tolist())
+    elif isinstance(obj, (pd.Timestamp, datetime)):
+        return obj.isoformat()
+    # Handle NaN/NaT - use try-except to avoid array ambiguity
+    try:
+        if pd.isna(obj):
+            return None
+    except (ValueError, TypeError):
+        # pd.isna() raises ValueError for arrays, TypeError for some objects
+        pass
     if isinstance(obj, dict):
         new_dict: Dict[str, Any] = {}
         for k, v in obj.items():
             mapped_key = _transform_with_mapping_key(k)
-            if isinstance(v, (dict, list)):
-                new_dict[mapped_key] = to_camel_case(v)
-            else:
-                new_dict[mapped_key] = v
+            # Always recurse to handle nested numpy types
+            new_dict[mapped_key] = to_camel_case(v)
         return new_dict
     elif isinstance(obj, list):
         return [to_camel_case(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(to_camel_case(item) for item in obj)
     else:
         return obj
 

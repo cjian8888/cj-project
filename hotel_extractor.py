@@ -48,7 +48,7 @@ def extract_hotel_data(data_dir: str, person_id: str = None) -> Dict[str, List[D
     
     # 遍历所有xlsx文件
     hotel_path = Path(hotel_dir)
-    xlsx_files = list(hotel_path.glob("*.xlsx"))
+    xlsx_files = [f for f in hotel_path.glob("*.xlsx") if not f.name.startswith("~$")]
     
     for file_path in xlsx_files:
         try:

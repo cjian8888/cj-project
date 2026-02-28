@@ -58,7 +58,7 @@ def extract_securities_data(data_dir: str, person_id: str = None) -> Dict[str, D
         
         # 遍历所有xlsx文件
         securities_path = Path(securities_dir)
-        xlsx_files = list(securities_path.glob("*.xlsx"))
+        xlsx_files = [f for f in securities_path.glob("*.xlsx") if not f.name.startswith("~$")]
         
         for file_path in xlsx_files:
             try:

@@ -50,7 +50,7 @@ def extract_coaddress_data(data_dir: str, person_id: str = None) -> Dict[str, Li
     logger.info(f"开始解析公安部同住址数据: {coaddress_dir}")
     
     coaddress_path = Path(coaddress_dir)
-    xlsx_files = list(coaddress_path.glob("*.xlsx"))
+    xlsx_files = [f for f in coaddress_path.glob("*.xlsx") if not f.name.startswith("~$")]
     
     for file_path in xlsx_files:
         try:
@@ -96,7 +96,7 @@ def extract_coviolation_data(data_dir: str, person_id: str = None) -> Dict[str, 
     logger.info(f"开始解析公安部同车违章数据: {coviolation_dir}")
     
     coviolation_path = Path(coviolation_dir)
-    xlsx_files = list(coviolation_path.glob("*.xlsx"))
+    xlsx_files = [f for f in coviolation_path.glob("*.xlsx") if not f.name.startswith("~$")]
     
     for file_path in xlsx_files:
         try:

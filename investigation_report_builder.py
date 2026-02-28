@@ -20,6 +20,8 @@ import json
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from dataclasses import asdict
+# 导入统一路径管理器
+from paths import OUTPUT_DIR, APP_ROOT
 
 import config
 import utils
@@ -133,15 +135,15 @@ class InvestigationReportBuilder:
     - 资金核查底稿.xlsx: Excel格式补充数据（JSON缺失时回退）
     """
 
-    def __init__(self, analysis_cache: Dict, output_dir: str = "./output"):
+    def __init__(self, analysis_cache: Dict, output_dir: str = None):
         """
         初始化
 
         Args:
             analysis_cache: 由 api_server.py 的 _load_analysis_cache() 加载的完整结果
-            output_dir: 输出目录路径，用于定位核查底稿Excel
+            output_dir: 输出目录路径，用于定位核查底稿Excel（默认使用 paths.OUTPUT_DIR）
         """
-        self.output_dir = output_dir
+        self.output_dir = output_dir if output_dir else str(OUTPUT_DIR)
         self.profiles = analysis_cache.get("profiles", {})
         self.derived_data = analysis_cache.get("derived_data", {})
         # Initialize phrase loader for configurable phrases in analysis descriptions
@@ -7238,10 +7240,9 @@ class InvestigationReportBuilder:
         import jinja2
 
         if template_dir is None:
-            # 获取项目根目录
-            project_root = os.path.dirname(os.path.abspath(__file__))
-            template_dir = os.path.join(project_root, "templates", "report_v3")
-
+            # 使用 paths 模块获取模板目录
+            template_dir = os.path.join(str(APP_ROOT), "templates", "report_v3")
+        
         # 配置Jinja2环境
         env = jinja2.Environment(
             loader=jinja2.FileSystemLoader(template_dir),
@@ -9450,7 +9451,13 @@ class InvestigationReportBuilder:
                     lines.append("      │ 年份    │ 工资(万元)  │")
                     lines.append("      ├" + "─" * 56 + "┤")
                     for year in sorted_years:
-                        salary_wan = salary_by_year[year] / 10000
+                        year_data = salary_by_year[year]
+                        # 修复：year_data 可能是 dict {'total': ..., 'transaction_count': ...}
+                        if isinstance(year_data, dict):
+                            salary_value = year_data.get("total", 0)
+                        else:
+                            salary_value = year_data if isinstance(year_data, (int, float)) else 0
+                        salary_wan = salary_value / 10000
                         lines.append(f"      │ {year:<8} │ {salary_wan:>10.2f}  │")
                     lines.append("      └" + "─" * 56 + "┘")
                     lines.append("")
@@ -9719,7 +9726,7 @@ class InvestigationReportBuilder:
 
 
 def load_investigation_report_builder(
-    output_dir: str = "./output",
+    output_dir: str = None,
 ) -> Optional[InvestigationReportBuilder]:
     """
     加载初查报告构建器
@@ -9734,11 +9741,15 @@ def load_investigation_report_builder(
     如果完整缓存不存在，回退到分散的缓存文件。
 
     Args:
-        output_dir: 输出目录路径
+        output_dir: 输出目录路径（默认使用 paths.OUTPUT_DIR）
 
     Returns:
         InvestigationReportBuilder 实例，如果缓存不存在则返回 None
     """
+    # 使用默认路径
+    if output_dir is None:
+        output_dir = str(OUTPUT_DIR)
+    
     # 【修复】优先尝试加载完整缓存文件
     full_cache_path = os.path.join(output_dir, "analysis_results_cache.json")
     if os.path.exists(full_cache_path):
@@ -9843,7 +9854,7 @@ def load_investigation_report_builder(
 if __name__ == "__main__":
     import sys
 
-    output_dir = sys.argv[1] if len(sys.argv) > 1 else "./output"
+    output_dir = sys.argv[1] if len(sys.argv) > 1 else str(OUTPUT_DIR)
 
     builder = load_investigation_report_builder(output_dir)
     if builder:

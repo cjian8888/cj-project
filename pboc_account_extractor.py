@@ -64,7 +64,7 @@ def extract_pboc_accounts(data_dir: str, person_id: str = None) -> Dict[str, Lis
     logger.info(f"开始解析人民银行账户数据: {pboc_dir}")
     
     # 遍历目录下的所有xlsx文件
-    xlsx_files = list(Path(pboc_dir).glob("*.xlsx"))
+    xlsx_files = [f for f in Path(pboc_dir).glob("*.xlsx") if not f.name.startswith("~$")]
     logger.info(f"找到 {len(xlsx_files)} 个xlsx文件")
     
     for file_path in xlsx_files:

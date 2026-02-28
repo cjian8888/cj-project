@@ -65,7 +65,7 @@ def extract_vehicle_data(data_dir: str, person_id: str = None) -> Dict[str, List
     
     # 遍历所有xlsx文件
     vehicle_path = Path(vehicle_dir)
-    xlsx_files = list(vehicle_path.glob("*.xlsx"))
+    xlsx_files = [f for f in vehicle_path.glob("*.xlsx") if not f.name.startswith("~$")]
     
     for file_path in xlsx_files:
         try:

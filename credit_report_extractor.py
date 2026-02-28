@@ -56,7 +56,7 @@ def extract_credit_data(data_dir: str) -> Dict[str, Dict]:
     credit_path = Path(credit_dir)
     
     # 遍历所有xlsx文件
-    xlsx_files = list(credit_path.glob("*.xlsx"))
+    xlsx_files = [f for f in credit_path.glob("*.xlsx") if not f.name.startswith("~$")]
     logger.info(f"找到 {len(xlsx_files)} 个征信文件")
     
     for xlsx_file in xlsx_files:

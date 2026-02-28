@@ -324,7 +324,9 @@ def _identify_salary_by_frequency(income_df: pd.DataFrame) -> pd.DataFrame:
     for counterparty, group in counterparty_groups:
         if not counterparty or str(counterparty) == 'nan': continue
         if group['is_salary'].any(): continue
-        if group.iloc[0]['is_self_transfer']: continue
+        # 【修复】检查 group 是否为空，避免 IndexError
+        if len(group) == 0: continue
+        if 'is_self_transfer' in group.columns and group.iloc[0]['is_self_transfer']: continue
 
         counterparty_str = str(counterparty).strip()
         

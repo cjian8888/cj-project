@@ -19,7 +19,7 @@ import warnings
 import os
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Dict, List, Optional, Any
 from contextlib import asynccontextmanager
 import threading
@@ -41,6 +41,7 @@ from pydantic import BaseModel
 
 # 导入核心模块
 import config
+from paths import APP_ROOT, DATA_DIR, OUTPUT_DIR
 import utils
 import file_categorizer
 import data_cleaner
@@ -98,6 +99,7 @@ from investigation_report_builder import (
 )
 from report_config.primary_targets_service import PrimaryTargetsService
 from specialized_reports import SpecializedReportGenerator
+from suspicion_engine import SuspicionEngine
 
 # ==================== Windows asyncio 兼容性修复 ====================
 if sys.platform == "win32":
@@ -160,7 +162,7 @@ def _get_cache_manager() -> CacheManager:
     global _cache_manager
     if _cache_manager is None:
         # 从全局配置获取缓存目录
-        cache_dir = _current_config.get("outputDirectory", "output")
+        cache_dir = _current_config.get("outputDirectory", str(OUTPUT_DIR))
         cache_dir = os.path.join(cache_dir, "analysis_cache")
         _cache_manager = CacheManager(cache_dir)
     return _cache_manager
@@ -265,13 +267,40 @@ def serialize_for_json(obj):
     elif isinstance(obj, np.bool_):
         return bool(obj)
     elif isinstance(obj, np.ndarray):
-        return obj.tolist()
+        return [serialize_for_json(v) for v in obj.tolist()]
     elif isinstance(obj, (pd.Timestamp, datetime)):
         return obj.isoformat()
-    elif pd.isna(obj):
-        return None
-    else:
-        return obj
+    elif isinstance(obj, date):
+        # Handle datetime.date (different from datetime.datetime)
+        return obj.isoformat()
+    # Handle NaN/NaT - use try-except to avoid array ambiguity
+    try:
+        if pd.isna(obj):
+            return None
+    except (ValueError, TypeError):
+        # pd.isna() raises ValueError for arrays, TypeError for some objects
+        pass
+    
+    # Final check: if it's still a numpy type, convert it
+    if hasattr(obj, 'dtype') and hasattr(obj, 'item'):
+        # This handles any remaining numpy scalar types
+        return obj.item()
+    
+    # Handle arbitrary Python objects (like ClueAggregator)
+    # Check if it has a to_dict method
+    if hasattr(obj, 'to_dict') and callable(getattr(obj, 'to_dict')):
+        return serialize_for_json(obj.to_dict())
+    
+    # Check if it has __dict__ attribute (custom class instance)
+    if hasattr(obj, '__dict__') and not isinstance(obj, type):
+        # Convert to dict, excluding private attributes and methods
+        obj_dict = {}
+        for key, value in obj.__dict__.items():
+            if not key.startswith('_') and not callable(value):
+                obj_dict[key] = serialize_for_json(value)
+        return obj_dict
+    
+    return obj
 
 
 def create_output_directories(base_dir: str) -> Dict[str, str]:
@@ -1056,8 +1085,13 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
 
         for entity, df in cleaned_data.items():
             try:
-                # 1. 生成基础画像
-                profile = financial_profiler.generate_profile_report(df, entity)
+                # 1. 生成基础画像（区分个人和公司）
+                if entity in all_companies:
+                    # 公司使用专门的公司画像生成函数
+                    profile = financial_profiler.build_company_profile(df, entity)
+                else:
+                    # 个人使用标准画像生成函数
+                    profile = financial_profiler.generate_profile_report(df, entity)
 
                 # 2. 提取银行账户列表
                 if entity in all_persons:
@@ -1426,9 +1460,10 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         )
         broadcast_log("INFO", f"  ✓ 疑点检测完成: 发现 {suspicion_total} 个可疑点")
 
-        analysis_state.update(progress=95, phase="生成分析报告...")
-        broadcast_log("INFO", "▶ Phase 8: 生成分析报告...")
-
+        # ========================================================================
+        # 【修复】在 Phase 8 之前保存基础缓存
+        # 这样报告生成器可以读取缓存文件
+        # ========================================================================
         derived_data = {
             "loan": analysis_results.get("loan", {}),
             "income": analysis_results.get("income", {}),
@@ -1439,6 +1474,27 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             "family_units_v2": analysis_results.get("family_units_v2", []),
             "all_family_summaries": analysis_results.get("all_family_summaries", {}),
         }
+
+        # 保存基础缓存（供报告生成器使用）
+        logger.info("保存基础缓存（供报告生成）...")
+        try:
+            cache_mgr = CacheManager(output_dirs["analysis_cache"])
+            cache_mgr.save_cache("profiles", serialize_profiles(profiles))
+            cache_mgr.save_cache("derived_data", derived_data)
+            cache_mgr.save_cache("suspicions", serialize_suspicions(suspicions))
+            # 保存元数据
+            metadata = {
+                "persons": all_persons,
+                "companies": all_companies,
+                "analysisTime": datetime.now().isoformat(),
+            }
+            cache_mgr.save_metadata(metadata)
+            logger.info("  ✓ 基础缓存已保存")
+        except Exception as e:
+            logger.warning(f"  ✗ 保存基础缓存失败: {e}")
+
+        analysis_state.update(progress=95, phase="生成分析报告...")
+        broadcast_log("INFO", "▶ Phase 8: 生成分析报告...")
 
         phase8_start = time.time()
 
@@ -1612,13 +1668,8 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             "_profiles_raw": profiles,
         }
 
-        # 完成状态更新
-        analysis_state.update(progress=100, phase="分析完成")
-        broadcast_log("INFO", "✓ 分析完成")
-        analysis_state.end_time = datetime.now()
-        analysis_state.status = "completed"
-
-        # 【修复】保存分析缓存（必须在设置 results 之后，清理内存之前）
+        # 【修复】先保存分析缓存，再设置完成状态
+        # 这样报告生成器和前端都能在 complete 时读取到缓存
         logger.info("保存分析缓存...")
         try:
             _save_analysis_cache_refactored(
@@ -1627,6 +1678,12 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             logger.info("  ✓ 分析缓存已保存")
         except Exception as e:
             logger.error(f"  ✗ 保存分析缓存失败: {e}")
+
+        # 完成状态更新（在缓存保存之后）
+        analysis_state.update(progress=100, phase="分析完成")
+        broadcast_log("INFO", "✓ 分析完成")
+        analysis_state.end_time = datetime.now()
+        analysis_state.status = "completed"
 
         # 内存清理
         logger.info("释放临时数据...")
@@ -1794,16 +1851,25 @@ async def start_analysis(config: AnalysisConfig, background_tasks: BackgroundTas
 @app.get("/api/results")
 async def get_results():
     """获取分析结果（优先从内存读取，fallback到缓存文件）"""
-    # 如果内存中有结果，直接返回
-    if analysis_state.status == "completed" and analysis_state.results:
-        results_data = serialize_for_json(analysis_state.results)
-        # 使用 key_mapper 将数据键名转换为 camelCase，确保前后端一致
-        results_data = to_camel_case(results_data)
-        return {"message": "分析结果获取成功", "data": results_data}
-
-    # 内存中没有结果，尝试从缓存文件读取
-    cache_dir = os.path.join("output", "analysis_cache")
+    from fastapi.responses import Response
+    import json
+    
+    logger = logging.getLogger(__name__)
+    
     try:
+        # 如果内存中有结果，直接返回
+        if analysis_state.status == "completed" and analysis_state.results:
+            results_data = serialize_for_json(analysis_state.results)
+            results_data = to_camel_case(results_data)
+            results_data = serialize_for_json(results_data)
+            response_body = json.dumps(
+                {"message": "分析结果获取成功", "data": results_data},
+                ensure_ascii=False
+            )
+            return Response(content=response_body, media_type="application/json")
+
+        # 内存中没有结果，尝试从缓存文件读取
+        cache_dir = os.path.join(str(OUTPUT_DIR), "analysis_cache")
         cache_mgr = CacheManager(cache_dir)
         results_data = cache_mgr.load_results()
 
@@ -1811,19 +1877,22 @@ async def get_results():
             # 将缓存结果加载到内存
             analysis_state.results = results_data
             analysis_state.status = "completed"
-            # 序列化后再 camelCase 转换，确保前端字段名风格一致
             results_serialized = serialize_for_json(results_data)
             results_serialized = to_camel_case(results_serialized)
-            return {
-                "message": "分析结果获取成功（来自缓存）",
-                "data": results_serialized,
-            }
+            results_serialized = serialize_for_json(results_serialized)
+            response_body = json.dumps(
+                {"message": "分析结果获取成功（来自缓存）", "data": results_serialized},
+                ensure_ascii=False
+            )
+            return Response(content=response_body, media_type="application/json")
         else:
             raise HTTPException(status_code=400, detail="分析尚未完成且缓存无效")
+    except HTTPException:
+        raise
     except Exception as e:
-        logging.getLogger(__name__).error(f"读取缓存失败: {e}")
+        logging.getLogger(__name__).exception(f"获取结果失败: {e}")
         raise HTTPException(
-            status_code=400, detail=f"分析尚未完成且缓存读取失败: {str(e)}"
+            status_code=500, detail=f"获取结果失败: {str(e)}"
         )
 
 
@@ -1831,7 +1900,7 @@ async def get_results():
 async def get_reports():
     """获取报告列表（递归扫描所有子目录）"""
     reports = []
-    reports_dir = os.path.join("output", "analysis_results")
+    reports_dir = os.path.join(str(OUTPUT_DIR), "analysis_results")
 
     def scan_directory(directory, prefix=""):
         """递归扫描目录"""
@@ -1911,7 +1980,7 @@ async def get_report_subjects():
         return {"success": True, "subjects": subjects}
 
     # 尝试从缓存文件中读取
-    cache_dir = os.path.join("output", "analysis_cache")
+    cache_dir = os.path.join(str(OUTPUT_DIR), "analysis_cache")
     metadata_path = os.path.join(cache_dir, "metadata.json")
     profiles_path = os.path.join(cache_dir, "profiles.json")
 
@@ -1960,7 +2029,7 @@ async def get_report_subjects():
 @app.get("/api/cache/info")
 async def get_cache_info():
     """获取缓存信息（用于调试和监控）"""
-    cache_dir = os.path.join("output", "analysis_cache")
+    cache_dir = os.path.join(str(OUTPUT_DIR), "analysis_cache")
     try:
         cache_mgr = CacheManager(cache_dir)
         cache_info = cache_mgr.get_cache_info()
@@ -1977,7 +2046,7 @@ async def invalidate_cache(cache_name: Optional[str] = None):
     Args:
         cache_name: 缓存名称（如 'profiles'），None 表示失效所有缓存
     """
-    cache_dir = os.path.join("output", "analysis_cache")
+    cache_dir = os.path.join(str(OUTPUT_DIR), "analysis_cache")
     try:
         cache_mgr = CacheManager(cache_dir)
         if cache_name:
@@ -2002,12 +2071,10 @@ async def get_default_paths():
     用于前端初始化时获取默认路径
     """
     try:
-        # 获取项目根目录（api_server.py 所在目录）
-        project_root = os.path.dirname(os.path.abspath(__file__))
-        
-        # 构建默认路径（绝对路径）
-        default_input = os.path.join(project_root, "data")
-        default_output = os.path.join(project_root, "output")
+        # 使用 paths 模块获取默认路径（绝对路径）
+        default_input = str(DATA_DIR)
+        default_output = str(OUTPUT_DIR)
+        project_root = str(APP_ROOT)
         
         # 确保目录存在
         os.makedirs(default_input, exist_ok=True)
@@ -2129,7 +2196,7 @@ async def get_primary_targets_config():
     logger.info("[归集配置] 获取配置")
 
     try:
-        service = PrimaryTargetsService(data_dir="./data", output_dir="./output")
+        service = PrimaryTargetsService(data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR))
         config, msg, is_new = service.get_or_create_config()
 
         if config is None:
@@ -2163,7 +2230,7 @@ async def get_primary_targets_entities():
     logger.info("[归集配置] 获取实体列表")
 
     try:
-        service = PrimaryTargetsService(data_dir="./data", output_dir="./output")
+        service = PrimaryTargetsService(data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR))
         result = service.get_entities_with_data_status()
 
         logger.info(
@@ -2200,7 +2267,7 @@ async def save_primary_targets_config(request: Request):
         config = PrimaryTargetsConfig.from_dict(config_dict)
 
         # 保存配置
-        service = PrimaryTargetsService(data_dir="./data", output_dir="./output")
+        service = PrimaryTargetsService(data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR))
         success, msg = service.save_config(config)
 
         if success:
@@ -2226,7 +2293,7 @@ async def generate_default_primary_targets():
     logger.info("[归集配置] 重新生成默认配置")
 
     try:
-        service = PrimaryTargetsService(data_dir="./data", output_dir="./output")
+        service = PrimaryTargetsService(data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR))
         config, msg = service.generate_default_config()
 
         if config is None:
@@ -2253,7 +2320,7 @@ async def get_report_files():
     返回 output/analysis_results 目录下的所有报告文件（包括子目录）
     """
     logger = logging.getLogger(__name__)
-    results_dir = os.path.join("output", "analysis_results")
+    results_dir = os.path.join(str(OUTPUT_DIR), "analysis_results")
 
     if not os.path.exists(results_dir):
         return {"success": True, "reports": [], "message": "报告目录不存在"}
@@ -2342,8 +2409,8 @@ async def preview_report_file(filename: str):
         )
     
     # 构建完整路径
-    base_dir = os.path.abspath("output/analysis_results")
-    filepath = os.path.abspath(os.path.join("output", "analysis_results", normalized_path))
+    base_dir = os.path.abspath(os.path.join(str(OUTPUT_DIR), "analysis_results"))
+    filepath = os.path.abspath(os.path.join(str(OUTPUT_DIR), "analysis_results", normalized_path))
     
     # 确保路径在允许的目录内
     if not filepath.startswith(base_dir):
@@ -2422,8 +2489,8 @@ async def download_report_file(filename: str):
         )
     
     # 构建完整路径
-    base_dir = os.path.abspath("output/analysis_results")
-    filepath = os.path.abspath(os.path.join("output", "analysis_results", normalized_path))
+    base_dir = os.path.abspath(os.path.join(str(OUTPUT_DIR), "analysis_results"))
+    filepath = os.path.abspath(os.path.join(str(OUTPUT_DIR), "analysis_results", normalized_path))
     
     # 确保路径在允许的目录内
     if not filepath.startswith(base_dir):
@@ -2482,7 +2549,7 @@ async def generate_investigation_report_with_config(
 
     try:
         # 1. 加载归集配置服务
-        service = PrimaryTargetsService(data_dir="./data", output_dir="./output")
+        service = PrimaryTargetsService(data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR))
 
         # 2. 获取或创建归集配置
         config, msg, is_new = service.get_or_create_config()
@@ -2498,7 +2565,7 @@ async def generate_investigation_report_with_config(
         )
 
         # 3. 加载报告构建器
-        builder = load_investigation_report_builder("./output")
+        builder = load_investigation_report_builder(str(OUTPUT_DIR))
         if builder is None:
             logger.warning("[报告生成] 缓存数据不存在，请先运行分析")
             return JSONResponse(
@@ -2516,7 +2583,7 @@ async def generate_investigation_report_with_config(
         logger.info("[报告生成] 检测到用户配置，重新计算家庭汇总...")
 
         # 4.1. 加载 profiles.json 和外部数据
-        cache_dir = os.path.join("./output", "analysis_cache")
+        cache_dir = os.path.join(str(OUTPUT_DIR), "analysis_cache")
         with open(os.path.join(cache_dir, "profiles.json"), "r", encoding="utf-8") as f:
             profiles = json.load(f)
         
@@ -2610,7 +2677,7 @@ async def generate_investigation_report_with_config(
 
         # 【v4.1 修复】重新加载 builder，确保使用更新后的缓存数据
         logger.info("[报告生成] 重新加载 builder（使用更新后的缓存数据）")
-        builder = load_investigation_report_builder("./output")
+        builder = load_investigation_report_builder(str(OUTPUT_DIR))
 
         if builder is None:
             logger.warning("[报告生成] 缓存数据不存在，请先运行分析")
@@ -2681,7 +2748,7 @@ async def generate_investigation_report_v5(
 
     try:
         # 1. 加载归集配置服务
-        service = PrimaryTargetsService(data_dir="./data", output_dir="./output")
+        service = PrimaryTargetsService(data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR))
 
         # 2. 获取或创建归集配置
         config, msg, is_new = service.get_or_create_config()
@@ -2697,7 +2764,7 @@ async def generate_investigation_report_v5(
         )
 
         # 3. 加载报告构建器
-        builder = load_investigation_report_builder("./output")
+        builder = load_investigation_report_builder(str(OUTPUT_DIR))
         if builder is None:
             logger.warning("[报告生成v5] 缓存数据不存在，请先运行分析")
             return JSONResponse(
@@ -2764,10 +2831,9 @@ async def generate_investigation_report_html(
     data_scope = request.data_scope if request else None
 
     try:
-        # 【2026-02-22 修复】使用绝对路径，避免工作目录不一致导致的问题
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        data_dir = os.path.join(base_dir, "data")
-        output_dir = os.path.join(base_dir, "output")
+        # 使用 paths 模块获取绝对路径
+        data_dir = str(DATA_DIR)
+        output_dir = str(OUTPUT_DIR)
         
         # 1. 加载归集配置服务
         service = PrimaryTargetsService(data_dir=data_dir, output_dir=output_dir)
@@ -2849,7 +2915,7 @@ async def save_html_report(request: dict):
             )
 
         # 保存到输出目录
-        reports_dir = os.path.join("output", "analysis_results")
+        reports_dir = os.path.join(str(OUTPUT_DIR), "analysis_results")
         os.makedirs(reports_dir, exist_ok=True)
 
         filepath = os.path.join(reports_dir, filename)
@@ -2884,7 +2950,7 @@ async def regenerate_txt_report():
 
     try:
         # 1. 加载归集配置
-        service = PrimaryTargetsService(data_dir="./data", output_dir="./output")
+        service = PrimaryTargetsService(data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR))
         config, msg = service.load_config()
 
         if config is None:
@@ -2892,7 +2958,7 @@ async def regenerate_txt_report():
             config, msg, _ = service.get_or_create_config()
 
         # 2. 加载报告构建器
-        builder = load_investigation_report_builder("./output")
+        builder = load_investigation_report_builder(str(OUTPUT_DIR))
         if builder is None:
             logger.warning("[txt报告] 缓存数据不存在")
             return JSONResponse(
@@ -2907,7 +2973,7 @@ async def regenerate_txt_report():
         )
 
         # 4. 重新生成txt报告（会使用用户配置的家庭单元）
-        output_dirs = create_output_directories("./output")
+        output_dirs = create_output_directories(str(OUTPUT_DIR))
         txt_report_path = os.path.join(
             output_dirs["analysis_results"], "核查结果分析报告.txt"
         )
@@ -3222,4 +3288,3 @@ if __name__ == "__main__":
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
     uvicorn.run(app, host="0.0.0.0", port=8000)
-from suspicion_engine import SuspicionEngine

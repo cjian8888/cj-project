@@ -434,3 +434,4 @@ if __name__ == '__main__':
     
     result = analyze_wealth_accounts(df, person_name)
     print(result['report'])
+
