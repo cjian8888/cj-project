@@ -417,6 +417,9 @@ def serialize_profiles(profiles: Dict) -> Dict:
                 "yearly_salary": profile_dict.get("yearly_salary", {}),
                 "income_classification": profile_dict.get("income_classification", {}),
                 "bank_accounts": profile_dict.get("bank_accounts", []),
+                # 【2026-03-01 修复】添加公司特有分析数据，供报告生成使用
+                "company_specific": profile_dict.get("company_specific", {}),
+                "transactions": profile_dict.get("transactions", []),
             }
 
             result[name] = frontend_profile
