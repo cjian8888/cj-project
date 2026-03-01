@@ -91,7 +91,7 @@ from report_schema import (
     IncomeExpenseData,
     YearlySalaryData,
     FiveDimensionAnalysis,
-    DimensionScore,
+    LegacyDimensionScore,
     FamilyFinancialProfile,
     SuspicionAnalysis,
 )
@@ -1666,7 +1666,7 @@ class InvestigationReportBuilder:
     # 五维度分析辅助方法
     def _analyze_income_expense_match_unified(
         self, name: str, profile: Dict
-    ) -> DimensionScore:
+    ):
         """收支匹配度分析（统一版本）"""
         total_income = profile.get("totalIncome", 0) or 0
         total_expense = profile.get("totalExpense", 0) or 0
@@ -1689,7 +1689,7 @@ class InvestigationReportBuilder:
 
     def _analyze_lending_behavior_unified(
         self, name: str, profile: Dict
-    ) -> DimensionScore:
+    ):
         """借贷行为分析（统一版本）"""
         # 简化版本
         score = 20  # 默认分数
@@ -1700,7 +1700,7 @@ class InvestigationReportBuilder:
 
     def _analyze_consumption_pattern_unified(
         self, name: str, profile: Dict
-    ) -> DimensionScore:
+    ):
         """消费特征分析（统一版本）"""
         score = 15  # 默认分数
         verdict = "消费模式正常"
@@ -1708,7 +1708,7 @@ class InvestigationReportBuilder:
 
         return DimensionScore(score=score, verdict=verdict, details=details)
 
-    def _analyze_fund_flow_unified(self, name: str, profile: Dict) -> DimensionScore:
+    def _analyze_fund_flow_unified(self, name: str, profile: Dict):
         """资金流向分析（统一版本）"""
         score = 25  # 默认分数
         verdict = "资金流向正常"
@@ -1718,7 +1718,7 @@ class InvestigationReportBuilder:
 
     def _analyze_cash_operation_unified(
         self, name: str, profile: Dict
-    ) -> DimensionScore:
+    ):
         """现金操作分析（统一版本）"""
         score = 15  # 默认分数
         verdict = "现金操作正常"
@@ -9778,8 +9778,12 @@ class InvestigationReportBuilder:
                 avg_monthly_salary = avg_yearly_salary / 12 if years_count > 0 else 0
 
                 lines.append(f"    • 家庭成员数: {member_count} 人")
-                lines.append(f"    • 家庭总收入: {total_family_income / 10000:,.2f} 万元")
-                lines.append(f"    • 家庭总支出: {total_family_expense / 10000:,.2f} 万元")
+                lines.append(
+                    f"    • 家庭总收入: {total_family_income / 10000:,.2f} 万元"
+                )
+                lines.append(
+                    f"    • 家庭总支出: {total_family_expense / 10000:,.2f} 万元"
+                )
                 lines.append(
                     f"    • 🏠 家庭年均工资: {avg_yearly_salary / 10000:,.2f} 万元"
                 )

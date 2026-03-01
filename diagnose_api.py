@@ -6,7 +6,14 @@ import sys
 import os
 
 sys.path.insert(0, ".")
-os.chdir("D:/CJ/project")
+# 使用项目根目录（通过paths模块获取）
+try:
+    from paths import APP_ROOT
+
+    os.chdir(APP_ROOT)
+except ImportError:
+    # 如果paths模块不可用，使用当前目录
+    pass
 
 import logging
 

@@ -365,28 +365,34 @@ class YearlySalaryData:
 
 
 @dataclass
-class FiveDimensionAnalysis:
-    """五维度分析"""
-
-    income_expense_match: DimensionScore = field(
-        default_factory=lambda: DimensionScore()
-    )
-    lending_behavior: DimensionScore = field(default_factory=lambda: DimensionScore())
-    consumption_pattern: DimensionScore = field(
-        default_factory=lambda: DimensionScore()
-    )
-    fund_flow: DimensionScore = field(default_factory=lambda: DimensionScore())
-    cash_operation: DimensionScore = field(default_factory=lambda: DimensionScore())
-    total_score: int = 0
-
-
-@dataclass
-class DimensionScore:
-    """维度评分"""
+class LegacyDimensionScore:
+    """维度评分(旧版，用于FiveDimensionAnalysis)"""
 
     score: int = 0
     verdict: str = ""
     details: str = ""
+
+
+@dataclass
+class FiveDimensionAnalysis:
+    """五维度分析"""
+
+    income_expense_match: LegacyDimensionScore = field(
+        default_factory=lambda: LegacyDimensionScore()
+    )
+    lending_behavior: LegacyDimensionScore = field(
+        default_factory=lambda: LegacyDimensionScore()
+    )
+    consumption_pattern: LegacyDimensionScore = field(
+        default_factory=lambda: LegacyDimensionScore()
+    )
+    fund_flow: LegacyDimensionScore = field(
+        default_factory=lambda: LegacyDimensionScore()
+    )
+    cash_operation: LegacyDimensionScore = field(
+        default_factory=lambda: LegacyDimensionScore()
+    )
+    total_score: int = 0
 
 
 @dataclass
@@ -1424,7 +1430,9 @@ class TimelineCollisionAnalysis:
     """时空碰撞分析"""
 
     collisions: List[TimelineCollisionItem] = field(default_factory=list)
-    property_purchase_collisions: List[TimelineCollisionItem] = field(default_factory=list)
+    property_purchase_collisions: List[TimelineCollisionItem] = field(
+        default_factory=list
+    )
     income_timing_collisions: List[TimelineCollisionItem] = field(default_factory=list)
     collision_count: int = 0  # 碰撞点数量
     risk_level: str = "low"
