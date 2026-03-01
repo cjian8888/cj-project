@@ -9634,25 +9634,6 @@ class InvestigationReportBuilder:
         lines.append("=" * 70)
         lines.append("")
         lines.append(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-        # 【新增】数据来源及完整性声明
-        lines.append("")
-        lines.append("=" * 70)
-        lines.append("数据来源及完整性声明")
-        lines.append("=" * 70)
-        lines.append("")
-        lines.append("【数据来源】")
-        lines.append(f"  • 银行流水: 共{total_transactions:,}条交易记录")
-        lines.append(f"  • 核查对象: {person_count}名被核查人")
-        lines.append("")
-        lines.append("【数据完整性】")
-        lines.append("  • 已调取被核查人名下主要银行账户流水")
-        lines.append("  • 房产信息来源于不动产登记查询回执")
-        lines.append("")
-        lines.append("【待补充数据】")
-        lines.append("  • 房产交易价格: 需调取不动产登记中心交易档案")
-        lines.append("  • 第三方支付: 建议调取微信、支付宝账户流水")
-        lines.append("  • 配偶资产: 建议调取配偶银行流水及资产信息")
         lines.append("")
 
         # 一、核查结论
@@ -9778,8 +9759,8 @@ class InvestigationReportBuilder:
                 avg_monthly_salary = avg_yearly_salary / 12 if years_count > 0 else 0
 
                 lines.append(f"    • 家庭成员数: {member_count} 人")
-                lines.append(f"    • 家庭总收入: {total_family_income / 10000:,.2f} 万元")
-                lines.append(f"    • 家庭总支出: {total_family_expense / 10000:,.2f} 万元")
+                lines.append(f"    • 家庭总收入: {total_family_income:,.2f} 万元")
+                lines.append(f"    • 家庭总支出: {total_family_expense:,.2f} 万元")
                 lines.append(
                     f"    • 🏠 家庭年均工资: {avg_yearly_salary / 10000:,.2f} 万元"
                 )

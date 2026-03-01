@@ -12,35 +12,6 @@
     {{ report.preface.case_background }}
 </p>
 
-{# ==================== 数据来源及完整性声明 ==================== #}
-<div style="background: #f8f9fa; border-left: 4px solid #007bff; padding: 15px; margin: 20px 0; border-radius: 4px;">
-    <h3 style="margin-top: 0; color: #007bff;">数据来源及完整性声明</h3>
-    
-    <h4 style="margin: 15px 0 10px 0;">【数据来源】</h4>
-    <ul style="margin: 0; padding-left: 20px; line-height: 1.8;">
-        <li>银行流水: 由各商业银行提供的账户交易明细</li>
-        <li>房产信息: 不动产登记中心查询回执</li>
-        <li>车辆信息: 车辆管理所查询回执</li>
-        <li>理财信息: 银行理财账户对账单</li>
-    </ul>
-    
-    <h4 style="margin: 15px 0 10px 0;">【数据完整性】</h4>
-    <ul style="margin: 0; padding-left: 20px; line-height: 1.8;">
-        <li>已调取被核查人名下主要银行账户流水</li>
-        <li>房产信息来源于不动产登记查询回执</li>
-        <li>车辆信息来源于车辆管理所查询回执</li>
-    </ul>
-    
-    <h4 style="margin: 15px 0 10px 0;">【待补充数据】</h4>
-    <ul style="margin: 0; padding-left: 20px; line-height: 1.8;">
-        <li><strong style="color: #dc3545;">房产交易价格</strong>: 需调取不动产登记中心交易档案</li>
-        <li><strong style="color: #ffc107;">第三方支付</strong>: 建议调取微信、支付宝账户流水</li>
-        <li><strong style="color: #ffc107;">配偶资产</strong>: 建议调取配偶银行流水及资产信息</li>
-    </ul>
-</div>
-
-
-
 {# ==================== 家庭章节循环（v4.1新结构） ==================== #}
 {% if report.family_sections %}
 {% for family in report.family_sections %}

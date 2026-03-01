@@ -73,7 +73,7 @@ class PersonalFundFeatureAnalyzer:
             万元单位的金额
         """
         if unit == 'fen':
-            return amount / 100000  # 【修复】分 → 万元 (100000分 = 10000元 = 1万元)
+            return amount / 100000  # 【修复】分 → 万元 (100000分 = 10000元 = 1万元)  # 分 → 万元 (1000000分 = 10000元 = 1万元)
         elif unit == 'yuan':
             return amount / 10000  # 元 → 万元
         elif unit == 'wan':
@@ -206,7 +206,7 @@ class PersonalFundFeatureAnalyzer:
         extra_income = total_income - wage_income
 
         # 计算消费支出（包含取现）
-        expense_mask = transactions["transaction_type"].isin(["消费"])  # 【修复】移除转账支出、取现、提现
+        expense_mask = transactions["transaction_type"].isin(["消费"]  # 【修复】移除转账支出、取现、提现，只保留真正的消费)
         # 交易数据是分，需要转换为万元
         total_expense = self.to_wan_yuan(transactions[expense_mask]["amount"].sum(), 'fen')
 
@@ -368,7 +368,9 @@ class PersonalFundFeatureAnalyzer:
         注意：所有金额统一使用"万元"单位
         """
         # 识别消费交易（扩展到包括日常转账、取现等，但排除投资、理财、还款等）
-        consume_mask = transactions["transaction_type"].isin(["消费"])  # 【修复】移除转账支出、取现、提现
+        consume_mask = transactions["transaction_type"].isin([
+            "消费", "转账支出", "取现", "提现"
+        ])
         # 排除投资、理财、还款等非消费性支出
         investment_mask = ~transactions["description"].str.contains(
             "投资|理财|基金|股票|债券|还贷|还款|贷款", na=False, case=False
@@ -459,19 +461,13 @@ class PersonalFundFeatureAnalyzer:
 
         # 【修复】识别并排除家庭内部转账
         if family_members:
-            family_mask = transfer_txns["counterparty"].isin(family_members)
+            family_mask = transfer_txns["counterparty"].isin(family_members) | 
+                          transfer_txns["counterparty"].str.contains("|".join(family_members), na=False, case=False)
             external_transfer_txns = transfer_txns[~family_mask]
-            family_internal_total = self.to_wan_yuan(
-                transfer_txns[family_mask]["amount"].sum(), 'fen'
-            )
+            family_internal_count = family_mask.sum()
         else:
             external_transfer_txns = transfer_txns
-            family_internal_total = 0
-
-        # 使用外部转账计算风险和统计
-        transfer_total = self.to_wan_yuan(external_transfer_txns["amount"].sum(), 'fen')
-        transfer_count = len(external_transfer_txns)
-
+            family_internal_count = 0
         transfer_txns = transactions[transfer_mask]
 
         # 计算转账数据（交易数据是分，需要转换为万元）

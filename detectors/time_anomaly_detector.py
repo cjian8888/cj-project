@@ -2,6 +2,7 @@
 时间异常检测器 - TimeAnomalyDetector
 检测异常时间的交易，如凌晨、节假日等的交易。
 """
+
 from datetime import date, datetime, time
 from typing import Dict, List, Any, Optional, Set, Tuple
 
@@ -11,7 +12,7 @@ from schemas.suspicion import SuspicionSeverity, SuspicionType
 
 class TimeAnomalyDetector(BaseDetector):
     """检测异常时间的交易活动。
-    
+
     该检测器分析交易发生的时间，识别在凌晨、深夜、节假日等
     非正常工作时间的交易，这类交易可能具有特殊目的或风险。
     """
@@ -28,9 +29,11 @@ class TimeAnomalyDetector(BaseDetector):
     def risk_level(self) -> str:
         return "中"
 
-    def detect(self, data: Dict[str, Any], config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def detect(
+        self, data: Dict[str, Any], config: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
         """执行时间异常检测。
-        
+
         Args:
             data: 包含交易数据的字典，必须包含 'transactions' 键
             config: 检测配置参数
@@ -39,48 +42,51 @@ class TimeAnomalyDetector(BaseDetector):
                 - holiday_threshold: 节假日大额交易阈值（默认50000）
                 - weekend_threshold: 周末大额交易阈值（默认50000）
                 - min_amount: 检测的最低金额（默认10000）
-                
+
         Returns:
             List[Dict]: 检测到的疑点列表
         """
         transactions = data.get("transactions", [])
         entity_name = data.get("entity_name", "未知实体")
-        
+
         if not transactions:
             return []
-        
+
         off_hours_start = config.get("off_hours_start", 22)
         off_hours_end = config.get("off_hours_end", 6)
         holiday_threshold = config.get("holiday_threshold", 50000)
         weekend_threshold = config.get("weekend_threshold", 50000)
         min_amount = config.get("min_amount", 10000)
         holidays = config.get("holidays", self._get_default_holidays())
-        
+
         parsed_transactions = self._parse_transactions(transactions)
-        
+
         off_hours_txs = []
         holiday_txs = []
         weekend_txs = []
-        
+
         for tx in parsed_transactions:
             abs_amount = abs(tx["amount"])
             if abs_amount < min_amount:
                 continue
-            
+
             if self._is_off_hours(tx["datetime"], off_hours_start, off_hours_end):
                 off_hours_txs.append(tx)
-            
-            if self._is_holiday(tx["date"], holidays) and abs_amount >= holiday_threshold:
+
+            if (
+                self._is_holiday(tx["date"], holidays)
+                and abs_amount >= holiday_threshold
+            ):
                 holiday_txs.append(tx)
-            
+
             if self._is_weekend(tx["date"]) and abs_amount >= weekend_threshold:
                 weekend_txs.append(tx)
-        
+
         results = []
         results.extend(self._create_off_hours_suspicions(off_hours_txs, entity_name))
         results.extend(self._create_holiday_suspicions(holiday_txs, entity_name))
         results.extend(self._create_weekend_suspicions(weekend_txs, entity_name))
-        
+
         return results
 
     def _parse_transactions(self, transactions: List[Dict]) -> List[Dict]:
@@ -90,21 +96,25 @@ class TimeAnomalyDetector(BaseDetector):
             try:
                 dt = self._parse_datetime(tx.get("tx_date"), tx.get("tx_time"))
                 if dt:
-                    parsed.append({
-                        "date": dt.date(),
-                        "datetime": dt,
-                        "amount": float(tx.get("amount", 0)),
-                        "tx_type": tx.get("tx_type", ""),
-                        "counterparty": tx.get("counterparty", ""),
-                        "account": tx.get("account", ""),
-                        "bank": tx.get("bank", ""),
-                        "raw_data": tx
-                    })
+                    parsed.append(
+                        {
+                            "date": dt.date(),
+                            "datetime": dt,
+                            "amount": float(tx.get("amount", 0)),
+                            "tx_type": tx.get("tx_type", ""),
+                            "counterparty": tx.get("counterparty", ""),
+                            "account": tx.get("account", ""),
+                            "bank": tx.get("bank", ""),
+                            "raw_data": tx,
+                        }
+                    )
             except (ValueError, TypeError):
                 continue
         return parsed
 
-    def _parse_datetime(self, date_value: Any, time_value: Any = None) -> Optional[datetime]:
+    def _parse_datetime(
+        self, date_value: Any, time_value: Any = None
+    ) -> Optional[datetime]:
         """解析日期和时间字段为 datetime 对象。"""
         if isinstance(date_value, datetime):
             return date_value
@@ -115,12 +125,7 @@ class TimeAnomalyDetector(BaseDetector):
                     return datetime.combine(date_value, t)
             return datetime.combine(date_value, time.min)
         if isinstance(date_value, str):
-            formats = [
-                "%Y-%m-%d %H:%M:%S",
-                "%Y/%m/%d %H:%M:%S",
-                "%Y-%m-%d",
-                "%Y/%m/%d"
-            ]
+            formats = ["%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d"]
             for fmt in formats:
                 try:
                     return datetime.strptime(date_value, fmt)
@@ -184,36 +189,38 @@ class TimeAnomalyDetector(BaseDetector):
         ]
 
     def _create_off_hours_suspicions(
-        self, 
-        transactions: List[Dict], 
-        entity_name: str
+        self, transactions: List[Dict], entity_name: str
     ) -> List[Dict[str, Any]]:
         """创建非工作时段交易疑点。"""
         if not transactions:
             return []
-        
+
         results = []
         suspicion_id = f"TA{datetime.now().strftime('%Y%m%d')}001"
-        
-        total_amount = sum(abs(tx["amount"]) for tx in transactions)
+
+        total_amount = sum(abs(tx.get("amount") or 0) for tx in transactions)
         tx_count = len(transactions)
-        
+
         related_tx_ids = [
             f"TX_{tx['raw_data'].get('tx_date', '')}_{tx['amount']}"
             for tx in transactions[:50]
         ]
-        
+
         sample_times = [tx["datetime"].strftime("%H:%M") for tx in transactions[:5]]
-        
+
         description = (
             f"发现非工作时段交易异常：在22:00-06:00时段发生 {tx_count} 笔交易，"
             f"涉及总金额 {total_amount:,.2f} 元。样本交易时间：{', '.join(sample_times)}。"
             f"非工作时段的大额交易可能具有特殊目的或风险。"
         )
-        
-        severity = SuspicionSeverity.HIGH.value if total_amount >= 500000 else SuspicionSeverity.MEDIUM.value
+
+        severity = (
+            SuspicionSeverity.HIGH.value
+            if total_amount >= 500000
+            else SuspicionSeverity.MEDIUM.value
+        )
         confidence = min(0.5 + tx_count * 0.05, 0.9)
-        
+
         suspicion = {
             "suspicion_id": suspicion_id,
             "suspicion_type": SuspicionType.UNUSUAL_TIME.value,
@@ -225,40 +232,42 @@ class TimeAnomalyDetector(BaseDetector):
             "entity_name": entity_name,
             "confidence": confidence,
             "evidence": f"非工作时段交易: {tx_count}笔, 总金额: {total_amount:,.2f}元, 时段: 22:00-06:00",
-            "status": "待核实"
+            "status": "待核实",
         }
-        
+
         results.append(suspicion)
         return results
 
     def _create_holiday_suspicions(
-        self, 
-        transactions: List[Dict], 
-        entity_name: str
+        self, transactions: List[Dict], entity_name: str
     ) -> List[Dict[str, Any]]:
         """创建节假日交易疑点。"""
         if not transactions:
             return []
-        
+
         results = []
         suspicion_id = f"TA{datetime.now().strftime('%Y%m%d')}002"
-        
-        total_amount = sum(abs(tx["amount"]) for tx in transactions)
+
+        total_amount = sum(abs(tx.get("amount") or 0) for tx in transactions)
         tx_count = len(transactions)
-        
+
         related_tx_ids = [
             f"TX_{tx['raw_data'].get('tx_date', '')}_{tx['amount']}"
             for tx in transactions[:50]
         ]
-        
+
         description = (
             f"发现节假日大额交易异常：在法定节假日发生 {tx_count} 笔大额交易，"
             f"涉及总金额 {total_amount:,.2f} 元。节假日期间的大额资金往来需要关注。"
         )
-        
-        severity = SuspicionSeverity.HIGH.value if total_amount >= 1000000 else SuspicionSeverity.MEDIUM.value
+
+        severity = (
+            SuspicionSeverity.HIGH.value
+            if total_amount >= 1000000
+            else SuspicionSeverity.MEDIUM.value
+        )
         confidence = min(0.6 + tx_count * 0.03, 0.85)
-        
+
         suspicion = {
             "suspicion_id": suspicion_id,
             "suspicion_type": SuspicionType.UNUSUAL_TIME.value,
@@ -270,40 +279,42 @@ class TimeAnomalyDetector(BaseDetector):
             "entity_name": entity_name,
             "confidence": confidence,
             "evidence": f"节假日大额交易: {tx_count}笔, 总金额: {total_amount:,.2f}元",
-            "status": "待核实"
+            "status": "待核实",
         }
-        
+
         results.append(suspicion)
         return results
 
     def _create_weekend_suspicions(
-        self, 
-        transactions: List[Dict], 
-        entity_name: str
+        self, transactions: List[Dict], entity_name: str
     ) -> List[Dict[str, Any]]:
         """创建周末交易疑点。"""
         if not transactions:
             return []
-        
+
         results = []
         suspicion_id = f"TA{datetime.now().strftime('%Y%m%d')}003"
-        
-        total_amount = sum(abs(tx["amount"]) for tx in transactions)
+
+        total_amount = sum(abs(tx.get("amount") or 0) for tx in transactions)
         tx_count = len(transactions)
-        
+
         related_tx_ids = [
             f"TX_{tx['raw_data'].get('tx_date', '')}_{tx['amount']}"
             for tx in transactions[:50]
         ]
-        
+
         description = (
             f"发现周末大额交易异常：在周末发生 {tx_count} 笔大额交易，"
             f"涉及总金额 {total_amount:,.2f} 元。周末的大额资金往来值得关注。"
         )
-        
-        severity = SuspicionSeverity.MEDIUM.value if total_amount >= 500000 else SuspicionSeverity.LOW.value
+
+        severity = (
+            SuspicionSeverity.MEDIUM.value
+            if total_amount >= 500000
+            else SuspicionSeverity.LOW.value
+        )
         confidence = min(0.55 + tx_count * 0.02, 0.8)
-        
+
         suspicion = {
             "suspicion_id": suspicion_id,
             "suspicion_type": SuspicionType.UNUSUAL_TIME.value,
@@ -315,8 +326,8 @@ class TimeAnomalyDetector(BaseDetector):
             "entity_name": entity_name,
             "confidence": confidence,
             "evidence": f"周末大额交易: {tx_count}笔, 总金额: {total_amount:,.2f}元",
-            "status": "待核实"
+            "status": "待核实",
         }
-        
+
         results.append(suspicion)
         return results

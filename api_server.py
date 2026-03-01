@@ -110,6 +110,10 @@ if sys.platform == "win32":
 
 
 # ==================== 全局状态 ====================
+# 【P1修复】添加缓存并发锁
+_cache_lock = threading.Lock()
+
+
 class AnalysisState:
     def __init__(self):
         self.status = "idle"
@@ -236,15 +240,18 @@ class AnalysisConfig(BaseModel):
 
 class DirectorySelectRequest(BaseModel):
     """目录选择请求"""
+
     type: str  # "input" 或 "output"
     current_path: Optional[str] = None
 
 
 class DirectorySelectResponse(BaseModel):
     """目录选择响应"""
+
     success: bool
     path: Optional[str] = None
     error: Optional[str] = None
+
 
 # ==================== 辅助函数 ====================
 def serialize_for_json(obj):
@@ -280,26 +287,26 @@ def serialize_for_json(obj):
     except (ValueError, TypeError):
         # pd.isna() raises ValueError for arrays, TypeError for some objects
         pass
-    
+
     # Final check: if it's still a numpy type, convert it
-    if hasattr(obj, 'dtype') and hasattr(obj, 'item'):
+    if hasattr(obj, "dtype") and hasattr(obj, "item"):
         # This handles any remaining numpy scalar types
         return obj.item()
-    
+
     # Handle arbitrary Python objects (like ClueAggregator)
     # Check if it has a to_dict method
-    if hasattr(obj, 'to_dict') and callable(getattr(obj, 'to_dict')):
+    if hasattr(obj, "to_dict") and callable(getattr(obj, "to_dict")):
         return serialize_for_json(obj.to_dict())
-    
+
     # Check if it has __dict__ attribute (custom class instance)
-    if hasattr(obj, '__dict__') and not isinstance(obj, type):
+    if hasattr(obj, "__dict__") and not isinstance(obj, type):
         # Convert to dict, excluding private attributes and methods
         obj_dict = {}
         for key, value in obj.__dict__.items():
-            if not key.startswith('_') and not callable(value):
+            if not key.startswith("_") and not callable(value):
                 obj_dict[key] = serialize_for_json(value)
         return obj_dict
-    
+
     return obj
 
 
@@ -368,7 +375,7 @@ def serialize_profiles(profiles: Dict) -> Dict:
             # 问题背景：之前的简化版缺失 yearly_salary 等关键字段，导致报告生成器
             # 必须同时维护 profiles.json 和 profiles_full.json 两个文件，造成混淆
             # 解决方案：简化版保留所有原始数据，只是添加前端需要的扁平化字段
-            
+
             # 构建前端期望的扁平化结构（同时保留完整原始数据）
             frontend_profile = {
                 # 基础标识
@@ -394,7 +401,9 @@ def serialize_profiles(profiles: Dict) -> Dict:
                 "wealth_products": profile_dict.get("wealth_products", []),
                 "securities": profile_dict.get("securities", []),
                 "insurance": profile_dict.get("insurance", []),
-                "bank_accounts_official": profile_dict.get("bank_accounts_official", []),
+                "bank_accounts_official": profile_dict.get(
+                    "bank_accounts_official", []
+                ),
                 # 【2026-02-12 新增】保留完整的原始嵌套数据，供报告生成使用
                 # 这样报告生成器只需要使用 profiles.json，无需再加载 profiles_full.json
                 "entity_name": profile_dict.get("entity_name", name),
@@ -692,27 +701,26 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         output_dir = analysis_config.outputDirectory or os.path.join(
             os.path.dirname(data_dir), "output"
         )
-        
+
         # 转换为绝对路径
         data_dir = os.path.abspath(os.path.expanduser(data_dir))
         output_dir = os.path.abspath(os.path.expanduser(output_dir))
-        
+
         # 验证输入目录存在
         if not os.path.exists(data_dir):
             error_msg = f"输入目录不存在: {data_dir}"
             logger.error(error_msg)
             analysis_state.update(status="failed", phase=error_msg)
             return
-        
+
         if not os.path.isdir(data_dir):
             error_msg = f"输入路径不是目录: {data_dir}"
             logger.error(error_msg)
             analysis_state.update(status="failed", phase=error_msg)
             return
-        
+
         logger.info(f"输入目录 (绝对路径): {data_dir}")
         logger.info(f"输出目录 (绝对路径): {output_dir}")
-
 
         # 更新全局配置
         global _current_config
@@ -872,6 +880,11 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         analysis_state.update(progress=40, phase="提取外部数据源 (P0/P1/P2)...")
         broadcast_log("INFO", "▶ Phase 4: 提取外部数据源 (18个提取器)...")
         logger.info("🔄 [重构] 开始提取全部外部数据源 (18个提取器)...")
+
+        # 验证数据目录存在
+        if not os.path.exists(data_dir):
+            logger.error(f"数据目录不存在: {data_dir}")
+            raise ValueError(f"数据目录不存在: {data_dir}")
 
         phase4_start = time.time()
 
@@ -1853,9 +1866,9 @@ async def get_results():
     """获取分析结果（优先从内存读取，fallback到缓存文件）"""
     from fastapi.responses import Response
     import json
-    
+
     logger = logging.getLogger(__name__)
-    
+
     try:
         # 如果内存中有结果，直接返回
         if analysis_state.status == "completed" and analysis_state.results:
@@ -1864,7 +1877,7 @@ async def get_results():
             results_data = serialize_for_json(results_data)
             response_body = json.dumps(
                 {"message": "分析结果获取成功", "data": results_data},
-                ensure_ascii=False
+                ensure_ascii=False,
             )
             return Response(content=response_body, media_type="application/json")
 
@@ -1882,7 +1895,7 @@ async def get_results():
             results_serialized = serialize_for_json(results_serialized)
             response_body = json.dumps(
                 {"message": "分析结果获取成功（来自缓存）", "data": results_serialized},
-                ensure_ascii=False
+                ensure_ascii=False,
             )
             return Response(content=response_body, media_type="application/json")
         else:
@@ -1891,9 +1904,7 @@ async def get_results():
         raise
     except Exception as e:
         logging.getLogger(__name__).exception(f"获取结果失败: {e}")
-        raise HTTPException(
-            status_code=500, detail=f"获取结果失败: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"获取结果失败: {str(e)}")
 
 
 @app.get("/api/reports")
@@ -2062,12 +2073,11 @@ async def invalidate_cache(cache_name: Optional[str] = None):
 # ==================== 路径管理 API ====================
 
 
-
 @app.get("/api/default-paths")
 async def get_default_paths():
     """
     获取默认的 data 和 output 目录的绝对路径
-    
+
     用于前端初始化时获取默认路径
     """
     try:
@@ -2075,18 +2085,18 @@ async def get_default_paths():
         default_input = str(DATA_DIR)
         default_output = str(OUTPUT_DIR)
         project_root = str(APP_ROOT)
-        
+
         # 确保目录存在
         os.makedirs(default_input, exist_ok=True)
         os.makedirs(default_output, exist_ok=True)
-        
+
         return {
             "success": True,
             "data": {
                 "inputDirectory": default_input,
                 "outputDirectory": default_output,
-                "projectRoot": project_root
-            }
+                "projectRoot": project_root,
+            },
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -2096,33 +2106,34 @@ async def get_default_paths():
 async def select_directory(request: DirectorySelectRequest):
     """
     弹出文件选择对话框，让用户选择目录
-    
+
     macOS: 使用 AppleScript 弹出访达
     Windows: 使用 tkinter
     """
     import platform
     import subprocess
-    
+
     system = platform.system()
-    
+
     try:
         if system == "Darwin":  # macOS
             # 使用 AppleScript 弹出访达选择文件夹
-            initial_dir = request.current_path if request.current_path and os.path.exists(request.current_path) else os.path.expanduser("~")
-            
+            initial_dir = (
+                request.current_path
+                if request.current_path and os.path.exists(request.current_path)
+                else os.path.expanduser("~")
+            )
+
             # AppleScript 代码
             script = f'''
-            set chosenFolder to choose folder with prompt "选择{('输入目录 (data)' if request.type == 'input' else '输出目录 (output)')}" default location (POSIX file "{initial_dir}")
+            set chosenFolder to choose folder with prompt "选择{("输入目录 (data)" if request.type == "input" else "输出目录 (output)")}" default location (POSIX file "{initial_dir}")
             return POSIX path of chosenFolder
             '''
-            
+
             result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True,
-                text=True,
-                timeout=60
+                ["osascript", "-e", script], capture_output=True, text=True, timeout=60
             )
-            
+
             if result.returncode == 0:
                 selected_path = result.stdout.strip()
                 if selected_path:
@@ -2130,59 +2141,68 @@ async def select_directory(request: DirectorySelectRequest):
                 else:
                     return {"success": False, "error": "用户取消了选择"}
             else:
-                error_msg = result.stderr.strip() if result.stderr else "AppleScript 执行失败"
+                error_msg = (
+                    result.stderr.strip() if result.stderr else "AppleScript 执行失败"
+                )
                 return {"success": False, "error": error_msg}
-                
+
         elif system == "Windows":
             # Windows 使用 tkinter
             import threading
             import queue
-            
+
             result_queue = queue.Queue()
-            
+
             def run_dialog():
                 try:
                     import tkinter as tk
                     from tkinter import filedialog
-                    
+
                     root = tk.Tk()
                     root.withdraw()
-                    root.attributes('-topmost', True)
-                    
-                    initial_dir = request.current_path if request.current_path and os.path.exists(request.current_path) else os.getcwd()
-                    
-                    selected_path = filedialog.askdirectory(
-                        title="选择" + ("输入目录 (data)" if request.type == "input" else "输出目录 (output)"),
-                        initialdir=initial_dir
+                    root.attributes("-topmost", True)
+
+                    initial_dir = (
+                        request.current_path
+                        if request.current_path and os.path.exists(request.current_path)
+                        else os.getcwd()
                     )
-                    
+
+                    selected_path = filedialog.askdirectory(
+                        title="选择"
+                        + (
+                            "输入目录 (data)"
+                            if request.type == "input"
+                            else "输出目录 (output)"
+                        ),
+                        initialdir=initial_dir,
+                    )
+
                     root.destroy()
-                    
+
                     if selected_path:
                         result_queue.put({"success": True, "path": selected_path})
                     else:
                         result_queue.put({"success": False, "error": "用户取消了选择"})
-                        
+
                 except Exception as e:
                     result_queue.put({"success": False, "error": str(e)})
-            
+
             dialog_thread = threading.Thread(target=run_dialog)
             dialog_thread.start()
             dialog_thread.join(timeout=60)
-            
+
             if dialog_thread.is_alive():
                 return {"success": False, "error": "文件选择超时"}
-            
+
             return result_queue.get()
         else:
             return {"success": False, "error": f"不支持的操作系统: {system}"}
-            
+
     except subprocess.TimeoutExpired:
         return {"success": False, "error": "文件选择超时"}
     except Exception as e:
         return {"success": False, "error": str(e)}
-
-
 
 
 @app.get("/api/primary-targets")
@@ -2196,7 +2216,9 @@ async def get_primary_targets_config():
     logger.info("[归集配置] 获取配置")
 
     try:
-        service = PrimaryTargetsService(data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR))
+        service = PrimaryTargetsService(
+            data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR)
+        )
         config, msg, is_new = service.get_or_create_config()
 
         if config is None:
@@ -2230,7 +2252,9 @@ async def get_primary_targets_entities():
     logger.info("[归集配置] 获取实体列表")
 
     try:
-        service = PrimaryTargetsService(data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR))
+        service = PrimaryTargetsService(
+            data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR)
+        )
         result = service.get_entities_with_data_status()
 
         logger.info(
@@ -2267,7 +2291,9 @@ async def save_primary_targets_config(request: Request):
         config = PrimaryTargetsConfig.from_dict(config_dict)
 
         # 保存配置
-        service = PrimaryTargetsService(data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR))
+        service = PrimaryTargetsService(
+            data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR)
+        )
         success, msg = service.save_config(config)
 
         if success:
@@ -2293,7 +2319,9 @@ async def generate_default_primary_targets():
     logger.info("[归集配置] 重新生成默认配置")
 
     try:
-        service = PrimaryTargetsService(data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR))
+        service = PrimaryTargetsService(
+            data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR)
+        )
         config, msg = service.generate_default_config()
 
         if config is None:
@@ -2396,22 +2424,49 @@ async def preview_report_file(filename: str):
     logger = logging.getLogger(__name__)
     logger.info(f"[报告预览] 请求预览: {filename}")
 
-    # 安全检查：防止路径遍历攻击
-    # 1. 规范化路径（去除 .. 等）
-    # 2. 确保最终路径在允许的目录内
+    # 【P1修复】路径遍历安全增强
+    # 1. 检查空文件名
+    if not filename or not filename.strip():
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "error": "文件名不能为空"},
+        )
+
+    # 2. 检查文件名长度
+    if len(filename) > 255:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "error": "文件名过长"},
+        )
+
+    # 3. 检查非法字符
+    invalid_chars = ["<", ">", ":", '"', "|", "?", "*", "\x00"]
+    if any(char in filename for char in invalid_chars):
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "error": "文件名包含非法字符"},
+        )
+
+    # 4. 规范化路径（去除 .. 等）
     normalized_path = os.path.normpath(filename)
-    
-    # 检查是否包含路径遍历攻击（规范化后仍包含..）
-    if ".." in normalized_path or normalized_path.startswith("/") or normalized_path.startswith("\\"):
+
+    # 5. 检查是否包含路径遍历攻击（规范化后仍包含..）
+    if (
+        ".." in normalized_path
+        or normalized_path.startswith("/")
+        or normalized_path.startswith("\\")
+    ):
         return JSONResponse(
             status_code=400,
             content={"success": False, "error": "非法文件路径"},
         )
-    
+
     # 构建完整路径
     base_dir = os.path.abspath(os.path.join(str(OUTPUT_DIR), "analysis_results"))
-    filepath = os.path.abspath(os.path.join(str(OUTPUT_DIR), "analysis_results", normalized_path))
-    
+    filepath = os.path.abspath(
+        os.path.join(str(OUTPUT_DIR), "analysis_results", normalized_path)
+    )
+
     # 确保路径在允许的目录内
     if not filepath.startswith(base_dir):
         return JSONResponse(
@@ -2436,7 +2491,7 @@ async def preview_report_file(filename: str):
                 content = f.read()
             return {
                 "success": True,
-                "filename": safe_filename,
+                "filename": filename,
                 "type": "text",
                 "content": content,
             }
@@ -2480,18 +2535,24 @@ async def download_report_file(filename: str):
 
     # 安全检查：防止路径遍历攻击
     normalized_path = os.path.normpath(filename)
-    
+
     # 检查是否包含路径遍历攻击
-    if ".." in normalized_path or normalized_path.startswith("/") or normalized_path.startswith("\\"):
+    if (
+        ".." in normalized_path
+        or normalized_path.startswith("/")
+        or normalized_path.startswith("\\")
+    ):
         return JSONResponse(
             status_code=400,
             content={"success": False, "error": "非法文件路径"},
         )
-    
+
     # 构建完整路径
     base_dir = os.path.abspath(os.path.join(str(OUTPUT_DIR), "analysis_results"))
-    filepath = os.path.abspath(os.path.join(str(OUTPUT_DIR), "analysis_results", normalized_path))
-    
+    filepath = os.path.abspath(
+        os.path.join(str(OUTPUT_DIR), "analysis_results", normalized_path)
+    )
+
     # 确保路径在允许的目录内
     if not filepath.startswith(base_dir):
         return JSONResponse(
@@ -2549,7 +2610,9 @@ async def generate_investigation_report_with_config(
 
     try:
         # 1. 加载归集配置服务
-        service = PrimaryTargetsService(data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR))
+        service = PrimaryTargetsService(
+            data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR)
+        )
 
         # 2. 获取或创建归集配置
         config, msg, is_new = service.get_or_create_config()
@@ -2586,17 +2649,23 @@ async def generate_investigation_report_with_config(
         cache_dir = os.path.join(str(OUTPUT_DIR), "analysis_cache")
         with open(os.path.join(cache_dir, "profiles.json"), "r", encoding="utf-8") as f:
             profiles = json.load(f)
-        
+
         # 【修复】加载外部数据（房产、车辆）
         external_data_cache = {}
         try:
-            with open(os.path.join(cache_dir, "precisePropertyData.json"), "r", encoding="utf-8") as f:
+            with open(
+                os.path.join(cache_dir, "precisePropertyData.json"),
+                "r",
+                encoding="utf-8",
+            ) as f:
                 external_data_cache["property"] = json.load(f)
         except Exception:
             external_data_cache["property"] = {}
-        
+
         try:
-            with open(os.path.join(cache_dir, "vehicleData.json"), "r", encoding="utf-8") as f:
+            with open(
+                os.path.join(cache_dir, "vehicleData.json"), "r", encoding="utf-8"
+            ) as f:
                 external_data_cache["vehicle"] = json.load(f)
         except Exception:
             external_data_cache["vehicle"] = {}
@@ -2613,7 +2682,7 @@ async def generate_investigation_report_with_config(
                 # 【修复】聚合房产/车辆数据
                 all_properties = []
                 all_vehicles = []
-                
+
                 for member in members:
                     # 从 profiles 获取
                     profile = profiles.get(member, {})
@@ -2623,7 +2692,7 @@ async def generate_investigation_report_with_config(
                         all_properties.extend(profile["properties_precise"])
                     if profile.get("vehicles"):
                         all_vehicles.extend(profile["vehicles"])
-                    
+
                     # 从外部缓存获取（通过身份证号映射）
                     # 需要找到成员对应的身份证号
                     for pid, props in external_data_cache.get("property", {}).items():
@@ -2632,7 +2701,7 @@ async def generate_investigation_report_with_config(
                             owner_name = props[0].get("owner_name", "")
                             if owner_name == member:
                                 all_properties.extend(props)
-                    
+
                     for pid, vehicles in external_data_cache.get("vehicle", {}).items():
                         if vehicles and len(vehicles) > 0:
                             # 检查车主姓名是否匹配
@@ -2643,35 +2712,40 @@ async def generate_investigation_report_with_config(
                 # 重新计算家庭财务汇总
                 try:
                     unit_summary = calculate_family_summary(
-                        profiles, members,
+                        profiles,
+                        members,
                         properties=all_properties,
-                        vehicles=all_vehicles
+                        vehicles=all_vehicles,
                     )
                     unit_summary["householder"] = householder
                     updated_family_summaries[householder] = unit_summary
-                    logger.info(f"[家庭汇总] 已重新计算 {householder} 家庭汇总: 房产{len(all_properties)}套, 车辆{len(all_vehicles)}辆")
+                    logger.info(
+                        f"[家庭汇总] 已重新计算 {householder} 家庭汇总: 房产{len(all_properties)}套, 车辆{len(all_vehicles)}辆"
+                    )
                 except Exception as e:
                     logger.warning(f"计算 {householder} 家庭汇总失败: {e}")
 
         # 4.3. 更新 derived_data.json
+        # 【P1修复】使用缓存并发锁保护文件写入
         if updated_family_summaries:
-            with open(
-                os.path.join(cache_dir, "derived_data.json"), "r+", encoding="utf-8"
-            ) as f:
-                derived_data = json.load(f)
+            with _cache_lock:
+                with open(
+                    os.path.join(cache_dir, "derived_data.json"), "r+", encoding="utf-8"
+                ) as f:
+                    derived_data = json.load(f)
 
-                # 保留原有数据
-                derived_data["all_family_summaries"] = updated_family_summaries
+                    # 保留原有数据
+                    derived_data["all_family_summaries"] = updated_family_summaries
 
-                # 更新第一个家庭的summary（用于旧版兼容）
-                first_householder = list(updated_family_summaries.keys())[0]
-                derived_data["family_summary"] = updated_family_summaries[
-                    first_householder
-                ]
+                    # 更新第一个家庭的summary（用于旧版兼容）
+                    first_householder = list(updated_family_summaries.keys())[0]
+                    derived_data["family_summary"] = updated_family_summaries[
+                        first_householder
+                    ]
 
-                f.seek(0)
-                f.truncate()  # 截断文件，避免旧数据残留
-                json.dump(derived_data, f, ensure_ascii=False, indent=2)
+                    f.seek(0)
+                    f.truncate()  # 截断文件，避免旧数据残留
+                    json.dump(derived_data, f, ensure_ascii=False, indent=2)
 
             logger.info(f"[家庭汇总] 已更新: {len(updated_family_summaries)} 个家庭")
 
@@ -2748,7 +2822,9 @@ async def generate_investigation_report_v5(
 
     try:
         # 1. 加载归集配置服务
-        service = PrimaryTargetsService(data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR))
+        service = PrimaryTargetsService(
+            data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR)
+        )
 
         # 2. 获取或创建归集配置
         config, msg, is_new = service.get_or_create_config()
@@ -2834,7 +2910,7 @@ async def generate_investigation_report_html(
         # 使用 paths 模块获取绝对路径
         data_dir = str(DATA_DIR)
         output_dir = str(OUTPUT_DIR)
-        
+
         # 1. 加载归集配置服务
         service = PrimaryTargetsService(data_dir=data_dir, output_dir=output_dir)
 
@@ -2847,7 +2923,9 @@ async def generate_investigation_report_html(
                 content={"success": False, "error": f"归集配置加载失败: {msg}"},
             )
 
-        logger.info(f"[HTML报告生成] 配置加载成功: {len(config.analysis_units)} 个分析单元")
+        logger.info(
+            f"[HTML报告生成] 配置加载成功: {len(config.analysis_units)} 个分析单元"
+        )
 
         # 3. 加载报告构建器
         builder = load_investigation_report_builder(output_dir)
@@ -2950,7 +3028,9 @@ async def regenerate_txt_report():
 
     try:
         # 1. 加载归集配置
-        service = PrimaryTargetsService(data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR))
+        service = PrimaryTargetsService(
+            data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR)
+        )
         config, msg = service.load_config()
 
         if config is None:
@@ -3011,8 +3091,6 @@ class LegacyReportGenerateRequest(BaseModel):
     thresholds: Optional[Dict[str, float]] = None
     primary_person: Optional[str] = None
     case_background: Optional[str] = None
-
-
 
 
 class OpenFolderRequest(BaseModel):

@@ -1,0 +1,772 @@
+[
+  {
+    "file": "financial_profiler.py",
+    "line": 763,
+    "category": "可读性",
+    "description": "函数过长 (199 行)，建议拆分为多个小函数",
+    "suggestion": "将 extract_bank_accounts 函数拆分为多个辅助函数：提取银行卡号、验证账户、构建账户对象等"
+  },
+  {
+    "file": "financial_profiler.py",
+    "line": 763,
+    "category": "可读性",
+    "description": "函数 'extract_bank_accounts' 圈复杂度过高 (43)",
+    "suggestion": "简化条件逻辑，使用卫语句或提取复杂逻辑到辅助函数"
+  },
+  {
+    "file": "financial_profiler.py",
+    "line": 965,
+    "category": "可读性",
+    "description": "函数过长 (183 行)，建议拆分为多个小函数",
+    "suggestion": "将 calculate_yearly_salary 函数拆分为计算月度工资、统计年薪、处理异常值等辅助函数"
+  },
+  {
+    "file": "financial_profiler.py",
+    "line": 638,
+    "category": "可读性",
+    "description": "函数过长 (119 行)，建议拆分为多个小函数",
+    "suggestion": "将 calculate_income_structure 拆分为收入分类、支出分类、统计计算等子函数"
+  },
+  {
+    "file": "financial_profiler.py",
+    "line": 456,
+    "category": "可读性",
+    "description": "函数过长 (150 行)，建议拆分为多个小函数",
+    "suggestion": "将 _identify_salary_by_frequency 拆分为频率检测、金额验证、分类标记等步骤"
+  },
+  {
+    "file": "financial_profiler.py",
+    "line": 186,
+    "category": "可读性",
+    "description": "函数过长 (87 行)，建议拆分为多个小函数",
+    "suggestion": "将 _learn_salary_payers 拆分为数据筛选、候选单位评估、白名单更新等逻辑"
+  },
+  {
+    "file": "financial_profiler.py",
+    "line": 18,
+    "category": "类型提示缺失",
+    "description": "函数 '_find_expenses_near_date' 参数 'target_date' 缺少类型注解",
+    "suggestion": "添加参数类型，如 target_date: datetime"
+  },
+  {
+    "file": "financial_profiler.py",
+    "line": 59,
+    "category": "文档缺失",
+    "description": "函数 '_find_expenses_near_date_from_history' 缺少docstring文档",
+    "suggestion": "添加描述函数功能、参数、返回值的docstring"
+  },
+  {
+    "file": "financial_profiler.py",
+    "line": 18,
+    "category": "可读性",
+    "description": "函数 '_find_expenses_near_date' 圈复杂度过高 (11)",
+    "suggestion": "简化条件逻辑，使用卫语句或提取复杂逻辑到辅助函数"
+  },
+  {
+    "file": "config_loader.py",
+    "line": 70,
+    "category": "可读性",
+    "description": "函数过长 (324 行)，建议拆分为多个小函数",
+    "suggestion": "将 validate_risk_thresholds 拆分为多个验证规则函数，每个规则一个函数"
+  },
+  {
+    "file": "config_loader.py",
+    "line": 19,
+    "category": "类型提示缺失",
+    "description": "函数 '_get_logger' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> logging.Logger"
+  },
+  {
+    "file": "config_loader.py",
+    "line": 419,
+    "category": "类型提示缺失",
+    "description": "函数 'update_config_value' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> bool"
+  },
+  {
+    "file": "config_loader.py",
+    "line": 447,
+    "category": "类型提示缺失",
+    "description": "函数 'save_config' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> bool"
+  },
+  {
+    "file": "flow_visualizer.py",
+    "line": 76,
+    "category": "可读性",
+    "description": "函数过长 (178 行)，建议拆分为多个小函数",
+    "suggestion": "将 _generate_mermaid_flow 拆分为节点生成、边生成、样式配置等子函数"
+  },
+  {
+    "file": "flow_visualizer.py",
+    "line": 76,
+    "category": "可读性",
+    "description": "函数 '_generate_mermaid_flow' 圈复杂度过高 (15)",
+    "suggestion": "简化条件逻辑，使用卫语句或提取复杂逻辑到辅助函数"
+  },
+  {
+    "file": "flow_visualizer.py",
+    "line": 257,
+    "category": "可读性",
+    "description": "函数过长 (101 行)，建议拆分为多个小函数",
+    "suggestion": "将 render_flow_html 拆分为模板准备、数据注入、HTML渲染等步骤"
+  },
+  {
+    "file": "flow_visualizer.py",
+    "line": 361,
+    "category": "可读性",
+    "description": "函数过长 (121 行)，建议拆分为多个小函数",
+    "suggestion": "将 _prepare_graph_data 拆分为节点构建、边构建、采样逻辑等辅助函数"
+  },
+  {
+    "file": "flow_visualizer.py",
+    "line": 361,
+    "category": "可读性",
+    "description": "函数 '_prepare_graph_data' 圈复杂度过高 (21)",
+    "suggestion": "简化条件逻辑，使用卫语句或提取复杂逻辑到辅助函数"
+  },
+  {
+    "file": "flow_visualizer.py",
+    "line": 534,
+    "category": "可读性",
+    "description": "函数 '_calculate_flow_stats' 圈复杂度过高 (16)",
+    "suggestion": "简化条件逻辑，使用卫语句或提取复杂逻辑到辅助函数"
+  },
+  {
+    "file": "flow_visualizer.py",
+    "line": 380,
+    "category": "文档缺失",
+    "description": "函数 'is_noise_node' 缺少docstring文档",
+    "suggestion": "添加描述函数功能、参数、返回值的docstring"
+  },
+  {
+    "file": "flow_visualizer.py",
+    "line": 380,
+    "category": "类型提示缺失",
+    "description": "函数 'is_noise_node' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> bool"
+  },
+  {
+    "file": "flow_visualizer.py",
+    "line": 380,
+    "category": "类型提示缺失",
+    "description": "函数 'is_noise_node' 参数 'name' 缺少类型注解",
+    "suggestion": "添加参数类型，如 name: str"
+  },
+  {
+    "file": "flow_visualizer.py",
+    "line": 549,
+    "category": "类型提示缺失",
+    "description": "函数 'get_column_value' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> Any"
+  },
+  {
+    "file": "flow_visualizer.py",
+    "line": 549,
+    "category": "类型提示缺失",
+    "description": "函数 'get_column_value' 参数 'row' 缺少类型注解",
+    "suggestion": "添加参数类型，如 row: pd.Series"
+  },
+  {
+    "file": "flow_visualizer.py",
+    "line": 556,
+    "category": "类型提示缺失",
+    "description": "函数 'has_column' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> bool"
+  },
+  {
+    "file": "flow_visualizer.py",
+    "line": 556,
+    "category": "类型提示缺失",
+    "description": "函数 'has_column' 参数 'df' 缺少类型注解",
+    "suggestion": "添加参数类型，如 df: pd.DataFrame"
+  },
+  {
+    "file": "ml_analyzer.py",
+    "line": 363,
+    "category": "可读性",
+    "description": "函数过长 (139 行)，建议拆分为多个小函数",
+    "suggestion": "将 _feature_engineering 拆分为特征提取、特征计算、特征组合等子函数"
+  },
+  {
+    "file": "ml_analyzer.py",
+    "line": 363,
+    "category": "可读性",
+    "description": "函数 '_feature_engineering' 圈复杂度过高 (26)",
+    "suggestion": "简化条件逻辑，使用卫语句或提取复杂逻辑到辅助函数"
+  },
+  {
+    "file": "ml_analyzer.py",
+    "line": 505,
+    "category": "可读性",
+    "description": "函数 '_build_graph_transactions' 圈复杂度过高 (15)",
+    "suggestion": "简化条件逻辑，使用卫语句或提取复杂逻辑到辅助函数"
+  },
+  {
+    "file": "ml_analyzer.py",
+    "line": 571,
+    "category": "可读性",
+    "description": "函数 '_detect_statistical_anomalies' 圈复杂度过高 (12)",
+    "suggestion": "简化条件逻辑，使用卫语句或提取复杂逻辑到辅助函数"
+  },
+  {
+    "file": "ml_analyzer.py",
+    "line": 719,
+    "category": "可读性",
+    "description": "函数过长 (87 行)，建议拆分为多个小函数",
+    "suggestion": "将 detect_ml_anomalies 拆分为数据准备、模型推理、结果解析等步骤"
+  },
+  {
+    "file": "ml_analyzer.py",
+    "line": 113,
+    "category": "类型提示缺失",
+    "description": "函数 'build_graph' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> Dict[str, Any]"
+  },
+  {
+    "file": "ml_analyzer.py",
+    "line": 154,
+    "category": "类型提示缺失",
+    "description": "函数 '_tarjan_scc' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> List[List[int]]"
+  },
+  {
+    "file": "ml_analyzer.py",
+    "line": 274,
+    "category": "文档缺失",
+    "description": "函数 '__init__' 缺少docstring文档",
+    "suggestion": "添加描述类初始化参数和功能的docstring"
+  },
+  {
+    "file": "ml_analyzer.py",
+    "line": 277,
+    "category": "可读性",
+    "description": "函数过长 (83 行)，建议拆分为多个小函数",
+    "suggestion": "将 fit_predict 拆分为模型训练、预测、结果格式化等子函数"
+  },
+  {
+    "file": "ml_analyzer.py",
+    "line": 277,
+    "category": "可读性",
+    "description": "函数 'fit_predict' 圈复杂度过高 (14)",
+    "suggestion": "简化条件逻辑，使用卫语句或提取复杂逻辑到辅助函数"
+  },
+  {
+    "file": "ml_analyzer.py",
+    "line": 385,
+    "category": "文档缺失",
+    "description": "函数 'get_val' 缺少docstring文档",
+    "suggestion": "添加描述函数功能、参数、返回值的docstring"
+  },
+  {
+    "file": "ml_analyzer.py",
+    "line": 385,
+    "category": "类型提示缺失",
+    "description": "函数 'get_val' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> Any"
+  },
+  {
+    "file": "ml_analyzer.py",
+    "line": 385,
+    "category": "类型提示缺失",
+    "description": "函数 'get_val' 参数 'row' 缺少类型注解",
+    "suggestion": "添加参数类型，如 row: pd.Series"
+  },
+  {
+    "file": "ml_analyzer.py",
+    "line": 523,
+    "category": "文档缺失",
+    "description": "函数 'get_row_val' 缺少docstring文档",
+    "suggestion": "添加描述函数功能、参数、返回值的docstring"
+  },
+  {
+    "file": "ml_analyzer.py",
+    "line": 523,
+    "category": "类型提示缺失",
+    "description": "函数 'get_row_val' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> Any"
+  },
+  {
+    "file": "ml_analyzer.py",
+    "line": 523,
+    "category": "类型提示缺失",
+    "description": "函数 'get_row_val' 参数 'row' 缺少类型注解",
+    "suggestion": "添加参数类型，如 row: pd.Series"
+  },
+  {
+    "file": "ml_analyzer.py",
+    "line": 166,
+    "category": "文档缺失",
+    "description": "函数 'dfs' 缺少docstring文档",
+    "suggestion": "添加描述函数功能、参数、返回值的docstring"
+  },
+  {
+    "file": "ml_analyzer.py",
+    "line": 166,
+    "category": "类型提示缺失",
+    "description": "函数 'dfs' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> None"
+  },
+  {
+    "file": "ml_analyzer.py",
+    "line": 166,
+    "category": "类型提示缺失",
+    "description": "函数 'dfs' 参数 'u' 缺少类型注解",
+    "suggestion": "添加参数类型，如 u: int"
+  },
+  {
+    "file": "bank_formats.py",
+    "line": 279,
+    "category": "可读性",
+    "description": "函数过长 (93 行)，建议拆分为多个小函数",
+    "suggestion": "将 detect_bank_format 拆分为特征检测、置信度计算、格式匹配等步骤"
+  },
+  {
+    "file": "bank_formats.py",
+    "line": 279,
+    "category": "可读性",
+    "description": "函数 'detect_bank_format' 圈复杂度过高 (15)",
+    "suggestion": "简化条件逻辑，使用卫语句或提取复杂逻辑到辅助函数"
+  },
+  {
+    "file": "bank_formats.py",
+    "line": 375,
+    "category": "可读性",
+    "description": "函数过长 (126 行)，建议拆分为多个小函数",
+    "suggestion": "将 normalize_dataframe 拆分为列名标准化、数据清洗、格式转换等子函数"
+  },
+  {
+    "file": "bank_formats.py",
+    "line": 375,
+    "category": "可读性",
+    "description": "函数 'normalize_dataframe' 圈复杂度过高 (20)",
+    "suggestion": "简化条件逻辑，使用卫语句或提取复杂逻辑到辅助函数"
+  },
+  {
+    "file": "bank_formats.py",
+    "line": 511,
+    "category": "类型提示缺失",
+    "description": "函数 'add_custom_bank_format' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> bool"
+  },
+  {
+    "file": "family_assets_helper.py",
+    "line": 55,
+    "category": "可读性",
+    "description": "函数过长 (112 行)，建议拆分为多个小函数",
+    "suggestion": "将 build_family_assets_from_data 拆分为数据收集、关系分析、资产汇总等步骤"
+  },
+  {
+    "file": "family_assets_helper.py",
+    "line": 55,
+    "category": "可读性",
+    "description": "函数 'build_family_assets_from_data' 圈复杂度过高 (36)",
+    "suggestion": "简化条件逻辑，使用卫语句或提取复杂逻辑到辅助函数"
+  },
+  {
+    "file": "family_assets_helper.py",
+    "line": 170,
+    "category": "可读性",
+    "description": "函数 'build_family_assets_simple' 圈复杂度过高 (11)",
+    "suggestion": "简化条件逻辑，使用卫语句或提取复杂逻辑到辅助函数"
+  },
+  {
+    "file": "cohabitation_extractor.py",
+    "line": 225,
+    "category": "可读性",
+    "description": "函数 'get_relationship_graph' 圈复杂度过高 (12)",
+    "suggestion": "简化条件逻辑，使用卫语句或提取复杂逻辑到辅助函数"
+  },
+  {
+    "file": "cohabitation_extractor.py",
+    "line": 322,
+    "category": "文档缺失",
+    "description": "函数 '_safe_str' 缺少docstring文档",
+    "suggestion": "添加描述函数功能、参数、返回值的docstring"
+  },
+  {
+    "file": "cohabitation_extractor.py",
+    "line": 322,
+    "category": "类型提示缺失",
+    "description": "函数 '_safe_str' 参数 'value' 缺少类型注解",
+    "suggestion": "添加参数类型，如 value: Any"
+  },
+  {
+    "file": "cohabitation_extractor.py",
+    "line": 328,
+    "category": "文档缺失",
+    "description": "函数 '_safe_int' 缺少docstring文档",
+    "suggestion": "添加描述函数功能、参数、返回值的docstring"
+  },
+  {
+    "file": "cohabitation_extractor.py",
+    "line": 328,
+    "category": "类型提示缺失",
+    "description": "函数 '_safe_int' 参数 'value' 缺少类型注解",
+    "suggestion": "添加参数类型，如 value: Any"
+  },
+  {
+    "file": "cohabitation_extractor.py",
+    "line": 337,
+    "category": "文档缺失",
+    "description": "函数 '_safe_date' 缺少docstring文档",
+    "suggestion": "添加描述函数功能、参数、返回值的docstring"
+  },
+  {
+    "file": "cohabitation_extractor.py",
+    "line": 337,
+    "category": "类型提示缺失",
+    "description": "函数 '_safe_date' 参数 'value' 缺少类型注解",
+    "suggestion": "添加参数类型，如 value: Any"
+  },
+  {
+    "file": "time_series_analyzer.py",
+    "line": 39,
+    "category": "可读性",
+    "description": "函数过长 (107 行)，建议拆分为多个小函数",
+    "suggestion": "将 detect_periodic_income 拆分为周期检测、金额分析、结果生成等子函数"
+  },
+  {
+    "file": "time_series_analyzer.py",
+    "line": 39,
+    "category": "可读性",
+    "description": "函数 'detect_periodic_income' 圈复杂度过高 (14)",
+    "suggestion": "简化条件逻辑，使用卫语句或提取复杂逻辑到辅助函数"
+  },
+  {
+    "file": "time_series_analyzer.py",
+    "line": 276,
+    "category": "可读性",
+    "description": "函数过长 (88 行)，建议拆分为多个小函数",
+    "suggestion": "将 detect_delayed_transfers 拆分为延迟检测、转账配对、风险评分等步骤"
+  },
+  {
+    "file": "time_series_analyzer.py",
+    "line": 276,
+    "category": "可读性",
+    "description": "函数 'detect_delayed_transfers' 圈复杂度过高 (11)",
+    "suggestion": "简化条件逻辑，使用卫语句或提取复杂逻辑到辅助函数"
+  },
+  {
+    "file": "time_series_analyzer.py",
+    "line": 419,
+    "category": "可读性",
+    "description": "函数过长 (84 行)，建议拆分为多个小函数",
+    "suggestion": "将 generate_time_series_report 拆分为报告生成、数据格式化、HTML渲染等步骤"
+  },
+  {
+    "file": "time_series_analyzer.py",
+    "line": 419,
+    "category": "可读性",
+    "description": "函数 'generate_time_series_report' 圈复杂度过高 (11)",
+    "suggestion": "简化条件逻辑，使用卫语句或提取复杂逻辑到辅助函数"
+  },
+  {
+    "file": "time_series_analyzer.py",
+    "line": 424,
+    "category": "类型提示缺失",
+    "description": "函数 'safe_str' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> str"
+  },
+  {
+    "file": "time_series_analyzer.py",
+    "line": 424,
+    "category": "类型提示缺失",
+    "description": "函数 'safe_str' 参数 'val' 缺少类型注解",
+    "suggestion": "添加参数类型，如 val: Any"
+  },
+  {
+    "file": "time_series_analyzer.py",
+    "line": 428,
+    "category": "代码风格",
+    "description": "变量名 's' 过短，可读性差",
+    "suggestion": "使用有意义的描述性变量名，如 string_value"
+  },
+  {
+    "file": "strict_expense_calculator.py",
+    "line": 39,
+    "category": "可读性",
+    "description": "函数过长 (86 行)，建议拆分为多个小函数",
+    "suggestion": "将 calculate_strict_expenses 拆分为费用收集、分类计算、结果汇总等步骤"
+  },
+  {
+    "file": "salary_analyzer.py",
+    "line": 23,
+    "category": "可读性",
+    "description": "函数过长 (120 行)，建议拆分为多个小函数",
+    "suggestion": "将 analyze_salary 拆分为工资检测、频率分析、金额统计等子函数"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 44,
+    "category": "文档缺失",
+    "description": "函数 'to_dict' 缺少docstring文档",
+    "suggestion": "添加描述函数功能、参数、返回值的docstring"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 66,
+    "category": "类型提示缺失",
+    "description": "函数 'add_node' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> bool"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 71,
+    "category": "类型提示缺失",
+    "description": "函数 'add_edge' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> bool"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 107,
+    "category": "类型提示缺失",
+    "description": "函数 'clear' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> None"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 119,
+    "category": "文档缺失",
+    "description": "函数 '__init__' 缺少docstring文档",
+    "suggestion": "添加描述类初始化参数和功能的docstring"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 135,
+    "category": "类型提示缺失",
+    "description": "函数 '_try_connect' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> bool"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 157,
+    "category": "文档缺失",
+    "description": "函数 'is_connected' 缺少docstring文档",
+    "suggestion": "添加描述函数功能、参数、返回值的docstring"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 160,
+    "category": "类型提示缺失",
+    "description": "函数 'add_node' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> bool"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 176,
+    "category": "类型提示缺失",
+    "description": "函数 'add_edge' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> bool"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 300,
+    "category": "类型提示缺失",
+    "description": "函数 'clear' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> None"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 309,
+    "category": "类型提示缺失",
+    "description": "函数 'close' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> None"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 323,
+    "category": "文档缺失",
+    "description": "函数 '__init__' 缺少docstring文档",
+    "suggestion": "添加描述类初始化参数和功能的docstring"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 327,
+    "category": "文档缺失",
+    "description": "函数 'add_node' 缺少docstring文档",
+    "suggestion": "添加描述函数功能、参数、返回值的docstring"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 327,
+    "category": "类型提示缺失",
+    "description": "函数 'add_node' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> bool"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 334,
+    "category": "文档缺失",
+    "description": "函数 'add_edge' 缺少docstring文档",
+    "suggestion": "添加描述函数功能、参数、返回值的docstring"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 334,
+    "category": "类型提示缺失",
+    "description": "函数 'add_edge' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> bool"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 353,
+    "category": "文档缺失",
+    "description": "函数 'get_node' 缺少docstring文档",
+    "suggestion": "添加描述函数功能、参数、返回值的docstring"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 356,
+    "category": "文档缺失",
+    "description": "函数 'get_edges' 缺少docstring文档",
+    "suggestion": "添加描述函数功能、参数、返回值的docstring"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 373,
+    "category": "文档缺失",
+    "description": "函数 '_dfs_path' 缺少docstring文档",
+    "suggestion": "添加描述函数功能、参数、返回值的docstring"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 373,
+    "category": "类型提示缺失",
+    "description": "函数 '_dfs_path' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> bool"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 397,
+    "category": "文档缺失",
+    "description": "函数 '_dfs_cycle' 缺少docstring文档",
+    "suggestion": "添加描述函数功能、参数、返回值的docstring"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 397,
+    "category": "类型提示缺失",
+    "description": "函数 '_dfs_cycle' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> bool"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 414,
+    "category": "文档缺失",
+    "description": "函数 'get_node_count' 缺少docstring文档",
+    "suggestion": "添加描述函数功能、参数、返回值的docstring"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 417,
+    "category": "文档缺失",
+    "description": "函数 'get_edge_count' 缺少docstring文档",
+    "suggestion": "添加描述函数功能、参数、返回值的docstring"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 420,
+    "category": "文档缺失",
+    "description": "函数 'clear' 缺少docstring文档",
+    "suggestion": "添加描述函数功能、参数、返回值的docstring"
+  },
+  {
+    "file": "graph_adapter.py",
+    "line": 420,
+    "category": "类型提示缺失",
+    "description": "函数 'clear' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> None"
+  },
+  {
+    "file": "api_validators.py",
+    "line": 334,
+    "category": "类型提示缺失",
+    "description": "函数 'handle_validation_error' 缺少返回类型注解",
+    "suggestion": "添加返回类型 -> JSONResponse"
+  },
+  {
+    "file": "api_validators.py",
+    "line": 22,
+    "category": "文档缺失",
+    "description": "函数 '__init__' 缺少docstring文档",
+    "suggestion": "添加描述类初始化参数和功能的docstring"
+  },
+  {
+    "file": "dashboard/src/components/ReportBuilder.tsx",
+    "line": 53,
+    "category": "潜在优化点",
+    "description": "硬编码API地址 'http://localhost:8000'，应该使用环境变量",
+    "suggestion": "使用 import.meta.env.VITE_API_URL 从环境变量读取API地址"
+  },
+  {
+    "file": "dashboard/src/components/NetworkGraph.tsx",
+    "line": 1,
+    "category": "可读性",
+    "description": "文件过长 (1181+ 行)，包含多个大型组件",
+    "suggestion": "拆分为多个小组件：GraphPanel、StatPanel、TransactionModal、LegendPanel"
+  },
+  {
+    "file": "dashboard/src/components/NetworkGraph.tsx",
+    "line": 103,
+    "category": "可读性",
+    "description": "组件状态过多 (14+ 个useState)，建议拆分为子组件或使用Context",
+    "suggestion": "将状态按功能分组，拆分为独立的自定义hooks或子组件"
+  },
+  {
+    "file": "dashboard/src/components/NetworkGraph.tsx",
+    "line": 125,
+    "category": "代码风格",
+    "description": "函数 'formatAmount' 缺少类型注解",
+    "suggestion": "添加参数和返回类型：function formatAmount(amount: number): string"
+  },
+  {
+    "file": "dashboard/src/components/NetworkGraph.tsx",
+    "line": 136,
+    "category": "代码风格",
+    "description": "函数 'formatCounterpartyWithWarning' 缺少类型注解",
+    "suggestion": "添加参数和返回类型：function formatCounterpartyWithWarning(name: string): React.ReactNode"
+  },
+  {
+    "file": "dashboard/src/services/api.ts",
+    "line": 91,
+    "category": "文档缺失",
+    "description": "类成员缺少JSDoc注释",
+    "suggestion": "为 timeout、maxRetries、retryDelay 等成员添加 JSDoc 注释说明用途"
+  },
+  {
+    "file": "dashboard/src/services/api.ts",
+    "line": 113,
+    "category": "可读性",
+    "description": "函数 'fetchWithTimeout' 使用 any 类型，应该明确类型",
+    "suggestion": "使用泛型或明确的 Response 类型替代 any"
+  },
+  {
+    "file": "dashboard/src/services/api.ts",
+    "line": 140,
+    "category": "代码风格",
+    "description": "函数 'requestWithRetry' 错误处理逻辑重复",
+    "suggestion": "提取错误处理逻辑到独立的辅助函数"
+  },
+  {
+    "file": "api_server.py",
+    "line": 158,
+    "category": "代码风格",
+    "description": "函数 '_get_current_time_str' 缺少类型注解",
+    "suggestion": "添加返回类型 -> str"
+  },
+  {
+    "file": "api_server.py",
+    "line": 164,
+    "category": "代码风格",
+    "description": "函数 '_get_cache_manager' 返回类型为 CacheManager，但使用 Optional 声明",
+    "suggestion": "明确返回类型，不混用 Optional 和实际类型"
+  },
+  {
+    "file": "config.py",
+    "line": 558,
+    "category": "潜在优化点",
+    "description": "配置项数量过多 (950+ 行)，应该进一步模块化",
+    "suggestion": "将配置按功能拆分为多个文件：salary_config.py、risk_config.py、ui_config.py"
+  }
+]

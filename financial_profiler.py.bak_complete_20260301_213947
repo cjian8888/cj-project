@@ -17,58 +17,62 @@ import utils
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     标准化DataFrame的列名，支持个人和公司Excel的不同格式
-    【2026-03-01 完善版】支持所有常见列名
+
+    个人Excel常见列名：
+        - date, 交易日期, 日期
+        - amount, 交易金额, 金额
+
+    公司Excel常见列名：
+        - 交易时间, 日期, 交易日期
+        - 收入(元), 支出(元), 收入金额, 支出金额
+        - 贷方金额, 借方金额
 
     Returns:
-        标准化后的DataFrame，包含统一的列名
+        标准化后的DataFrame，包含统一的列名：
+        - date: 日期列
+        - amount: 金额列（正数表示收入，负数表示支出）
+        - income: 收入列（可选）
+        - expense: 支出列（可选）
     """
-    # 完整的列名映射字典
-    column_mappings = {
-        # 日期列
-        'date': ['date', '日期', '交易日期', '交易时间', 'time', '交易日期时间'],
-        
-        # 金额列（单列）
-        'amount': ['amount', '金额', '交易金额', '发生额'],
-        
-        # 收入列（分开）
-        'income': ['收入(元)', '收入金额', '收入', '贷方金额', '贷方', 'income'],
-        
-        # 支出列（分开）
-        'expense': ['支出(元)', '支出金额', '支出', '借方金额', '借方', 'expense'],
-        
-        # 交易对手
-        'counterparty': ['counterparty', '交易对手', '对方户名', '对方账号名', '收款人', '付款人'],
-        
-        # 交易摘要
-        'description': ['description', '交易摘要', '摘要', '用途', '备注'],
-        
-        # 银行
-        'bank': ['bank', '所属银行', '银行', '开户行'],
-        
-        # 账号
-        'account': ['account', '本方账号', '账号', '银行账号'],
-        
-        # 余额
-        'balance': ['balance', '余额(元)', '余额', '账户余额'],
-        
-        # 交易分类
-        'category': ['category', '交易分类', '分类', '交易类型'],
-        
-        # 现金标识
-        'cash': ['cash', '现金', '是否现金'],
-    }
-    
-    # 应用映射
-    for standard_name, possible_names in column_mappings.items():
-        for possible_name in possible_names:
-            if possible_name in df.columns and standard_name not in df.columns:
-                df = df.rename(columns={possible_name: standard_name})
-                break
-    
-    # 如果有income和expense，合并为amount
-    if 'income' in df.columns and 'expense' in df.columns:
+    # 列名映射字典
+    date_columns = ['date', '日期', '交易日期', '交易时间', 'time', '交易日期时间']
+    income_columns = ['收入(元)', '收入金额', '收入', '贷方金额', '贷方', 'income']
+    expense_columns = ['支出(元)', '支出金额', '支出', '借方金额', '借方', 'expense']
+    amount_columns = ['amount', '金额', '交易金额', '发生额']
+
+    # 查找并重命名日期列
+    for col in date_columns:
+        if col in df.columns:
+            df = df.rename(columns={col: 'date'})
+            break
+
+    # 查找并处理金额列
+    # 情况1：单列金额（正负数表示收支）
+    for col in amount_columns:
+        if col in df.columns:
+            df = df.rename(columns={col: 'amount'})
+            return df
+
+    # 情况2：收入+支出分开的两列
+    income_col = None
+    expense_col = None
+
+    for col in income_columns:
+        if col in df.columns:
+            income_col = col
+            df = df.rename(columns={col: 'income'})
+            break
+
+    for col in expense_columns:
+        if col in df.columns:
+            expense_col = col
+            df = df.rename(columns={col: 'expense'})
+            break
+
+    # 如果找到了收入和支出列，合并为amount列
+    if income_col and expense_col:
         df['amount'] = df['income'].fillna(0) - df['expense'].fillna(0)
-    
+
     return df
 
 
@@ -96,58 +100,62 @@ def safe_get_column(df: pd.DataFrame, column_names: list, default=None):
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     标准化DataFrame的列名，支持个人和公司Excel的不同格式
-    【2026-03-01 完善版】支持所有常见列名
+
+    个人Excel常见列名：
+        - date, 交易日期, 日期
+        - amount, 交易金额, 金额
+
+    公司Excel常见列名：
+        - 交易时间, 日期, 交易日期
+        - 收入(元), 支出(元), 收入金额, 支出金额
+        - 贷方金额, 借方金额
 
     Returns:
-        标准化后的DataFrame，包含统一的列名
+        标准化后的DataFrame，包含统一的列名：
+        - date: 日期列
+        - amount: 金额列（正数表示收入，负数表示支出）
+        - income: 收入列（可选）
+        - expense: 支出列（可选）
     """
-    # 完整的列名映射字典
-    column_mappings = {
-        # 日期列
-        'date': ['date', '日期', '交易日期', '交易时间', 'time', '交易日期时间'],
-        
-        # 金额列（单列）
-        'amount': ['amount', '金额', '交易金额', '发生额'],
-        
-        # 收入列（分开）
-        'income': ['收入(元)', '收入金额', '收入', '贷方金额', '贷方', 'income'],
-        
-        # 支出列（分开）
-        'expense': ['支出(元)', '支出金额', '支出', '借方金额', '借方', 'expense'],
-        
-        # 交易对手
-        'counterparty': ['counterparty', '交易对手', '对方户名', '对方账号名', '收款人', '付款人'],
-        
-        # 交易摘要
-        'description': ['description', '交易摘要', '摘要', '用途', '备注'],
-        
-        # 银行
-        'bank': ['bank', '所属银行', '银行', '开户行'],
-        
-        # 账号
-        'account': ['account', '本方账号', '账号', '银行账号'],
-        
-        # 余额
-        'balance': ['balance', '余额(元)', '余额', '账户余额'],
-        
-        # 交易分类
-        'category': ['category', '交易分类', '分类', '交易类型'],
-        
-        # 现金标识
-        'cash': ['cash', '现金', '是否现金'],
-    }
-    
-    # 应用映射
-    for standard_name, possible_names in column_mappings.items():
-        for possible_name in possible_names:
-            if possible_name in df.columns and standard_name not in df.columns:
-                df = df.rename(columns={possible_name: standard_name})
-                break
-    
-    # 如果有income和expense，合并为amount
-    if 'income' in df.columns and 'expense' in df.columns:
+    # 列名映射字典
+    date_columns = ['date', '日期', '交易日期', '交易时间', 'time', '交易日期时间']
+    income_columns = ['收入(元)', '收入金额', '收入', '贷方金额', '贷方', 'income']
+    expense_columns = ['支出(元)', '支出金额', '支出', '借方金额', '借方', 'expense']
+    amount_columns = ['amount', '金额', '交易金额', '发生额']
+
+    # 查找并重命名日期列
+    for col in date_columns:
+        if col in df.columns:
+            df = df.rename(columns={col: 'date'})
+            break
+
+    # 查找并处理金额列
+    # 情况1：单列金额（正负数表示收支）
+    for col in amount_columns:
+        if col in df.columns:
+            df = df.rename(columns={col: 'amount'})
+            return df
+
+    # 情况2：收入+支出分开的两列
+    income_col = None
+    expense_col = None
+
+    for col in income_columns:
+        if col in df.columns:
+            income_col = col
+            df = df.rename(columns={col: 'income'})
+            break
+
+    for col in expense_columns:
+        if col in df.columns:
+            expense_col = col
+            df = df.rename(columns={col: 'expense'})
+            break
+
+    # 如果找到了收入和支出列，合并为amount列
+    if income_col and expense_col:
         df['amount'] = df['income'].fillna(0) - df['expense'].fillna(0)
-    
+
     return df
 
 

@@ -17,137 +17,62 @@ import utils
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     标准化DataFrame的列名，支持个人和公司Excel的不同格式
-    【2026-03-01 完善版】支持所有常见列名
+
+    个人Excel常见列名：
+        - date, 交易日期, 日期
+        - amount, 交易金额, 金额
+
+    公司Excel常见列名：
+        - 交易时间, 日期, 交易日期
+        - 收入(元), 支出(元), 收入金额, 支出金额
+        - 贷方金额, 借方金额
 
     Returns:
-        标准化后的DataFrame，包含统一的列名
+        标准化后的DataFrame，包含统一的列名：
+        - date: 日期列
+        - amount: 金额列（正数表示收入，负数表示支出）
+        - income: 收入列（可选）
+        - expense: 支出列（可选）
     """
-    # 完整的列名映射字典
-    column_mappings = {
-        # 日期列
-        'date': ['date', '日期', '交易日期', '交易时间', 'time', '交易日期时间'],
-        
-        # 金额列（单列）
-        'amount': ['amount', '金额', '交易金额', '发生额'],
-        
-        # 收入列（分开）
-        'income': ['收入(元)', '收入金额', '收入', '贷方金额', '贷方', 'income'],
-        
-        # 支出列（分开）
-        'expense': ['支出(元)', '支出金额', '支出', '借方金额', '借方', 'expense'],
-        
-        # 交易对手
-        'counterparty': ['counterparty', '交易对手', '对方户名', '对方账号名', '收款人', '付款人'],
-        
-        # 交易摘要
-        'description': ['description', '交易摘要', '摘要', '用途', '备注'],
-        
-        # 银行
-        'bank': ['bank', '所属银行', '银行', '开户行'],
-        
-        # 账号
-        'account': ['account', '本方账号', '账号', '银行账号'],
-        
-        # 余额
-        'balance': ['balance', '余额(元)', '余额', '账户余额'],
-        
-        # 交易分类
-        'category': ['category', '交易分类', '分类', '交易类型'],
-        
-        # 现金标识
-        'cash': ['cash', '现金', '是否现金'],
-    }
-    
-    # 应用映射
-    for standard_name, possible_names in column_mappings.items():
-        for possible_name in possible_names:
-            if possible_name in df.columns and standard_name not in df.columns:
-                df = df.rename(columns={possible_name: standard_name})
-                break
-    
-    # 如果有income和expense，合并为amount
-    if 'income' in df.columns and 'expense' in df.columns:
-        df['amount'] = df['income'].fillna(0) - df['expense'].fillna(0)
-    
-    return df
+    # 列名映射字典
+    date_columns = ['date', '日期', '交易日期', '交易时间', 'time', '交易日期时间']
+    income_columns = ['收入(元)', '收入金额', '收入', '贷方金额', '贷方', 'income']
+    expense_columns = ['支出(元)', '支出金额', '支出', '借方金额', '借方', 'expense']
+    amount_columns = ['amount', '金额', '交易金额', '发生额']
 
-
-def safe_get_column(df: pd.DataFrame, column_names: list, default=None):
-    """
-    安全获取DataFrame的列，支持多种列名
-
-    Args:
-        df: DataFrame
-        column_names: 可能的列名列表
-        default: 默认值（如果列不存在）
-
-    Returns:
-        列数据或默认值
-    """
-    for col in column_names:
+    # 查找并重命名日期列
+    for col in date_columns:
         if col in df.columns:
-            return df[col]
-    return default
+            df = df.rename(columns={col: 'date'})
+            break
 
+    # 查找并处理金额列
+    # 情况1：单列金额（正负数表示收支）
+    for col in amount_columns:
+        if col in df.columns:
+            df = df.rename(columns={col: 'amount'})
+            return df
 
+    # 情况2：收入+支出分开的两列
+    income_col = None
+    expense_col = None
 
-# ========== 列名标准化函数（2026-03-01 通用修复） ==========
+    for col in income_columns:
+        if col in df.columns:
+            income_col = col
+            df = df.rename(columns={col: 'income'})
+            break
 
-def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    标准化DataFrame的列名，支持个人和公司Excel的不同格式
-    【2026-03-01 完善版】支持所有常见列名
+    for col in expense_columns:
+        if col in df.columns:
+            expense_col = col
+            df = df.rename(columns={col: 'expense'})
+            break
 
-    Returns:
-        标准化后的DataFrame，包含统一的列名
-    """
-    # 完整的列名映射字典
-    column_mappings = {
-        # 日期列
-        'date': ['date', '日期', '交易日期', '交易时间', 'time', '交易日期时间'],
-        
-        # 金额列（单列）
-        'amount': ['amount', '金额', '交易金额', '发生额'],
-        
-        # 收入列（分开）
-        'income': ['收入(元)', '收入金额', '收入', '贷方金额', '贷方', 'income'],
-        
-        # 支出列（分开）
-        'expense': ['支出(元)', '支出金额', '支出', '借方金额', '借方', 'expense'],
-        
-        # 交易对手
-        'counterparty': ['counterparty', '交易对手', '对方户名', '对方账号名', '收款人', '付款人'],
-        
-        # 交易摘要
-        'description': ['description', '交易摘要', '摘要', '用途', '备注'],
-        
-        # 银行
-        'bank': ['bank', '所属银行', '银行', '开户行'],
-        
-        # 账号
-        'account': ['account', '本方账号', '账号', '银行账号'],
-        
-        # 余额
-        'balance': ['balance', '余额(元)', '余额', '账户余额'],
-        
-        # 交易分类
-        'category': ['category', '交易分类', '分类', '交易类型'],
-        
-        # 现金标识
-        'cash': ['cash', '现金', '是否现金'],
-    }
-    
-    # 应用映射
-    for standard_name, possible_names in column_mappings.items():
-        for possible_name in possible_names:
-            if possible_name in df.columns and standard_name not in df.columns:
-                df = df.rename(columns={possible_name: standard_name})
-                break
-    
-    # 如果有income和expense，合并为amount
-    if 'income' in df.columns and 'expense' in df.columns:
+    # 如果找到了收入和支出列，合并为amount列
+    if income_col and expense_col:
         df['amount'] = df['income'].fillna(0) - df['expense'].fillna(0)
-    
+
     return df
 
 
@@ -2919,228 +2844,6 @@ def categorize_transactions(df: pd.DataFrame) -> Dict[str, List[Dict]]:
 
 
 def build_company_profile(df: pd.DataFrame, entity_name: str) -> Dict:
-    """
-    构建公司资金画像
-
-    【2026-03-01 通用修复】支持多种列名格式
-    """
-    logger.info(f"正在为公司 {entity_name} 生成资金画像...")
-
-    if df.empty:
-        logger.warning(f"{entity_name} 无交易数据")
-        return {"entity_name": entity_name, "entity_type": "company", "has_data": False}
-
-    # 【关键修复】标准化列名
-    try:
-        df = standardize_columns(df)
-        logger.info(f"✓ 列名标准化完成: {list(df.columns)}")
-    except Exception as e:
-        logger.warning(f"列名标准化失败: {str(e)}，使用原始列名")
-
-    # 【容错处理】如果还是没有'date'列，尝试其他方式
-    if 'date' not in df.columns:
-        logger.warning(f"未找到'date'列，尝试其他日期列名")
-        # 尝试其他日期列名
-        for col in ['交易时间', '交易日期', '日期']:
-            if col in df.columns:
-                df = df.rename(columns={col: 'date'})
-                logger.info(f"✓ 使用'{col}'作为日期列")
-                break
-
-    """
-    构建公司资金画像
-
-    【2026-03-01 通用修复】支持多种列名格式
-    """
-    logger.info(f"正在为公司 {entity_name} 生成资金画像...")
-
-    if df.empty:
-        logger.warning(f"{entity_name} 无交易数据")
-        return {"entity_name": entity_name, "entity_type": "company", "has_data": False}
-
-    # 【关键修复】标准化列名
-    try:
-        df = standardize_columns(df)
-        logger.info(f"✓ 列名标准化完成: {list(df.columns)}")
-    except Exception as e:
-        logger.warning(f"列名标准化失败: {str(e)}，使用原始列名")
-
-    # 【容错处理】如果还是没有'date'列，尝试其他方式
-    if 'date' not in df.columns:
-        logger.warning(f"未找到'date'列，尝试其他日期列名")
-        # 尝试其他日期列名
-        for col in ['交易时间', '交易日期', '日期']:
-            if col in df.columns:
-                df = df.rename(columns={col: 'date'})
-                logger.info(f"✓ 使用'{col}'作为日期列")
-                break
-
-    """
-    构建公司资金画像
-
-    【Phase 2 - 2026-01-20】
-    功能:
-    1. 复用现有的画像生成逻辑
-    2. 移除不适用于公司的字段(如工资统计)
-    3. 添加公司特有的分析维度
-
-    Args:
-        df: 交易DataFrame
-        entity_name: 公司名称
-
-    Returns:
-        公司资金画像字典,包含:
-        - entity_type: 'company'
-        - 基础画像数据(复用个人画像结构)
-        - company_specific: 公司特有分析
-    """
-    logger.info(f"正在为公司 {entity_name} 生成资金画像...")
-
-    if df.empty:
-        logger.warning(f"{entity_name} 无交易数据")
-        return {"entity_name": entity_name, "entity_type": "company", "has_data": False}
-
-    # 复用现有的画像生成逻辑
-    # 注意: 不传入entity_name参数,因为公司不需要工资识别
-    income_structure = calculate_income_structure(df, entity_name=None)
-    fund_flow = analyze_fund_flow(df)
-    wealth_management = analyze_wealth_management(df, entity_name=None)
-    large_cash = extract_large_cash(df)
-    categories = categorize_transactions(df)
-
-    # 计算真实收入/支出（【2026-02-12修复】）
-    real_income, real_expense, offset_detail = _calculate_real_income_expense(
-        income_structure, wealth_management, fund_flow
-    )
-
-    # 公司特有分析
-    company_specific = _analyze_company_specific(df, entity_name)
-
-    # 构建公司画像摘要(移除工资相关字段)
-    summary = {
-        "total_income": income_structure["total_income"],
-        "total_expense": income_structure["total_expense"],
-        "net_flow": income_structure["net_flow"],
-        "real_income": real_income,
-        "real_expense": real_expense,
-        "cash_ratio": (fund_flow["cash_income"] + fund_flow["cash_expense"])
-        / (income_structure["total_income"] + income_structure["total_expense"])
-        if (income_structure["total_income"] + income_structure["total_expense"]) > 0
-        else 0,
-        "third_party_ratio": fund_flow["third_party_ratio"],
-        "large_cash_count": len(large_cash),
-        "wealth_transactions": wealth_management["total_transactions"],
-        "transaction_count": len(df),
-        "date_range": income_structure["date_range"],
-        "offset_detail": offset_detail,  # 【2026-02-12新增】
-    }
-
-    profile = {
-        "entity_name": entity_name,
-        "entity_type": "company",  # 标识为公司实体
-        "has_data": True,
-        "income_structure": income_structure,
-        "fund_flow": fund_flow,
-        "wealth_management": wealth_management,
-        "large_cash": large_cash,
-        "categories": categories,
-        "company_specific": company_specific,  # 公司特有分析
-        "summary": summary,
-    }
-
-    logger.info(f"{entity_name} 公司画像生成完成")
-
-    # 【内存优化】强制执行垃圾回收
-    import gc
-
-    gc.collect()
-
-    return profile
-
-
-    """
-    构建公司资金画像
-
-    【Phase 2 - 2026-01-20】
-    功能:
-    1. 复用现有的画像生成逻辑
-    2. 移除不适用于公司的字段(如工资统计)
-    3. 添加公司特有的分析维度
-
-    Args:
-        df: 交易DataFrame
-        entity_name: 公司名称
-
-    Returns:
-        公司资金画像字典,包含:
-        - entity_type: 'company'
-        - 基础画像数据(复用个人画像结构)
-        - company_specific: 公司特有分析
-    """
-    logger.info(f"正在为公司 {entity_name} 生成资金画像...")
-
-    if df.empty:
-        logger.warning(f"{entity_name} 无交易数据")
-        return {"entity_name": entity_name, "entity_type": "company", "has_data": False}
-
-    # 复用现有的画像生成逻辑
-    # 注意: 不传入entity_name参数,因为公司不需要工资识别
-    income_structure = calculate_income_structure(df, entity_name=None)
-    fund_flow = analyze_fund_flow(df)
-    wealth_management = analyze_wealth_management(df, entity_name=None)
-    large_cash = extract_large_cash(df)
-    categories = categorize_transactions(df)
-
-    # 计算真实收入/支出（【2026-02-12修复】）
-    real_income, real_expense, offset_detail = _calculate_real_income_expense(
-        income_structure, wealth_management, fund_flow
-    )
-
-    # 公司特有分析
-    company_specific = _analyze_company_specific(df, entity_name)
-
-    # 构建公司画像摘要(移除工资相关字段)
-    summary = {
-        "total_income": income_structure["total_income"],
-        "total_expense": income_structure["total_expense"],
-        "net_flow": income_structure["net_flow"],
-        "real_income": real_income,
-        "real_expense": real_expense,
-        "cash_ratio": (fund_flow["cash_income"] + fund_flow["cash_expense"])
-        / (income_structure["total_income"] + income_structure["total_expense"])
-        if (income_structure["total_income"] + income_structure["total_expense"]) > 0
-        else 0,
-        "third_party_ratio": fund_flow["third_party_ratio"],
-        "large_cash_count": len(large_cash),
-        "wealth_transactions": wealth_management["total_transactions"],
-        "transaction_count": len(df),
-        "date_range": income_structure["date_range"],
-        "offset_detail": offset_detail,  # 【2026-02-12新增】
-    }
-
-    profile = {
-        "entity_name": entity_name,
-        "entity_type": "company",  # 标识为公司实体
-        "has_data": True,
-        "income_structure": income_structure,
-        "fund_flow": fund_flow,
-        "wealth_management": wealth_management,
-        "large_cash": large_cash,
-        "categories": categories,
-        "company_specific": company_specific,  # 公司特有分析
-        "summary": summary,
-    }
-
-    logger.info(f"{entity_name} 公司画像生成完成")
-
-    # 【内存优化】强制执行垃圾回收
-    import gc
-
-    gc.collect()
-
-    return profile
-
-
     """
     构建公司资金画像
 
