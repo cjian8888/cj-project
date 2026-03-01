@@ -17,6 +17,13 @@ from collections import defaultdict
 import pandas as pd
 
 import utils
+from utils.safe_types import (
+    safe_str,
+    safe_float,
+    safe_int,
+    safe_date,
+    safe_datetime,
+)
 
 logger = utils.setup_logger(__name__)
 
@@ -117,23 +124,23 @@ def _parse_hotel_row(row: pd.Series, source_file: str) -> Optional[Dict]:
     """解析单行住宿数据"""
     try:
         record = {
-            "name": _safe_str(row.get("姓名", "")),
-            "gender": _safe_str(row.get("性别", "")),
-            "ethnicity": _safe_str(row.get("民族", "")),
-            "birth_date": _safe_date(row.get("出生日期")),
-            "id_type": _safe_str(row.get("证件类型", "")),
-            "id_number": _safe_str(row.get("证件号码", "")),
-            "hotel_code": _safe_str(row.get("旅店代码", "")),
-            "province": _safe_str(row.get("省级名称", "")),
-            "room_number": _safe_str(row.get("房间号码", "")),
-            "check_in_time": _safe_datetime(row.get("入住时间")),
-            "check_out_time": _safe_datetime(row.get("离店时间")),
-            "hotel_phone": _safe_str(row.get("旅店联系号码", "")),
-            "hotel_name": _safe_str(row.get("旅店名称", "")),
-            "hotel_district": _safe_str(row.get("旅店区划", "")),
-            "hukou_district": _safe_str(row.get("户籍地区划", "")),
-            "hukou_address": _safe_str(row.get("户籍地详情", "")),
-            "hotel_address": _safe_str(row.get("旅店地址", "")),
+            "name": safe_str(row.get("姓名", "")),
+            "gender": safe_str(row.get("性别", "")),
+            "ethnicity": safe_str(row.get("民族", "")),
+            "birth_date": safe_date(row.get("出生日期")),
+            "id_type": safe_str(row.get("证件类型", "")),
+            "id_number": safe_str(row.get("证件号码", "")),
+            "hotel_code": safe_str(row.get("旅店代码", "")),
+            "province": safe_str(row.get("省级名称", "")),
+            "room_number": safe_str(row.get("房间号码", "")),
+            "check_in_time": safe_datetime(row.get("入住时间")),
+            "check_out_time": safe_datetime(row.get("离店时间")),
+            "hotel_phone": safe_str(row.get("旅店联系号码", "")),
+            "hotel_name": safe_str(row.get("旅店名称", "")),
+            "hotel_district": safe_str(row.get("旅店区划", "")),
+            "hukou_district": safe_str(row.get("户籍地区划", "")),
+            "hukou_address": safe_str(row.get("户籍地详情", "")),
+            "hotel_address": safe_str(row.get("旅店地址", "")),
             "source_file": source_file
         }
         
@@ -208,28 +215,6 @@ def _extract_id_from_filename(filename: str) -> Optional[str]:
     if match:
         return match.group().upper()
     return None
-
-
-def _safe_str(value) -> str:
-    if pd.isna(value):
-        return ""
-    return str(value).strip()
-
-
-def _safe_date(value) -> str:
-    if pd.isna(value):
-        return ""
-    if hasattr(value, "strftime"):
-        return value.strftime("%Y-%m-%d")
-    return str(value).strip()[:10]
-
-
-def _safe_datetime(value) -> str:
-    if pd.isna(value):
-        return ""
-    if hasattr(value, "strftime"):
-        return value.strftime("%Y-%m-%d %H:%M:%S")
-    return str(value).strip()[:19]
 
 
 def get_hotel_summary(data_dir: str) -> Dict:

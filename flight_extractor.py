@@ -16,6 +16,13 @@ from pathlib import Path
 import pandas as pd
 
 import utils
+from utils.safe_types import (
+    safe_str,
+    safe_float,
+    safe_int,
+    safe_date,
+    safe_datetime,
+)
 
 logger = utils.setup_logger(__name__)
 
@@ -133,47 +140,47 @@ def _parse_flight_row(row: pd.Series, source_file: str, is_completed: bool) -> O
     """解析航班信息行"""
     try:
         flight = {
-            "passenger_id": _safe_str(row.get("旅客证件号", "")),
-            "phone": _safe_str(row.get("手机号", "")),
-            "airline": _safe_str(row.get("航空公司", "")),
-            "flight_number": _safe_str(row.get("航班号", "")),
-            "passenger_name_cn": _safe_str(row.get("旅客中文姓名", "")),
-            "passenger_name_en": _safe_str(row.get("旅客英文名字", "")),
-            "departure_date": _safe_date(row.get("起飞日期")),
-            "departure_time": _safe_str(row.get("起飞时间", "")),
-            "arrival_date": _safe_date(row.get("到达日期")),
-            "arrival_time": _safe_str(row.get("到达时间", "")),
-            "departure_airport_code": _safe_str(row.get("起飞机场三字码", "")),
-            "arrival_airport_code": _safe_str(row.get("到达机场三字码", "")),
-            "departure_airport": _safe_str(row.get("起飞机场", "")),
-            "arrival_airport": _safe_str(row.get("到达机场", "")),
-            "checkin_date": _safe_date(row.get("值机日期")),
-            "checkin_time": _safe_str(row.get("值机时间", "")),
-            "cabin_class": _safe_str(row.get("离港舱位", "")),
-            "boarding_sequence": _safe_str(row.get("登机牌序号", "")),
-            "seat_row": _safe_str(row.get("座位行号", "")),
-            "seat_number": _safe_str(row.get("座位号", "")),
-            "ticket_number": _safe_str(row.get("票号", "")),
-            "record_number": _safe_str(row.get("记录编号", "")),
-            "sales_cabin": _safe_str(row.get("销售舱位", "")),
-            "ticket_date": _safe_date(row.get("出票日期")),
-            "ffp_airline": _safe_str(row.get("常客卡所属航空公司", "")),
-            "ffp_number": _safe_str(row.get("常客卡号", "")),
-            "baggage_count": _safe_int(row.get("行李件数")),
-            "baggage_weight": _safe_float(row.get("行李重量(kg)")),
-            "ticket_price": _safe_float(row.get("票面总价")),
-            "payment_method": _safe_str(row.get("付款方式", "")),
-            "currency": _safe_str(row.get("票价货币类型", "")),
-            "ticket_office": _safe_str(row.get("出票处office", "")),
-            "ticket_office_phone": _safe_str(row.get("出票处电话", "")),
-            "ticket_office_address": _safe_str(row.get("出票处地址", "")),
-            "booking_office": _safe_str(row.get("订票处office", "")),
-            "booking_office_name": _safe_str(row.get("订票处名字", "")),
-            "booking_office_phone": _safe_str(row.get("订票处电话", "")),
-            "booking_office_address": _safe_str(row.get("订票处地址", "")),
-            "companion_type": _safe_str(row.get("同行人类别", "")),
-            "related_target": _safe_str(row.get("关联目标人", "")),
-            "person_type": _safe_str(row.get("人员类别", "")),
+            "passenger_id": safe_str(row.get("旅客证件号", "")),
+            "phone": safe_str(row.get("手机号", "")),
+            "airline": safe_str(row.get("航空公司", "")),
+            "flight_number": safe_str(row.get("航班号", "")),
+            "passenger_name_cn": safe_str(row.get("旅客中文姓名", "")),
+            "passenger_name_en": safe_str(row.get("旅客英文名字", "")),
+            "departure_date": safe_date(row.get("起飞日期")),
+            "departure_time": safe_str(row.get("起飞时间", "")),
+            "arrival_date": safe_date(row.get("到达日期")),
+            "arrival_time": safe_str(row.get("到达时间", "")),
+            "departure_airport_code": safe_str(row.get("起飞机场三字码", "")),
+            "arrival_airport_code": safe_str(row.get("到达机场三字码", "")),
+            "departure_airport": safe_str(row.get("起飞机场", "")),
+            "arrival_airport": safe_str(row.get("到达机场", "")),
+            "checkin_date": safe_date(row.get("值机日期")),
+            "checkin_time": safe_str(row.get("值机时间", "")),
+            "cabin_class": safe_str(row.get("离港舱位", "")),
+            "boarding_sequence": safe_str(row.get("登机牌序号", "")),
+            "seat_row": safe_str(row.get("座位行号", "")),
+            "seat_number": safe_str(row.get("座位号", "")),
+            "ticket_number": safe_str(row.get("票号", "")),
+            "record_number": safe_str(row.get("记录编号", "")),
+            "sales_cabin": safe_str(row.get("销售舱位", "")),
+            "ticket_date": safe_date(row.get("出票日期")),
+            "ffp_airline": safe_str(row.get("常客卡所属航空公司", "")),
+            "ffp_number": safe_str(row.get("常客卡号", "")),
+            "baggage_count": safe_int(row.get("行李件数")),
+            "baggage_weight": safe_float(row.get("行李重量(kg)")),
+            "ticket_price": safe_float(row.get("票面总价")),
+            "payment_method": safe_str(row.get("付款方式", "")),
+            "currency": safe_str(row.get("票价货币类型", "")),
+            "ticket_office": safe_str(row.get("出票处office", "")),
+            "ticket_office_phone": safe_str(row.get("出票处电话", "")),
+            "ticket_office_address": safe_str(row.get("出票处地址", "")),
+            "booking_office": safe_str(row.get("订票处office", "")),
+            "booking_office_name": safe_str(row.get("订票处名字", "")),
+            "booking_office_phone": safe_str(row.get("订票处电话", "")),
+            "booking_office_address": safe_str(row.get("订票处地址", "")),
+            "companion_type": safe_str(row.get("同行人类别", "")),
+            "related_target": safe_str(row.get("关联目标人", "")),
+            "person_type": safe_str(row.get("人员类别", "")),
             "is_completed": is_completed,
             "source_file": source_file
         }
@@ -244,38 +251,6 @@ def _extract_id_from_filename(filename: str) -> Optional[str]:
     if match:
         return match.group().upper()
     return None
-
-
-def _safe_str(value) -> str:
-    if pd.isna(value):
-        return ""
-    return str(value).strip()
-
-
-def _safe_int(value) -> int:
-    if pd.isna(value):
-        return 0
-    try:
-        return int(value)
-    except (ValueError, TypeError):
-        return 0
-
-
-def _safe_float(value) -> float:
-    if pd.isna(value):
-        return 0.0
-    try:
-        return float(value)
-    except (ValueError, TypeError):
-        return 0.0
-
-
-def _safe_date(value) -> str:
-    if pd.isna(value):
-        return ""
-    if hasattr(value, "strftime"):
-        return value.strftime("%Y-%m-%d")
-    return str(value).strip()[:10]
 
 
 def get_flight_summary(data_dir: str) -> Dict:

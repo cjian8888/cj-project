@@ -19,6 +19,13 @@ from pathlib import Path
 import pandas as pd
 
 import utils
+from utils.safe_types import (
+    safe_str,
+    safe_float,
+    safe_int,
+    safe_date,
+    safe_datetime,
+)
 
 logger = utils.setup_logger(__name__)
 
@@ -120,7 +127,6 @@ def extract_wealth_product_data(data_dir: str, person_id: str = None) -> Dict[st
     return result
 
 
-
 def parse_wealth_file(file_path: str) -> Dict:
     """
     解析单个理财产品xlsx文件
@@ -169,22 +175,22 @@ def _parse_products_sheet(df: pd.DataFrame, source_file: str) -> List[Dict]:
     for _, row in df.iterrows():
         try:
             product = {
-                "bank": _safe_str(row.get("反馈单位", "")),
-                "product_name": _safe_str(row.get("金融理财名称", "")),
-                "product_type": _safe_str(row.get("金融理财类型", "")),
-                "product_code": _safe_str(row.get("金融产品编号", "")),
-                "amount": _safe_float(row.get("资产总数额", 0)),
-                "available_amount": _safe_float(row.get("可控资产总数额", 0)),
-                "shares": _safe_float(row.get("数量/份额/金额", 0)),
-                "unit_price": _safe_float(row.get("资产单位价格", 0)),
-                "currency": _safe_str(row.get("币种", "人民币")),
-                "status": _safe_str(row.get("产品状态", "")),
-                "sales_type": _safe_str(row.get("产品销售种类", "")),
-                "asset_manager": _safe_str(row.get("资产管理人", "")),
-                "custodian": _safe_str(row.get("托管人", "")),
-                "start_date": _safe_date(row.get("成立日")),
-                "end_date": _safe_date(row.get("赎回日")),
-                "feedback_date": _safe_date(row.get("反馈日期")),
+                "bank": safe_str(row.get("反馈单位", "")),
+                "product_name": safe_str(row.get("金融理财名称", "")),
+                "product_type": safe_str(row.get("金融理财类型", "")),
+                "product_code": safe_str(row.get("金融产品编号", "")),
+                "amount": safe_float(row.get("资产总数额", 0)),
+                "available_amount": safe_float(row.get("可控资产总数额", 0)),
+                "shares": safe_float(row.get("数量/份额/金额", 0)),
+                "unit_price": safe_float(row.get("资产单位价格", 0)),
+                "currency": safe_str(row.get("币种", "人民币")),
+                "status": safe_str(row.get("产品状态", "")),
+                "sales_type": safe_str(row.get("产品销售种类", "")),
+                "asset_manager": safe_str(row.get("资产管理人", "")),
+                "custodian": safe_str(row.get("托管人", "")),
+                "start_date": safe_date(row.get("成立日")),
+                "end_date": safe_date(row.get("赎回日")),
+                "feedback_date": safe_date(row.get("反馈日期")),
                 "source_file": source_file
             }
 
@@ -213,16 +219,16 @@ def _parse_accounts_sheet(df: pd.DataFrame, source_file: str) -> List[Dict]:
     for _, row in df.iterrows():
         try:
             account = {
-                "bank": _safe_str(row.get("反馈单位", "")),
-                "account_number": _safe_str(row.get("理财账号", row.get("理财卡号", ""))),
-                "account_type": _safe_str(row.get("账户类别", "")),
-                "account_status": _safe_str(row.get("账户状态", "")),
-                "open_date": _safe_date(row.get("开户日期")),
-                "open_branch": _safe_str(row.get("开户网点", "")),
-                "balance": _safe_float(row.get("账户余额", 0)),
-                "available_balance": _safe_float(row.get("可用余额", 0)),
-                "currency": _safe_str(row.get("币种", "人民币")),
-                "last_transaction_time": _safe_str(row.get("最后交易时间", "")),
+                "bank": safe_str(row.get("反馈单位", "")),
+                "account_number": safe_str(row.get("理财账号", row.get("理财卡号", ""))),
+                "account_type": safe_str(row.get("账户类别", "")),
+                "account_status": safe_str(row.get("账户状态", "")),
+                "open_date": safe_date(row.get("开户日期")),
+                "open_branch": safe_str(row.get("开户网点", "")),
+                "balance": safe_float(row.get("账户余额", 0)),
+                "available_balance": safe_float(row.get("可用余额", 0)),
+                "currency": safe_str(row.get("币种", "人民币")),
+                "last_transaction_time": safe_str(row.get("最后交易时间", "")),
                 "source_file": source_file
             }
             
@@ -351,39 +357,6 @@ def _calculate_summary(products: List[Dict]) -> Dict:
         "total_available": round(available, 2),
         "product_count": len(products)
     }
-
-
-def _safe_str(value) -> str:
-    """安全转换为字符串"""
-    if pd.isna(value):
-        return ""
-    return str(value).strip()
-
-
-def _safe_float(value) -> float:
-    """安全转换为浮点数"""
-    if pd.isna(value):
-        return 0.0
-    try:
-        return float(value)
-    except (ValueError, TypeError):
-        return 0.0
-
-
-def _safe_date(value) -> str:
-    """安全转换为日期字符串"""
-    if pd.isna(value):
-        return ""
-    if hasattr(value, "strftime"):
-        return value.strftime("%Y-%m-%d")
-    return str(value).strip()[:10]
-
-
-# 便捷函数
-def get_person_wealth_products(data_dir: str, person_id: str) -> Dict:
-    """获取指定人员的理财产品信息"""
-    result = extract_wealth_product_data(data_dir, person_id)
-    return result.get(person_id, {"products": [], "accounts": [], "summary": {}})
 
 
 def get_wealth_summary(data_dir: str) -> Dict:

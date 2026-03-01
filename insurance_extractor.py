@@ -16,6 +16,13 @@ from pathlib import Path
 import pandas as pd
 
 import utils
+from utils.safe_types import (
+    safe_str,
+    safe_float,
+    safe_int,
+    safe_date,
+    safe_datetime,
+)
 
 logger = utils.setup_logger(__name__)
 
@@ -154,21 +161,21 @@ def _parse_policy_row(row: pd.Series, source_file: str) -> Optional[Dict]:
     """解析保单行数据"""
     try:
         policy = {
-            "entity_name": _safe_str(row.get("自然人对象名称") or row.get("机构名称", "")),
-            "entity_id": _safe_str(row.get("自然人证件号码") or row.get("统一社会信用代码", "")),
-            "product_name": _safe_str(row.get("保险产品名称", "")),
-            "policy_number": _safe_str(row.get("保单号", "")),
-            "insurance_company": _safe_str(row.get("保险公司名称", "")),
-            "premium_paid": _safe_float(row.get("累计缴纳保费")),
-            "currency": _safe_str(row.get("币种", "CNY")),
-            "insurance_type": _safe_str(row.get("险种名称", "")),
-            "policy_nature": _safe_str(row.get("保单团个性质", "")),
-            "purchase_date": _safe_date(row.get("购买日期")),
-            "effective_date": _safe_date(row.get("保单生效日期")),
-            "termination_date": _safe_date(row.get("保单终止日期")),
-            "insured_subject": _safe_str(row.get("保险标的名称", "")),
-            "account_value": _safe_float(row.get("保险账户价值")),
-            "data_date": _safe_date(row.get("数据提取日期")),
+            "entity_name": safe_str(row.get("自然人对象名称") or row.get("机构名称", "")),
+            "entity_id": safe_str(row.get("自然人证件号码") or row.get("统一社会信用代码", "")),
+            "product_name": safe_str(row.get("保险产品名称", "")),
+            "policy_number": safe_str(row.get("保单号", "")),
+            "insurance_company": safe_str(row.get("保险公司名称", "")),
+            "premium_paid": safe_float(row.get("累计缴纳保费")),
+            "currency": safe_str(row.get("币种", "CNY")),
+            "insurance_type": safe_str(row.get("险种名称", "")),
+            "policy_nature": safe_str(row.get("保单团个性质", "")),
+            "purchase_date": safe_date(row.get("购买日期")),
+            "effective_date": safe_date(row.get("保单生效日期")),
+            "termination_date": safe_date(row.get("保单终止日期")),
+            "insured_subject": safe_str(row.get("保险标的名称", "")),
+            "account_value": safe_float(row.get("保险账户价值")),
+            "data_date": safe_date(row.get("数据提取日期")),
             "source_file": source_file
         }
         
@@ -186,17 +193,17 @@ def _parse_person_row(row: pd.Series, source_file: str) -> Optional[Dict]:
     """解析人员行数据"""
     try:
         person = {
-            "policy_seq": _safe_str(row.get("保单序号", "")),
-            "person_type": _safe_str(row.get("人员类别", "")),
-            "person_seq": _safe_str(row.get("人员序号", "")),
-            "id_type": _safe_str(row.get("人员证件类型", "")),
-            "id_number": _safe_str(row.get("人员证件号码", "")),
-            "phone": _safe_str(row.get("人员联系电话", "")),
-            "address": _safe_str(row.get("人员联系地址", "")),
-            "payment_account": _safe_str(row.get("缴费账号", "")),
-            "applicant_name": _safe_str(row.get("投保人名称", "")),
-            "insured_name": _safe_str(row.get("被保险人名称", "")),
-            "beneficiary_name": _safe_str(row.get("受益人名称", "")),
+            "policy_seq": safe_str(row.get("保单序号", "")),
+            "person_type": safe_str(row.get("人员类别", "")),
+            "person_seq": safe_str(row.get("人员序号", "")),
+            "id_type": safe_str(row.get("人员证件类型", "")),
+            "id_number": safe_str(row.get("人员证件号码", "")),
+            "phone": safe_str(row.get("人员联系电话", "")),
+            "address": safe_str(row.get("人员联系地址", "")),
+            "payment_account": safe_str(row.get("缴费账号", "")),
+            "applicant_name": safe_str(row.get("投保人名称", "")),
+            "insured_name": safe_str(row.get("被保险人名称", "")),
+            "beneficiary_name": safe_str(row.get("受益人名称", "")),
             "source_file": source_file
         }
         
@@ -213,17 +220,17 @@ def _parse_claim_row(row: pd.Series, source_file: str) -> Optional[Dict]:
     """解析赔案行数据"""
     try:
         claim = {
-            "policy_seq": _safe_str(row.get("保单序号", "")),
-            "claim_seq": _safe_str(row.get("赔案序号", "")),
-            "reporter_name": _safe_str(row.get("赔案报案人姓名", "")),
-            "reporter_phone": _safe_str(row.get("赔案报案人联系电话", "")),
-            "claim_number": _safe_str(row.get("赔案号", "")),
-            "incident_time": _safe_datetime(row.get("出险时间")),
-            "report_time": _safe_datetime(row.get("报案时间")),
-            "incident_reason": _safe_str(row.get("出险原因", "")),
-            "payment_account": _safe_str(row.get("赔款支付账号", "")),
-            "payment_amount": _safe_float(row.get("赔付金额")),
-            "payment_date": _safe_date(row.get("赔付日期")),
+            "policy_seq": safe_str(row.get("保单序号", "")),
+            "claim_seq": safe_str(row.get("赔案序号", "")),
+            "reporter_name": safe_str(row.get("赔案报案人姓名", "")),
+            "reporter_phone": safe_str(row.get("赔案报案人联系电话", "")),
+            "claim_number": safe_str(row.get("赔案号", "")),
+            "incident_time": safe_datetime(row.get("出险时间")),
+            "report_time": safe_datetime(row.get("报案时间")),
+            "incident_reason": safe_str(row.get("出险原因", "")),
+            "payment_account": safe_str(row.get("赔款支付账号", "")),
+            "payment_amount": safe_float(row.get("赔付金额")),
+            "payment_date": safe_date(row.get("赔付日期")),
             "source_file": source_file
         }
         
@@ -303,48 +310,6 @@ def _extract_name_from_filename(filename: str) -> str:
     if parts:
         return parts[0]
     return ""
-
-
-def _safe_str(value) -> str:
-    """安全转换为字符串"""
-    if pd.isna(value):
-        return ""
-    return str(value).strip()
-
-
-def _safe_float(value) -> float:
-    """安全转换为浮点数"""
-    if pd.isna(value):
-        return 0.0
-    try:
-        return float(value)
-    except (ValueError, TypeError):
-        return 0.0
-
-
-def _safe_date(value) -> str:
-    """安全转换为日期字符串"""
-    if pd.isna(value):
-        return ""
-    if hasattr(value, "strftime"):
-        return value.strftime("%Y-%m-%d")
-    return str(value).strip()[:10]
-
-
-def _safe_datetime(value) -> str:
-    """安全转换为日期时间字符串"""
-    if pd.isna(value):
-        return ""
-    if hasattr(value, "strftime"):
-        return value.strftime("%Y-%m-%d %H:%M:%S")
-    return str(value).strip()[:19]
-
-
-# 便捷函数
-def get_person_insurance(data_dir: str, person_id: str) -> Dict:
-    """获取指定人员的保险信息"""
-    result = extract_insurance_data(data_dir, person_id)
-    return result.get(person_id, {})
 
 
 def get_insurance_summary(data_dir: str) -> Dict:

@@ -20,6 +20,13 @@ from collections import defaultdict
 import pandas as pd
 
 import utils
+from utils.safe_types import (
+    safe_str,
+    safe_float,
+    safe_int,
+    safe_date,
+    safe_datetime,
+)
 
 logger = utils.setup_logger(__name__)
 
@@ -148,25 +155,25 @@ def _parse_coaddress_file(file_path: str) -> List[Dict]:
         
         for _, row in df.iterrows():
             record = {
-                "name": _safe_str(row.get("姓名", "")),
-                "gender": _safe_str(row.get("性别", "")),
-                "birth_date": _safe_date(row.get("出生日期")),
-                "id_number": _safe_str(row.get("身份证号", "")),
-                "ethnicity": _safe_str(row.get("民族", "")),
-                "native_place": _safe_str(row.get("籍贯", "")),
-                "hukou_address": _safe_str(row.get("户籍地", "")),
-                "former_name": _safe_str(row.get("曾用名", "")),
-                "age": _safe_int(row.get("年龄")),
-                "height": _safe_str(row.get("身高", "")),
-                "occupation": _safe_str(row.get("职业", "")),
-                "education": _safe_str(row.get("文化程度", "")),
-                "person_status": _safe_str(row.get("人员状态", "")),
-                "employer": _safe_str(row.get("从业单位", "")),
-                "relation_to_head": _safe_str(row.get("与户主关系", "")),
-                "hukou_district": _safe_str(row.get("户籍地区划", "")),
-                "military_status": _safe_str(row.get("兵役情况", "")),
-                "marital_status": _safe_str(row.get("婚姻状况", "")),
-                "death_date": _safe_date(row.get("死亡日期")),
+                "name": safe_str(row.get("姓名", "")),
+                "gender": safe_str(row.get("性别", "")),
+                "birth_date": safe_date(row.get("出生日期")),
+                "id_number": safe_str(row.get("身份证号", "")),
+                "ethnicity": safe_str(row.get("民族", "")),
+                "native_place": safe_str(row.get("籍贯", "")),
+                "hukou_address": safe_str(row.get("户籍地", "")),
+                "former_name": safe_str(row.get("曾用名", "")),
+                "age": safe_int(row.get("年龄")),
+                "height": safe_str(row.get("身高", "")),
+                "occupation": safe_str(row.get("职业", "")),
+                "education": safe_str(row.get("文化程度", "")),
+                "person_status": safe_str(row.get("人员状态", "")),
+                "employer": safe_str(row.get("从业单位", "")),
+                "relation_to_head": safe_str(row.get("与户主关系", "")),
+                "hukou_district": safe_str(row.get("户籍地区划", "")),
+                "military_status": safe_str(row.get("兵役情况", "")),
+                "marital_status": safe_str(row.get("婚姻状况", "")),
+                "death_date": safe_date(row.get("死亡日期")),
                 "source_file": filename
             }
             
@@ -206,10 +213,10 @@ def _parse_coviolation_file(file_path: str) -> List[Dict]:
         
         for _, row in df.iterrows():
             record = {
-                "name": _safe_str(row.get("姓名", "")),
-                "id_number": _safe_str(row.get("身份证号", "")),
-                "plate_number": _safe_str(row.get("车号牌", "")),
-                "violation_count": _safe_int(row.get("同次数")),
+                "name": safe_str(row.get("姓名", "")),
+                "id_number": safe_str(row.get("身份证号", "")),
+                "plate_number": safe_str(row.get("车号牌", "")),
+                "violation_count": safe_int(row.get("同次数")),
                 "source_file": filename
             }
             
@@ -317,29 +324,6 @@ def _extract_id_from_filename(filename: str) -> Optional[str]:
     if match:
         return match.group().upper()
     return None
-
-
-def _safe_str(value) -> str:
-    if pd.isna(value):
-        return ""
-    return str(value).strip()
-
-
-def _safe_int(value) -> int:
-    if pd.isna(value):
-        return 0
-    try:
-        return int(value)
-    except (ValueError, TypeError):
-        return 0
-
-
-def _safe_date(value) -> str:
-    if pd.isna(value):
-        return ""
-    if hasattr(value, "strftime"):
-        return value.strftime("%Y-%m-%d")
-    return str(value).strip()[:10]
 
 
 def get_cohabitation_summary(data_dir: str) -> Dict:

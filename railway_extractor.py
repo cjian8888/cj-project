@@ -16,6 +16,13 @@ from pathlib import Path
 import pandas as pd
 
 import utils
+from utils.safe_types import (
+    safe_str,
+    safe_float,
+    safe_int,
+    safe_date,
+    safe_datetime,
+)
 
 logger = utils.setup_logger(__name__)
 
@@ -120,30 +127,30 @@ def _parse_ticket_row(row: pd.Series, source_file: str) -> Optional[Dict]:
     """解析票面信息行"""
     try:
         ticket = {
-            "ticket_seq": _safe_str(row.get("车票序号", "")),
-            "departure_date": _safe_date(row.get("发车日期")),
-            "departure_time": _safe_str(row.get("发车时间", "")),
-            "passenger_name": _safe_str(row.get("乘车人姓名", "")),
-            "id_type": _safe_str(row.get("证件类型", "")),
-            "id_number": _safe_str(row.get("证件号码", "")),
-            "ticket_number": _safe_str(row.get("票号", "")),
-            "train_number": _safe_str(row.get("列车车次", "")),
-            "departure_station": _safe_str(row.get("发站", "")),
-            "arrival_station": _safe_str(row.get("到站", "")),
-            "carriage_number": _safe_str(row.get("车厢号", "")),
-            "seat_type": _safe_str(row.get("席别", "")),
-            "seat_number": _safe_str(row.get("席位号", "")),
-            "ticket_station": _safe_str(row.get("售票车站", "")),
-            "ticket_time": _safe_datetime(row.get("售票时间")),
-            "buyer_name": _safe_str(row.get("购票人", "")),
-            "buyer_id": _safe_str(row.get("购票人证件号码", "")),
-            "buyer_contact": _safe_str(row.get("购票人联系方式", "")),
-            "refund_station": _safe_str(row.get("退票车站", "")),
-            "refund_date": _safe_date(row.get("退票日期")),
-            "refund_time": _safe_str(row.get("退票时间", "")),
-            "change_station": _safe_str(row.get("改签车站", "")),
-            "change_time": _safe_datetime(row.get("改签时间")),
-            "new_ticket_number": _safe_str(row.get("改签新票票号", "")),
+            "ticket_seq": safe_str(row.get("车票序号", "")),
+            "departure_date": safe_date(row.get("发车日期")),
+            "departure_time": safe_str(row.get("发车时间", "")),
+            "passenger_name": safe_str(row.get("乘车人姓名", "")),
+            "id_type": safe_str(row.get("证件类型", "")),
+            "id_number": safe_str(row.get("证件号码", "")),
+            "ticket_number": safe_str(row.get("票号", "")),
+            "train_number": safe_str(row.get("列车车次", "")),
+            "departure_station": safe_str(row.get("发站", "")),
+            "arrival_station": safe_str(row.get("到站", "")),
+            "carriage_number": safe_str(row.get("车厢号", "")),
+            "seat_type": safe_str(row.get("席别", "")),
+            "seat_number": safe_str(row.get("席位号", "")),
+            "ticket_station": safe_str(row.get("售票车站", "")),
+            "ticket_time": safe_datetime(row.get("售票时间")),
+            "buyer_name": safe_str(row.get("购票人", "")),
+            "buyer_id": safe_str(row.get("购票人证件号码", "")),
+            "buyer_contact": safe_str(row.get("购票人联系方式", "")),
+            "refund_station": safe_str(row.get("退票车站", "")),
+            "refund_date": safe_date(row.get("退票日期")),
+            "refund_time": safe_str(row.get("退票时间", "")),
+            "change_station": safe_str(row.get("改签车站", "")),
+            "change_time": safe_datetime(row.get("改签时间")),
+            "new_ticket_number": safe_str(row.get("改签新票票号", "")),
             "source_file": source_file
         }
         
@@ -160,12 +167,12 @@ def _parse_transaction_row(row: pd.Series, source_file: str) -> Optional[Dict]:
     """解析交易信息行"""
     try:
         trans = {
-            "ticket_seq": _safe_str(row.get("车票序号", "")),
-            "train_number": _safe_str(row.get("列车车次", "")),
-            "departure_date": _safe_date(row.get("发车日期")),
-            "order_number": _safe_str(row.get("交易订单号", "")),
-            "transaction_time": _safe_datetime(row.get("交易时间")),
-            "acquiring_bank": _safe_str(row.get("收单行", "")),
+            "ticket_seq": safe_str(row.get("车票序号", "")),
+            "train_number": safe_str(row.get("列车车次", "")),
+            "departure_date": safe_date(row.get("发车日期")),
+            "order_number": safe_str(row.get("交易订单号", "")),
+            "transaction_time": safe_datetime(row.get("交易时间")),
+            "acquiring_bank": safe_str(row.get("收单行", "")),
             "source_file": source_file
         }
         
@@ -219,28 +226,6 @@ def _extract_id_from_filename(filename: str) -> Optional[str]:
     if match:
         return match.group().upper()
     return None
-
-
-def _safe_str(value) -> str:
-    if pd.isna(value):
-        return ""
-    return str(value).strip()
-
-
-def _safe_date(value) -> str:
-    if pd.isna(value):
-        return ""
-    if hasattr(value, "strftime"):
-        return value.strftime("%Y-%m-%d")
-    return str(value).strip()[:10]
-
-
-def _safe_datetime(value) -> str:
-    if pd.isna(value):
-        return ""
-    if hasattr(value, "strftime"):
-        return value.strftime("%Y-%m-%d %H:%M:%S")
-    return str(value).strip()[:19]
 
 
 def get_railway_summary(data_dir: str) -> Dict:

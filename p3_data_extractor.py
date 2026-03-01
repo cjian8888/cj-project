@@ -19,6 +19,13 @@ from pathlib import Path
 import pandas as pd
 
 import utils
+from utils.safe_types import (
+    safe_str,
+    safe_float,
+    safe_int,
+    safe_date,
+    safe_datetime,
+)
 
 logger = utils.setup_logger(__name__)
 
@@ -73,12 +80,12 @@ def _parse_driver_license_file(file_path: str) -> Dict:
         # 提取驾驶证信息
         info = {
             "source_file": Path(file_path).name,
-            "license_number": _safe_str(df.iloc[0].get("证号", df.iloc[0].get("档案编号", ""))),
-            "license_type": _safe_str(df.iloc[0].get("准驾车型", "")),
-            "issue_date": _safe_date(df.iloc[0].get("初次领证日期", "")),
-            "valid_from": _safe_date(df.iloc[0].get("有效起始日期", "")),
-            "valid_until": _safe_date(df.iloc[0].get("有效期止", df.iloc[0].get("有效截止日期", ""))),
-            "status": _safe_str(df.iloc[0].get("状态", df.iloc[0].get("证件状态", "正常"))),
+            "license_number": safe_str(df.iloc[0].get("证号", df.iloc[0].get("档案编号", ""))),
+            "license_type": safe_str(df.iloc[0].get("准驾车型", "")),
+            "issue_date": safe_date(df.iloc[0].get("初次领证日期", "")),
+            "valid_from": safe_date(df.iloc[0].get("有效起始日期", "")),
+            "valid_until": safe_date(df.iloc[0].get("有效期止", df.iloc[0].get("有效截止日期", ""))),
+            "status": safe_str(df.iloc[0].get("状态", df.iloc[0].get("证件状态", "正常"))),
         }
         
         return info
@@ -138,13 +145,13 @@ def _parse_traffic_violation_file(file_path: str) -> List[Dict]:
         for _, row in df.iterrows():
             record = {
                 "source_file": Path(file_path).name,
-                "violation_date": _safe_date(row.get("违法时间", row.get("违法日期", ""))),
-                "violation_type": _safe_str(row.get("违法行为", row.get("违法类型", ""))),
-                "location": _safe_str(row.get("违法地点", "")),
-                "vehicle_plate": _safe_str(row.get("号牌号码", row.get("车牌号", ""))),
-                "fine_amount": _safe_float(row.get("罚款金额", 0)),
-                "points_deducted": _safe_int(row.get("记分", row.get("扣分", 0))),
-                "status": _safe_str(row.get("处理状态", "未处理")),
+                "violation_date": safe_date(row.get("违法时间", row.get("违法日期", ""))),
+                "violation_type": safe_str(row.get("违法行为", row.get("违法类型", ""))),
+                "location": safe_str(row.get("违法地点", "")),
+                "vehicle_plate": safe_str(row.get("号牌号码", row.get("车牌号", ""))),
+                "fine_amount": safe_float(row.get("罚款金额", 0)),
+                "points_deducted": safe_int(row.get("记分", row.get("扣分", 0))),
+                "status": safe_str(row.get("处理状态", "未处理")),
             }
             records.append(record)
         
@@ -205,12 +212,12 @@ def _parse_exit_document_file(file_path: str) -> Dict:
         documents = []
         for _, row in df.iterrows():
             doc = {
-                "doc_type": _safe_str(row.get("证件类型", row.get("证照类型", ""))),
-                "doc_number": _safe_str(row.get("证件号码", row.get("证照号码", ""))),
-                "issue_date": _safe_date(row.get("签发日期", "")),
-                "valid_until": _safe_date(row.get("有效期至", row.get("有效截止日期", ""))),
-                "issue_authority": _safe_str(row.get("签发机关", "")),
-                "status": _safe_str(row.get("状态", "有效")),
+                "doc_type": safe_str(row.get("证件类型", row.get("证照类型", ""))),
+                "doc_number": safe_str(row.get("证件号码", row.get("证照号码", ""))),
+                "issue_date": safe_date(row.get("签发日期", "")),
+                "valid_until": safe_date(row.get("有效期至", row.get("有效截止日期", ""))),
+                "issue_authority": safe_str(row.get("签发机关", "")),
+                "status": safe_str(row.get("状态", "有效")),
             }
             if doc["doc_number"]:
                 documents.append(doc)
@@ -275,12 +282,12 @@ def _parse_railway_registration_file(file_path: str) -> Dict:
         row = df.iloc[0]
         info = {
             "source_file": Path(file_path).name,
-            "username": _safe_str(row.get("用户名", "")),
-            "phone": _safe_str(row.get("手机号码", row.get("联系电话", ""))),
-            "email": _safe_str(row.get("邮箱", row.get("电子邮箱", ""))),
-            "register_date": _safe_date(row.get("注册日期", row.get("注册时间", ""))),
-            "bindred_cards": _safe_str(row.get("绑定银行卡", "")),
-            "bindred_id_cards": _safe_str(row.get("绑定身份证", "")),
+            "username": safe_str(row.get("用户名", "")),
+            "phone": safe_str(row.get("手机号码", row.get("联系电话", ""))),
+            "email": safe_str(row.get("邮箱", row.get("电子邮箱", ""))),
+            "register_date": safe_date(row.get("注册日期", row.get("注册时间", ""))),
+            "bindred_cards": safe_str(row.get("绑定银行卡", "")),
+            "bindred_id_cards": safe_str(row.get("绑定身份证", "")),
         }
         
         return info
@@ -309,45 +316,6 @@ def _extract_id_from_filename(filename: str) -> str:
     match = re.search(r'[0-9]{17}[0-9X]', filename)
     return match.group(0) if match else ""
 
-
-def _safe_str(value) -> str:
-    if pd.isna(value):
-        return ""
-    return str(value).strip()
-
-
-def _safe_int(value) -> int:
-    try:
-        if pd.isna(value):
-            return 0
-        return int(float(value))
-    except (ValueError, TypeError):
-        return 0
-
-
-def _safe_float(value) -> float:
-    try:
-        if pd.isna(value):
-            return 0.0
-        return float(value)
-    except (ValueError, TypeError):
-        return 0.0
-
-
-def _safe_date(value) -> str:
-    if pd.isna(value):
-        return ""
-    try:
-        if hasattr(value, 'strftime'):
-            return value.strftime("%Y-%m-%d")
-        return str(value)
-    except Exception:
-        return str(value) if value else ""
-
-
-# ============================================
-# 便捷函数：一次性提取所有P3级数据
-# ============================================
 
 def extract_all_p3_data(data_dir: str) -> Dict[str, Dict]:
     """

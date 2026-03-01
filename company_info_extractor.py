@@ -17,6 +17,13 @@ from pathlib import Path
 import pandas as pd
 
 import utils
+from utils.safe_types import (
+    safe_str,
+    safe_float,
+    safe_int,
+    safe_date,
+    safe_datetime,
+)
 
 logger = utils.setup_logger(__name__)
 
@@ -153,29 +160,29 @@ def _parse_basic_info(xls: pd.ExcelFile, source_file: str) -> Dict[str, Dict]:
                     continue
                 
                 for idx, row in df.iterrows():
-                    uscc = _safe_str(row.get("统一社会信用代码"))
+                    uscc = safe_str(row.get("统一社会信用代码"))
                     if not uscc:
                         continue
                     
                     company = {
                         "uscc": uscc,
-                        "company_name": _safe_str(row.get("企业（机构）名称")),
-                        "legal_representative": _safe_str(row.get("法定代表人")),
-                        "registered_capital": _safe_float(row.get("注册资本(金)（万元）")),
-                        "capital_currency": _safe_str(row.get("注册资本(金)币种", "人民币")),
-                        "paid_capital": _safe_float(row.get("实收资本")),
-                        "establishment_date": _safe_date(row.get("成立日期")),
-                        "approval_date": _safe_date(row.get("核准日期")),
-                        "business_scope": _safe_str(row.get("经营范围")),
-                        "registration_status": _safe_str(row.get("登记状态")),
-                        "company_type": _safe_str(row.get("市场主体类型")),
-                        "statistical_type": _safe_str(row.get("统计企业类型")),
-                        "industry": _safe_str(row.get("行业门类")),
-                        "industry_code": _safe_str(row.get("行业代码")),
-                        "registration_authority": _safe_str(row.get("登记机关")),
-                        "address": _safe_str(row.get("住所")),
-                        "registration_number": _safe_str(row.get("注册号")),
-                        "employee_count": _safe_int(row.get("从业人员/农专成员总数")),
+                        "company_name": safe_str(row.get("企业（机构）名称")),
+                        "legal_representative": safe_str(row.get("法定代表人")),
+                        "registered_capital": safe_float(row.get("注册资本(金)（万元）")),
+                        "capital_currency": safe_str(row.get("注册资本(金)币种", "人民币")),
+                        "paid_capital": safe_float(row.get("实收资本")),
+                        "establishment_date": safe_date(row.get("成立日期")),
+                        "approval_date": safe_date(row.get("核准日期")),
+                        "business_scope": safe_str(row.get("经营范围")),
+                        "registration_status": safe_str(row.get("登记状态")),
+                        "company_type": safe_str(row.get("市场主体类型")),
+                        "statistical_type": safe_str(row.get("统计企业类型")),
+                        "industry": safe_str(row.get("行业门类")),
+                        "industry_code": safe_str(row.get("行业代码")),
+                        "registration_authority": safe_str(row.get("登记机关")),
+                        "address": safe_str(row.get("住所")),
+                        "registration_number": safe_str(row.get("注册号")),
+                        "employee_count": safe_int(row.get("从业人员/农专成员总数")),
                         "shareholders": [],
                         "key_persons": [],
                         "branches": [],
@@ -184,7 +191,7 @@ def _parse_basic_info(xls: pd.ExcelFile, source_file: str) -> Dict[str, Dict]:
                     }
                     
                     # 只保留主公司（查询对象）
-                    query_name = _safe_str(row.get("查询名称"))
+                    query_name = safe_str(row.get("查询名称"))
                     company_name = company["company_name"]
                     
                     if query_name and company_name:
@@ -216,19 +223,19 @@ def _parse_shareholders(xls: pd.ExcelFile, source_file: str) -> Dict[str, List[D
                     continue
                 
                 for idx, row in df.iterrows():
-                    uscc = _safe_str(row.get("证件号码"))  # 企业的统一社会信用代码
+                    uscc = safe_str(row.get("证件号码"))  # 企业的统一社会信用代码
                     if not uscc:
                         continue
                     
                     shareholder = {
-                        "name": _safe_str(row.get("自然人姓名")),
-                        "id_type": _safe_str(row.get("自然人证件类型")),
-                        "id_number": _safe_str(row.get("自然人证件号码")),
-                        "subscribed_capital": _safe_float(row.get("认缴出资额（万元）")),
-                        "subscribed_ratio": _safe_float(row.get("认缴出资比例")),
-                        "subscribed_date": _safe_date(row.get("认缴出资期限")),
-                        "paid_capital": _safe_float(row.get("实缴出资额（万元）")),
-                        "currency": _safe_str(row.get("币种", "人民币")),
+                        "name": safe_str(row.get("自然人姓名")),
+                        "id_type": safe_str(row.get("自然人证件类型")),
+                        "id_number": safe_str(row.get("自然人证件号码")),
+                        "subscribed_capital": safe_float(row.get("认缴出资额（万元）")),
+                        "subscribed_ratio": safe_float(row.get("认缴出资比例")),
+                        "subscribed_date": safe_date(row.get("认缴出资期限")),
+                        "paid_capital": safe_float(row.get("实缴出资额（万元）")),
+                        "currency": safe_str(row.get("币种", "人民币")),
                         "source_file": source_file
                     }
                     
@@ -256,15 +263,15 @@ def _parse_key_persons(xls: pd.ExcelFile, source_file: str) -> Dict[str, List[Di
                     continue
                 
                 for idx, row in df.iterrows():
-                    uscc = _safe_str(row.get("证件号码"))  # 企业的统一社会信用代码
+                    uscc = safe_str(row.get("证件号码"))  # 企业的统一社会信用代码
                     if not uscc:
                         continue
                     
                     person = {
-                        "name": _safe_str(row.get("姓名")) or _safe_str(row.get("主要人员姓名")),
-                        "position": _safe_str(row.get("职务")) or _safe_str(row.get("职位")),
-                        "id_type": _safe_str(row.get("证件类型")),
-                        "id_number": _safe_str(row.get("人员证件号码")),
+                        "name": safe_str(row.get("姓名")) or safe_str(row.get("主要人员姓名")),
+                        "position": safe_str(row.get("职务")) or safe_str(row.get("职位")),
+                        "id_type": safe_str(row.get("证件类型")),
+                        "id_number": safe_str(row.get("人员证件号码")),
                         "source_file": source_file
                     }
                     
@@ -292,14 +299,14 @@ def _parse_branches(xls: pd.ExcelFile, source_file: str) -> Dict[str, List[Dict]
                     continue
                 
                 for idx, row in df.iterrows():
-                    uscc = _safe_str(row.get("证件号码"))  # 总公司的统一社会信用代码
+                    uscc = safe_str(row.get("证件号码"))  # 总公司的统一社会信用代码
                     if not uscc:
                         continue
                     
                     branch = {
-                        "branch_name": _safe_str(row.get("分支机构名称")),
-                        "branch_uscc": _safe_str(row.get("分支机构统一社会信用代码")),
-                        "branch_registration_number": _safe_str(row.get("分支机构注册号")),
+                        "branch_name": safe_str(row.get("分支机构名称")),
+                        "branch_uscc": safe_str(row.get("分支机构统一社会信用代码")),
+                        "branch_registration_number": safe_str(row.get("分支机构注册号")),
                         "source_file": source_file
                     }
                     
@@ -331,63 +338,6 @@ def _find_company_info_dir(data_dir: str) -> Optional[str]:
             return str(matches[0])
     
     return None
-
-
-def _safe_str(value) -> Optional[str]:
-    """安全转换为字符串"""
-    if pd.isna(value):
-        return None
-    return str(value).strip()
-
-
-def _safe_float(value) -> Optional[float]:
-    """安全转换为浮点数"""
-    if pd.isna(value):
-        return None
-    try:
-        return float(value)
-    except (ValueError, TypeError):
-        return None
-
-
-def _safe_int(value) -> Optional[int]:
-    """安全转换为整数"""
-    if pd.isna(value):
-        return None
-    try:
-        return int(float(value))
-    except (ValueError, TypeError):
-        return None
-
-
-def _safe_date(value) -> Optional[str]:
-    """安全转换为日期字符串"""
-    if pd.isna(value):
-        return None
-    try:
-        if isinstance(value, pd.Timestamp):
-            return value.strftime("%Y-%m-%d")
-        if isinstance(value, str):
-            return pd.to_datetime(value).strftime("%Y-%m-%d")
-        return str(value)
-    except:
-        return None
-
-
-# 便捷函数
-def get_company_by_uscc(data_dir: str, uscc: str) -> Optional[Dict]:
-    """
-    根据统一社会信用代码获取企业信息
-    
-    Args:
-        data_dir: 数据目录
-        uscc: 统一社会信用代码
-        
-    Returns:
-        Dict: 企业信息，未找到返回None
-    """
-    result = extract_company_info(data_dir)
-    return result.get(uscc)
 
 
 def get_companies_by_person(data_dir: str, person_id: str) -> List[Dict]:
@@ -561,30 +511,30 @@ def parse_credit_code_file(file_path: str) -> Dict[str, Dict]:
             return result
         
         for _, row in df.iterrows():
-            uscc = _safe_str(row.get("统一社会信用代码"))
+            uscc = safe_str(row.get("统一社会信用代码"))
             if not uscc:
                 continue
             
             company = {
                 "uscc": uscc,
-                "org_code": _safe_str(row.get("组织机构代码")),
-                "company_name": _safe_str(row.get("机构名称")),
-                "registration_number": _safe_str(row.get("注册号")),
-                "company_type": _safe_str(row.get("机构类型")),
-                "legal_representative": _safe_str(row.get("法定代表人")),
-                "legal_representative_id": _safe_str(row.get("法定代表人证件号码")),
-                "legal_representative_phone": _safe_str(row.get("法定代表人电话号码")),
-                "registered_capital": _safe_float(row.get("注册资本")),
-                "registered_capital_currency": _safe_str(row.get("注册资本币种", "人民币")),
-                "paid_capital": _safe_float(row.get("实收资本")),
-                "establishment_date": _safe_date(row.get("成立日期")),
-                "business_scope": _safe_str(row.get("经营范围")),
-                "operation_period_start": _safe_date(row.get("经营期限起")),
-                "operation_period_end": _safe_date(row.get("经营期限止")),
-                "operation_status": _safe_str(row.get("经营状态")),
-                "registration_authority": _safe_str(row.get("登记机关")),
-                "address": _safe_str(row.get("机构地址")),
-                "feedback_date": _safe_str(row.get("反馈录入时间")),
+                "org_code": safe_str(row.get("组织机构代码")),
+                "company_name": safe_str(row.get("机构名称")),
+                "registration_number": safe_str(row.get("注册号")),
+                "company_type": safe_str(row.get("机构类型")),
+                "legal_representative": safe_str(row.get("法定代表人")),
+                "legal_representative_id": safe_str(row.get("法定代表人证件号码")),
+                "legal_representative_phone": safe_str(row.get("法定代表人电话号码")),
+                "registered_capital": safe_float(row.get("注册资本")),
+                "registered_capital_currency": safe_str(row.get("注册资本币种", "人民币")),
+                "paid_capital": safe_float(row.get("实收资本")),
+                "establishment_date": safe_date(row.get("成立日期")),
+                "business_scope": safe_str(row.get("经营范围")),
+                "operation_period_start": safe_date(row.get("经营期限起")),
+                "operation_period_end": safe_date(row.get("经营期限止")),
+                "operation_status": safe_str(row.get("经营状态")),
+                "registration_authority": safe_str(row.get("登记机关")),
+                "address": safe_str(row.get("机构地址")),
+                "feedback_date": safe_str(row.get("反馈录入时间")),
                 "source_file": source_file,
                 "data_source": "统一社会信用代码查询"
             }

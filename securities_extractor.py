@@ -16,6 +16,13 @@ from pathlib import Path
 import pandas as pd
 
 import utils
+from utils.safe_types import (
+    safe_str,
+    safe_float,
+    safe_int,
+    safe_date,
+    safe_datetime,
+)
 
 logger = utils.setup_logger(__name__)
 
@@ -115,7 +122,6 @@ def extract_securities_data(data_dir: str, person_id: str = None) -> Dict[str, D
     return result
 
 
-
 def parse_securities_file(file_path: str) -> Dict:
     """
     解析单个证券信息xlsx文件
@@ -163,17 +169,17 @@ def _parse_accounts_sheet(df: pd.DataFrame, source_file: str) -> List[Dict]:
     for _, row in df.iterrows():
         try:
             account = {
-                "holder_name": _safe_str(row.get("持有人名称", "")),
-                "id_type": _safe_str(row.get("证件类型", "")),
-                "id_number": _safe_str(row.get("证件号码", "")),
-                "market": _safe_str(row.get("市场类型", "")),
-                "account": _safe_str(row.get("证券账户", "")),
-                "status": _safe_str(row.get("证券账户状态", "")),
-                "open_date": _safe_date(row.get("开户日期")),
-                "address": _safe_str(row.get("联系地址", "")),
-                "phone": _safe_str(row.get("联系电话", "")),
-                "broker": _safe_str(row.get("开户代理机构名称", "")),
-                "result_note": _safe_str(row.get("结果说明", "")),
+                "holder_name": safe_str(row.get("持有人名称", "")),
+                "id_type": safe_str(row.get("证件类型", "")),
+                "id_number": safe_str(row.get("证件号码", "")),
+                "market": safe_str(row.get("市场类型", "")),
+                "account": safe_str(row.get("证券账户", "")),
+                "status": safe_str(row.get("证券账户状态", "")),
+                "open_date": safe_date(row.get("开户日期")),
+                "address": safe_str(row.get("联系地址", "")),
+                "phone": safe_str(row.get("联系电话", "")),
+                "broker": safe_str(row.get("开户代理机构名称", "")),
+                "result_note": safe_str(row.get("结果说明", "")),
                 "source_file": source_file
             }
             
@@ -194,25 +200,25 @@ def _parse_holdings_sheet(df: pd.DataFrame, source_file: str) -> List[Dict]:
     for _, row in df.iterrows():
         try:
             # 检查是否有持有信息
-            result_note = _safe_str(row.get("结果说明", ""))
+            result_note = safe_str(row.get("结果说明", ""))
             if "无持有信息" in result_note:
                 continue
             
-            quantity = _safe_int(row.get("持有数量", 0))
-            price = _safe_float(row.get("当日收牌价", 0))
+            quantity = safe_int(row.get("持有数量", 0))
+            price = safe_float(row.get("当日收牌价", 0))
             
             holding = {
-                "market": _safe_str(row.get("市场类型", "")),
-                "account": _safe_str(row.get("证券账户", "")),
-                "code": _safe_str(row.get("证券代码", "")),
-                "name": _safe_str(row.get("证券简称", "")),
-                "category": _safe_str(row.get("证券类别", "")),
+                "market": safe_str(row.get("市场类型", "")),
+                "account": safe_str(row.get("证券账户", "")),
+                "code": safe_str(row.get("证券代码", "")),
+                "name": safe_str(row.get("证券简称", "")),
+                "category": safe_str(row.get("证券类别", "")),
                 "quantity": quantity,
                 "price": price,
                 "market_value": round(quantity * price, 2),
-                "total_shares": _safe_int(row.get("证券总股本数量", 0)),
-                "frozen_quantity": _safe_int(row.get("其中冻结数量", 0)),
-                "circulation_type": _safe_str(row.get("流通类型", "")),
+                "total_shares": safe_int(row.get("证券总股本数量", 0)),
+                "frozen_quantity": safe_int(row.get("其中冻结数量", 0)),
+                "circulation_type": safe_str(row.get("流通类型", "")),
                 "source_file": source_file
             }
             
@@ -233,15 +239,15 @@ def _parse_transactions_sheet(df: pd.DataFrame, source_file: str) -> List[Dict]:
     for _, row in df.iterrows():
         try:
             transaction = {
-                "market": _safe_str(row.get("市场类型", "")),
-                "account": _safe_str(row.get("证券账户", "")),
-                "code": _safe_str(row.get("证券代码", "")),
-                "name": _safe_str(row.get("证券简称", "")),
-                "category": _safe_str(row.get("证券类别", "")),
-                "date": _safe_date(row.get("过户日期")),
-                "type": _safe_str(row.get("过户类型", "")),
-                "quantity": _safe_int(row.get("过户数量", 0)),
-                "broker": _safe_str(row.get("结算人简称", "")),
+                "market": safe_str(row.get("市场类型", "")),
+                "account": safe_str(row.get("证券账户", "")),
+                "code": safe_str(row.get("证券代码", "")),
+                "name": safe_str(row.get("证券简称", "")),
+                "category": safe_str(row.get("证券类别", "")),
+                "date": safe_date(row.get("过户日期")),
+                "type": safe_str(row.get("过户类型", "")),
+                "quantity": safe_int(row.get("过户数量", 0)),
+                "broker": safe_str(row.get("结算人简称", "")),
                 "source_file": source_file
             }
             
@@ -374,49 +380,6 @@ def _calculate_summary(data: Dict) -> Dict:
         "total_market_value": round(total_market_value, 2),
         "total_frozen_quantity": total_frozen
     }
-
-
-def _safe_str(value) -> str:
-    if pd.isna(value):
-        return ""
-    return str(value).strip()
-
-
-def _safe_float(value) -> float:
-    if pd.isna(value):
-        return 0.0
-    try:
-        return float(value)
-    except (ValueError, TypeError):
-        return 0.0
-
-
-def _safe_int(value) -> int:
-    if pd.isna(value):
-        return 0
-    try:
-        return int(float(value))
-    except (ValueError, TypeError):
-        return 0
-
-
-def _safe_date(value) -> str:
-    if pd.isna(value):
-        return ""
-    if hasattr(value, "strftime"):
-        return value.strftime("%Y-%m-%d")
-    s = str(value).strip()
-    # 处理YYYYMMDD格式
-    if len(s) == 8 and s.isdigit():
-        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
-    return s[:10]
-
-
-# 便捷函数
-def get_person_securities(data_dir: str, person_id: str) -> Dict:
-    """获取指定人员的证券信息"""
-    result = extract_securities_data(data_dir, person_id)
-    return result.get(person_id, {"accounts": [], "holdings": [], "transactions": [], "summary": {}})
 
 
 def get_securities_summary(data_dir: str) -> Dict:

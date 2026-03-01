@@ -16,6 +16,13 @@ from pathlib import Path
 import pandas as pd
 
 import utils
+from utils.safe_types import (
+    safe_str,
+    safe_float,
+    safe_int,
+    safe_date,
+    safe_datetime,
+)
 
 logger = utils.setup_logger(__name__)
 
@@ -109,11 +116,11 @@ def parse_bank_account_info_file(file_path: str) -> Dict[str, Dict]:
             df = pd.read_excel(xls, sheet_name="账号基本信息")
             
             for _, row in df.iterrows():
-                id_number = _safe_str(row.get("证件号码"))
+                id_number = safe_str(row.get("证件号码"))
                 if not id_number:
                     continue
                 
-                name = _safe_str(row.get("名称"))
+                name = safe_str(row.get("名称"))
                 
                 if id_number not in results:
                     results[id_number] = {
@@ -123,18 +130,18 @@ def parse_bank_account_info_file(file_path: str) -> Dict[str, Dict]:
                     }
                 
                 account = {
-                    "account_number": _safe_str(row.get("账号")),
-                    "card_number": _safe_str(row.get("卡号")),
-                    "bank_name": _safe_str(row.get("反馈单位")),
-                    "account_type": _safe_str(row.get("账户类别")),
-                    "status": _safe_str(row.get("账户状态")),
-                    "balance": _safe_float(row.get("账户余额")),
-                    "available_balance": _safe_float(row.get("可用余额")),
-                    "open_date": _safe_date(row.get("开户日期")),
-                    "close_date": _safe_date(row.get("销户日期")),
-                    "branch": _safe_str(row.get("开户网点")),
-                    "currency": _safe_str(row.get("币种")),
-                    "last_transaction": _safe_date(row.get("最后交易时间")),
+                    "account_number": safe_str(row.get("账号")),
+                    "card_number": safe_str(row.get("卡号")),
+                    "bank_name": safe_str(row.get("反馈单位")),
+                    "account_type": safe_str(row.get("账户类别")),
+                    "status": safe_str(row.get("账户状态")),
+                    "balance": safe_float(row.get("账户余额")),
+                    "available_balance": safe_float(row.get("可用余额")),
+                    "open_date": safe_date(row.get("开户日期")),
+                    "close_date": safe_date(row.get("销户日期")),
+                    "branch": safe_str(row.get("开户网点")),
+                    "currency": safe_str(row.get("币种")),
+                    "last_transaction": safe_date(row.get("最后交易时间")),
                     "source_file": filename
                 }
                 
@@ -164,53 +171,6 @@ def _find_bank_account_info_dir(data_dir: str) -> Optional[str]:
             return str(subdir)
     
     return None
-
-
-def _safe_str(value) -> Optional[str]:
-    """安全转换为字符串"""
-    if pd.isna(value):
-        return None
-    return str(value).strip()
-
-
-def _safe_float(value) -> Optional[float]:
-    """安全转换为浮点数"""
-    if pd.isna(value):
-        return None
-    try:
-        return float(value)
-    except (ValueError, TypeError):
-        return None
-
-
-def _safe_date(value) -> Optional[str]:
-    """安全转换为日期字符串"""
-    if pd.isna(value):
-        return None
-    try:
-        if hasattr(value, "strftime"):
-            return value.strftime("%Y-%m-%d")
-        return str(value)[:10]
-    except:
-        return str(value)
-
-
-# 便捷函数
-def get_person_bank_accounts(data_dir: str, person_id: str) -> List[Dict]:
-    """
-    获取指定人员的银行账户列表
-    
-    Args:
-        data_dir: 数据目录
-        person_id: 身份证号
-        
-    Returns:
-        List[Dict]: 账户列表
-    """
-    result = extract_bank_account_info(data_dir, person_id)
-    if person_id in result:
-        return result[person_id].get("accounts", [])
-    return []
 
 
 def get_account_summary(data_dir: str) -> Dict:

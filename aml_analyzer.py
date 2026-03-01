@@ -17,6 +17,13 @@ from pathlib import Path
 import pandas as pd
 
 import utils
+from utils.safe_types import (
+    safe_str,
+    safe_float,
+    safe_int,
+    safe_date,
+    safe_datetime,
+)
 
 logger = utils.setup_logger(__name__)
 
@@ -254,17 +261,17 @@ def _parse_payment_accounts(xls: pd.ExcelFile, source_file: str) -> List[Dict]:
                         
                         # 根据列位置提取数据
                         if len(row) > 0:
-                            account["payment_institution"] = _safe_str(row.iloc[0])
+                            account["payment_institution"] = safe_str(row.iloc[0])
                         if len(row) > 1:
-                            account["account_number"] = _safe_str(row.iloc[1])
+                            account["account_number"] = safe_str(row.iloc[1])
                         if len(row) > 2:
-                            account["account_type"] = _safe_str(row.iloc[2])
+                            account["account_type"] = safe_str(row.iloc[2])
                         if len(row) > 3:
-                            account["open_date"] = _safe_date(row.iloc[3])
+                            account["open_date"] = safe_date(row.iloc[3])
                         if len(row) > 4:
-                            account["close_date"] = _safe_date(row.iloc[4])
+                            account["close_date"] = safe_date(row.iloc[4])
                         if len(row) > 5:
-                            account["balance"] = _safe_float(row.iloc[5])
+                            account["balance"] = safe_float(row.iloc[5])
                         
                         if account.get("account_number"):
                             accounts.append(account)
@@ -322,15 +329,15 @@ def _parse_payment_transactions(xls: pd.ExcelFile, source_file: str) -> List[Dic
                         
                         # 提取各字段
                         if len(row) > 0:
-                            tx["transaction_date"] = _safe_date(row.iloc[0])
+                            tx["transaction_date"] = safe_date(row.iloc[0])
                         if len(row) > 1:
-                            tx["transaction_type"] = _safe_str(row.iloc[1])
+                            tx["transaction_type"] = safe_str(row.iloc[1])
                         if len(row) > 2:
-                            tx["amount"] = _safe_float(row.iloc[2])
+                            tx["amount"] = safe_float(row.iloc[2])
                         if len(row) > 3:
-                            tx["counterparty"] = _safe_str(row.iloc[3])
+                            tx["counterparty"] = safe_str(row.iloc[3])
                         if len(row) > 4:
-                            tx["description"] = _safe_str(row.iloc[4])
+                            tx["description"] = safe_str(row.iloc[4])
                         
                         if tx.get("amount"):
                             transactions.append(tx)
@@ -411,53 +418,6 @@ def _find_aml_dir(data_dir: str) -> Optional[str]:
             return str(matches[0])
     
     return None
-
-
-def _safe_str(value) -> Optional[str]:
-    """安全转换为字符串"""
-    if pd.isna(value):
-        return None
-    return str(value).strip()
-
-
-def _safe_float(value) -> Optional[float]:
-    """安全转换为浮点数"""
-    if pd.isna(value):
-        return None
-    try:
-        return float(value)
-    except (ValueError, TypeError):
-        return None
-
-
-def _safe_date(value) -> Optional[str]:
-    """安全转换为日期字符串"""
-    if pd.isna(value):
-        return None
-    try:
-        if isinstance(value, pd.Timestamp):
-            return value.strftime("%Y-%m-%d")
-        if isinstance(value, str):
-            return pd.to_datetime(value).strftime("%Y-%m-%d")
-        return str(value)
-    except:
-        return None
-
-
-# 便捷函数
-def get_person_aml_data(data_dir: str, person_id: str) -> Optional[Dict]:
-    """
-    获取指定人员的反洗钱数据
-    
-    Args:
-        data_dir: 数据目录
-        person_id: 身份证号
-        
-    Returns:
-        Dict: 反洗钱数据，未找到返回None
-    """
-    result = extract_aml_data(data_dir)
-    return result.get(person_id)
 
 
 def get_aml_alerts(data_dir: str) -> List[Dict]:

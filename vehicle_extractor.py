@@ -16,6 +16,13 @@ from pathlib import Path
 import pandas as pd
 
 import utils
+from utils.safe_types import (
+    safe_str,
+    safe_float,
+    safe_int,
+    safe_date,
+    safe_datetime,
+)
 
 logger = utils.setup_logger(__name__)
 
@@ -147,27 +154,27 @@ def _parse_vehicle_row(row: pd.Series, source_file: str) -> Optional[Dict]:
     """解析单行车辆数据"""
     try:
         # 检查是否为抵押/质押
-        is_pledged_val = _safe_str(row.get("是否抵押/质押", ""))
+        is_pledged_val = safe_str(row.get("是否抵押/质押", ""))
         is_pledged = is_pledged_val in ["1", "是", "有"]
         
         vehicle = {
-            "plate_number": _safe_str(row.get("号牌号码", "")),
-            "plate_type": _safe_str(row.get("号牌种类", "")),
-            "brand": _safe_str(row.get("中文品牌", "")),
-            "color": _safe_str(row.get("车身颜色", "")),
-            "register_date": _safe_date(row.get("初次登记日期")),
-            "status": _safe_str(row.get("机动车状态", "")),
+            "plate_number": safe_str(row.get("号牌号码", "")),
+            "plate_type": safe_str(row.get("号牌种类", "")),
+            "brand": safe_str(row.get("中文品牌", "")),
+            "color": safe_str(row.get("车身颜色", "")),
+            "register_date": safe_date(row.get("初次登记日期")),
+            "status": safe_str(row.get("机动车状态", "")),
             "is_pledged": is_pledged,
-            "engine_number": _safe_str(row.get("机动车发动机号", "")),
-            "vin": _safe_str(row.get("车辆识别代码", "")),
-            "displacement": _safe_str(row.get("机动车发动机排量", "")),
-            "power": _safe_str(row.get("机动车发动机功率", "")),
-            "energy_type": _safe_str(row.get("机动车能源种类", "")),
-            "manufacture_date": _safe_date(row.get("出厂日期")),
-            "owner_name": _safe_str(row.get("机动车所有人", "")),
-            "owner_id": _safe_str(row.get("身份证号", "")),
-            "contact_phone": _safe_str(row.get("联系电话", "")),
-            "address": _safe_str(row.get("住所地址", "")),
+            "engine_number": safe_str(row.get("机动车发动机号", "")),
+            "vin": safe_str(row.get("车辆识别代码", "")),
+            "displacement": safe_str(row.get("机动车发动机排量", "")),
+            "power": safe_str(row.get("机动车发动机功率", "")),
+            "energy_type": safe_str(row.get("机动车能源种类", "")),
+            "manufacture_date": safe_date(row.get("出厂日期")),
+            "owner_name": safe_str(row.get("机动车所有人", "")),
+            "owner_id": safe_str(row.get("身份证号", "")),
+            "contact_phone": safe_str(row.get("联系电话", "")),
+            "address": safe_str(row.get("住所地址", "")),
             "source_file": source_file
         }
         
@@ -232,38 +239,6 @@ def _deduplicate_vehicles(vehicles: List[Dict]) -> List[Dict]:
             unique.append(v)
     
     return unique
-
-
-def _safe_str(value) -> str:
-    """安全转换为字符串"""
-    if pd.isna(value):
-        return ""
-    return str(value).strip()
-
-
-def _safe_date(value) -> str:
-    """安全转换为日期字符串"""
-    if pd.isna(value):
-        return ""
-    if hasattr(value, "strftime"):
-        return value.strftime("%Y-%m-%d")
-    return str(value).strip()[:10]
-
-
-# 便捷函数
-def get_person_vehicles(data_dir: str, person_id: str) -> List[Dict]:
-    """
-    获取指定人员的车辆列表
-    
-    Args:
-        data_dir: 数据目录
-        person_id: 身份证号
-        
-    Returns:
-        List[Dict]: 车辆列表
-    """
-    result = extract_vehicle_data(data_dir, person_id)
-    return result.get(person_id, [])
 
 
 def get_vehicle_summary(data_dir: str) -> Dict:

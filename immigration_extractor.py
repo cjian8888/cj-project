@@ -16,6 +16,13 @@ from pathlib import Path
 import pandas as pd
 
 import utils
+from utils.safe_types import (
+    safe_str,
+    safe_float,
+    safe_int,
+    safe_date,
+    safe_datetime,
+)
 
 logger = utils.setup_logger(__name__)
 
@@ -121,21 +128,21 @@ def _parse_immigration_row(row: pd.Series, source_file: str) -> Optional[Dict]:
     """解析单行出入境数据"""
     try:
         record = {
-            "name": _safe_str(row.get("姓名", "")),
-            "person_type": _safe_str(row.get("人员类别", "")),
-            "id_type": _safe_str(row.get("证件类别", "")),
-            "id_number": _safe_str(row.get("证件号码") or row.get("身份证号", "")),
-            "gender": _safe_str(row.get("性别", "")),
-            "nationality": _safe_str(row.get("国籍", "")),
-            "visa_type": _safe_str(row.get("签证种类", "")),
-            "birth_date": _safe_date(row.get("出生日期")),
-            "date": _safe_date(row.get("出入日期")),
-            "time": _safe_str(row.get("出入时间", "")),
-            "port": _safe_str(row.get("出入口岸", "")),
-            "transport_mode": _safe_str(row.get("交通方式", "")),
-            "transport_vehicle": _safe_str(row.get("交通工具", "")),
-            "visa_number": _safe_str(row.get("签证号码", "")),
-            "destination_or_origin": _safe_str(row.get("前往/归来国家", "")),
+            "name": safe_str(row.get("姓名", "")),
+            "person_type": safe_str(row.get("人员类别", "")),
+            "id_type": safe_str(row.get("证件类别", "")),
+            "id_number": safe_str(row.get("证件号码") or row.get("身份证号", "")),
+            "gender": safe_str(row.get("性别", "")),
+            "nationality": safe_str(row.get("国籍", "")),
+            "visa_type": safe_str(row.get("签证种类", "")),
+            "birth_date": safe_date(row.get("出生日期")),
+            "date": safe_date(row.get("出入日期")),
+            "time": safe_str(row.get("出入时间", "")),
+            "port": safe_str(row.get("出入口岸", "")),
+            "transport_mode": safe_str(row.get("交通方式", "")),
+            "transport_vehicle": safe_str(row.get("交通工具", "")),
+            "visa_number": safe_str(row.get("签证号码", "")),
+            "destination_or_origin": safe_str(row.get("前往/归来国家", "")),
             "source_file": source_file
         }
         
@@ -183,29 +190,6 @@ def _extract_name_from_filename(filename: str) -> str:
     if parts:
         return parts[0]
     return ""
-
-
-def _safe_str(value) -> str:
-    """安全转换为字符串"""
-    if pd.isna(value):
-        return ""
-    return str(value).strip()
-
-
-def _safe_date(value) -> str:
-    """安全转换为日期字符串"""
-    if pd.isna(value):
-        return ""
-    if hasattr(value, "strftime"):
-        return value.strftime("%Y-%m-%d")
-    return str(value).strip()[:10]
-
-
-# 便捷函数
-def get_person_immigration(data_dir: str, person_id: str) -> List[Dict]:
-    """获取指定人员的出入境记录"""
-    result = extract_immigration_data(data_dir, person_id)
-    return result.get(person_id, [])
 
 
 def get_immigration_timeline(data_dir: str) -> List[Dict]:
