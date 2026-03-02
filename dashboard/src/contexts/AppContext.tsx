@@ -108,7 +108,7 @@ interface AppContextType extends AppState {
     stopAnalysis: () => void;
     updateAnalysisProgress: (progress: number, phase: string) => void;
     setAnalysisStatus: (status: AnalysisState['status']) => void;
-
+    clearCache: () => Promise<void>;
     // Data actions
     updateData: (data: Partial<DataState>) => void;
     resetData: () => void;
@@ -399,6 +399,37 @@ export function AppProvider({ children }: AppProviderProps) {
         setData(defaultData);
     }, []);
 
+    const clearCache = useCallback(async () => {
+        const now = new Date();
+        const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+
+        try {
+            addLog({ time: timeStr, level: 'INFO', msg: '正在清除缓存...' });
+            
+            const result = await api.clearCache();
+            
+            if (result.success) {
+                // 清空前端状态
+                resetData();
+                setAnalysis({
+                    isRunning: false,
+                    progress: 0,
+                    currentPhase: '缓存已清除，等待开始分析',
+                    lastRunTime: null,
+                    status: 'idle',
+                    isLoading: false,
+                });
+                
+                addLog({ time: timeStr, level: 'INFO', msg: '✓ 缓存已清除（内存+目录）' });
+            } else {
+                addLog({ time: timeStr, level: 'ERROR', msg: `清除缓存失败: ${result.error || '未知错误'}` });
+            }
+        } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : '未知错误';
+            addLog({ time: timeStr, level: 'ERROR', msg: `清除缓存失败: ${errorMsg}` });
+        }
+    }, [addLog, resetData]);
+
     // ==================== Log Actions ====================
 
     const clearLogs = useCallback(() => {
@@ -608,6 +639,7 @@ export function AppProvider({ children }: AppProviderProps) {
         stopAnalysis,
         updateAnalysisProgress,
         setAnalysisStatus,
+        clearCache,
         updateData,
         resetData,
         addLog,

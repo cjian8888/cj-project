@@ -36,7 +36,8 @@ export function Sidebar() {
         startAnalysis,
         stopAnalysis,
         setActiveTab,
-        toggleSidebar
+        toggleSidebar,
+        clearCache,
     } = useApp();
 
     const [expandedSections, setExpandedSections] = useState({
@@ -206,6 +207,16 @@ export function Sidebar() {
                             </div>
                             <span className="text-red-400 truncate">{analysis.currentPhase || '分析失败'}</span>
                         </div>
+                    )}
+
+                    {/* 清除缓存按钮（分析完成后显示） */}
+                    {analysis.status === 'completed' && !analysis.isRunning && (
+                        <button
+                            onClick={() => clearCache()}
+                            className="mt-3 w-full py-2 px-3 rounded-lg text-xs font-medium theme-bg-muted/50 theme-text-muted hover:bg-red-500/10 hover:text-red-400 transition-all border border-transparent hover:border-red-500/30"
+                        >
+                            清除缓存，重新开始
+                        </button>
                     )}
                 </div>
 

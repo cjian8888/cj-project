@@ -235,7 +235,8 @@ def _identify_reimbursements(income_df: pd.DataFrame) -> pd.DataFrame:
     mask_self = ~income_df["is_self_transfer"].fillna(False)
 
     # 向量化匹配：构建正则表达式
-    descriptions = income_df["description"].fillna("").astype(str).str.lower()
+    descriptions = income_df["description"].astype(str).fillna("").str.lower()
+    # 修复: 先转 str 再 fillna， 避免 Categorical 类型错误
 
     # 检查排除关键词（报销关键词）
     if config.EXCLUDED_REIMBURSEMENT_KEYWORDS:
@@ -304,7 +305,7 @@ def _learn_salary_payers(income_df: pd.DataFrame) -> set:
 
     # 【P1-性能5优化】向量化处理：一次性筛选有效对手方
     # 1. 筛选有对手方且长度>=4的记录
-    cp_series = income_df["counterparty"].fillna("").astype(str)
+    cp_series = income_df["counterparty"].astype(str).fillna("")
     valid_mask = cp_series.str.len() >= 4
     valid_df = income_df[valid_mask].copy()
 
@@ -325,7 +326,7 @@ def _learn_salary_payers(income_df: pd.DataFrame) -> set:
         "薪酬",
         "代发工资",
     ]
-    desc_series = valid_df["description"].fillna("").astype(str)
+    desc_series = valid_df["description"].astype(str).fillna("")
 
     # 构建正则表达式模式（性能优化：只编译一次）
     salary_pattern = "|".join(map(re.escape, salary_keywords))
@@ -456,13 +457,13 @@ def _identify_salary_by_keywords(income_df: pd.DataFrame) -> pd.DataFrame:
         return income_df
 
     # 3. 向量化检查工资关键词
-    desc_series = candidates_df["description"].fillna("").astype(str)
+    desc_series = candidates_df["description"].astype(str).fillna("")
     salary_pattern = "|".join(map(re.escape, config.SALARY_STRONG_KEYWORDS))
     has_salary_keyword = desc_series.str.contains(salary_pattern, regex=True, na=False)
 
     # 4. 【P1-性能6优化】处理"分红"特殊情况：排除金融机构的分红
     dividend_mask = desc_series.str.contains("分红", na=False)
-    cp_series = candidates_df["counterparty"].fillna("").astype(str)
+    cp_series = candidates_df["counterparty"].astype(str).fillna("")
 
     # 检查对手方是否在黑名单中（向量化方式）
     blacklist_pattern = "|".join(map(re.escape, WEALTH_ENTITY_BLACKLIST))
@@ -510,7 +511,7 @@ def _identify_salary_by_hr_company(income_df: pd.DataFrame) -> pd.DataFrame:
         return income_df
 
     # 3. 向量化检查人力资源公司关键词
-    cp_series = candidates_df["counterparty"].fillna("").astype(str)
+    cp_series = candidates_df["counterparty"].astype(str).fillna("")
     hr_pattern = "|".join(map(re.escape, config.HR_COMPANY_KEYWORDS))
     is_hr_company = cp_series.str.contains(hr_pattern, regex=True, na=False)
 
@@ -2407,25 +2408,35 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
 
 
 def _calculate_real_income_expense(
-    income_structure: Dict, wealth_management: Dict, fund_flow: Dict
+    income_structure: Dict, 
+    wealth_management: Dict, 
+    fund_flow: Dict,
+    df: pd.DataFrame = None,
+    family_members: List[str] = None,
+    entity_name: str = None
 ) -> tuple:
     """
-    计算真实收入/支出（改进版 - 2026-02-12）
+    计算真实收入/支出（改进版 - 2026-03-02 增加家庭转账剔除）
 
     【关键修复】
     1. 定期存款到期是本金返还，不是收入，需要完全剔除
     2. 理财赎回超出购买的部分（历史存量）也应剔除
     3. 这些"其他收入"实际上是早年工资的积蓄回流
+    4. 【2026-03-02 新增】家庭成员间转账需要剔除
 
     核心原则：
     1. 自我转账理论上应该收支平衡（没数据完整时可能有差额）
     2. 理财/定存的本金回流不是收入，只有收益才是收入
     3. 为保守起见，我们剔除所有本金回流，只保留收益
+    4. 家庭成员间转账是内部资金流动，不影响家庭总财富
 
     Args:
         income_structure: 收支结构
         wealth_management: 理财管理分析结果
         fund_flow: 资金流向分析结果
+        df: 交易DataFrame（用于计算家庭转账）
+        family_members: 家庭成员列表（不包含本人）
+        entity_name: 当前实体名称
 
     Returns:
         (real_income, real_expense, detail_dict) 元组，detail_dict包含剔除详情
@@ -2465,6 +2476,36 @@ def _calculate_real_income_expense(
     wealth_historical_redeem = max(0, wealth_redeem - wealth_buy)
 
     # 【2026-02-12 关键修复】定期存款到期完全剔除（本金不是收入）
+
+    # 【2026-03-02 新增】计算家庭转账（如果有家庭成员信息）
+    family_transfer_in = 0.0  # 家庭成员转入
+    family_transfer_out = 0.0  # 转给家庭成员
+    
+    if df is not None and family_members and len(family_members) > 0 and entity_name:
+        try:
+            # 获取交易对手列（支持多种列名）
+            counterparty_col = None
+            for col in ['counterparty', '交易对手', '对手方', '对方户名']:
+                if col in df.columns:
+                    counterparty_col = col
+                    break
+            
+            if counterparty_col:
+                # 计算家庭成员转入（收入）
+                family_in_mask = df[counterparty_col].isin(family_members) & (df['income'] > 0 if 'income' in df.columns else False)
+                if family_in_mask.any():
+                    family_transfer_in = df.loc[family_in_mask, 'income'].sum()
+                
+                # 计算转给家庭成员（支出）
+                family_out_mask = df[counterparty_col].isin(family_members) & (df['expense'] > 0 if 'expense' in df.columns else False)
+                if family_out_mask.any():
+                    family_transfer_out = df.loc[family_out_mask, 'expense'].sum()
+                    
+                logger.info(f"  - 家庭转入: {family_transfer_in / 10000:.2f}万 (需从收入剔除)")
+                logger.info(f"  - 家庭转出: {family_transfer_out / 10000:.2f}万 (需从支出剔除)")
+        except Exception as e:
+            logger.warning(f"计算家庭转账失败: {e}")
+    
     # 定存到期是本金返还，不应算作收入
     deposit_offset = deposit_redeem  # 完全剔除定存到期本金
 
@@ -2474,6 +2515,7 @@ def _calculate_real_income_expense(
 
     # 计算真实收入
     # 【2026-02-23 修复】恢复剔除 wealth_historical_redeem
+    # 【2026-03-02 新增】剔除家庭转入
     real_income = (
         total_income
         - self_transfer_offset  # 自我转入对冲
@@ -2481,17 +2523,20 @@ def _calculate_real_income_expense(
         - wealth_historical_redeem  # 【恢复】理财历史存量赎回
         - deposit_offset  # 定存到期本金
         - loan_in  # 贷款发放
-        - refund_in
-    )  # 退款
+        - refund_in  # 退款
+        - family_transfer_in  # 【新增】家庭成员转入
+    )
 
     # 计算真实支出
     # 支出端也需要相应调整
+    # 【2026-03-02 新增】剔除家庭转出
     real_expense = (
         total_expense
         - self_transfer_offset  # 自我转出对冲
         - wealth_principal_offset  # 理财购买对冲
-        - deposit_buy
-    )  # 【新增】定存购买（投资支出）
+        - deposit_buy  # 定存购买（投资支出）
+        - family_transfer_out  # 【新增】转给家庭成员
+    )
 
     # 安全检查
     real_income = max(0, real_income)
@@ -2505,6 +2550,8 @@ def _calculate_real_income_expense(
         "deposit_redemption": deposit_offset,
         "loan": loan_in,
         "refund": refund_in,
+        "family_transfer_in": family_transfer_in,  # 【2026-03-02 新增】家庭转入
+        "family_transfer_out": family_transfer_out,  # 【2026-03-02 新增】家庭转出
         "total_offset": (
             self_transfer_offset
             + wealth_principal_offset
@@ -2512,15 +2559,18 @@ def _calculate_real_income_expense(
             + deposit_offset
             + loan_in
             + refund_in
+            + family_transfer_in  # 【新增】
         ),
     }
 
     # 日志输出
-    logger.info(f"【2026-02-23修复】资金对冲详情（恢复历史存量剔除）:")
+    logger.info(f"【2026-03-02修复】资金对冲详情（含家庭转账剔除）:")
     logger.info(f"  - 自我转账: {self_transfer_offset / 10000:.2f}万")
     logger.info(f"  - 理财本金: {wealth_principal_offset / 10000:.2f}万")
-    # logger.info(f'  - 理财历史存量: {wealth_historical_redeem/10000:.2f}万')  # 已移除
     logger.info(f"  - 定存到期: {deposit_offset / 10000:.2f}万")
+    if family_transfer_in > 0 or family_transfer_out > 0:
+        logger.info(f"  - 家庭转入: {family_transfer_in / 10000:.2f}万 (已从收入剔除)")
+        logger.info(f"  - 家庭转出: {family_transfer_out / 10000:.2f}万 (已从支出剔除)")
     logger.info(
         f"真实收入: {real_income / 10000:.2f}万, 真实支出: {real_expense / 10000:.2f}万"
     )
@@ -2569,7 +2619,7 @@ def _build_profile_summary(
     }
 
 
-def generate_profile_report(df: pd.DataFrame, entity_name: str) -> Dict:
+def generate_profile_report(df: pd.DataFrame, entity_name: str, family_members: list = None) -> Dict:
     """
     生成资金画像报告
 
@@ -2662,8 +2712,9 @@ def generate_profile_report(df: pd.DataFrame, entity_name: str) -> Dict:
     )
 
     # 计算真实收入/支出（【2026-02-12修复】现在返回剔除详情）
+    # 【2026-03-02 修复】传入 df 和 family_members
     real_income, real_expense, offset_detail = _calculate_real_income_expense(
-        income_structure, wealth_management, fund_flow
+        income_structure, wealth_management, fund_flow, df, family_members, entity_name
     )
 
     # 构建画像摘要
@@ -3207,8 +3258,8 @@ def classify_income_sources(
 
     # 向量化:准备数据列
     df = income_df.copy()
-    df["desc_str"] = df["description"].fillna("").astype(str).str.strip()
-    df["cp_str"] = df["counterparty"].fillna("").astype(str).str.strip()
+    df["desc_str"] = df["description"].astype(str).fillna("").str.strip()
+    df["cp_str"] = df["counterparty"].astype(str).fillna("").str.strip()
     df["amount"] = df["income"]
     df["date_str"] = df["date"].apply(
         lambda x: x.strftime("%Y-%m-%d") if pd.notna(x) else "未知"

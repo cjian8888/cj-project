@@ -340,6 +340,16 @@ class ApiService {
         });
     }
 
+    /**
+     * 清空所有缓存（内存+目录）
+     * 用于用户想彻底清空数据重新开始
+     */
+    async clearCache(): Promise<{ success: boolean; message?: string; error?: string }> {
+        return this.request('/api/cache/clear', {
+            method: 'POST',
+        });
+    }
+
 
     /**
      * 获取默认路径配置

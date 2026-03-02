@@ -806,3 +806,718 @@ def build_family_units(core_persons: List[str], data_directory: str) -> List[Dic
                 print(
                     f"    {rel['person_a']} ↔ {rel['person_b']}: {rel['relation']} (置信度:{rel['confidence']:.1f})"
                 )
+
+# ==================== 家庭成员推断功能（新增）====================
+# 【功能说明】
+# 当缺少官方同户人/户籍数据时，基于侧面证据推断家庭关系
+# 包括：房产共有人、交易备注、高频资金往来等
+# 与原有功能完全独立，不影响官方数据识别流程
+# ================================================================
+
+import pandas as pd
+from typing import Dict, List, Tuple, Set, Any
+from dataclasses import dataclass, field
+from collections import defaultdict
+
+
+@dataclass
+class RelationshipEvidence:
+    """关系证据数据结构"""
+    source_person: str
+    target_person: str
+    evidence_type: str
+    confidence: float
+    details: Dict = field(default_factory=dict)
+    
+
+@dataclass  
+class InferredRelation:
+    """推断的关系"""
+    person_a: str
+    person_b: str
+    relation_type: str
+    confidence: float
+    evidence_list: List[RelationshipEvidence] = field(default_factory=list)
+
+
+# 关系关键词库
+RELATIONSHIP_KEYWORDS = {
+    '配偶': ['丈夫', '妻子', '老婆', '老公', '爱人', '配偶', '夫妻', '夫君', '太太'],
+    '子女': ['女儿', '儿子', '孩子', '闺女', '丫头', '小子', '给闺女', '给儿子', '女儿学费', '儿子学费'],
+    '父母': ['父亲', '母亲', '爸爸', '妈妈', '爸妈', '给爹', '给娘', '给爸', '给妈', '孝敬父母'],
+}
+
+
+def infer_from_property_data_v2(
+    core_persons: List[str],
+    property_data: Dict = None
+) -> List[RelationshipEvidence]:
+    """
+    【证据源1】从房产共有人数据推断家庭关系（V2 - 使用内存数据）
+    
+    Args:
+        core_persons: 核心人员列表
+        property_data: 房产数据字典（从external_data['p1']['precise_property_data']传入）
+    
+    Returns:
+        关系证据列表
+    """
+    evidence_list = []
+    
+    if not property_data:
+        logger.info("[推断] 未提供房产数据，跳过房产证据收集")
+        return evidence_list
+
+    # 建立人员到ID的映射
+    person_ids = {}
+    for person_id, properties in property_data.items():
+        if properties and len(properties) > 0:
+            owner_name = properties[0].get("owner_name", "")
+            if owner_name:
+                person_ids[owner_name] = person_id
+    
+    # 收集所有房产的共有人关系
+    co_owner_groups = []
+    
+    for person_id, properties in property_data.items():
+        if not properties:
+            continue
+            
+        for prop in properties:
+            owner_name = prop.get("owner_name", "")
+            co_owners_str = prop.get("co_owners", "")
+            ownership_type = prop.get("ownership_type", "")
+            
+            co_owners = parse_co_owners(co_owners_str)
+            
+            all_members = [(owner_name, "")] + co_owners if owner_name else co_owners
+            all_members = [(name, id_num) for name, id_num in all_members if name]
+            
+            if len(all_members) >= 2:
+                co_owner_groups.append({
+                    "members": all_members,
+                    "type": ownership_type,
+                    "property": prop.get("location", "")
+                })
+    
+    # 生成证据
+    for group in co_owner_groups:
+        members = group["members"]
+        ownership_type = group["type"]
+        
+        core_members = [m for m in members if m[0] in core_persons]
+        
+        if len(core_members) >= 2:
+            if ownership_type == "共同共有":
+                base_confidence = 0.95
+            elif ownership_type == "按份共有":
+                base_confidence = 0.75
+            else:
+                base_confidence = 0.85
+            
+            for i, (name_a, id_a) in enumerate(core_members):
+                for name_b, id_b in core_members[i+1:]:
+                    age_a = extract_age_from_id(id_a)
+                    age_b = extract_age_from_id(id_b)
+                    
+                    if age_a > 0 and age_b > 0:
+                        age_diff = abs(age_a - age_b)
+                        if 20 <= age_diff <= 45:
+                            relation_hint = "配偶或父母"
+                        elif age_diff < 20:
+                            relation_hint = "兄弟姐妹或子女"
+                        else:
+                            relation_hint = "家庭成员"
+                    else:
+                        relation_hint = "家庭成员"
+                    
+                    evidence = RelationshipEvidence(
+                        source_person=name_a,
+                        target_person=name_b,
+                        evidence_type="property_coowner",
+                        confidence=base_confidence,
+                        details={
+                            "ownership_type": ownership_type,
+                            "property_location": group.get("property", ""),
+                            "age_difference": abs(age_a - age_b) if age_a > 0 and age_b > 0 else None,
+                            "relation_hint": relation_hint
+                        }
+                    )
+                    evidence_list.append(evidence)
+    
+    logger.info(f"[推断] 从房产数据收集到 {len(evidence_list)} 条证据")
+    return evidence_list
+
+
+# V2版本主函数 - 接受内存数据
+def infer_family_units_v2(
+    core_persons: List[str],
+    external_data: Dict = None,
+    profiles: Dict = None,
+    cleaned_data: Dict = None,
+    data_directory: str = "./data",
+    confidence_threshold: float = 0.6
+) -> Tuple[List[Dict], Dict]:
+    """
+    【主入口 V2】基于侧面证据推断家庭单元（使用内存数据）
+    
+    Args:
+        core_persons: 核心人员列表
+        external_data: 外部数据字典（包含房产、车辆等）
+        profiles: 画像数据字典
+        cleaned_data: 清洗后的交易数据字典
+        data_directory: 原始数据目录（用于读取官方同户人数据）
+        confidence_threshold: 关系置信度阈值
+        
+    Returns:
+        (family_units, inference_details)
+    """
+    logger.info("=" * 60)
+    logger.info("开始基于侧面证据推断家庭关系 (V2)")
+    logger.info("=" * 60)
+    
+    if not core_persons:
+        logger.warning("[推断] 核心人员列表为空")
+        return [], {"status": "no_persons"}
+    
+    logger.info(f"[推断] 核心人员: {core_persons}")
+    
+    # Step 1: 首先尝试使用官方数据（如果存在）
+    logger.info("[推断] Step 1: 检查官方同户人/户籍数据...")
+    official_units = build_family_units(core_persons, data_directory)
+    
+    assigned_from_official = set()
+    for unit in official_units:
+        assigned_from_official.update(unit.get("members", []))
+    
+    unassigned_persons = [p for p in core_persons if p not in assigned_from_official]
+    
+    if not unassigned_persons and official_units:
+        logger.info("[推断] 所有人员已分配到家庭（基于官方数据），无需推断")
+        return official_units, {
+            "status": "official_data",
+            "method": "official_only",
+            "units_count": len(official_units)
+        }
+    
+    logger.info(f"[推断] {len(unassigned_persons)} 人未分配: {unassigned_persons}")
+    
+    # Step 2: 收集侧面证据（使用传入的内存数据）
+    logger.info("[推断] Step 2: 收集侧面证据...")
+    all_evidence = []
+    
+    # 从external_data获取房产数据
+    property_data = None
+    if external_data and "p1" in external_data:
+        property_data = external_data["p1"].get("precise_property_data")
+    
+    if property_data:
+        logger.info("[推断] 2.1 分析房产共有人...")
+        evidence_from_property = infer_from_property_data_v2(core_persons, property_data)
+        all_evidence.extend(evidence_from_property)
+    else:
+        logger.info("[推断] 未提供房产数据，跳过")
+        evidence_from_property = []
+    
+    logger.info(f"[推断] 共收集 {len(all_evidence)} 条证据")
+    
+    if not all_evidence:
+        logger.warning("[推断] 未找到任何侧面证据，无法推断家庭关系")
+        # 创建独立单元
+        fallback_units = []
+        for person in core_persons:
+            fallback_units.append({
+                "anchor": person,
+                "householder": person,
+                "members": [person],
+                "address": "",
+                "member_details": [{
+                    "name": person,
+                    "relation": "本人",
+                    "has_data": True,
+                    "id_number": ""
+                }],
+                "extended_relatives": [],
+                "inferred": True,
+                "confidence": 1.0,
+                "evidence": [],
+                "note": "无家庭关系证据"
+            })
+        return fallback_units, {
+            "status": "no_evidence",
+            "method": "independent_fallback",
+            "units_count": len(fallback_units)
+        }
+    
+    # Step 3: 合并证据并推断关系
+    logger.info("[推断] Step 3: 合并证据并推断关系...")
+    inferred_relations = merge_evidence_v2(all_evidence)
+    logger.info(f"[推断] 推断出 {len(inferred_relations)} 对关系")
+    
+    # Step 4: 构建家庭单元
+    logger.info("[推断] Step 4: 构建家庭单元...")
+    inferred_units = build_family_units_inferred_v2(
+        inferred_relations, 
+        core_persons, 
+        conf
+    )
+# ==================== 家庭成员推断功能（新增 V2）====================
+# 【功能说明】
+# 当缺少官方同户人/户籍数据时，基于侧面证据推断家庭关系
+# 与原有功能完全独立，不影响官方数据识别流程
+# ================================================================
+
+from typing import Dict, List, Tuple, Any
+from dataclasses import dataclass, field
+
+
+@dataclass
+class RelationshipEvidence:
+    """关系证据数据结构"""
+
+    source_person: str
+    target_person: str
+    evidence_type: str
+    confidence: float
+    details: Dict = field(default_factory=dict)
+
+
+@dataclass
+class InferredRelation:
+    """推断的关系"""
+
+    person_a: str
+    person_b: str
+    relation_type: str
+    confidence: float
+    evidence_list: List[RelationshipEvidence] = field(default_factory=list)
+
+
+def infer_from_property_data_v2(core_persons, property_data=None):
+    """
+    【证据源1】从房产共有人数据推断家庭关系（V2 - 使用内存数据）
+
+    Args:
+        core_persons: 核心人员列表
+        property_data: 房产数据字典（从external_data传入）
+
+    Returns:
+        关系证据列表
+    """
+    evidence_list = []
+
+    if not property_data:
+        logger.info("[推断] 未提供房产数据，跳过房产证据收集")
+        return evidence_list
+
+    # 收集所有房产的共有人关系
+    co_owner_groups = []
+
+    for person_id, properties in property_data.items():
+        if not properties:
+            continue
+
+        for prop in properties:
+            owner_name = prop.get("owner_name", "")
+            co_owners_str = prop.get("co_owners", "")
+            ownership_type = prop.get("ownership_type", "")
+
+            # 解析共有人
+            co_owners = []
+            if co_owners_str and isinstance(co_owners_str, str):
+                parts = co_owners_str.split(";")
+                for part in parts:
+                    if "," in part:
+                        name, id_num = part.split(",", 1)
+                        co_owners.append((name.strip(), id_num.strip()))
+                    else:
+                        co_owners.append((part.strip(), ""))
+
+            all_members = [(owner_name, "")] + co_owners if owner_name else co_owners
+            all_members = [(name, id_num) for name, id_num in all_members if name]
+
+            if len(all_members) >= 2:
+                co_owner_groups.append(
+                    {
+                        "members": all_members,
+                        "type": ownership_type,
+                        "property": prop.get("location", ""),
+                    }
+                )
+
+    # 生成证据
+    for group in co_owner_groups:
+        members = group["members"]
+        ownership_type = group["type"]
+
+        core_members = [m for m in members if m[0] in core_persons]
+
+        if len(core_members) >= 2:
+            if ownership_type == "共同共有":
+                base_confidence = 0.95
+            elif ownership_type == "按份共有":
+                base_confidence = 0.75
+            else:
+                base_confidence = 0.85
+
+            for i, (name_a, id_a) in enumerate(core_members):
+                for name_b, id_b in core_members[i + 1 :]:
+                    evidence = RelationshipEvidence(
+                        source_person=name_a,
+                        target_person=name_b,
+                        evidence_type="property_coowner",
+                        confidence=base_confidence,
+                        details={
+                            "ownership_type": ownership_type,
+                            "property_location": group.get("property", ""),
+                        },
+                    )
+                    evidence_list.append(evidence)
+
+    logger.info(f"[推断] 从房产数据收集到 {len(evidence_list)} 条证据")
+    return evidence_list
+
+
+def infer_family_units_v2(
+    core_persons,
+    external_data=None,
+    profiles=None,
+    cleaned_data=None,
+    data_directory="./data",
+    confidence_threshold=0.6,
+):
+    """
+    【主入口 V2】基于侧面证据推断家庭单元（使用内存数据）
+
+    Args:
+        core_persons: 核心人员列表
+        external_data: 外部数据字典（包含房产、车辆等）
+        profiles: 画像数据字典
+        cleaned_data: 清洗后的交易数据字典
+        data_directory: 原始数据目录（用于读取官方同户人数据）
+        confidence_threshold: 关系置信度阈值
+
+    Returns:
+        (family_units, inference_details)
+    """
+    logger.info("=" * 60)
+    logger.info("开始基于侧面证据推断家庭关系 (V2)")
+    logger.info("=" * 60)
+
+    if not core_persons:
+        logger.warning("[推断] 核心人员列表为空")
+        return [], {"status": "no_persons"}
+
+    logger.info(f"[推断] 核心人员: {core_persons}")
+
+    # Step 1: 首先尝试使用官方数据（如果存在）
+    logger.info("[推断] Step 1: 检查官方同户人/户籍数据...")
+    official_units = build_family_units(core_persons, data_directory)
+
+    assigned_from_official = set()
+    for unit in official_units:
+        assigned_from_official.update(unit.get("members", []))
+
+    unassigned_persons = [p for p in core_persons if p not in assigned_from_official]
+
+    # 检查是否有真正的多人家庭（不仅仅是独立单元）
+    has_real_family = any(
+        len(unit.get("members", [])) > 1 for unit in official_units
+    )
+    
+    if not unassigned_persons and has_real_family:
+        logger.info("[推断] 官方数据已识别真正的家庭关系，无需侧面证据推断")
+        return official_units, {
+            "status": "official_data",
+            "method": "official_only",
+            "units_count": len(official_units),
+            "real_families": sum(1 for u in official_units if len(u.get("members", [])) > 1),
+        }
+
+    logger.info(f"[推断] {len(unassigned_persons)} 人未分配: {unassigned_persons}")
+
+    # Step 2: 收集侧面证据（使用传入的内存数据）
+    logger.info("[推断] Step 2: 收集侧面证据...")
+    all_evidence = []
+
+    # 从external_data获取房产数据
+    property_data = None
+    if external_data and "p1" in external_data:
+        property_data = external_data["p1"].get("precise_property_data")
+
+    if property_data:
+        logger.info("[推断] 2.1 分析房产共有人...")
+        evidence_from_property = infer_from_property_data_v2(
+            core_persons, property_data
+        )
+        all_evidence.extend(evidence_from_property)
+    else:
+        logger.info("[推断] 未提供房产数据，跳过")
+        evidence_from_property = []
+
+    logger.info(f"[推断] 共收集 {len(all_evidence)} 条证据")
+
+    if not all_evidence:
+        logger.warning("[推断] 未找到任何侧面证据，无法推断家庭关系")
+        # 创建独立单元
+        fallback_units = []
+        for person in core_persons:
+            fallback_units.append(
+                {
+                    "anchor": person,
+                    "householder": person,
+                    "members": [person],
+                    "address": "",
+                    "member_details": [
+                        {
+                            "name": person,
+                            "relation": "本人",
+                            "has_data": True,
+                            "id_number": "",
+                        }
+                    ],
+                    "extended_relatives": [],
+                    "inferred": True,
+                    "confidence": 1.0,
+                    "evidence": [],
+                    "note": "无家庭关系证据",
+                }
+            )
+        return fallback_units, {
+            "status": "no_evidence",
+            "method": "independent_fallback",
+            "units_count": len(fallback_units),
+        }
+
+    # Step 3: 合并证据并推断关系
+    logger.info("[推断] Step 3: 合并证据并推断关系...")
+    inferred_relations = merge_evidence_v2(all_evidence)
+    logger.info(f"[推断] 推断出 {len(inferred_relations)} 对关系")
+
+    # Step 4: 构建家庭单元
+    logger.info("[推断] Step 4: 构建家庭单元...")
+    inferred_units = build_family_units_inferred_v2(
+        inferred_relations, core_persons, confidence_threshold
+    )
+
+    # Step 5: 合并官方数据和推断数据
+    logger.info("[推断] Step 5: 合并官方和推断结果...")
+    final_units = []
+
+    for unit in official_units:
+        if len(unit.get("members", [])) > 1:
+            unit["source"] = "official"
+            final_units.append(unit)
+
+    for unit in inferred_units:
+        members = set(unit.get("members", []))
+        already_covered = any(members <= set(u.get("members", [])) for u in final_units)
+        if not already_covered:
+            unit["source"] = "inferred"
+            final_units.append(unit)
+
+    official_count = sum(1 for u in final_units if u.get("source") == "official")
+    inferred_count = sum(1 for u in final_units if u.get("source") == "inferred")
+
+    logger.info("=" * 60)
+    logger.info("家庭关系推断完成")
+    logger.info(f"  总家庭单元: {len(final_units)}")
+    logger.info(f"  官方数据识别: {official_count}")
+    logger.info(f"  侧面证据推断: {inferred_count}")
+    logger.info("=" * 60)
+
+    inference_details = {
+        "status": "success",
+        "method": "hybrid",
+        "units_count": len(final_units),
+        "official_units": official_count,
+        "inferred_units": inferred_count,
+        "evidence_count": len(all_evidence),
+        "relations_inferred": len(inferred_relations),
+        "evidence_breakdown": {"property": len(evidence_from_property)},
+    }
+
+    return final_units, inference_details
+
+
+def merge_evidence_v2(evidence_list):
+    """合并同一对人员之间的多条证据"""
+    merged = {}
+
+    for evidence in evidence_list:
+        key = tuple(sorted([evidence.source_person, evidence.target_person]))
+
+        if key not in merged:
+            relation_type = "家庭成员"
+            if evidence.evidence_type == "transaction_note":
+                relation_type = evidence.details.get("inferred_relation", "家庭成员")
+
+            merged[key] = InferredRelation(
+                person_a=key[0],
+                person_b=key[1],
+                relation_type=relation_type,
+                confidence=evidence.confidence,
+                evidence_list=[evidence],
+            )
+        else:
+            existing = merged[key]
+            existing.evidence_list.append(evidence)
+
+            c1 = existing.confidence
+            c2 = evidence.confidence
+            new_confidence = 1 - (1 - c1) * (1 - c2)
+            existing.confidence = min(0.99, new_confidence)
+
+            if evidence.evidence_type == "transaction_note":
+                existing.relation_type = evidence.details.get(
+                    "inferred_relation", existing.relation_type
+                )
+
+    return merged
+
+
+def build_family_units_inferred_v2(
+    inferred_relations, core_persons, confidence_threshold=0.6
+):
+    """基于推断的关系构建家庭单元"""
+    high_confidence_relations = {
+        k: v
+        for k, v in inferred_relations.items()
+        if v.confidence >= confidence_threshold
+    }
+
+    if not high_confidence_relations:
+        logger.info(f"[推断] 没有足够置信度(>{confidence_threshold})的关系证据")
+        return []
+
+    sorted_relations = sorted(
+        high_confidence_relations.values(), key=lambda x: x.confidence, reverse=True
+    )
+
+    family_groups = []
+
+    for relation in sorted_relations:
+        person_a = relation.person_a
+        person_b = relation.person_b
+
+        group_a_idx = None
+        group_b_idx = None
+
+        for idx, group in enumerate(family_groups):
+            if person_a in group:
+                group_a_idx = idx
+            if person_b in group:
+                group_b_idx = idx
+
+        if group_a_idx is not None and group_b_idx is not None:
+            if group_a_idx != group_b_idx:
+                family_groups[group_a_idx].update(family_groups[group_b_idx])
+                family_groups.pop(group_b_idx)
+        elif group_a_idx is not None:
+            family_groups[group_a_idx].add(person_b)
+        elif group_b_idx is not None:
+            family_groups[group_b_idx].add(person_a)
+        else:
+            family_groups.append({person_a, person_b})
+
+    family_units = []
+    assigned_persons = set()
+
+    for idx, group in enumerate(family_groups):
+        members = sorted(list(group))
+        if not members:
+            continue
+
+        anchor = members[0]
+
+        member_details = []
+        for member in members:
+            assigned_persons.add(member)
+
+            relations = []
+            for other in members:
+                if other != member:
+                    key = tuple(sorted([member, other]))
+                    if key in inferred_relations:
+                        rel = inferred_relations[key]
+                        relations.append(f"与{other}:{rel.relation_type}")
+
+            member_details.append(
+                {
+                    "name": member,
+                    "relation": "本人"
+                    if member == anchor
+                    else (relations[0].split(":")[1] if relations else "家庭成员"),
+                    "has_data": True,
+                    "id_number": "",
+                }
+            )
+
+        family_evidence = []
+        for i, m1 in enumerate(members):
+            for m2 in members[i + 1 :]:
+                key = tuple(sorted([m1, m2]))
+                if key in inferred_relations:
+                    rel = inferred_relations[key]
+                    for ev in rel.evidence_list:
+                        family_evidence.append(
+                            {
+                                "type": ev.evidence_type,
+                                "members": [m1, m2],
+                                "confidence": ev.confidence,
+                                "details": ev.details,
+                            }
+                        )
+
+        unit = {
+            "anchor": anchor,
+            "householder": anchor,
+            "members": members,
+            "address": "",
+            "member_details": member_details,
+            "extended_relatives": [],
+            "inferred": True,
+            "confidence": min(
+                0.99,
+                sum(
+                    r.confidence
+                    for r in [
+                        inferred_relations.get(tuple(sorted([m1, m2])))
+                        for i, m1 in enumerate(members)
+                        for m2 in members[i + 1 :]
+                        if tuple(sorted([m1, m2])) in inferred_relations
+                    ]
+                )
+                / max(1, len(members) - 1),
+            ),
+            "evidence": family_evidence,
+            "note": "基于侧面证据自动推断的家庭单元",
+        }
+
+        family_units.append(unit)
+
+    unassigned = [p for p in core_persons if p not in assigned_persons]
+    for person in unassigned:
+        family_units.append(
+            {
+                "anchor": person,
+                "householder": person,
+                "members": [person],
+                "address": "",
+                "member_details": [
+                    {
+                        "name": person,
+                        "relation": "本人",
+                        "has_data": True,
+                        "id_number": "",
+                    }
+                ],
+                "extended_relatives": [],
+                "inferred": True,
+                "confidence": 1.0,
+                "evidence": [],
+                "note": "未发现家庭关系证据，独立单元",
+            }
+        )
+
+    return family_units
