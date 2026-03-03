@@ -386,6 +386,7 @@ def serialize_profiles(profiles: Dict) -> Dict:
             frontend_profile = {
                 # 基础标识
                 "entityName": name,
+                "entity_id": profile_dict.get("entity_id", ""),  # 【修复】添加身份证号
                 # 核心财务指标 (camelCase) - 前端展示用
                 "totalIncome": summary.get("total_income", 0)
                 or income_structure.get("total_income", 0),
@@ -1114,6 +1115,15 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                 else:
                     # 个人使用标准画像生成函数
                     profile = financial_profiler.generate_profile_report(df, entity)
+
+                # 【修复】添加 entity_id（身份证号）到 profile
+                # 从 id_to_name_map 反向查找
+                entity_id = ""
+                for id_num, mapped_name in id_to_name_map.items():
+                    if mapped_name == entity:
+                        entity_id = id_num
+                        break
+                profile["entity_id"] = entity_id
 
                 # 2. 提取银行账户列表
                 if entity in all_persons:

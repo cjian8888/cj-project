@@ -10,6 +10,8 @@ import re
 import pdfplumber
 from typing import Dict, List, Optional
 import utils
+from utils.safe_types import safe_float as safe_float_util
+
 
 logger = utils.setup_logger(__name__)
 
@@ -464,14 +466,15 @@ def _parse_precise_property_row(row, source_file: str) -> Optional[Dict]:
     
     try:
         prop = {
-            "location": safe_str(row.get("不动产坐落", "")),
-            "area": safe_str(row.get("不动产面积", "")),
+            # 【修复】支持多种列名格式（全国总库 vs 精准查询）
+            "location": safe_str(row.get("房地坐落") or row.get("不动产坐落", "")),
+            "area": safe_str(row.get("建筑面积(平方米)") or row.get("不动产面积", "")),
             "usage": safe_str(row.get("规划用途", "")),
             "right_type": safe_str(row.get("权利类型", "")),
-            "owner_name": safe_str(row.get("权利人名称", "")),
-            "owner_id": safe_str(row.get("权利人证件号码", "")),
-            "co_owners": safe_str(row.get("共有权人名称", "")),
-            "ownership_type": safe_str(row.get("共用方式", "")),
+            "owner_name": safe_str(row.get("名称") or row.get("权利人名称", "")),
+            "owner_id": safe_str(row.get("证件号码") or row.get("权利人证件号码", "")),
+            "co_owners": safe_str(row.get("共有人名称") or row.get("共有权人名称", "")),
+            "ownership_type": safe_str(row.get("共有情况") or row.get("共用方式", "")),
             "property_number": safe_str(row.get("不动产单元号", "")),
             "certificate_number": safe_str(row.get("不动产权证号", "")),
             "register_date": safe_str(row.get("登记时间", ""))[:10],
@@ -480,6 +483,7 @@ def _parse_precise_property_row(row, source_file: str) -> Optional[Dict]:
             "is_sealed": safe_bool(row.get("是否查封")),
             "query_region": safe_str(row.get("查询申请地区", "")),
             "query_unit": safe_str(row.get("查询单位", "")),
+            "transaction_price": safe_float_util(row.get("交易金额(万元)", 0)) or 0.0,
             "source_file": source_file
         }
         

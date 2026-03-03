@@ -1824,8 +1824,9 @@ def _detect_wealth_transaction(row: pd.Series, product_code_pattern) -> tuple:
                 confidence = "medium"
                 wealth_type = "定期存款" if "定期" in description else "银行理财"
 
-    # 【2026-02-20 修复】C. 纯数字摘要识别（Wave1 新增）银行内部代码
+    # 【2026-03-03 修复】C. 纯数字摘要识别（Wave1 新增）银行内部代码
     # 识别摘要为纯数字且在 BANK_INTERNAL_CODES 中的情况
+    # 【重要修复】如果对手方是发薪单位（含"内部户"），则不是理财
     if not is_wealth:
         code_candidate = None
         if description:
@@ -1836,11 +1837,21 @@ def _detect_wealth_transaction(row: pd.Series, product_code_pattern) -> tuple:
             cs = str(counterparty).strip()
             if cs.isdigit():
                 code_candidate = cs
+        
         if code_candidate and code_candidate in config.BANK_INTERNAL_CODES:
-            is_wealth = True
-            wealth_type = config.BANK_INTERNAL_CODES[code_candidate]
-            confidence = "high"
-
+            # 【关键修复】检查对手方是否是发薪单位
+            counterparty_str = str(counterparty).strip() if counterparty else ""
+            # 发薪单位特征：含"代发"、"工资"、"内部户"等
+            salary_indicators = ["代发", "工资", "薪", "内部户", "内部账户"]
+            is_salary = any(ind in counterparty_str for ind in salary_indicators)
+            
+            if is_salary:
+                # 是工资收入，不是理财，跳过
+                pass
+            else:
+                is_wealth = True
+                wealth_type = config.BANK_INTERNAL_CODES[code_candidate]
+                confidence = "high"
     # D. 产品编号格式
     if not is_wealth and description:
         if re.match(r"^\d{6,}", description):

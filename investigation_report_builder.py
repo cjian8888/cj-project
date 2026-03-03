@@ -7100,7 +7100,9 @@ class InvestigationReportBuilder:
             "political_status": identity_info.get("political_status", "暂无数据"),
             "work_identity": identity_info.get("work_identity", "暂无数据"),
         }
-        # 尝试从 derived_data.json 的 family_tree 提取身份信息
+        
+        # 【修复】优先级1: 尝试从同户人/户籍数据（family_tree）提取 - 最完整
+        family_data_found = False
         try:
             derived_path = os.path.join(
                 self.output_dir, "analysis_cache", "derived_data.json"
@@ -7130,10 +7132,21 @@ class InvestigationReportBuilder:
                         basic_info["work_unit"] = str(work_unit)
                     if id_num:
                         basic_info["id_number"] = str(id_num)
+                        family_data_found = True
                     if position:
                         basic_info["position"] = str(position)
         except Exception:
             pass
+        
+        # 【修复】优先级2: 如果没有从family_tree获取到身份证号，从profiles读取
+        if not family_data_found and basic_info["id_number"] == "暂无数据":
+            if name in self.profiles:
+                profile = self.profiles[name]
+                # 尝试从profile获取身份证号（我们修复后添加的entity_id字段）
+                entity_id = profile.get("entity_id", "") or profile.get("id_number", "")
+                if entity_id:
+                    basic_info["id_number"] = entity_id
+                    logger.info(f"[个人信息] {name} 从profiles读取身份证号: {entity_id}")
 
         # 职业履历(从外部数据获取,这里使用占位符)
         career_history = [

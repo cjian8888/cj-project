@@ -11,60 +11,40 @@
 
 ### 🐛 Bug修复
 
-#### 审计核心指标明细显示修复
+#### 理财识别误判修复 (financial_profiler.py)
+- **问题**: 工资收入被误识别为理财产品
+- **根因**: 银行内部代码识别逻辑没有排除发薪单位
+- **修复**: 增加对手方检查，排除包含"代发"、"工资"、"薪"、"内部户"等发薪特征的交易
+- **影响**: 防止工资收入被错误归类为理财资金
 
-**问题1: 物理现金存取明细不显示**
-- **现象**: 数据概览 → 审计核心指标 → "物理现金存取"显示30笔，但点击后弹窗中看不到任何明细
-- **根因**: 
-  - 后端 `financial_profiler.py` 返回的现金交易字段名是中文：`"类型"`、`"金额"`、`"日期"`等
-  - 前端 `TabContent.tsx` 过滤时使用 `x.type === cat.type`（英文字段名）
-  - 由于 `x.type` 是 `undefined`，过滤条件永远为 `false`
-- **修复文件**: `dashboard/src/components/TabContent.tsx` 第386-401行
-- **修复方案**: 在提取 `allCashTransactions` 时做字段名映射
-```javascript
-// 修复后: 映射中文字段名为英文字段名
-const allCashTransactions = Object.values(data.profiles || {}).flatMap((p: any) =>
-    (p.cashTransactions || []).map((tx: any) => ({
-        ...tx,
-        type: tx.type || tx['类型'] || '',
-        amount: tx.amount || tx['金额'] || 0,
-        date: tx.date || tx['日期'] || '',
-        description: tx.description || tx['摘要'] || '',
-        counterparty: tx.counterparty || tx['对手方'] || '',
-        entity: p.entityName
-    }))
-);
-```
+#### 身份证号提取优化 (api_server.py + investigation_report_builder.py)
+- **问题**: 个人信息报告中身份证号显示为"暂无数据"
+- **修复1** (api_server.py): 在 `serialize_profiles` 中添加 `entity_id` 字段
+- **修复2** (api_server.py): 在 `run_analysis_refactored` 中从 `id_to_name_map` 反向查找身份证号
+- **修复3** (investigation_report_builder.py): 优化身份证号提取优先级
+  - 优先级1: 从同户人/户籍数据（family_tree）提取 - 最完整
+  - 优先级2: 从 profiles 的 entity_id 字段读取
+- **影响**: 个人信息报告现在能正确显示身份证号
 
-**问题2: 借贷分析类型映射不一致**
-- **现象**: 部分借贷类型明细可能无法正确分类显示
-- **根因**: 后端 `api_server.py` 的 `loan_type_mapping` 与前端 `loanCategories` 的 `type` 值不一致
-- **不一致项**:
-  - 后端: `"no_payment_loans"` → `"no_payment"` → 前端期望: `"no_repayment"`
-  - 后端: `"regular_repayments"` → `"regular_payment"` → 前端期望: `"regular_repayment"`
-- **修复文件**: `api_server.py` 第567-574行
-- **修复方案**: 更新后端映射以匹配前端期望值
-```python
-# 修复前
-"no_payment_loans": "no_payment",
-"regular_repayments": "regular_payment",
+#### 不动产数据兼容性修复 (asset_extractor.py)
+- **问题**: 全国总库和精准查询的列名格式不同，导致部分数据无法提取
+- **修复**: 支持多种列名格式
+  - `房地坐落` 或 `不动产坐落`
+  - `建筑面积(平方米)` 或 `不动产面积`
+  - `名称` 或 `权利人名称`
+  - `证件号码` 或 `权利人证件号码`
+  - `共有人名称` 或 `共有权人名称`
+  - `共有情况` 或 `共用方式`
+- **新增**: 交易金额字段提取 (`交易金额(万元)`)
+- **影响**: 提高不动产数据提取的兼容性和完整性
 
-# 修复后
-"no_repayment_loans": "no_repayment",
-"regular_repayments": "regular_repayment",
-```
+### 🔧 代码质量
 
-### 📋 影响范围
-- 审计核心指标 → 物理现金存取 (完全修复)
-- 审计核心指标 → 借贷风险分析 (分类映射修正)
+#### 工具函数统一化 (asset_extractor.py)
+- **问题**: 本地重复定义 `safe_float` 函数，违反代码规范
+- **修复**: 改用 `utils/safe_types.py` 中的统一工具函数
+- **参考**: AGENTS.md - 工具函数统一规范
 
-### ✅ 验证方法
-1. 进入数据概览页面
-2. 点击审计核心指标的"物理现金存取"卡片
-3. 确认能看到"取现"和"存现"两个分类
-4. 点击分类行能查看详细记录
-
----
 
 ## [v4.5.3] - 2026-01-19
 
