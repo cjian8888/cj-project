@@ -6032,7 +6032,7 @@ class InvestigationReportBuilder:
         # 【5.2修复】添加数据质量说明
         data_quality_note = {
             "bank_data": "银行流水数据：已进行去重和标准化处理，交易记录完整",
-            "asset_data": "资产数据：部分资产信息（如房产交易价格）可能存在缺失，标注为【待补充】",
+            "asset_data": "资产数据：部分资产信息（如房产交易价格）可能存在缺失，标注为暂无数据"
             "data_timeliness": "数据时效性：银行流水数据为实时数据，资产数据为查询时点数据",
             "data_validation": "数据验证：已对关键字段进行完整性检查，缺失字段已在报告中标注",
         }
@@ -7010,11 +7010,11 @@ class InvestigationReportBuilder:
             or "依据相关线索反映,现对相关人员进行资金穿透核查。",
             "data_scope": {
                 "bank_transactions": f"{start_date[:10]} 至 {end_date[:10]}",
-                "real_estate": "【待调取】自然资源部精准查询",
-                "vehicles": "【待调取】公安部机动车查询",
-                "company_registration": "【待调取】市场监管总局企业登记信息",
-                "aml_data": "【待调取】中国人民银行反洗钱定向查询",
-                "travel_data": "【待调取】铁路总公司票面信息、中航信航班进出港信息",
+                "real_estate": "暂无数据自然资源部精准查询"
+                "vehicles": "暂无数据公安部机动车查询"
+                "company_registration": "暂无数据市场监管总局企业登记信息"
+                "aml_data": "暂无数据中国人民银行反洗钱定向查询"
+                "travel_data": "暂无数据铁路总公司票面信息、中航信航班进出港信息"
             },
             "time_range": {
                 "start_date": start_date[:10],

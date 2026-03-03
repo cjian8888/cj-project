@@ -160,16 +160,16 @@ tax_analysis, travel_analysis
     <p>
         {{ bg.name }}，{{ bg.gender }}，{{ bg.birth_date }}出生，
         {{ bg.birth_place }}人。
-        {% if bg.employer and bg.employer != '【待调取】' %}
+        {% if bg.employer and bg.employer != '暂无数据' %}
         从业单位为{{ bg.employer }}。
         {% endif %}
-        {% if bg.current_position and bg.current_position != '【待调取】' %}
+        {% if bg.current_position and bg.current_position != '暂无数据' %}
         现任职务为{{ bg.current_position }}。
         {% endif %}
-        {% if bg.entry_date and bg.entry_date != '【待调取】' %}
+        {% if bg.entry_date and bg.entry_date != '暂无数据' %}
         于{{ bg.entry_date }}进入现单位工作。
         {% endif %}
-        {% if bg.family_members_desc and bg.family_members_desc != '【待调取】家庭成员信息' %}
+        {% if bg.family_members_desc and bg.family_members_desc != '暂无家庭成员信息' %}
         除本人外其家庭成员还有：{{ bg.family_members_desc }}。
         {% endif %}
     </p>
