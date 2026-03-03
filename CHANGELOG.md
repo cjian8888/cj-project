@@ -7,6 +7,65 @@
 
 ---
 
+## [v4.5.4] - 2026-03-03
+
+### 🐛 Bug修复
+
+#### 审计核心指标明细显示修复
+
+**问题1: 物理现金存取明细不显示**
+- **现象**: 数据概览 → 审计核心指标 → "物理现金存取"显示30笔，但点击后弹窗中看不到任何明细
+- **根因**: 
+  - 后端 `financial_profiler.py` 返回的现金交易字段名是中文：`"类型"`、`"金额"`、`"日期"`等
+  - 前端 `TabContent.tsx` 过滤时使用 `x.type === cat.type`（英文字段名）
+  - 由于 `x.type` 是 `undefined`，过滤条件永远为 `false`
+- **修复文件**: `dashboard/src/components/TabContent.tsx` 第386-401行
+- **修复方案**: 在提取 `allCashTransactions` 时做字段名映射
+```javascript
+// 修复后: 映射中文字段名为英文字段名
+const allCashTransactions = Object.values(data.profiles || {}).flatMap((p: any) =>
+    (p.cashTransactions || []).map((tx: any) => ({
+        ...tx,
+        type: tx.type || tx['类型'] || '',
+        amount: tx.amount || tx['金额'] || 0,
+        date: tx.date || tx['日期'] || '',
+        description: tx.description || tx['摘要'] || '',
+        counterparty: tx.counterparty || tx['对手方'] || '',
+        entity: p.entityName
+    }))
+);
+```
+
+**问题2: 借贷分析类型映射不一致**
+- **现象**: 部分借贷类型明细可能无法正确分类显示
+- **根因**: 后端 `api_server.py` 的 `loan_type_mapping` 与前端 `loanCategories` 的 `type` 值不一致
+- **不一致项**:
+  - 后端: `"no_payment_loans"` → `"no_payment"` → 前端期望: `"no_repayment"`
+  - 后端: `"regular_repayments"` → `"regular_payment"` → 前端期望: `"regular_repayment"`
+- **修复文件**: `api_server.py` 第567-574行
+- **修复方案**: 更新后端映射以匹配前端期望值
+```python
+# 修复前
+"no_payment_loans": "no_payment",
+"regular_repayments": "regular_payment",
+
+# 修复后
+"no_repayment_loans": "no_repayment",
+"regular_repayments": "regular_repayment",
+```
+
+### 📋 影响范围
+- 审计核心指标 → 物理现金存取 (完全修复)
+- 审计核心指标 → 借贷风险分析 (分类映射修正)
+
+### ✅ 验证方法
+1. 进入数据概览页面
+2. 点击审计核心指标的"物理现金存取"卡片
+3. 确认能看到"取现"和"存现"两个分类
+4. 点击分类行能查看详细记录
+
+---
+
 ## [v4.5.3] - 2026-01-19
 
 ### 🔧 UI/UX 优化

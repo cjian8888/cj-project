@@ -566,8 +566,8 @@ def serialize_analysis_results(results: Dict) -> Dict:
             # 映射：后端数组名 -> 前端 _type 标识
             loan_type_mapping = {
                 "bidirectional_flows": "bidirectional",
-                "regular_repayments": "regular_payment",
-                "no_payment_loans": "no_payment",
+                "regular_repayments": "regular_repayment",
+                "no_repayment_loans": "no_repayment",
                 "online_loan_platforms": "online_loan",
                 "loan_pairs": "loan_pair",
                 "abnormal_interest": "abnormal_interest",

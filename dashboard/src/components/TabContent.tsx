@@ -383,9 +383,16 @@ function OverviewTab() {
     const cashCollisionsCount = (data.suspicions.cashCollisions || []).length;
 
     // 从 profiles 中提取所有现金交易明细
+    // 【修复】映射后端中文键名为前端英文键名
     const allCashTransactions = Object.values(data.profiles || {}).flatMap((p: any) =>
         (p.cashTransactions || []).map((tx: any) => ({
             ...tx,
+            // 映射中文字段名为英文字段名（兼容两种格式）
+            type: tx.type || tx['类型'] || '',
+            amount: tx.amount || tx['金额'] || 0,
+            date: tx.date || tx['日期'] || '',
+            description: tx.description || tx['摘要'] || '',
+            counterparty: tx.counterparty || tx['对手方'] || '',
             entity: p.entityName  // 添加归属人员
         }))
     );

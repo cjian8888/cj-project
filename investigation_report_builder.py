@@ -113,10 +113,252 @@ from company_risk_analyzer import analyze_company_risk, RiskThresholds
 logger = utils.setup_logger(__name__)
 
 
-# 银行账户剔除关键词
-ACCOUNT_EXCLUDE_KEYWORDS = ["基金", "理财", "证券", "期货", "信托", "资管", "托管"]
 
+class UnifiedMetricsCalculator:
+    """
+    统一财务指标计算器
 
+    【设计目标】
+    1. 所有财务指标只计算一次，存入中央缓存
+    2. 杜绝不同模块使用不同的 filter/groupby 导致口径分裂
+    3. 提供计算溯源日志，便于调试
+
+    【使用方式】
+    calculator = UnifiedMetricsCalculator(profiles, derived_data)
+    real_income = calculator.get_real_income(name)  # 自动缓存
+    """
+
+    def __init__(self, profiles: Dict, derived_data: Dict):
+        """
+        初始化统一指标计算器
+
+        Args:
+            profiles: 个人/公司画像数据
+            derived_data: 派生分析数据（借贷、大额交易、家庭汇总）
+        """
+        self._profiles = profiles
+        self._derived_data = derived_data
+        self._cache: Dict[str, Dict[str, float]] = {}  # 中央缓存: {name: {metric: value}}
+        self._calculation_log: List[Dict] = []  # 计算溯源日志
+
+    def get_real_income(self, name: str) -> float:
+        """
+        获取真实收入（剔除后的收入）
+
+        Returns:
+            真实收入数值
+
+        Notes:
+            - 优先使用缓存的 real_income
+            - 如果不存在则从 profiles 或 derived_data 计算
+            - 计算失败回退到 total_income
+        """
+        # 检查缓存
+        cache_key = f"real_income_{name}"
+        if cache_key in self._cache and name in self._cache[cache_key]:
+            return self._cache[cache_key][name]
+
+        try:
+            # 优先从 derived_data 获取
+            name_key = name.replace("\u200b", "")  # 处理零宽空格
+            derived_key = f"{name_key}_derived"
+            if derived_key in self._derived_data and "real_income" in self._derived_data[derived_key]:
+                value = self._derived_data[derived_key]["real_income"]
+                self._cache[cache_key][name] = float(value)
+                self._calculation_log.append({
+                    "timestamp": utils.get_timestamp(),
+                    "name": name,
+                    "metric": "real_income",
+                    "value": float(value),
+                    "data_source": "derived_data"
+                })
+                logger.info(f"[UnifiedMetricsCalculator] get_real_income({name})={float(value)} from derived_data")
+                return float(value)
+
+            # 从 profiles 获取 total_income
+            if name_key in self._profiles and "total_income" in self._profiles[name_key]:
+                value = self._profiles[name_key]["total_income"]
+                self._cache[cache_key][name] = float(value)
+                self._calculation_log.append({
+                    "timestamp": utils.get_timestamp(),
+                    "name": name,
+                    "metric": "real_income",
+                    "value": float(value),
+                    "data_source": "profiles.total_income"
+                })
+                logger.info(f"[UnifiedMetricsCalculator] get_real_income({name})={float(value)} from profiles.total_income")
+                return float(value)
+
+            # 如果都失败，尝试计算
+            if name_key in self._profiles:
+                value = self._profiles[name_key].get("total_income", 0)
+                self._cache[cache_key][name] = float(value)
+                self._calculation_log.append({
+                    "timestamp": utils.get_timestamp(),
+                    "name": name,
+                    "metric": "real_income",
+                    "value": float(value),
+                    "data_source": "profiles (fallback)"
+                })
+                logger.info(f"[UnifiedMetricsCalculator] get_real_income({name})={float(value)} from profiles (fallback)")
+                return float(value)
+
+            return 0.0
+
+        except Exception as e:
+            logger.error(f"[UnifiedMetricsCalculator] get_real_income({name}) failed: {str(e)}")
+            return 0.0
+
+    def get_real_expense(self, name: str) -> float:
+        """
+        获取真实支出
+
+        Returns:
+            真实支出数值
+
+        Notes:
+            - 优先使用缓存的 real_expense
+            - 如果不存在则从 profiles 或 derived_data 计算
+            - 计算失败回退到 total_expense
+        """
+        # 检查缓存
+        cache_key = f"real_expense_{name}"
+        if cache_key in self._cache and name in self._cache[cache_key]:
+            return self._cache[cache_key][name]
+
+        try:
+            # 优先从 derived_data 获取
+            name_key = name.replace("\u200b", "")  # 处理零宽空格
+            derived_key = f"{name_key}_derived"
+            if derived_key in self._derived_data and "real_expense" in self._derived_data[derived_key]:
+                value = self._derived_data[derived_key]["real_expense"]
+                self._cache[cache_key][name] = float(value)
+                self._calculation_log.append({
+                    "timestamp": utils.get_timestamp(),
+                    "name": name,
+                    "metric": "real_expense",
+                    "value": float(value),
+                    "data_source": "derived_data"
+                })
+                logger.info(f"[UnifiedMetricsCalculator] get_real_expense({name})={float(value)} from derived_data")
+                return float(value)
+
+            # 从 profiles 获取 total_expense
+            if name_key in self._profiles and "total_expense" in self._profiles[name_key]:
+                value = self._profiles[name_key]["total_expense"]
+                self._cache[cache_key][name] = float(value)
+                self._calculation_log.append({
+                    "timestamp": utils.get_timestamp(),
+                    "name": name,
+                    "metric": "real_expense",
+                    "value": float(value),
+                    "data_source": "profiles.total_expense"
+                })
+                logger.info(f"[UnifiedMetricsCalculator] get_real_expense({name})={float(value)} from profiles.total_expense")
+                return float(value)
+
+            # 如果都失败，尝试计算
+            if name_key in self._profiles:
+                value = self._profiles[name_key].get("total_expense", 0)
+                self._cache[cache_key][name] = float(value)
+                self._calculation_log.append({
+                    "timestamp": utils.get_timestamp(),
+                    "name": name,
+                    "metric": "real_expense",
+                    "value": float(value),
+                    "data_source": "profiles (fallback)"
+                })
+                logger.info(f"[UnifiedMetricsCalculator] get_real_expense({name})={float(value)} from profiles (fallback)")
+                return float(value)
+
+            return 0.0
+
+        except Exception as e:
+            logger.error(f"[UnifiedMetricsCalculator] get_real_expense({name}) failed: {str(e)}")
+            return 0.0
+
+    def get_total_inflow(self, name: str) -> float:
+        """
+        获取总流入（原始流水）
+
+        Returns:
+            总流入数值
+
+        Notes:
+            - 总流入 = 总收入
+            - 从 profiles 直接读取
+        """
+        # 检查缓存
+        cache_key = f"total_inflow_{name}"
+        if cache_key in self._cache and name in self._cache[cache_key]:
+            return self._cache[cache_key][name]
+
+        try:
+            name_key = name.replace("\u200b", "")  # 处理零宽空格
+            if name_key in self._profiles and "total_income" in self._profiles[name_key]:
+                value = self._profiles[name_key]["total_income"]
+                self._cache[cache_key][name] = float(value)
+                self._calculation_log.append({
+                    "timestamp": utils.get_timestamp(),
+                    "name": name,
+                    "metric": "total_inflow",
+                    "value": float(value),
+                    "data_source": "profiles.total_income"
+                })
+                logger.info(f"[UnifiedMetricsCalculator] get_total_inflow({name})={float(value)} from profiles.total_income")
+                return float(value)
+
+            return 0.0
+
+        except Exception as e:
+            logger.error(f"[UnifiedMetricsCalculator] get_total_inflow({name}) failed: {str(e)}")
+            return 0.0
+
+    def get_total_outflow(self, name: str) -> float:
+        """
+        获取总流出（原始流水）
+
+        Returns:
+            总流出数值
+
+        Notes:
+            - 总流出 = 总支出
+            - 从 profiles 直接读取
+        """
+        # 检查缓存
+        cache_key = f"total_outflow_{name}"
+        if cache_key in self._cache and name in self._cache[cache_key]:
+            return self._cache[cache_key][name]
+
+        try:
+            name_key = name.replace("\u200b", "")  # 处理零宽空格
+            if name_key in self._profiles and "total_expense" in self._profiles[name_key]:
+                value = self._profiles[name_key]["total_expense"]
+                self._cache[cache_key][name] = float(value)
+                self._calculation_log.append({
+                    "timestamp": utils.get_timestamp(),
+                    "name": name,
+                    "metric": "total_outflow",
+                    "value": float(value),
+                    "data_source": "profiles.total_expense"
+                })
+                logger.info(f"[UnifiedMetricsCalculator] get_total_outflow({name})={float(value)} from profiles.total_expense")
+                return float(value)
+
+            return 0.0
+
+        except Exception as e:
+            logger.error(f"[UnifiedMetricsCalculator] get_total_outflow({name}) failed: {str(e)}")
+            return 0.0
+
+    def get_calculation_log(self) -> List[Dict]:
+        """
+        获取计算溯源日志
+
+        Returns:
+            计算日志列表，每条日志包含时间戳、姓名、指标名、数值、数据来源
+        """
+        return self._calculation_log.copy()
 class InvestigationReportBuilder:
     """
     初查报告构建器
@@ -163,6 +405,21 @@ class InvestigationReportBuilder:
         self._external_wealth_cache = analysis_cache.get("wealthProductData", {})
         self._external_securities_cache = analysis_cache.get("securitiesData", {})
 
+        # 【2026-03-03 新增】加载风险等级阈值配置
+        try:
+            with open(os.path.join(self.output_dir, 'config/risk_thresholds.yaml'), 'r', encoding='utf-8') as f:
+                risk_config = yaml.safe_load(f)
+                self._risk_thresholds = risk_config.get('risk_level_thresholds', {})
+                logger.info(f"风险等级阈值配置加载成功: {self._risk_thresholds}")
+        except Exception as e:
+            logger.warning(f"加载风险阈值配置失败: {e}，使用默认值")
+            self._risk_thresholds = {
+                'income_expense': {'high': 0.3, 'medium': 0.5, 'low': 0.7},
+                'risk_score': {'high': 60, 'medium': 30, 'low': 0},
+                'five_dimension': {'high': 60, 'medium': 30, 'low': 0}
+            }
+        # 【2026-03-03 新增】统一财务指标计算器
+        self._metrics_calculator = UnifiedMetricsCalculator(self.profiles, self.derived_data)
         # 【修复】建立身份证号→姓名的双向映射
         self._id_to_name_map = {}
         self._name_to_id_map = {}
@@ -170,10 +427,22 @@ class InvestigationReportBuilder:
 
         # 核查底稿Excel缓存（延迟加载）
         self._workbook_cache = {}
-
+        self.profiles = analysis_cache.get("profiles", {})
         # 缓存核心人员列表
         self._core_persons = self._extract_core_persons()
-        self._companies = self._extract_companies()
+        # 【2026-03-03 新增】加载风险等级阈值配置
+        try:
+            with open('config/risk_thresholds.yaml', 'r', encoding='utf-8') as f:
+                risk_config = yaml.safe_load(f)
+                self._risk_thresholds = risk_config.get('risk_level_thresholds', {})
+                logger.info(f"风险等级阈值配置加载成功: {self._risk_thresholds}")
+        except Exception as e:
+            logger.warning(f"加载风险阈值配置失败: {e}，使用默认值")
+            self._risk_thresholds = {
+                'income_expense': {'high': 0.3, 'medium': 0.5, 'low': 0.7},
+                'risk_score': {'high': 60, 'medium': 30, 'low': 0},
+                'five_dimension': {'high': 60, 'medium': 30, 'low': 0}
+            }
 
         # 【2026-02-21 新增】人员身份信息映射（政治面貌、工作身份等）
         self._person_identity_map = {
@@ -5425,52 +5694,11 @@ class InvestigationReportBuilder:
                 wealth_mgmt = full_profile.get("wealth_management", {})
                 fund_flow = full_profile.get("fund_flow", {})
 
-                # 【2026-02-20 修复】增强回退逻辑，处理扁平化缓存数据
-                # 优先级：1.缓存的real_income -> 2.重新计算 -> 3.使用total_income回退
-                member_real_income = 0
-                member_real_expense = 0
-                member_offset = {}
-
-                # 方案1：检查是否有缓存的 real_income（新格式数据）
-                if (
-                    summary.get("real_income") is not None
-                    and summary.get("real_income") > 0
-                ):
-                    member_real_income = summary.get("real_income", 0)
-                    member_real_expense = summary.get("real_expense", 0)
-                    member_offset = summary.get("offset_detail", {})
-                # 方案2：尝试重新计算（需要完整的嵌套数据）
-                elif income_structure and wealth_mgmt:
-                    try:
-                        member_real_income, member_real_expense, member_offset = (
-                            _calculate_real_income_expense(
-                                income_structure, wealth_mgmt, fund_flow
-                            )
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"[_build_family_summary_v4] 计算{member}真实收入失败: {e}，使用回退方案"
-                        )
-                        # 方案3：回退到 total_income（扁平化缓存数据）
-                        member_real_income = summary.get(
-                            "total_income", full_profile.get("totalIncome", 0)
-                        )
-                        member_real_expense = summary.get(
-                            "total_expense", full_profile.get("totalExpense", 0)
-                        )
-                        member_offset = {}
-                else:
-                    # 方案3：直接使用 total_income（扁平化缓存数据）
-                    member_real_income = summary.get(
-                        "total_income", full_profile.get("totalIncome", 0)
-                    )
-                    member_real_expense = summary.get(
-                        "total_expense", full_profile.get("totalExpense", 0)
-                    )
-                    member_offset = {}
-                    logger.info(
-                        f"[_build_family_summary_v4] {member}使用total_income作为回退: {member_real_income / 10000:.2f}万"
-                    )
+                # 【2026-03-03 Phase 2-Wave 1 优化】使用 UnifiedMetricsCalculator 统一管理收支计算
+# 调用 UnifiedMetricsCalculator 获取真实收入和支出（内部包含完整的回退逻辑）
+                member_real_income = self._metrics_calculator.get_real_income(member)
+                member_real_expense = self._metrics_calculator.get_real_expense(member)
+                member_offset = {}  # UnifiedMetricsCalculator 日志中已包含明细
 
                 total_real_income += member_real_income
                 total_real_expense += member_real_expense
