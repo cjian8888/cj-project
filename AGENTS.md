@@ -1,7 +1,111 @@
+# PROJECT KNOWLEDGE BASE
+
+**Generated:** 2026-03-03
+**Mode:** Update (existing conventions preserved)
 
 ---
 
-## 📋 代码规范约定 (2026-03-01 更新)
+## OVERVIEW
+
+穿云审计 (F.P.A.S) - 资金穿透与关联排查系统。Python 3.9+ FastAPI 后端 + React 19 TypeScript 前端。核心功能: 交易数据清洗、疑点检测、资金画像、借贷分析、关联方穿透、ML风险预测。
+
+**唯一入口**: `api_server.py` (`main.py` 已废弃)
+
+---
+
+## STRUCTURE
+
+```
+project/
+├── api_server.py          # ⭐ 唯一入口 - FastAPI 服务
+├── config.py             # 全局配置
+├── data_cleaner.py       # 数据清洗
+├── financial_profiler.py # 资金画像
+├── suspicion_engine.py   # 疑点检测
+├── loan_analyzer.py      # 借贷分析
+├── *_extractor.py        # 数据提取器 (16+)
+├── *_analyzer.py         # 数据分析器 (14+)
+├── classifiers/          # 交易分类引擎
+├── detectors/            # 疑点检测器插件 (8个)
+├── schemas/              # Pydantic 数据模型
+├── learners/             # ML 学习模块
+├── knowledge/            # 行业知识库 (YAML)
+├── utils/                # 工具函数
+├── tests/                # pytest 测试
+└── dashboard/            # React 前端
+    ├── src/components/  # UI 组件
+    ├── src/contexts/    # 全局状态
+    ├── src/services/     # API 调用
+    └── src/types/       # TypeScript 类型
+```
+
+---
+
+## WHERE TO LOOK
+
+| 任务 | 位置 | 关键文件 |
+|------|------|--------|
+| 修改 API 端点 | 根目录 | `api_server.py` |
+| 修改配置 | 根目录 | `config.py`, `config_loader.py` |
+| 添加检测器 | `detectors/` | 继承 `BaseDetector` |
+| 添加分类器 | `classifiers/` | 实现 `classify()` |
+| 修改数据模型 | `schemas/` | 继承 `BaseModel` |
+| 修改前端组件 | `dashboard/src/components/` | `*.tsx` |
+| 工具函数 | `utils/` | `safe_types.py` |
+| 测试 | `tests/` | `test_*.py` |
+
+---
+
+## CODE MAP
+
+| 符号 | 类型 | 位置 | 职责 |
+|------|------|------|------|
+| `api_server.py` | FastAPI | 根目录 | 唯一入口，所有 API 端点 |
+| `config.py` | 配置 | 根目录 | 全局阈值参数 |
+| `data_cleaner.py` | 清洗 | 根目录 | 数据清洗管道 |
+| `financial_profiler.py` | 分析 | 根目录 | 资金画像生成 |
+| `suspicion_engine.py` | 检测 | 根目录 | 疑点检测协调 |
+| `clue_aggregator.py` | 聚合 | 根目录 | 线索聚合引擎 |
+| `BaseDetector` | 基类 | `detectors/` | 检测器抽象基类 |
+| `CategoryEngine` | 引擎 | `classifiers/` | 分类引擎入口 |
+| `safe_str/float/int` | 函数 | `utils/safe_types.py` | 类型安全转换 |
+
+---
+
+## COMMANDS
+
+```bash
+# 启动后端 (唯一入口)
+python api_server.py
+
+# 启动前端
+cd dashboard && npm run dev
+
+# 运行测试
+pytest tests/ -v
+
+# 类型检查
+cd dashboard && npm run type-check
+```
+
+---
+
+## NOTES
+
+### 数据源铁律
+**所有 API 必须从 `output/cleaned_data/` 读取** - 禁止数据造假
+
+### 批量文件说明
+- 根目录 76 个 Python 文件 (扁平结构，建议重构)
+- `api_server.py` 3438 行 (最大文件)
+- 无 CI/CD 配置 (手动部署)
+
+### 废弃代码
+- `main.py` 已废弃，使用 `api_server.py`
+
+---
+
+## CONVENTIONS
 
 ### 🔧 工具函数统一规范
 
@@ -29,67 +133,3 @@ from utils.safe_types import (
 3. **易于维护** - 修改只需在一个地方进行
 4. **减少bug** - 消除不同实现之间的细微差异
 
-#### 使用示例
-```python
-# ✅ 正确做法
-from utils.safe_types import safe_str, safe_float, safe_date
-
-name = safe_str(row.get("姓名"))           # 返回 Optional[str]
-amount = safe_float(row.get("金额"))       # 返回 Optional[float]
-date = safe_date(row.get("交易日期"))      # 返回 Optional[str]
-
-# ❌ 错误做法 - 禁止在文件中重新定义这些函数
-def _safe_str(value):   # 不要这样做！
-    ...
-
-def _safe_float(value): # 不要这样做！
-    ...
-```
-
-#### 受影响的文件（必须遵守）
-- `*_extractor.py` - 所有数据提取器
-- `*_analyzer.py` - 数据分析器
-- 任何需要数据类型转换的模块
-
-### 🚨 禁止的代码模式
-
-1. **禁止重复定义工具函数**
-   ```python
-   # 禁止
-   def _safe_str(value): ...
-   def _safe_float(value): ...
-   ```
-
-2. **禁止不一致的返回类型**
-   ```python
-   # 禁止 - 有的返回空字符串，有的返回None
-   def _safe_str(value) -> str:  # 应该返回 Optional[str]
-       if pd.isna(value):
-           return ""  # 不一致！
-       return str(value)
-   ```
-
-3. **禁止硬编码路径**
-   ```python
-   # 禁止
-   os.chdir("D:/CJ/project")  # Windows绝对路径
-   
-   # 应该
-   from paths import APP_ROOT
-   os.chdir(APP_ROOT)
-   ```
-
-### 📁 文件组织约定
-
-| 用途 | 位置 | 说明 |
-|------|------|------|
-| 工具函数 | `utils/` 目录 | safe_types.py, logging_config.py 等 |
-| 数据提取器 | 根目录 `*_extractor.py` | 必须导入 utils.safe_types |
-| 配置管理 | `config.py` + `config_loader.py` | 禁止硬编码配置 |
-| 数据模型 | `schemas/` 目录 | Pydantic 模型 |
-
-### 🔄 后续Agent修改代码时必须检查
-
-1. 是否在新增数据提取器？→ 必须使用 `utils.safe_types`
-2. 是否修改现有提取器？→ 检查是否有重复定义，迁移到统一模块
-3. 是否添加新工具函数？→ 考虑是否通用，通用则加入 `utils.safe_types`
