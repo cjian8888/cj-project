@@ -26,6 +26,7 @@ from paths import OUTPUT_DIR, APP_ROOT
 
 import config
 import utils
+import yaml
 from report_schema import (
     InvestigationReport,
     InvestigationMeta,
@@ -407,7 +408,7 @@ class InvestigationReportBuilder:
 
         # 【2026-03-03 新增】加载风险等级阈值配置
         try:
-            with open(os.path.join(self.output_dir, 'config/risk_thresholds.yaml'), 'r', encoding='utf-8') as f:
+            with open('config/risk_thresholds.yaml', 'r', encoding='utf-8') as f:
                 risk_config = yaml.safe_load(f)
                 self._risk_thresholds = risk_config.get('risk_level_thresholds', {})
                 logger.info(f"风险等级阈值配置加载成功: {self._risk_thresholds}")
@@ -430,6 +431,8 @@ class InvestigationReportBuilder:
         self.profiles = analysis_cache.get("profiles", {})
         # 缓存核心人员列表
         self._core_persons = self._extract_core_persons()
+        # 【2026-03-03 新增】加载风险等级阈值配置
+        self._companies = []  # 【2026-03-03 修复】初始化公司列表
         # 【2026-03-03 新增】加载风险等级阈值配置
         try:
             with open('config/risk_thresholds.yaml', 'r', encoding='utf-8') as f:
@@ -6432,7 +6435,39 @@ class InvestigationReportBuilder:
             else:
                 score += 5
                 risk_factors.append("与核心人员有资金往来")
+        # 5. 交易频次风险 (0-10分)
+        transaction_count = profile.get("transactionCount", 0)
+        if transaction_count > 1000:
+            score += 5
+            risk_factors.append("交易频次异常高")
 
+        # 【2026-03-03 新增】6. 快进快出风险 (0-30分)
+        # 使用 _analyze_company_behavioral_patterns() 返回的快进快出数据
+        behavioral = self._analyze_company_behavioral_patterns(company)
+        if behavioral.get("has_patterns"):
+            fast_in_out = behavioral.get("fast_in_out", {})
+            total_fast_in_out = fast_in_out.get("total", 0)
+            
+            # 根据快进快出记录数量计算风险分
+            if total_fast_in_out == 0:
+                fast_in_out_score = 0
+            elif total_fast_in_out <= 5:
+                fast_in_out_score = total_fast_in_out * 2  # 每条2分，最高10分
+            elif total_fast_in_out <= 10:
+                fast_in_out_score = total_fast_in_out * 3  # 每条3分，最高30分
+            elif total_fast_in_out <= 20:
+                fast_in_out_score = total_fast_in_out * 4  # 每条4分，最高80分
+            elif total_fast_in_out <= 50:
+                fast_in_out_score = total_fast_in_out * 5  # 每条5分，最高250分
+            else:
+                fast_in_out_score = min(300, total_fast_in_out * 6)  # 每条6分，最高300分
+            
+            score += fast_in_out_score
+            risk_factors.append(f"快进快出记录{total_fast_in_out}条，评分{fast_in_out_score}分")
+        # 更新risk_factors的最大数量为6个（原为5个）
+
+        # 6. 收支失衡风险 (0-20分)
+        total_expense = profile.get("totalExpense", 0)
         # 3. 交易频次风险 (0-10分)
         transaction_count = profile.get("transactionCount", 0)
         if transaction_count > 1000:
