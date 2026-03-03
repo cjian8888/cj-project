@@ -6420,7 +6420,8 @@ class InvestigationReportBuilder:
             score += 8
             risk_factors.append("现金收入占比较高")
 
-        # 2. 核心人员往来风险 (0-30分)
+        # 5. 核心人员往来风险 (0-30分)
+
         person_transfers = self._analyze_company_person_transfers(company, core_persons)
         if person_transfers["has_transfers"]:
             total_transfer = (
@@ -6435,13 +6436,13 @@ class InvestigationReportBuilder:
             else:
                 score += 5
                 risk_factors.append("与核心人员有资金往来")
-        # 5. 交易频次风险 (0-10分)
+        # 6. 交易频次风险 (0-10分)
         transaction_count = profile.get("transactionCount", 0)
         if transaction_count > 1000:
             score += 5
             risk_factors.append("交易频次异常高")
 
-        # 【2026-03-03 新增】6. 快进快出风险 (0-30分)
+        # 【2026-03-03 新增】7. 快进快出风险 (0-30分)
         # 使用 _analyze_company_behavioral_patterns() 返回的快进快出数据
         behavioral = self._analyze_company_behavioral_patterns(company)
         if behavioral.get("has_patterns"):
@@ -6464,18 +6465,9 @@ class InvestigationReportBuilder:
             
             score += fast_in_out_score
             risk_factors.append(f"快进快出记录{total_fast_in_out}条，评分{fast_in_out_score}分")
-        # 更新risk_factors的最大数量为6个（原为5个）
-
-        # 6. 收支失衡风险 (0-20分)
+        # 8. 收支失衡风险 (0-20分)
         total_expense = profile.get("totalExpense", 0)
-        # 3. 交易频次风险 (0-10分)
-        transaction_count = profile.get("transactionCount", 0)
-        if transaction_count > 1000:
-            score += 5
-            risk_factors.append("交易频次异常高")
 
-        # 4. 收支失衡风险 (0-20分)
-        total_expense = profile.get("totalExpense", 0)
         if total_income > 0 and total_expense / total_income > 1.5:
             score += 15
             risk_factors.append("支出远超收入")
@@ -6487,10 +6479,11 @@ class InvestigationReportBuilder:
             level = "中风险"
         else:
             level = "低风险"
-
+        
         summary = f"【风险评分】综合评分{score}/100分，评级为{level}。"
         if risk_factors:
             summary += f"主要风险：{'；'.join(risk_factors[:3])}。"
+
 
         return {
             "score": score,
@@ -6613,6 +6606,75 @@ class InvestigationReportBuilder:
 
         return None
 
+
+    def validate_and_fill_defaults(self, context: Dict) -> Dict:
+        """
+        【2026-03-03 新增】验证并填充默认值（病灶四修复）
+        
+        为所有模板变量添加默认值，消除空值和占位符渲染问题。
+        
+        Args:
+            context: 报告上下文字典
+            
+        Returns:
+            填充默认值后的上下文字典
+        """
+        if not context:
+            return context
+            
+        # 定义默认值映射
+        defaults = {
+            # 报告元数据
+            'title_prefix': '资金穿透核查',
+            'doc_number': '国监查',
+            
+            # 人员基本信息
+            'id_number': '暂未获取',
+            'gender': '暂未获取',
+            'birth_date': '暂未获取',
+            'work_unit': '信息待补充',
+            'position': '信息待补充',
+            'political_status': '暂未获取',
+            'work_identity': '暂未获取',
+            'employer': '信息待补充',
+            
+            # 资产信息
+            'property_value': '暂未获取',
+            'vehicle_value': '暂未获取',
+            'property_area': '暂未获取',
+            
+            # 金额字段
+            'amount': '0.00',
+            'balance': '0.00',
+            'income': '0.00',
+            'expense': '0.00',
+            
+            # 叙述性字段
+            'narrative': '暂无数据',
+            'description': '暂无数据',
+            'summary': '暂无数据',
+        }
+        
+        # 递归填充默认值
+        def fill_recursive(data):
+            if isinstance(data, dict):
+                result = {}
+                for key, value in data.items():
+                    if value is None or value == '' or value == '【待调取】' or value == '【待补充】':
+                        # 使用默认值
+                        result[key] = defaults.get(key, '暂无数据')
+                    elif isinstance(value, (dict, list)):
+                        result[key] = fill_recursive(value)
+                    else:
+                        result[key] = value
+                return result
+            elif isinstance(data, list):
+                return [fill_recursive(item) for item in data]
+            else:
+                return data
+        
+        return fill_recursive(context)
+
     def _build_v4_conclusion(
         self, person_sections: List[Dict], company_sections: List[Dict]
     ) -> Dict:
@@ -6633,29 +6695,43 @@ class InvestigationReportBuilder:
                 expense_income_ratio = income_match.get("expense_income_ratio", 0)
 
                 # 【6.1修复】判断风险等级 - 【2026-02-21 增强】增加支出收入比判断
-                # 高风险：工资占比<20% 或 支出收入比>150%
-                if salary_ratio < 0.2 or expense_income_ratio > 1.5:
+                # 使用统一阈值配置替代硬编码值
+                income_expense_thresholds = self._risk_thresholds.get('income_expense', {})
+                high_threshold = income_expense_thresholds.get('high', 0.3)      # 高风险：工资占比<30%
+                medium_threshold = income_expense_thresholds.get('medium', 0.5)  # 中风险：工资占比<50%
+                low_threshold = income_expense_thresholds.get('low', 0.7)        # 低风险：工资占比>=70%
+
+                # 高风险：工资占比<high_threshold 或 支出收入比>1.5
+                if salary_ratio < high_threshold or expense_income_ratio > 1.5:
                     risk_level = "high"
-                    if salary_ratio < 0.2 and expense_income_ratio > 1.5:
+                    if salary_ratio < high_threshold and expense_income_ratio > 1.5:
                         risk_desc = "严重偏低且入不敷出"
-                    elif salary_ratio < 0.2:
+                    elif salary_ratio < high_threshold:
                         risk_desc = "严重偏低"
                     else:
                         risk_desc = "入不敷出"
-                # 中风险：工资占比<50% 或 支出收入比>120%
-                elif salary_ratio < 0.5 or expense_income_ratio > 1.2:
+                # 中风险：工资占比<medium_threshold 或 支出收入比>1.2
+                elif salary_ratio < medium_threshold or expense_income_ratio > 1.2:
                     risk_level = "medium"
-                    if salary_ratio < 0.5 and expense_income_ratio > 1.2:
+                    if salary_ratio < medium_threshold and expense_income_ratio > 1.2:
                         risk_desc = "偏低且支出偏高"
-                    elif salary_ratio < 0.5:
+                    elif salary_ratio < medium_threshold:
                         risk_desc = "偏低"
                     else:
                         risk_desc = "支出偏高"
+                # 低风险：工资占比>=low_threshold 且 支出收入比<=1.2
                 else:
                     risk_level = "low"
                     risk_desc = "正常"
 
                 risk_levels[risk_level] += 1
+
+                # 【2026-03-03 新增】统计五维度评分的风险等级（病灶三修复）
+                five_dimension = analysis.get("five_dimension_score", {})
+                if five_dimension:
+                    fd_risk_level = five_dimension.get("risk_level")
+                    if fd_risk_level and fd_risk_level in risk_levels:
+                        risk_levels[fd_risk_level] += 1
 
                 # 【2026-02-22 修复】修正逻辑矛盾，优化描述文本
                 # 原问题："工资收入占比仅39.9%，正常，不足以支撑日常开支" - 既说正常又说不支撑，矛盾
@@ -7016,13 +7092,13 @@ class InvestigationReportBuilder:
         # Initialize with placeholders
         basic_info = {
             "name": name,
-            "id_number": "【待调取】",
-            "gender": "【待调取】",
-            "birth_date": "【待调取】",
-            "work_unit": identity_info.get("employer", "【待调取】"),
-            "position": identity_info.get("position", "【待调取】"),
-            "political_status": identity_info.get("political_status", "【待调取】"),
-            "work_identity": identity_info.get("work_identity", "【待调取】"),
+            "id_number": "暂无数据",
+            "gender": "暂无数据",
+            "birth_date": "暂无数据",
+            "work_unit": identity_info.get("employer", "暂无数据"),
+            "position": identity_info.get("position", "暂无数据"),
+            "political_status": identity_info.get("political_status", "暂无数据"),
+            "work_identity": identity_info.get("work_identity", "暂无数据"),
         }
         # 尝试从 derived_data.json 的 family_tree 提取身份信息
         try:
@@ -7062,9 +7138,9 @@ class InvestigationReportBuilder:
         # 职业履历(从外部数据获取,这里使用占位符)
         career_history = [
             {
-                "period": "【待调取】",
-                "unit": "【待调取】",
-                "position": "【待调取】",
+                "period": "暂无数据",
+                "unit": "暂无数据",
+                "position": "暂无数据",
             }
         ]
 
@@ -7964,26 +8040,26 @@ class InvestigationReportBuilder:
             else:
                 birth_date = str(birth_date_raw)
         else:
-            birth_date = "【待调取】"
+            birth_date = "暂无数据"
 
         # 获取籍贯/出生地
         birth_place = (
-            huji_info.get("籍贯", "") or huji_info.get("出生地", "") or "【待调取】"
+            huji_info.get("籍贯", "") or huji_info.get("出生地", "") or "暂无数据"
         )
 
         # 获取从业单位
-        employer = huji_info.get("从业单位", "") or "【待调取】"
+        employer = huji_info.get("从业单位", "") or "暂无数据"
 
         # 获取性别
-        gender = huji_info.get("性别", "") or "【待调取】"
+        gender = huji_info.get("性别", "") or "暂无数据"
 
         return {
             "name": name,
             "gender": gender,
             "birth_date": birth_date,
             "birth_place": birth_place,
-            "entry_date": "【待调取】",  # 入职日期需要人事档案
-            "current_position": "【待调取】",  # 职务需要人事档案
+            "entry_date": "暂无数据",  # 入职日期需要人事档案
+            "current_position": "暂无数据",  # 职务需要人事档案
             "employer": employer,
             "family_members_desc": self._build_family_members_desc(name),
             "has_complete_info": bool(
@@ -8007,7 +8083,7 @@ class InvestigationReportBuilder:
                     members_desc.append(f"{relation}：{member}")
 
         if not members_desc:
-            return "【待调取】家庭成员信息"
+            return "暂无家庭成员信息"
 
         return "；".join(members_desc)
 
@@ -8087,7 +8163,7 @@ class InvestigationReportBuilder:
             "avg_yearly_wan": round(avg_yearly / 10000, 2),  # 【M-03修复】
             "avg_monthly": avg_monthly,
             "avg_monthly_wan": round(avg_monthly / 10000, 2),  # 【M-03修复】
-            "employer_name": profile.get("id_info", {}).get("employer", "【待调取】"),
+            "employer_name": profile.get("id_info", {}).get("employer", "暂无数据"),
             # 专业描述文本
             "narrative": self._generate_salary_narrative(
                 name,
@@ -8315,7 +8391,7 @@ class InvestigationReportBuilder:
                     # 金额较小，假设已经是万元
                     value_display = f"{value:.2f}"
             else:
-                value_display = "【待补充】"
+                value_display = "暂无数据"
 
             # 【1.3修复】统一身份证号格式
             co_owners = (
@@ -8550,7 +8626,7 @@ class InvestigationReportBuilder:
                 or v.get("初次登记日期", "")
                 or v.get("purchase_date", "")
                 or v.get("购入日期", "")
-                or "【待补充】"  # 添加默认占位符
+                or "暂无数据"  # 添加默认占位符
             )
             vehicle_type = v.get("vehicle_type", "") or v.get("车辆类型", "") or ""
 
@@ -9250,7 +9326,7 @@ class InvestigationReportBuilder:
         if total_value > 0:
             value_text = f"{total_value:.2f}万元"
         else:
-            value_text = "【待补充】"
+            value_text = "暂无数据"
 
         # TODO: 分析购房款支付记录
         has_payment_record = False  # 需要进一步分析银行流水
@@ -9387,7 +9463,7 @@ class InvestigationReportBuilder:
             "has_suspicious_travel": False,
             "narrative": "；".join(narrative_parts) + "。"
             if narrative_parts
-            else "【待调取】出行数据",
+            else "暂无出行数据",
         }
 
     # ==================== v5.0 新增方法 ====================
