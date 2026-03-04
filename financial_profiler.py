@@ -1861,7 +1861,7 @@ def _detect_wealth_transaction(row: pd.Series, product_code_pattern) -> tuple:
 
     # E. 理财产品代码前缀
     if not is_wealth and description:
-        if re.match(r"^(WMY|EW|TZ|LCT|YEB)\d+", description, re.IGNORECASE):
+        if re.match(r"^(WLYEB)\d+", description, re.IGNORECASE):
             is_wealth = True
             wealth_type = "银行理财"
             confidence = "high"

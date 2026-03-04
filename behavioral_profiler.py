@@ -23,43 +23,43 @@ from collections import defaultdict
 import config
 import utils
 
-TX|logger = utils.setup_logger(__name__)
-JJ|
-HQ|# ============================================================
-NZ|# 【2026-03-04 优化】性能优化配置
-JY|# ============================================================
-JQ|
-VQ|# 优化开关 - 可回退到旧实现
-XB|USE_VECTORIZED_FILTER = True
-QT|
-NR|# 编译后的正则模式（预编译提升性能）
-MS|_FINANCIAL_KEYWORDS_PATTERN = None
-VW|
-KH|def _get_financial_keywords_pattern() -> str:
-XZ|    """获取编译后的理财关键词正则模式"""
-QT|    global _FINANCIAL_KEYWORDS_PATTERN
-XK|    if _FINANCIAL_KEYWORDS_PATTERN is None:
-TH|        # 理财产品关键词列表（与原始代码完全一致）
-BJ|        keywords = [
-RY|            '理财', '基金', '证券', '申购', '赎回',
-QZ|            '存管', '清算', '产品', '结构性存款',
-XR|            '申万宏源', '万联证券', '长信基金',
-HZ|            '华泰证券', '国泰君安', '海通证券',
-QP|            '招商证券', '中信证券', '广发证券',
-ZR|            '银河证券', '光大证券', '东方证券',
-YJ|            '兴业证券', '长江证券', '中金公司',
-WH|            '汇添富', '易方达', '华夏基金', '嘉实基金',
-KM|            '南方基金', '博时基金', '富国基金',
-NY|            '债券', '股票', '期货', '期权',
-QY|            '理财产品', '基金产品', '证券账户',
-SX|            '银证转账', '第三方存管', '资金清算'
-MY|        ]
-XZ|        # 转义特殊字符并用 | 连接
-JS|        import re
-QK|        _FINANCIAL_KEYWORDS_PATTERN = '|'.join(re.escape(k) for k in keywords)
-PV|    return _FINANCIAL_KEYWORDS_PATTERN
-JJ|
-HQ|# ============================================================
+logger = utils.setup_logger(__name__)
+
+# ============================================================
+# 【2026-03-04 优化】性能优化配置
+# ============================================================
+
+# 优化开关 - 可回退到旧实现
+USE_VECTORIZED_FILTER = True
+
+# 编译后的正则模式（预编译提升性能）
+_FINANCIAL_KEYWORDS_PATTERN = None
+
+def _get_financial_keywords_pattern() -> str:
+    """获取编译后的理财关键词正则模式"""
+    global _FINANCIAL_KEYWORDS_PATTERN
+    if _FINANCIAL_KEYWORDS_PATTERN is None:
+        # 理财产品关键词列表（与原始代码完全一致）
+        keywords = [
+            '理财', '基金', '证券', '申购', '赎回',
+            '存管', '清算', '产品', '结构性存款',
+            '申万宏源', '万联证券', '长信基金',
+            '华泰证券', '国泰君安', '海通证券',
+            '招商证券', '中信证券', '广发证券',
+            '银河证券', '光大证券', '东方证券',
+            '兴业证券', '长江证券', '中金公司',
+            '汇添富', '易方达', '华夏基金', '嘉实基金',
+            '南方基金', '博时基金', '富国基金',
+            '债券', '股票', '期货', '期权',
+            '理财产品', '基金产品', '证券账户',
+            '银证转账', '第三方存管', '资金清算'
+        ]
+        # 转义特殊字符并用 | 连接
+        import re
+        _FINANCIAL_KEYWORDS_PATTERN = '|'.join(re.escape(k) for k in keywords)
+    return _FINANCIAL_KEYWORDS_PATTERN
+
+# ============================================================
 
 
 # ============================================================
@@ -103,84 +103,84 @@ def is_financial_product_transaction(transaction: pd.Series) -> bool:
     return False
 
 
-YH|def filter_financial_transactions(df: pd.DataFrame) -> pd.DataFrame:
-JB|    """
-JT|    过滤掉理财产品相关交易
-BP|    【2026-03-04 优化】自动选择向量化版本或旧版本
-XQ|    
-KT|    Args:
-RN|        df: 交易DataFrame
-QJ|    
-JH|    Returns:
-VS|        过滤后的DataFrame
-JX|    """
-MY|    global USE_VECTORIZED_FILTER
-PH|    
-QY|    if USE_VECTORIZED_FILTER:
-SX|        return _filter_financial_transactions_vectorized(df)
-MY|    else:
-XZ|        return _filter_financial_transactions_legacy(df)
-JS|
-QK|
-BZ|
-HZ|def _filter_financial_transactions_legacy(df: pd.DataFrame) -> pd.DataFrame:
-XT|    """【保留】原版实现 - 用于对比验证"""
-BM|    if df.empty:
-YP|        return df
-SN|    
-TH|    import time
-TR|    start_time = time.time()
-ZB|    
-WX|    # 标记理财交易
-KW|    df_filtered = df.copy()
-QZ|    df_filtered['is_financial'] = df_filtered.apply(is_financial_product_transaction, axis=1)
-WV|    
-QQ|    # 返回非理财交易
-HZ|    result = df_filtered[~df_filtered['is_financial']].copy()
-JP|    
-ZB|    elapsed = time.time() - start_time
-WH|    logger.info(f"    【旧版】理财过滤: {len(df)}行 -> {len(result)}行, 耗时{elapsed:.3f}秒")
-WK|    
-KM|    return result
-NY|
-QY|
-SX|
-XZ|def _filter_financial_transactions_vectorized(df: pd.DataFrame) -> pd.DataFrame:
-JS|    """
-QK|    【2026-03-04 优化】向量化版本 - 性能提升10-50倍
-BZ|    
-HZ|    使用 pandas 向量化字符串操作替代 apply(axis=1)，
-XT|    在保持结果一致性的前提下大幅提升性能。
-BM|    
-YP|    Args:
-SN|        df: 交易DataFrame
-TH|    
-TR|    Returns:
-ZB|        过滤后的DataFrame（非理财交易）
-WX|    """
-KW|    if df.empty:
-QZ|        return df
-WV|    
-QQ|    import time
-HZ|    start_time = time.time()
-JP|    
-ZB|    # 获取预编译的正则模式
-WH|    pattern = _get_financial_keywords_pattern()
-WK|    
-KM|    # 向量化匹配：检查 counterparty 和 description 是否包含关键词
-NY|    # na=False 表示 NaN 值返回 False（不匹配）
-QY|    mask_counterparty = df['counterparty'].str.contains(pattern, na=False, regex=True)
-SX|    mask_description = df['description'].str.contains(pattern, na=False, regex=True)
-XZ|    is_financial = mask_counterparty | mask_description
-JS|    
-QK|    # 返回非理财交易
-BZ|    result = df[~is_financial].copy()
-HZ|    
-XT|    elapsed = time.time() - start_time
-BM|    logger.info(f"    【优化】理财过滤: {len(df)}行 -> {len(result)}行, 耗时{elapsed:.3f}秒")
-YP|    
-SN|    return result
-TH|
+def filter_financial_transactions(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    过滤掉理财产品相关交易
+    【2026-03-04 优化】自动选择向量化版本或旧版本
+    
+    Args:
+        df: 交易DataFrame
+    
+    Returns:
+        过滤后的DataFrame
+    """
+    global USE_VECTORIZED_FILTER
+    
+    if USE_VECTORIZED_FILTER:
+        return _filter_financial_transactions_vectorized(df)
+    else:
+        return _filter_financial_transactions_legacy(df)
+
+
+
+def _filter_financial_transactions_legacy(df: pd.DataFrame) -> pd.DataFrame:
+    """【保留】原版实现 - 用于对比验证"""
+    if df.empty:
+        return df
+    
+    import time
+    start_time = time.time()
+    
+    # 标记理财交易
+    df_filtered = df.copy()
+    df_filtered['is_financial'] = df_filtered.apply(is_financial_product_transaction, axis=1)
+    
+    # 返回非理财交易
+    result = df_filtered[~df_filtered['is_financial']].copy()
+    
+    elapsed = time.time() - start_time
+    logger.info(f"    【旧版】理财过滤: {len(df)}行 -> {len(result)}行, 耗时{elapsed:.3f}秒")
+    
+    return result
+
+
+
+def _filter_financial_transactions_vectorized(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    【2026-03-04 优化】向量化版本 - 性能提升10-50倍
+    
+    使用 pandas 向量化字符串操作替代 apply(axis=1)，
+    在保持结果一致性的前提下大幅提升性能。
+    
+    Args:
+        df: 交易DataFrame
+    
+    Returns:
+        过滤后的DataFrame（非理财交易）
+    """
+    if df.empty:
+        return df
+    
+    import time
+    start_time = time.time()
+    
+    # 获取预编译的正则模式
+    pattern = _get_financial_keywords_pattern()
+    
+    # 向量化匹配：检查 counterparty 和 description 是否包含关键词
+    # na=False 表示 NaN 值返回 False（不匹配）
+    mask_counterparty = df['counterparty'].str.contains(pattern, na=False, regex=True)
+    mask_description = df['description'].str.contains(pattern, na=False, regex=True)
+    is_financial = mask_counterparty | mask_description
+    
+    # 返回非理财交易
+    result = df[~is_financial].copy()
+    
+    elapsed = time.time() - start_time
+    logger.info(f"    【优化】理财过滤: {len(df)}行 -> {len(result)}行, 耗时{elapsed:.3f}秒")
+    
+    return result
+
     """
     过滤掉理财产品相关交易
     

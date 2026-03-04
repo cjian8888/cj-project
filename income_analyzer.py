@@ -163,7 +163,7 @@ def _extract_counterparty_from_description(desc: str) -> str:
         return match.group(1)
     
     # 模式6: 某些银行摘要末尾是对手方 "网银转账 张三丰"
-    match = re.search(r'(?:网银|手机银行|APP|跨行)转账?\s+([^\s,，;；\d]{2,10})$', desc)
+    match = re.search(r'(?:网银|手机银行|A跨行)转账?\s+([^\s,，;；\d]{2,10})$', desc)
     if match:
         return match.group(1)
     
@@ -900,7 +900,7 @@ def _add_risk_entry(item: Dict, entry_type: str, item_type: str,
     description = ''
     
     if entry_type == '规律性非工资收入':
-        unique_key = f"{item['person']}|{item['counterparty']}|REGULAR|{int(item['total_amount'])}"
+        unique_key = f"{item['person']}|{item['counterparty']}|REGUL{int(item['total_amount'])}"
         description = f"共{item['occurrences']}次, 均额{item['avg_amount']:.0f}元, {item.get('possible_type', '')}"
         counterparty = item['counterparty']
         amount = item['total_amount']
@@ -933,7 +933,7 @@ def _add_risk_entry(item: Dict, entry_type: str, item_type: str,
         amount = item['amount']
         date_value = item.get('date')
     elif entry_type == '同源多次收入':
-        unique_key = f"{item['person']}|{item['counterparty']}|MULTI|{int(item['total'])}"
+        unique_key = f"{item['person']}|{item['counterparty']}|MUL{int(item['total'])}"
         description = f"共{item['count']}次, 均额{item['avg_amount']:.0f}元, {item.get('source_type', '')}"
         counterparty = item['counterparty']
         amount = item['total']

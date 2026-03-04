@@ -91,19 +91,19 @@ import cohabitation_extractor
 import railway_extractor
 import flight_extractor
 
-JP|# 导入辅助模块
-SV|import family_assets_helper
-SY|import family_finance
-ZT|
-BZ|# 【2026-03-04 优化】导入家庭收入优化模块
-PR|try:
-SN|    from family_income_optimizer import batch_update_family_income
-PH|    USE_OPTIMIZED_FAMILY_INCOME = True
-VT|except ImportError:
-TM|    USE_OPTIMIZED_FAMILY_INCOME = False
-KK|    logger = logging.getLogger(__name__)
-PX|    logger.warning("家庭收入优化模块未加载，使用原始实现")
-KR|from specialized_reports import SpecializedReportGenerator
+# 导入辅助模块
+import family_assets_helper
+import family_finance
+
+# 【2026-03-04 优化】导入家庭收入优化模块
+try:
+    from family_income_optimizer import batch_update_family_income
+    USE_OPTIMIZED_FAMILY_INCOME = True
+except ImportError:
+    USE_OPTIMIZED_FAMILY_INCOME = False
+    logger = logging.getLogger(__name__)
+    logger.warning("家庭收入优化模块未加载，使用原始实现")
+from specialized_reports import SpecializedReportGenerator
 import family_assets_helper
 import family_finance
 
@@ -1352,12 +1352,8 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         # 6.5 时序分析
         if modules_config.get("timeSeriesAnalysis", True):
             try:
-            try:
                 logger.info("  ▶ 时序分析开始...")
                 analysis_results["timeSeries"] = (
-                    time_series_analyzer.analyze_time_series(cleaned_data, all_persons)
-                )
-                logger.info("  ✓ 时序分析完成")
                     time_series_analyzer.analyze_time_series(cleaned_data, all_persons)
                 )
                 logger.info("  ✓ 时序分析完成")
@@ -1367,18 +1363,8 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         # 6.6 线索聚合
         if modules_config.get("clueAggregation", True):
             try:
-            try:
                 logger.info("  ▶ 线索聚合开始...")
                 analysis_results["aggregation"] = clue_aggregator.aggregate_all_results(
-                    all_persons,
-                    all_companies,
-                    penetration_results=None,
-                    ml_results=None,
-                    ts_results=analysis_results.get("timeSeries"),
-                    related_party_results=analysis_results.get("relatedParty"),
-                    loan_results=analysis_results.get("loan"),
-                )
-                logger.info("  ✓ 线索聚合完成")
                     all_persons,
                     all_companies,
                     penetration_results=None,
@@ -1404,13 +1390,6 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                 confidence_threshold=0.6
             )
             logger.info(f"  ✓ 家庭单元推断完成: {len(family_units_list)} 个家庭")
-                core_persons=all_persons,
-                external_data=external_data,  # 传入Phase 4提取的外部数据
-                profiles=profiles,  # 传入Phase 5生成的画像
-                cleaned_data=cleaned_data,  # 传入清洗后的交易数据
-                data_directory=data_dir,
-                confidence_threshold=0.6
-            )
             family_tree = family_analyzer.build_family_tree(all_persons, data_dir)
             family_summary = family_analyzer.get_family_summary(family_tree)
 
@@ -1453,74 +1432,70 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                 analysis_results["family_summary"] = family_summary_result
                 logger.info(f"  ✓ 家庭汇总完成(fallback): {len(all_persons)} 人")
 
-            BP|            # 【2026-03-04 优化】使用向量化函数更新家庭收入
-JN|            if family_units_list and USE_OPTIMIZED_FAMILY_INCOME:
-BJ|                try:
-KQ|                    profiles = batch_update_family_income(
-HV|                        profiles, cleaned_data, family_units_list, logger
-JN|                    )
-BJ|                except Exception as e:
-KQ|                    logger.warning(f"【优化版】更新真实收入失败: {e}，回退到原始实现")
-HV|                    USE_OPTIMIZED_FAMILY_INCOME = False
-JN|            
-BJ|            # 【回退】如果优化版失败，使用原始实现
-KQ|            if family_units_list and not USE_OPTIMIZED_FAMILY_INCOME:
-HV|                try:
-JN|                    logger.info("  ▶ [旧版] 根据家庭信息更新真实收入...")
-BJ|                    # 构建人员到家庭成员的映射
-KQ|                    person_to_family = {}
-JS|                    for unit in family_units_list:
-XP|                        members = unit.get("members", [])
-KH|                        for member in members:
-PY|                            # 其他成员（不包含自己）
-KJ|                            other_members = [m for m in members if m != member]
-BK|                            if other_members:
-BM|                                person_to_family[member] = other_members
-PN|                    
-ZQ|                    # 更新每个 profile 的真实收入
-NR|                    for person_name in profiles:
-VJ|                        family_members = person_to_family.get(person_name, [])
-VN|                        profile = profiles[person_name]
-MH|                        df = cleaned_data.get(person_name)
-RB|                        
-JW|                        if df is not None and family_members:
-WQ|                            # 重新计算真实收入/支出
-BJ|                            try:
-ST|                                income_structure = profile.get("income_structure", {})
-KW|                                wealth_management = profile.get("wealth_management", {})
-YP|                                fund_flow = profile.get("fund_flow", {})
-WH|                                
-BM|                                new_real_income, new_real_expense, new_offset_detail = (
-RT|                                    financial_profiler._calculate_real_income_expense(
-MN|                                        income_structure, wealth_management, fund_flow,
-JQ|                                        df, family_members, person_name
-JW|                                    )
-JM|                                )
-PN|                                
-PT|                                # 更新 profile
-TM|                                profile["summary"]["real_income"] = new_real_income
-XX|                                profile["summary"]["real_expense"] = new_real_expense
-RZ|                                profile["summary"]["offset_detail"] = new_offset_detail
-VP|                                
-HM|                                # 更新顶层字段（兼容旧代码）
-PS|                                profile["real_income"] = new_real_income
-YZ|                                profile["real_expense"] = new_real_expense
-MS|                                
-ZK|                                logger.info(
-HK|                                    f"  ✓ 更新 {person_name} 真实收入: "
-BW|                                    f"    原始: {income_structure.get('total_income', 0)/10000:.2f}万, "
-PY|                                    f"    更新后: {new_real_income/10000:.2f}万 (剔除家庭转账)"
-HR|                                )
-SB|                            except Exception as e:
-RX|                                logger.warning(f"更新 {person_name} 真实收入失败: {e}")
-PR|                    
-MY|                    logger.info(f"  ✓ [旧版] 已根据家庭关系更新 {len(person_to_family)} 人的真实收入")
-SB|                except Exception as e:
-BV|                    logger.warning(f"更新真实收入失败: {e}")
-            if family_units_list:
+                        # 【2026-03-04 优化】使用向量化函数更新家庭收入
+            if family_units_list and USE_OPTIMIZED_FAMILY_INCOME:
                 try:
-                    logger.info("  ▶ 根据家庭信息更新真实收入...")
-            # 家庭转账应该从收入/支出中剔除
+                    profiles = batch_update_family_income(
+                        profiles, cleaned_data, family_units_list, logger
+                    )
+                except Exception as e:
+                    logger.warning(f"【优化版】更新真实收入失败: {e}，回退到原始实现")
+                    USE_OPTIMIZED_FAMILY_INCOME = False
+            
+            # 【回退】如果优化版失败，使用原始实现
+            if family_units_list and not USE_OPTIMIZED_FAMILY_INCOME:
+                try:
+                    logger.info("  ▶ [旧版] 根据家庭信息更新真实收入...")
+                    # 构建人员到家庭成员的映射
+                    person_to_family = {}
+                    for unit in family_units_list:
+                        members = unit.get("members", [])
+                        for member in members:
+                            # 其他成员（不包含自己）
+                            other_members = [m for m in members if m != member]
+                            if other_members:
+                                person_to_family[member] = other_members
+                    
+                    # 更新每个 profile 的真实收入
+                    for person_name in profiles:
+                        family_members = person_to_family.get(person_name, [])
+                        profile = profiles[person_name]
+                        df = cleaned_data.get(person_name)
+                        
+                        if df is not None and family_members:
+                            # 重新计算真实收入/支出
+                            try:
+                                income_structure = profile.get("income_structure", {})
+                                wealth_management = profile.get("wealth_management", {})
+                                fund_flow = profile.get("fund_flow", {})
+                                
+                                new_real_income, new_real_expense, new_offset_detail = (
+                                    financial_profiler._calculate_real_income_expense(
+                                        income_structure, wealth_management, fund_flow,
+                                        df, family_members, person_name
+                                    )
+                                )
+                                
+                                # 更新 profile
+                                profile["summary"]["real_income"] = new_real_income
+                                profile["summary"]["real_expense"] = new_real_expense
+                                profile["summary"]["offset_detail"] = new_offset_detail
+                                
+                                # 更新顶层字段（兼容旧代码）
+                                profile["real_income"] = new_real_income
+                                profile["real_expense"] = new_real_expense
+                                
+                                logger.info(
+                                    f"  ✓ 更新 {person_name} 真实收入: "
+                                    f"    原始: {income_structure.get('total_income', 0)/10000:.2f}万, "
+                                    f"    更新后: {new_real_income/10000:.2f}万 (剔除家庭转账)"
+                                )
+                            except Exception as e:
+                                logger.warning(f"更新 {person_name} 真实收入失败: {e}")
+                    
+                    logger.info(f"  ✓ [旧版] 已根据家庭关系更新 {len(person_to_family)} 人的真实收入")
+                except Exception as e:
+                    logger.warning(f"更新真实收入失败: {e}")
             if family_units_list:
                 try:
                     # 构建人员到家庭成员的映射

@@ -282,7 +282,7 @@ def identify_wealth_management_transaction(
         return WealthIdentificationResult(True, '产品编号格式', 'medium')
     
     # 规则7: 理财产品代码前缀
-    if desc and re.match(r'^(WMY|EW|TZ|LCT|YEB)\d+', desc, re.IGNORECASE):
+    if desc and re.match(r'^(WLYEB)\d+', desc, re.IGNORECASE):
         return WealthIdentificationResult(True, '理财产品代码前缀', 'medium')
     
     # ========== 低可信度规则（可能是理财，需谨慎）==========
