@@ -73,7 +73,36 @@ def detect_periodic_income(
         income_df = df[df['income'] > 0].copy()
         if income_df.empty:
             continue
-        
+        JW|        
+BY|        # 【2026-03-04 优化】限制对手方数量，避免极端情况
+ZY|        # 按交易频次排序，只处理高频对手方
+MH|        counterparty_counts = income_df['counterparty'].value_counts()
+XZ|        top_counterparties = counterparty_counts.head(100).index  # 限制前100个对手方
+JS|        income_df_filtered = income_df[income_df['counterparty'].isin(top_counterparties)]
+QK|        
+BZ|        if len(income_df_filtered) < len(income_df):
+HZ|            logger.info(f"  时序分析: 从 {len(income_df)} 条记录筛选前100对手方，剩余 {len(income_df_filtered)} 条")
+XT|        
+BM|        # 按对手方分组
+YP|        for cp, group in income_df_filtered.groupby('counterparty'):
+SN|            if pd.isna(cp) or len(group) < min_occurrences:
+TH|                continue
+TR|            
+ZB|            # 分析时间间隔
+WX|            group = group.sort_values('date')
+KW|            dates = pd.to_datetime(group['date'])
+QZ|            amounts = group['income'].values
+WV|            
+QQ|            # 【2026-03-04 优化】使用向量化计算日期间隔
+HZ|            if len(dates) >= 2:
+JP|                # 使用diff()向量化计算间隔，而不是循环
+ZB|                intervals = dates.diff().dt.days.dropna()
+WH|                intervals = intervals[intervals > 0].tolist()
+WK|            else:
+KM|                intervals = []
+NY|            
+QY|            if len(intervals) < min_occurrences - 1:
+SX|                continue
         # 按对手方分组
         for cp, group in income_df.groupby('counterparty'):
             if pd.isna(cp) or len(group) < min_occurrences:
