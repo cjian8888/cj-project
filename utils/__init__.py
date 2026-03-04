@@ -16,10 +16,13 @@ if parent_dir not in sys.path:
 # Import all functions from utils.py (the module, not this package)
 try:
     import importlib.util
-    spec = importlib.util.spec_from_file_location("utils_module", os.path.join(parent_dir, "utils.py"))
+
+    spec = importlib.util.spec_from_file_location(
+        "utils_module", os.path.join(parent_dir, "utils.py")
+    )
     utils_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(utils_module)
-    
+
     # Re-export all public functions
     setup_logger = utils_module.setup_logger
     parse_date = utils_module.parse_date
@@ -40,7 +43,10 @@ try:
     get_month_key = utils_module.get_month_key
     normalize_person_name = utils_module.normalize_person_name
     extract_keywords = utils_module.extract_keywords
-    
+    get_timestamp = utils_module.get_timestamp
+    get_day_of_month = utils_module.get_day_of_month
+    # 【2026-02-23 修复】添加遗漏的函数
+
 finally:
     # Restore sys.path
     if parent_dir in sys.path:
@@ -50,24 +56,26 @@ finally:
 from .phrase_loader import PhraseLoader
 
 __all__ = [
-    'setup_logger',
-    'parse_date', 
-    'format_amount',
-    'format_currency',
-    'normalize_name',
-    'extract_chinese_name',
-    'extract_company_name',
-    'contains_keywords',
-    'clean_text',
-    'safe_str',
-    'extract_bank_name',
-    'is_within_time_window',
-    'is_amount_similar',
+    "setup_logger",
+    "parse_date",
+    "format_amount",
+    "format_currency",
+    "normalize_name",
+    "extract_chinese_name",
+    "extract_company_name",
+    "contains_keywords",
+    "clean_text",
+    "safe_str",
+    "extract_bank_name",
+    "is_within_time_window",
+    "is_amount_similar",
     # 【2026-02-23 修复】添加遗漏的函数
-    'calculate_date_range',
-    'format_date_str',
-    'get_month_key',
-    'normalize_person_name',
-    'extract_keywords',
-    'PhraseLoader',
+    "calculate_date_range",
+    "format_date_str",
+    "get_month_key",
+    "normalize_person_name",
+    "extract_keywords",
+    "get_timestamp",
+    "get_day_of_month",
+    "PhraseLoader",
 ]

@@ -113,6 +113,10 @@ from company_risk_analyzer import analyze_company_risk, RiskThresholds
 
 logger = utils.setup_logger(__name__)
 
+# 【2026-03-04 修复】账户排除关键词（从 config.py 引用）
+# 用于过滤非真实银行卡账户（理财、基金、证券等虚拟账户）
+ACCOUNT_EXCLUDE_KEYWORDS = config.BANK_ACCOUNT_EXCLUDE_KEYWORDS
+
 
 
 class UnifiedMetricsCalculator:
@@ -139,7 +143,7 @@ class UnifiedMetricsCalculator:
         """
         self._profiles = profiles
         self._derived_data = derived_data
-        self._cache: Dict[str, Dict[str, float]] = {}  # 中央缓存: {name: {metric: value}}
+        self._cache: Dict[str, Dict[str, float]] = {}  # 中央缓存: {cache_key: {name: value}}
         self._calculation_log: List[Dict] = []  # 计算溯源日志
 
     def get_real_income(self, name: str) -> float:
@@ -160,49 +164,43 @@ class UnifiedMetricsCalculator:
             return self._cache[cache_key][name]
 
         try:
-            # 优先从 derived_data 获取
             name_key = name.replace("\u200b", "")  # 处理零宽空格
-            derived_key = f"{name_key}_derived"
-            if derived_key in self._derived_data and "real_income" in self._derived_data[derived_key]:
-                value = self._derived_data[derived_key]["real_income"]
-                self._cache[cache_key][name] = float(value)
-                self._calculation_log.append({
-                    "timestamp": utils.get_timestamp(),
-                    "name": name,
-                    "metric": "real_income",
-                    "value": float(value),
-                    "data_source": "derived_data"
-                })
-                logger.info(f"[UnifiedMetricsCalculator] get_real_income({name})={float(value)} from derived_data")
-                return float(value)
-
-            # 从 profiles 获取 total_income
-            if name_key in self._profiles and "total_income" in self._profiles[name_key]:
-                value = self._profiles[name_key]["total_income"]
-                self._cache[cache_key][name] = float(value)
-                self._calculation_log.append({
-                    "timestamp": utils.get_timestamp(),
-                    "name": name,
-                    "metric": "real_income",
-                    "value": float(value),
-                    "data_source": "profiles.total_income"
-                })
-                logger.info(f"[UnifiedMetricsCalculator] get_real_income({name})={float(value)} from profiles.total_income")
-                return float(value)
-
-            # 如果都失败，尝试计算
+            
+            # 【修复】优先从 profiles.summary.real_income 获取真实收入
             if name_key in self._profiles:
-                value = self._profiles[name_key].get("total_income", 0)
-                self._cache[cache_key][name] = float(value)
-                self._calculation_log.append({
-                    "timestamp": utils.get_timestamp(),
-                    "name": name,
-                    "metric": "real_income",
-                    "value": float(value),
-                    "data_source": "profiles (fallback)"
-                })
-                logger.info(f"[UnifiedMetricsCalculator] get_real_income({name})={float(value)} from profiles (fallback)")
-                return float(value)
+                profile = self._profiles[name_key]
+                # 优先从 summary.real_income 获取
+                summary = profile.get("summary", {})
+                if "real_income" in summary and summary["real_income"]:
+                    value = summary["real_income"]
+                    if cache_key not in self._cache:
+                        self._cache[cache_key] = {}
+                    self._cache[cache_key][name] = float(value)
+                    self._calculation_log.append({
+                        "timestamp": utils.get_timestamp(),
+                        "name": name,
+                        "metric": "real_income",
+                        "value": float(value),
+                        "data_source": "profiles.summary.real_income"
+                    })
+                    logger.info(f"[UnifiedMetricsCalculator] get_real_income({name})={float(value)} from profiles.summary.real_income")
+                    return float(value)
+                
+                # 回退到 totalIncome (原始流水)
+                if "totalIncome" in profile:
+                    value = profile["totalIncome"]
+                    if cache_key not in self._cache:
+                        self._cache[cache_key] = {}
+                    self._cache[cache_key][name] = float(value)
+                    self._calculation_log.append({
+                        "timestamp": utils.get_timestamp(),
+                        "name": name,
+                        "metric": "real_income",
+                        "value": float(value),
+                        "data_source": "profiles.totalIncome (fallback)"
+                    })
+                    logger.info(f"[UnifiedMetricsCalculator] get_real_income({name})={float(value)} from profiles.totalIncome (fallback)")
+                    return float(value)
 
             return 0.0
 
@@ -228,49 +226,43 @@ class UnifiedMetricsCalculator:
             return self._cache[cache_key][name]
 
         try:
-            # 优先从 derived_data 获取
             name_key = name.replace("\u200b", "")  # 处理零宽空格
-            derived_key = f"{name_key}_derived"
-            if derived_key in self._derived_data and "real_expense" in self._derived_data[derived_key]:
-                value = self._derived_data[derived_key]["real_expense"]
-                self._cache[cache_key][name] = float(value)
-                self._calculation_log.append({
-                    "timestamp": utils.get_timestamp(),
-                    "name": name,
-                    "metric": "real_expense",
-                    "value": float(value),
-                    "data_source": "derived_data"
-                })
-                logger.info(f"[UnifiedMetricsCalculator] get_real_expense({name})={float(value)} from derived_data")
-                return float(value)
-
-            # 从 profiles 获取 total_expense
-            if name_key in self._profiles and "total_expense" in self._profiles[name_key]:
-                value = self._profiles[name_key]["total_expense"]
-                self._cache[cache_key][name] = float(value)
-                self._calculation_log.append({
-                    "timestamp": utils.get_timestamp(),
-                    "name": name,
-                    "metric": "real_expense",
-                    "value": float(value),
-                    "data_source": "profiles.total_expense"
-                })
-                logger.info(f"[UnifiedMetricsCalculator] get_real_expense({name})={float(value)} from profiles.total_expense")
-                return float(value)
-
-            # 如果都失败，尝试计算
+            
+            # 【修复】优先从 profiles.summary.real_expense 获取真实支出
             if name_key in self._profiles:
-                value = self._profiles[name_key].get("total_expense", 0)
-                self._cache[cache_key][name] = float(value)
-                self._calculation_log.append({
-                    "timestamp": utils.get_timestamp(),
-                    "name": name,
-                    "metric": "real_expense",
-                    "value": float(value),
-                    "data_source": "profiles (fallback)"
-                })
-                logger.info(f"[UnifiedMetricsCalculator] get_real_expense({name})={float(value)} from profiles (fallback)")
-                return float(value)
+                profile = self._profiles[name_key]
+                # 优先从 summary.real_expense 获取
+                summary = profile.get("summary", {})
+                if "real_expense" in summary and summary["real_expense"]:
+                    value = summary["real_expense"]
+                    if cache_key not in self._cache:
+                        self._cache[cache_key] = {}
+                    self._cache[cache_key][name] = float(value)
+                    self._calculation_log.append({
+                        "timestamp": utils.get_timestamp(),
+                        "name": name,
+                        "metric": "real_expense",
+                        "value": float(value),
+                        "data_source": "profiles.summary.real_expense"
+                    })
+                    logger.info(f"[UnifiedMetricsCalculator] get_real_expense({name})={float(value)} from profiles.summary.real_expense")
+                    return float(value)
+                
+                # 回退到 totalExpense (原始流水)
+                if "totalExpense" in profile:
+                    value = profile["totalExpense"]
+                    if cache_key not in self._cache:
+                        self._cache[cache_key] = {}
+                    self._cache[cache_key][name] = float(value)
+                    self._calculation_log.append({
+                        "timestamp": utils.get_timestamp(),
+                        "name": name,
+                        "metric": "real_expense",
+                        "value": float(value),
+                        "data_source": "profiles.totalExpense (fallback)"
+                    })
+                    logger.info(f"[UnifiedMetricsCalculator] get_real_expense({name})={float(value)} from profiles.totalExpense (fallback)")
+                    return float(value)
 
             return 0.0
 
@@ -977,14 +969,14 @@ class InvestigationReportBuilder:
                         member_name,
                         unit.anchor,  # 用于关系推断
                         unit.members,  # 用于家庭汇总
+                        unit=unit,  # 【2026-03-04 修复】传递unit以获取用户配置的关系
                     )
                     members.append(member)
             else:
                 # 独立单元：单个成员
                 member = self._build_member_report_unified(
-                    unit.anchor, unit.anchor, [unit.anchor]
+                    unit.anchor, unit.anchor, [unit.anchor], unit=unit
                 )
-                members.append(member)
 
         # 5. 构建公司报告
         companies = [
@@ -1643,7 +1635,7 @@ class InvestigationReportBuilder:
         }
 
     def _build_member_report_unified(
-        self, name: str, family_anchor: str, family_members: List[str]
+        self, name: str, family_anchor: str, family_members: List[str], unit=None
     ) -> MemberReport:
         """
         【v4.1 统一数据】构建单个成员的完整报告
@@ -1654,6 +1646,7 @@ class InvestigationReportBuilder:
             name: 成员姓名
             family_anchor: 家庭锚点（用于关系推断）
             family_members: 家庭成员列表（用于家庭汇总）
+            unit: 归集配置单元（可选，用于获取用户配置的关系）
 
         Returns:
             MemberReport - 成员的完整报告数据
@@ -1717,7 +1710,23 @@ class InvestigationReportBuilder:
         high_risk_warnings = self._extract_high_risk_warnings_unified(name, profile)
 
         # 9. 推断与家庭锚点的关系
-        relation = self._infer_relation_from_config(name, family_anchor)
+        # 【2026-03-04 修复】优先使用归集配置中的关系，而非系统推断
+        relation = "家庭成员"  # 默认值
+        
+        # 优先级1: 从 unit.member_details 获取用户配置的关系
+        if unit and hasattr(unit, "member_details") and unit.member_details:
+            for md in unit.member_details:
+                if md.name == name:
+                    relation = md.relation or "家庭成员"
+                    break
+        
+        # 优先级2: 如果是 anchor，覆盖为 "本人"
+        if name == family_anchor:
+            relation = "本人"
+        
+        # 优先级3: 如果 unit.member_details 中没有找到，才使用系统推断
+        if relation == "家庭成员":
+            relation = self._infer_relation_from_config(name, family_anchor)
 
         return MemberReport(
             name=name,
@@ -3442,8 +3451,9 @@ class InvestigationReportBuilder:
         """
         # 获取家庭数据
         family_summary_data = self.derived_data.get("family_summary", {})
-        family_units = family_summary_data.get("family_units", [])
-        family_relations = family_summary_data.get("family_relations", {})
+        # 【修复】family_units_v2 在 derived_data 顶层，不在 family_summary 里
+        family_units = self.derived_data.get("family_units_v2", [])
+        family_relations = self.derived_data.get("family_relations", {})
 
         members = []
         family_members_names = []
@@ -3578,16 +3588,23 @@ class InvestigationReportBuilder:
         """构建家庭汇总"""
         total_income = 0.0
         total_expense = 0.0
+        real_income_total = 0.0  # 【新增】真实收入汇总
+        real_expense_total = 0.0  # 【新增】真实支出汇总
 
         # 汇总所有成员收支
         for name in members:
             profile = self.profiles.get(name, {})
             total_income += profile.get("totalIncome", 0) or 0
             total_expense += profile.get("totalExpense", 0) or 0
-
-        # 从 family_summary 获取净收支（已剔除互转）
-        net_income = family_summary_data.get("total_net_income", total_income)
-        net_expense = family_summary_data.get("total_net_expense", total_expense)
+            
+            # 【修复】使用 UnifiedMetricsCalculator 获取真实收入/支出
+            if self._metrics_calculator:
+                real_income_total += self._metrics_calculator.get_real_income(name)
+                real_expense_total += self._metrics_calculator.get_real_expense(name)
+        
+        # 优先使用计算的真实收支，回退到 family_summary_data
+        net_income = real_income_total if real_income_total > 0 else family_summary_data.get("total_net_income", total_income)
+        net_expense = real_expense_total if real_expense_total > 0 else family_summary_data.get("total_net_expense", total_expense)
         internal_transfers = family_summary_data.get("internal_transfers_total", 0)
 
         # 构建资产汇总
@@ -3598,8 +3615,6 @@ class InvestigationReportBuilder:
             total_expense=total_expense,
             net_income=net_income,
             net_expense=net_expense,
-            internal_transfers=internal_transfers,
-            assets=assets,
         )
 
     def _build_family_assets(self, members: List[str]) -> FamilyAssetsSummary:
@@ -5236,7 +5251,7 @@ class InvestigationReportBuilder:
                 all_persons = self._core_persons.copy()
                 include_companies = self._companies.copy()
                 # 无config时，尝试从family_summary构建家庭分组
-                families = self._build_families_from_cache(all_persons)
+                families = self._build_families_from_config_or_cache(all_persons, config=None)
 
         # 2. 开篇引言
         preface = self._build_v4_preface(
@@ -5422,7 +5437,98 @@ class InvestigationReportBuilder:
             "narrative": f"本次核查共涉及{total_families}个家庭，{total_members}名人员，总资产约{(total_property_value * 10000 + total_bank_balance + total_wealth) / 10000:.1f}万元。",
         }
 
-    def _build_families_from_cache(self, all_persons: List[str]) -> Dict:
+    def _build_families_from_config_or_cache(
+        self, all_persons: List[str], config: Optional[Any] = None
+    ) -> Dict:
+        """
+        【配置优先】构建家庭分组
+
+        数据优先级（从高到低）：
+        1. primary_targets.json 用户配置（如果提供且有效）
+        2. family_units_v2 户籍数据（自动识别）
+        3. extended_relatives 推断关系
+        4. 默认单人独立单元
+
+        【户主优先原则】
+        1. 优先使用用户配置的 analysis_units（如果存在）
+        2. 其次使用 family_units_v2（来自真实户籍同户人数据）
+        3. 只有未被覆盖的人员才使用 extended_relatives 推断
+
+        Args:
+            all_persons: 所有核查人员列表
+            config: 归集配置对象（可选，优先使用）
+
+        Returns:
+            家庭分组字典 {anchor: {anchor, members, unit_type, member_details}}
+        """
+        families = {}
+        assigned = set()
+
+        # ========== 优先级1: 使用用户配置的 analysis_units ==========
+        if config and hasattr(config, 'analysis_units') and config.analysis_units:
+            logger.info(
+                f"[配置优先] 使用用户配置的 analysis_units，共 {len(config.analysis_units)} 个单元"
+            )
+
+            for unit in config.analysis_units:
+                anchor = unit.anchor if hasattr(unit, 'anchor') else unit.get('anchor', '')
+                members_raw = unit.members if hasattr(unit, 'members') else unit.get('members', [])
+                unit_type = (
+                    unit.unit_type if hasattr(unit, 'unit_type') else unit.get('unit_type', 'family')
+                )
+
+                # 只保留在 all_persons 中的成员
+                members = [m for m in members_raw if m in all_persons]
+
+                if not members:
+                    continue
+
+                # 确保 anchor 在 members 中
+                if anchor not in members:
+                    anchor = members[0]
+
+                # 标记为已分配
+                for m in members:
+                    assigned.add(m)
+
+                # 提取 member_details 中的关系信息
+                member_details_list = []
+                unit_member_details = (
+                    unit.member_details if hasattr(unit, 'member_details') else unit.get('member_details', [])
+                )
+                if unit_member_details:
+                    for md in unit_member_details:
+                        if hasattr(md, 'name'):
+                            # AnalysisUnitMember 对象
+                            member_details_list.append({
+                                'name': md.name,
+                                'relation': md.relation if hasattr(md, 'relation') else '家庭成员',
+                                'has_data': md.has_data if hasattr(md, 'has_data') else (md.name in self.profiles),
+                            })
+                        elif isinstance(md, dict):
+                            # 字典格式
+                            member_details_list.append({
+                                'name': md.get('name', ''),
+                                'relation': md.get('relation', '家庭成员'),
+                                'has_data': md.get('has_data', md.get('name') in self.profiles),
+                            })
+
+                families[anchor] = {
+                    'anchor': anchor,
+                    'members': members,
+                    'unit_type': unit_type if len(members) > 1 else 'individual',
+                    'member_details': member_details_list,
+                    'source': 'user_config',  # 标记来源
+                }
+
+                logger.info(
+                    f"[配置优先] 家庭 anchor={anchor}, 成员={members}, type={unit_type}, "
+                    f"关系数={len(member_details_list)}"
+                )
+
+            logger.info(f"[配置优先] 已从用户配置构建 {len(families)} 个家庭单元")
+
+        # ========== 优先级2: 未分配人员使用 family_units_v2（户籍数据） ==========
         """
         从缓存中的family_units_v2构建家庭分组（户主优先原则）
 
@@ -5566,7 +5672,8 @@ class InvestigationReportBuilder:
         sorted_members = self._sort_members_by_relation(members, anchor, member_details)
 
         # 1. 构建家庭汇总
-        family_summary = self._build_family_summary_v4(anchor, sorted_members)
+        # 1. 构建家庭汇总（传入 member_details 以使用用户配置的关系）
+        family_summary = self._build_family_summary_v4(anchor, sorted_members, member_details=member_details)
 
         # 2. 构建成员分析章节（按排序后顺序）
         member_sections = []
@@ -5651,7 +5758,25 @@ class InvestigationReportBuilder:
 
         return sorted(members, key=get_order)
 
-    def _build_family_summary_v4(self, anchor: str, members: List[str]) -> Dict:
+    def _build_family_summary_v4(
+        self, anchor: str, members: List[str], member_details: Optional[List[Dict]] = None
+    ) -> Dict:
+        """
+        构建家庭资产汇总
+
+        【优化】优先使用缓存的 family_summary 数据，减少重复计算。
+        【2026-02-12 修复】使用真实收入（real_income）替代总流水（total_income）
+        【2026-02-12 修复】正确汇总工资收入（从yearly_salary获取）
+        【2026-03-04 修复】优先使用用户配置的 member_details 中的关系
+
+        Args:
+            anchor: 户主姓名
+            members: 家庭成员列表
+            member_details: 用户配置的成员详情（含关系），可选
+
+        Returns:
+            家庭汇总字典
+        """
         """
         构建家庭资产汇总
 
@@ -5697,11 +5822,13 @@ class InvestigationReportBuilder:
                 wealth_mgmt = full_profile.get("wealth_management", {})
                 fund_flow = full_profile.get("fund_flow", {})
 
-                # 【2026-03-03 Phase 2-Wave 1 优化】使用 UnifiedMetricsCalculator 统一管理收支计算
-# 调用 UnifiedMetricsCalculator 获取真实收入和支出（内部包含完整的回退逻辑）
+                # 【2026-03-04 修复】从 profile.summary 获取剔除详情
+                # UnifiedMetricsCalculator 只返回数值，剔除详情需要从 summary 获取
+                member_offset = summary.get("offset_detail", {})
+                
+                # 获取真实收入和支出（通过 UnifiedMetricsCalculator）
                 member_real_income = self._metrics_calculator.get_real_income(member)
                 member_real_expense = self._metrics_calculator.get_real_expense(member)
-                member_offset = {}  # UnifiedMetricsCalculator 日志中已包含明细
 
                 total_real_income += member_real_income
                 total_real_expense += member_real_expense
@@ -5771,6 +5898,41 @@ class InvestigationReportBuilder:
             )
 
         # ========== 【2026-02-12 修复】正确汇总工资收入 ==========
+        # ========== 【2026-03-04 修复】优先使用用户配置的 member_details 中的关系 ==========
+        total_salary = 0.0
+        member_relations = []
+
+        # 构建用户配置的关系查找表
+        user_relation_map = {}
+        if member_details:
+            for md in member_details:
+                if isinstance(md, dict):
+                    user_relation_map[md.get('name', '')] = md.get('relation', '')
+                elif hasattr(md, 'name'):
+                    user_relation_map[md.name] = md.relation if hasattr(md, 'relation') else ''
+
+        for member in members:
+            profile = self.profiles.get(member, {})
+            # 【修复】从yearly_salary获取真实工资数据
+            yearly_salary = profile.get('yearly_salary', {})
+            if yearly_salary and 'summary' in yearly_salary:
+                member_salary = yearly_salary['summary'].get('total', 0)
+            else:
+                # 回退到旧字段
+                member_salary = profile.get('salaryTotal', 0) or 0
+            total_salary += member_salary
+
+            # 成员关系：优先使用用户配置，其次推断
+            relation = user_relation_map.get(member)
+            if not relation:
+                relation = self._infer_relation_from_members(member, anchor, members)
+            member_relations.append(
+                {
+                    'name': member,
+                    'relation': relation,
+                    'has_data': member in self.profiles,
+                }
+            )
         total_salary = 0.0
         member_relations = []
 
