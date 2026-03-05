@@ -260,6 +260,64 @@ def _identify_reimbursements(income_df: pd.DataFrame) -> pd.DataFrame:
     return income_df
 
 
+def _check_payday_pattern(dates: List, min_concentration: float = 0.6) -> Tuple[bool, float, Optional[int]]:
+    """
+    检查发薪日期是否集中在每月固定几天
+    
+    Args:
+        dates: 日期列表 (datetime 对象)
+        min_concentration: 集中度阈值 (默认 0.6 表示 60%)
+        
+    Returns:
+        (is_pattern, concentration, dominant_day) 元组
+        is_pattern: 是否有规律
+        concentration: 集中度 (0-1)
+        dominant_day: 主要发薪日 (1-31)
+    """
+    if not dates or len(dates) < 4:
+        return False, 0.0, None
+    
+    # 提取每个日期的“日”部分
+    days = [d.day for d in dates if hasattr(d, 'day')]
+    if not days:
+        return False, 0.0, None
+    
+    # 统计发薪日的分布
+    from collections import Counter
+    day_counts = Counter(days)
+    total = len(days)
+    
+    # 找出最常见的发薪日区间 (允许 +/- 2 天误差)
+    # 将日期分为几个区间: 1-5, 6-10, 11-15, 16-20, 21-25, 26-31
+    ranges = [
+        (1, 5, '月初'),
+        (6, 10, '上旬'),
+        (11, 15, '中旬'),
+        (16, 20, '下旬'),
+        (21, 25, '月末'),
+        (26, 31, '月底'),
+    ]
+    
+    range_counts = {}
+    for start, end, label in ranges:
+        count = sum(c for d, c in day_counts.items() if start <= d <= end)
+        range_counts[label] = count
+    
+    if not range_counts:
+        return False, 0.0, None
+    
+    # 找出最多的区间
+    dominant_range = max(range_counts, key=range_counts.get)
+    dominant_count = range_counts[dominant_range]
+    concentration = dominant_count / total
+    
+    # 找出最常见的单日
+    dominant_day = day_counts.most_common(1)[0][0] if day_counts else None
+    
+    is_pattern = concentration >= min_concentration
+    
+    return is_pattern, concentration, dominant_day
+
 def _learn_salary_payers(income_df: pd.DataFrame) -> set:
     """
     自动挖掘工资发放单位 - 向量化优化版
@@ -640,16 +698,16 @@ def _identify_salary_by_frequency(income_df: pd.DataFrame) -> pd.DataFrame:
         cv_series.rename("cv"), left_on="counterparty", right_index=True, how="left"
     )
 
-    # 【向量化6】应用频率稳定性条件筛选有效对手方
+    # 【向量化6】应用频率稳定性条件筛选有效对手方 - 使用 config 阈值
     valid_mask = (
-        (group_stats["valid_count"] >= 6)
-        & (group_stats["months"] >= 5)
-        & (group_stats["valid_count"] / group_stats["months"] > 0.6)
+        (group_stats["valid_count"] >= config.SALARY_FREQUENCY_MIN_COUNT)
+        & (group_stats["months"] >= config.SALARY_FREQUENCY_MIN_MONTHS)
+        & (group_stats["valid_count"] / group_stats["months"] > config.SALARY_FREQUENCY_MONTH_RATIO)
         & (group_stats["mean_income"] <= HIGH_FREQUENCY_AMOUNT_CAP)
         & (group_stats["mean_income"] >= config.INCOME_MEAN_AMOUNT_MIN)
         & (group_stats["mean_income"] <= config.INCOME_MEAN_AMOUNT_MAX)
         & (group_stats["wealth_ratio"] <= 0.3)
-        & (group_stats["cv"] < 2.0)
+        & (group_stats["cv"] < config.SALARY_CV_THRESHOLD_LOOSE)
     )
 
     valid_counterparties = group_stats.loc[valid_mask, "counterparty"].tolist()

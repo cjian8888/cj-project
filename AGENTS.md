@@ -51,7 +51,7 @@ project/
 | 添加分类器 | `classifiers/` | 实现 `classify()` |
 | 修改数据模型 | `schemas/` | 继承 `BaseModel` |
 | 修改前端组件 | `dashboard/src/components/` | `*.tsx` |
-| 工具函数 | `utils/` | `safe_types.py` |
+| 工具函数 | `utils/` | `safe_types.py` (详见 [utils/AGENTS.md](utils/AGENTS.md)) |
 | 测试 | `tests/` | `test_*.py` |
 
 ---

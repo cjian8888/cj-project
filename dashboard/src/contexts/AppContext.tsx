@@ -14,6 +14,12 @@ import type {
 import { api, ws } from '../services/api';
 import type { AnalysisStatus, WebSocketMessage } from '../services/api';
 
+// ==================== Storage Keys ====================
+const STORAGE_KEYS = {
+    INPUT_DIR: 'fpas_input_directory',
+    OUTPUT_DIR: 'fpas_output_directory',
+} as const;
+
 // ==================== Default Values ====================
 
 const defaultConfig: AppConfig = {
@@ -145,11 +151,23 @@ export function AppProvider({ children }: AppProviderProps) {
     }, []);
 
     const updateDataSources = useCallback((dataSources: Partial<AppConfig['dataSources']>) => {
-        setConfig(prev => ({
-            ...prev,
-            dataSources: { ...prev.dataSources, ...dataSources },
-        }));
-    }, []);
+        setConfig(prev => {
+            const newConfig = {
+                ...prev,
+                dataSources: { ...prev.dataSources, ...dataSources },
+            };
+            
+            // 持久化到 localStorage
+            if (dataSources.inputDirectory) {
+                localStorage.setItem(STORAGE_KEYS.INPUT_DIR, dataSources.inputDirectory);
+            }
+            if (dataSources.outputDirectory) {
+                localStorage.setItem(STORAGE_KEYS.OUTPUT_DIR, dataSources.outputDirectory);
+            }
+            
+            return newConfig;
+        });
+    }, [])
 
     const updateThresholds = useCallback((thresholds: Partial<AppConfig['thresholds']>) => {
         setConfig(prev => ({
@@ -573,6 +591,28 @@ export function AppProvider({ children }: AppProviderProps) {
         // 获取默认路径配置
         const fetchDefaultPaths = async () => {
             try {
+                // 1. 首先检查 localStorage 是否有用户保存的路径
+                const savedInputDir = localStorage.getItem(STORAGE_KEYS.INPUT_DIR);
+                const savedOutputDir = localStorage.getItem(STORAGE_KEYS.OUTPUT_DIR);
+                
+                if (savedInputDir || savedOutputDir) {
+                    // 使用用户保存的路径
+                    setConfig(prev => ({
+                        ...prev,
+                        dataSources: {
+                            inputDirectory: savedInputDir || prev.dataSources.inputDirectory,
+                            outputDirectory: savedOutputDir || prev.dataSources.outputDirectory,
+                        }
+                    }));
+                    addLog({ 
+                        time: new Date().toLocaleTimeString(), 
+                        level: 'INFO', 
+                        msg: `已恢复用户设置路径: 输入=${savedInputDir || '默认'}, 输出=${savedOutputDir || '默认'}` 
+                    });
+                    return; // 有保存的路径，不再获取后端默认路径
+                }
+                
+                // 2. 没有保存的路径，获取后端默认路径
                 const result = await api.getDefaultPaths();
                 if (result.success && result.data) {
                     // 更新默认路径为绝对路径

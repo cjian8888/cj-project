@@ -178,117 +178,155 @@ def _read_rail_companions(rail_pattern: str, core_persons: List[str]) -> List[Di
     return companions
 
 
+def _build_transaction_index(all_transactions: Dict[str, pd.DataFrame], core_persons: List[str]) -> Dict[str, List[tuple]]:
+    """
+    预构建交易数据索引，按核心人员分组
+    返回: {person_name: [(key, df), ...]}
+    """
+    index = {p: [] for p in core_persons}
+    for key, df in all_transactions.items():
+        if df.empty or 'counterparty' not in df.columns:
+            continue
+        for person in core_persons:
+            if person in key:
+                index[person].append((key, df))
+    return index
+
+
+def _normalize_name(name: str) -> str:
+    """规范化姓名：去掉脱敏符号和空格"""
+    if not name:
+        return ''
+    for char in ['*', '＊', '×', '○', '●', '_', '-', ' ']:
+        name = name.replace(char, '')
+    return name.strip()
+
+
+def _fuzzy_match(name1: str, name2: str) -> bool:
+    """模糊匹配姓名"""
+    n1 = _normalize_name(name1)
+    n2 = _normalize_name(name2)
+    if not n1 or not n2:
+        return False
+    if n1 == n2:
+        return True
+    if len(n1) >= 2 and len(n2) >= 2:
+        if n1 in n2 or n2 in n1:
+            return True
+    if len(n1) >= 2 and len(n2) >= 2:
+        if n1[0] == n2[0] and abs(len(n1) - len(n2)) <= 1:
+            return True
+    return False
+
+
 def _correlate_companions_with_funds(
     companions: List[Dict],
     all_transactions: Dict[str, pd.DataFrame],
     core_persons: List[str],
     time_window_days: int = 30
 ) -> List[Dict]:
-    """将同行人与银行流水碰撞（支持模糊匹配）"""
+    """将同行人与银行流水碰撞（优化版：预构建索引 + 向量化匹配）"""
+    if not companions:
+        return []
+    
     correlations = []
     
-    def normalize_name(name: str) -> str:
-        """规范化姓名：去掉脱敏符号和空格"""
-        if not name:
-            return ''
-        # 去掉常见脱敏符号
-        for char in ['*', '＊', '×', '○', '●', '_', '-', ' ']:
-            name = name.replace(char, '')
-        return name.strip()
+    # 预构建交易索引
+    tx_index = _build_transaction_index(all_transactions, core_persons)
     
-    def fuzzy_match(name1: str, name2: str) -> bool:
-        """模糊匹配姓名"""
-        n1 = normalize_name(name1)
-        n2 = normalize_name(name2)
-        if not n1 or not n2:
-            return False
-        # 完全匹配
-        if n1 == n2:
-            return True
-        # 一个包含另一个（处理脱敏后的部分匹配）
-        if len(n1) >= 2 and len(n2) >= 2:
-            if n1 in n2 or n2 in n1:
-                return True
-        # 首字相同 + 长度相近（处理"张三" vs "张*三"）
-        if len(n1) >= 2 and len(n2) >= 2:
-            if n1[0] == n2[0] and abs(len(n1) - len(n2)) <= 1:
-                return True
-        return False
+    # 按人员分组同行人记录，减少交易遍历次数
+    from collections import defaultdict
+    companions_by_person = defaultdict(list)
+    for c in companions:
+        companions_by_person[c['person']].append(c)
     
-    for companion_rec in companions:
-        person = companion_rec['person']
-        companion_name = companion_rec['companion_name']
-        travel_date = companion_rec.get('travel_date')
-        
-        if travel_date is None:
-            continue
-        
-        # 查找该核心人员的交易数据
-        for key, df in all_transactions.items():
-            if person not in key:
-                continue
-            
-            if df.empty or 'counterparty' not in df.columns:
-                continue
-            
-            # 查找与同行人的资金往来（使用模糊匹配）
-            for _, row in df.iterrows():
-                counterparty = str(row.get('counterparty', ''))
-                
-                # 使用模糊匹配
-                if not fuzzy_match(companion_name, counterparty):
-                    continue
-                
-                trans_date = row.get('date')
-                if trans_date is None:
-                    continue
-                
-                # 检查时间关系
+    # 预解析旅行日期
+    for person, person_companions in companions_by_person.items():
+        for c in person_companions:
+            travel_date = c.get('travel_date')
+            if travel_date is not None:
                 try:
                     if hasattr(travel_date, 'date'):
-                        travel_dt = travel_date
+                        c['_travel_dt'] = travel_date
                     else:
-                        travel_dt = pd.to_datetime(travel_date)
-                    
-                    if hasattr(trans_date, 'date'):
-                        trans_dt = trans_date
-                    else:
-                        trans_dt = pd.to_datetime(trans_date)
-                    
-                    days_diff = (trans_dt - travel_dt).days
-                except Exception as e:
-                    logger.debug(f'日期解析失败: {e}')
+                        c['_travel_dt'] = pd.to_datetime(travel_date)
+                except:
+                    c['_travel_dt'] = None
+    
+    # 遍历每个人员的交易
+    for person, person_companions in companions_by_person.items():
+        person_tx_list = tx_index.get(person, [])
+        if not person_tx_list:
+            continue
+        
+        # 合并该人员所有账户的交易
+        all_dfs = []
+        for key, df in person_tx_list:
+            df_copy = df[['date', 'counterparty', 'income', 'expense', 'description']].copy()
+            df_copy['_account_key'] = key
+            all_dfs.append(df_copy)
+        
+        if not all_dfs:
+            continue
+        
+        merged_df = pd.concat(all_dfs, ignore_index=True)
+        
+        # 预解析交易日期
+        try:
+            merged_df['_trans_dt'] = pd.to_datetime(merged_df['date'], errors='coerce')
+        except:
+            merged_df['_trans_dt'] = None
+        
+        # 遍历同行人记录
+        for c in person_companions:
+            travel_dt = c.get('_travel_dt')
+            if travel_dt is None:
+                continue
+            
+            companion_name = c['companion_name']
+            normalized_companion = _normalize_name(companion_name)
+            if not normalized_companion or len(normalized_companion) < 2:
+                continue
+            
+            # 使用向量化字符串匹配
+            mask = merged_df['counterparty'].astype(str).str.contains(
+                normalized_companion, na=False, regex=False
+            )
+            matched = merged_df[mask]
+            
+            # 对匹配结果进行二次模糊匹配验证 + 时间窗口过滤
+            for row in matched.itertuples():
+                counterparty = str(row.counterparty)
+                if not _fuzzy_match(companion_name, counterparty):
                     continue
+                
+                trans_dt = row._trans_dt
+                if pd.isna(trans_dt):
+                    continue
+                
+                days_diff = (trans_dt - travel_dt).days
                 
                 if abs(days_diff) > time_window_days:
                     continue
                 
-                # 判断时序关系
-                if days_diff < 0:
-                    timing = '先付款后同行'
-                elif days_diff > 0:
-                    timing = '先同行后收款'
-                else:
-                    timing = '同日'
+                timing = '先付款后同行' if days_diff < 0 else ('先同行后收款' if days_diff > 0 else '同日')
                 
-                correlation = {
+                correlations.append({
                     'person': person,
                     'companion': companion_name,
-                    'travel_date': travel_date,
-                    'travel_type': companion_rec.get('travel_type', ''),
-                    'transaction_date': trans_date,
+                    'travel_date': c.get('travel_date'),
+                    'travel_type': c.get('travel_type', ''),
+                    'transaction_date': row.date,
                     'days_diff': days_diff,
                     'timing': timing,
-                    'amount': max(row.get('income', 0), row.get('expense', 0)),
-                    'direction': 'income' if row.get('income', 0) > 0 else 'expense',
-                    'description': row.get('description', ''),
+                    'amount': max(getattr(row, 'income', 0) or 0, getattr(row, 'expense', 0) or 0),
+                    'direction': 'income' if (getattr(row, 'income', 0) or 0) > 0 else 'expense',
+                    'description': getattr(row, 'description', ''),
                     'counterparty_raw': counterparty,
                     'risk_level': 'high' if abs(days_diff) <= 7 else 'medium'
-                }
-                correlations.append(correlation)
+                })
     
     return correlations
-
 
 def _summarize_companions(companions: List[Dict]) -> Dict:
     """汇总同行人信息"""
@@ -403,33 +441,58 @@ def correlate_hotel_cohabitants(
     
     logger.info(f'  读取到同住宿记录 {len(results["cohabitants"])} 条')
     
-    # 与银行流水碰撞（复用同行人碰撞逻辑）
-    for rec in results['cohabitants']:
-        person = rec['person']
-        cohabitant = rec['cohabitant']
-        stay_date = rec.get('stay_date')
-        
-        for key, df in all_transactions.items():
-            if person not in key:
-                continue
-            
-            if df.empty or 'counterparty' not in df.columns:
-                continue
-            
-            for _, row in df.iterrows():
-                counterparty = str(row.get('counterparty', ''))
-                if cohabitant in counterparty:
-                    results['fund_correlations'].append({
-                        'person': person,
-                        'cohabitant': cohabitant,
-                        'stay_date': stay_date,
-                        'transaction_date': row.get('date'),
-                        'amount': max(row.get('income', 0), row.get('expense', 0)),
-                        'direction': 'income' if row.get('income', 0) > 0 else 'expense',
-                        'description': row.get('description', ''),
-                        'risk_level': 'high'
-                    })
+    # 与银行流水碰撞（优化版：预构建索引 + 向量化匹配）
+    if not results['cohabitants']:
+        logger.info(f'同住宿分析完成: 发现 0 条资金碰撞')
+        return results
     
+    # 预构建交易索引
+    tx_index = _build_transaction_index(all_transactions, core_persons)
+    
+    # 按人员分组同住宿记录
+    from collections import defaultdict
+    cohabitants_by_person = defaultdict(list)
+    for rec in results['cohabitants']:
+        cohabitants_by_person[rec['person']].append(rec)
+    
+    # 遍历每个人员
+    for person, person_cohabitants in cohabitants_by_person.items():
+        person_tx_list = tx_index.get(person, [])
+        if not person_tx_list:
+            continue
+        
+        # 合并该人员所有账户的交易
+        all_dfs = []
+        for key, df in person_tx_list:
+            df_copy = df[['date', 'counterparty', 'income', 'expense', 'description']].copy()
+            df_copy['_account_key'] = key
+            all_dfs.append(df_copy)
+        
+        if not all_dfs:
+            continue
+        
+        merged_df = pd.concat(all_dfs, ignore_index=True)
+        
+        # 为每个同住人进行向量化匹配
+        for rec in person_cohabitants:
+            cohabitant = rec['cohabitant']
+            stay_date = rec.get('stay_date')
+            
+            # 使用向量化字符串匹配
+            mask = merged_df['counterparty'].astype(str).str.contains(cohabitant, na=False, regex=False)
+            matched = merged_df[mask]
+            
+            for row in matched.itertuples():
+                results['fund_correlations'].append({
+                    'person': person,
+                    'cohabitant': cohabitant,
+                    'stay_date': stay_date,
+                    'transaction_date': row.date,
+                    'amount': max(getattr(row, 'income', 0) or 0, getattr(row, 'expense', 0) or 0),
+                    'direction': 'income' if (getattr(row, 'income', 0) or 0) > 0 else 'expense',
+                    'description': getattr(row, 'description', ''),
+                    'risk_level': 'high'
+                })
     logger.info(f'同住宿分析完成: 发现 {len(results["fund_correlations"])} 条资金碰撞')
     
     return results
@@ -509,36 +572,67 @@ def correlate_express_contacts(
     ]
     results['frequent_addresses'] = sorted(frequent_contacts, key=lambda x: -x['count'])[:20]
     
-    # 与银行流水碰撞
-    for contact_name in contact_counter.keys():
-        for key, df in all_transactions.items():
-            # 检查是否是核心人员的交易数据
-            is_core = any(p in key for p in core_persons)
-            if not is_core:
+    # 与银行流水碰撞（优化版：预构建索引 + 向量化匹配）
+    if not contact_counter:
+        logger.info(f'快递联系人分析完成: 发现 0 条资金碰撞')
+        return results
+    
+    # 预构建交易索引
+    tx_index = _build_transaction_index(all_transactions, core_persons)
+    
+    # 收集所有联系人姓名
+    all_contact_names = list(contact_counter.keys())
+    
+    # 合并所有核心人员的交易数据
+    all_dfs = []
+    for person in core_persons:
+        person_tx_list = tx_index.get(person, [])
+        for key, df in person_tx_list:
+            df_copy = df[['date', 'counterparty', 'income', 'expense', 'description']].copy()
+            df_copy['_person'] = person
+            all_dfs.append(df_copy)
+    
+    if not all_dfs:
+        logger.info(f'快递联系人分析完成: 发现 0 条资金碰撞')
+        return results
+    
+    merged_tx = pd.concat(all_dfs, ignore_index=True)
+    
+    # 预规范化 counterparty 列，用于模糊匹配
+    merged_tx['_normalized_counterparty'] = merged_tx['counterparty'].astype(str).apply(_normalize_name)
+    
+    # 批量匹配所有联系人
+    for contact_name in all_contact_names:
+        normalized_contact = _normalize_name(contact_name)
+        if not normalized_contact or len(normalized_contact) < 2:
+            continue
+        
+        # 使用规范化后的 counterparty 进行匹配
+        mask = merged_tx['_normalized_counterparty'].str.contains(
+            normalized_contact, na=False, regex=False
+        )
+        matched = merged_tx[mask]
+        
+        # 对匹配结果进行处理（使用模糊匹配二次验证）
+        for row in matched.itertuples():
+            # 使用模糊匹配验证，避免误匹配
+            if not _fuzzy_match(contact_name, str(row.counterparty)):
                 continue
             
-            if df.empty or 'counterparty' not in df.columns:
-                continue
-            
-            for _, row in df.iterrows():
-                counterparty = str(row.get('counterparty', ''))
-                if contact_name in counterparty:
-                    person = utils.normalize_person_name(key)
-                    results['fund_correlations'].append({
-                        'person': person if person else key.split('_')[0],
-                        'contact': contact_name,
-                        'transaction_date': row.get('date'),
-                        'amount': max(row.get('income', 0), row.get('expense', 0)),
-                        'direction': 'income' if row.get('income', 0) > 0 else 'expense',
-                        'description': row.get('description', ''),
-                        'frequency': contact_counter[contact_name]['count'],
-                        'risk_level': 'high' if contact_counter[contact_name]['count'] >= 5 else 'medium'
-                    })
+            results['fund_correlations'].append({
+                'person': row._person,
+                'contact': contact_name,
+                'transaction_date': row.date,
+                'amount': max(getattr(row, 'income', 0) or 0, getattr(row, 'expense', 0) or 0),
+                'direction': 'income' if (getattr(row, 'income', 0) or 0) > 0 else 'expense',
+                'description': getattr(row, 'description', ''),
+                'frequency': contact_counter[contact_name]['count'],
+                'risk_level': 'high' if contact_counter[contact_name]['count'] >= 5 else 'medium'
+            })
     
     logger.info(f'快递联系人分析完成: 发现 {len(results["fund_correlations"])} 条资金碰撞')
     
     return results
-
 
 def run_all_correlations(
     data_directory: str,

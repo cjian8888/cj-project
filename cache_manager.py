@@ -237,12 +237,13 @@ class CacheManager:
 
         self.save_cache("metadata", metadata)
 
-    def save_results(self, results: Dict):
+    def save_results(self, results: Dict, id_to_name_map: Dict = None):
         """
         保存完整的分析结果到缓存
 
         Args:
             results: 分析结果字典
+            id_to_name_map: 身份证号到人名的映射（可选）
         """
         # 保存各个模块的缓存
         if "profiles" in results:
@@ -301,8 +302,11 @@ class CacheManager:
             "generatedAt": datetime.now().isoformat(),
             "refactored": True,
             "dataFlow": "external_data_first",
+            # 【修复】添加身份证号到人名的映射
+            "id_to_name_map": id_to_name_map or {},
         }
         self.save_metadata(metadata)
+
 
         self.logger.info("[缓存管理] 所有缓存已保存")
 

@@ -92,17 +92,22 @@ def extract_wealth_product_data(data_dir: str, person_id: str = None) -> Dict[st
                                 "latest_products": [],
                                 "accounts": [],
                                 "summary": {"total_amount": 0, "product_count": 0},
-                                "query_dates": set()
+                                "query_dates": set(),
+                                "_holdings": []  # 【新增】存储持有信息
                             }
                         
                         result[file_id]["products"].extend(data.get("products", []))
                         result[file_id]["accounts"].extend(data.get("accounts", []))
+                        result[file_id]["_holdings"].extend(data.get("_holdings", []))  # 【新增】
                         
                         # 收集查询时点
                         for p in data.get("products", []):
                             if p.get("feedback_date"):
                                 result[file_id]["query_dates"].add(p["feedback_date"])
-                        
+                        # 【新增】从持有信息收集时点
+                        for h in data.get("_holdings", []):
+                            if h.get("holding_date"):
+                                result[file_id]["query_dates"].add(h["holding_date"])
                 except Exception as e:
                     logger.error(f"解析理财文件失败 {file_path}: {e}")
                     continue
@@ -115,6 +120,22 @@ def extract_wealth_product_data(data_dir: str, person_id: str = None) -> Dict[st
         # 账户去重
         result[pid]["accounts"] = _deduplicate_accounts(result[pid]["accounts"])
         
+        # 【修复】使用持有信息补充产品金额（针对理财产品格式）
+        holdings_map = {}
+        for h in result[pid].get("_holdings", []):
+            code = h.get("product_code", "")
+            if code and code not in holdings_map:
+                # 取最新日期的持有金额
+                holdings_map[code] = h.get("amount", 0)
+        
+        # 补充产品金额
+        for product in result[pid]["products"]:
+            if product.get("amount", 0) == 0 and product.get("product_code"):
+                code = product["product_code"]
+                if code in holdings_map:
+                    product["amount"] = holdings_map[code]
+                    product["available_amount"] = holdings_map[code]
+        
         # 提取最新时点的产品（用于资产统计）
         result[pid]["latest_products"] = _get_latest_products(result[pid]["products"])
         
@@ -122,6 +143,10 @@ def extract_wealth_product_data(data_dir: str, person_id: str = None) -> Dict[st
         result[pid]["summary"] = _calculate_summary(result[pid]["latest_products"])
         result[pid]["summary"]["all_records_count"] = len(result[pid]["products"])
         result[pid]["summary"]["query_count"] = len(result[pid]["query_dates"])
+        
+        # 清理临时数据
+        if "_holdings" in result[pid]:
+            del result[pid]["_holdings"]
     
     logger.info(f"理财产品解析完成，共 {len(result)} 个主体")
     return result
@@ -137,62 +162,129 @@ def parse_wealth_file(file_path: str) -> Dict:
     Returns:
         Dict: 包含products和accounts的字典
     """
-    result = {"products": [], "accounts": []}
+    result = {"products": [], "accounts": [], "_holdings": []}
     filename = Path(file_path).name
     
     try:
         xls = pd.ExcelFile(file_path)
         
+        # 【修复】第一遍遍历：先解析持有信息（用于补充产品金额）
+        holdings_data = []
         for sheet_name in xls.sheet_names:
             df = pd.read_excel(xls, sheet_name=sheet_name)
             
             if df.empty:
                 continue
             
-            if "理财信息" in sheet_name or "金融理财信息" in sheet_name:
-                # 解析理财产品信息
-                products = _parse_products_sheet(df, filename)
+            if "持有信息" in sheet_name:
+                # 【新增】解析理财产品持有信息（用于补充金额数据）
+                holdings = _parse_holdings_sheet(df, filename)
+                holdings_data.extend(holdings)
+        
+        # 【修复】第二遍遍历：解析产品和账户信息
+        for sheet_name in xls.sheet_names:
+            df = pd.read_excel(xls, sheet_name=sheet_name)
+            
+            if df.empty:
+                continue
+            
+            # 【修复】支持两种数据源格式：银行理财（金融理财信息）和 理财产品（产品信息）
+            if "理财信息" in sheet_name or "金融理财信息" in sheet_name or "产品信息" in sheet_name:
+                # 解析理财产品信息，传入持有信息用于补充金额
+                products = _parse_products_sheet(df, filename, holdings_data)
                 result["products"].extend(products)
+                
+            elif "持有信息" in sheet_name:
+                # 持有信息已在上一步处理，这里跳过
+                result["_holdings"].extend(holdings_data)
                 
             elif "账户" in sheet_name:
                 # 解析理财账户信息
                 accounts = _parse_accounts_sheet(df, filename)
                 result["accounts"].extend(accounts)
-        
     except Exception as e:
         logger.error(f"读取理财文件失败 {file_path}: {e}")
     
     return result
 
 
-def _parse_products_sheet(df: pd.DataFrame, source_file: str) -> List[Dict]:
-    """解析理财产品信息sheet"""
+def _parse_products_sheet(df: pd.DataFrame, source_file: str, holdings_data: List[Dict] = None) -> List[Dict]:
+    """解析理财产品信息sheet
+    
+    【修复】支持两种数据源格式：
+    1. 银行业金融机构金融理财：列名包含"金融理财名称"、"反馈单位"等
+    2. 理财产品（定向查询）：列名包含"产品名称"、"发行机构"等
+    """
     products = []
     total_rows = len(df)
     processed = 0
-    log_interval = max(1, total_rows // 10)  # 每10%输出一次进度
+    log_interval = max(1, total_rows // 10) if total_rows > 0 else 1
+    
+    # 【修复】检测数据源类型
+    has_financial_cols = "金融理财名称" in df.columns
+    has_product_cols = "产品名称" in df.columns
+    
+    if not has_financial_cols and not has_product_cols:
+        logger.warning(f"[理财解析] 无法识别列名格式，列: {df.columns.tolist()}")
+        return products
+    
+    # 【修复】构建持有信息查找表（product_code -> amount）
+    holdings_map = {}
+    if holdings_data:
+        for h in holdings_data:
+            code = h.get("product_code", "")
+            if code:
+                holdings_map[code] = h.get("amount", 0)
 
     for _, row in df.iterrows():
         try:
-            product = {
-                "bank": safe_str(row.get("反馈单位", "")),
-                "product_name": safe_str(row.get("金融理财名称", "")),
-                "product_type": safe_str(row.get("金融理财类型", "")),
-                "product_code": safe_str(row.get("金融产品编号", "")),
-                "amount": safe_float(row.get("资产总数额", 0)),
-                "available_amount": safe_float(row.get("可控资产总数额", 0)),
-                "shares": safe_float(row.get("数量/份额/金额", 0)),
-                "unit_price": safe_float(row.get("资产单位价格", 0)),
-                "currency": safe_str(row.get("币种", "人民币")),
-                "status": safe_str(row.get("产品状态", "")),
-                "sales_type": safe_str(row.get("产品销售种类", "")),
-                "asset_manager": safe_str(row.get("资产管理人", "")),
-                "custodian": safe_str(row.get("托管人", "")),
-                "start_date": safe_date(row.get("成立日")),
-                "end_date": safe_date(row.get("赎回日")),
-                "feedback_date": safe_date(row.get("反馈日期")),
-                "source_file": source_file
-            }
+            if has_financial_cols:
+                # 格式1：银行业金融机构金融理财（原始逻辑）
+                product = {
+                    "bank": safe_str(row.get("反馈单位", "")),
+                    "product_name": safe_str(row.get("金融理财名称", "")),
+                    "product_type": safe_str(row.get("金融理财类型", "")),
+                    "product_code": safe_str(row.get("金融产品编号", "")),
+                    "amount": safe_float(row.get("资产总数额", 0)),
+                    "available_amount": safe_float(row.get("可控资产总数额", 0)),
+                    "shares": safe_float(row.get("数量/份额/金额", 0)),
+                    "unit_price": safe_float(row.get("资产单位价格", 0)),
+                    "currency": safe_str(row.get("币种", "人民币")),
+                    "status": safe_str(row.get("产品状态", "")),
+                    "sales_type": safe_str(row.get("产品销售种类", "")),
+                    "asset_manager": safe_str(row.get("资产管理人", "")),
+                    "custodian": safe_str(row.get("托管人", "")),
+                    "start_date": safe_date(row.get("成立日")),
+                    "end_date": safe_date(row.get("赎回日")),
+                    "feedback_date": safe_date(row.get("反馈日期")),
+                    "source_file": source_file
+                }
+            else:
+                # 格式2：理财产品（定向查询）（新增逻辑）
+                product_code = safe_str(row.get("产品登记编码", ""))
+                
+                # 从持有信息补充金额（如果存在）
+                amount = holdings_map.get(product_code, 0) if holdings_map else 0
+                
+                product = {
+                    "bank": safe_str(row.get("发行机构", "")),
+                    "product_name": safe_str(row.get("产品名称", "")),
+                    "product_type": safe_str(row.get("产品运作模式", "")),
+                    "product_code": product_code,
+                    "amount": amount,  # 从持有信息获取
+                    "available_amount": amount,  # 默认可用金额等于持有金额
+                    "shares": 0,  # 理财产品格式无此字段
+                    "unit_price": 0,  # 理财产品格式无此字段
+                    "currency": safe_str(row.get("币种", "人民币")),
+                    "status": safe_str(row.get("产品状态", "")),
+                    "sales_type": "",  # 理财产品格式无此字段
+                    "asset_manager": safe_str(row.get("产品管理人", "")),
+                    "custodian": safe_str(row.get("产品托管人", "")),
+                    "start_date": safe_date(row.get("产品起始日")),
+                    "end_date": safe_date(row.get("产品终止日")),
+                    "feedback_date": None,  # 理财产品格式无此列，使用持有信息的日期
+                    "source_file": source_file
+                }
 
             # 只保留有产品名称的记录
             if product["product_name"]:
@@ -200,8 +292,8 @@ def _parse_products_sheet(df: pd.DataFrame, source_file: str) -> List[Dict]:
 
             processed += 1
             # 每10%输出进度
-            if processed % log_interval == 0 or processed == total_rows:
-                progress = (processed / total_rows * 100)
+            if log_interval > 0 and (processed % log_interval == 0 or processed == total_rows):
+                progress = (processed / total_rows * 100) if total_rows > 0 else 0
                 logger.info(f"理财产品解析进度: {progress:.1f}% ({processed}/{total_rows} 行)")
 
         except Exception as e:
@@ -240,7 +332,34 @@ def _parse_accounts_sheet(df: pd.DataFrame, source_file: str) -> List[Dict]:
             continue
     
     return accounts
-
+def _parse_holdings_sheet(df: pd.DataFrame, source_file: str) -> List[Dict]:
+    """解析理财产品持有信息sheet（用于理财产品定向查询格式）
+    
+    【新增】从持有信息sheet提取产品持有金额
+    列名：产品登记编码、持有日期、币种、持有金额、理财收益率
+    """
+    holdings = []
+    
+    for _, row in df.iterrows():
+        try:
+            holding = {
+                "product_code": safe_str(row.get("产品登记编码", "")),
+                "holding_date": safe_date(row.get("持有日期")),
+                "currency": safe_str(row.get("币种", "人民币")),
+                "amount": safe_float(row.get("持有金额", 0)),
+                "yield_rate": safe_float(row.get("理财收益率（%）", 0)),
+                "source_file": source_file
+            }
+            
+            if holding["product_code"]:
+                holdings.append(holding)
+                
+        except Exception as e:
+            logger.debug(f"解析持有信息行失败: {e}")
+            continue
+    
+    logger.info(f"持有信息解析完成: 共解析 {len(holdings)} 条记录")
+    return holdings
 
 def _find_all_wealth_dirs(data_dir: str, target_name: str) -> List[str]:
     """

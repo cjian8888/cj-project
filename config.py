@@ -703,6 +703,21 @@ BRIBE_INSTALLMENT_MIN_MONTHS: int = _get_config('bribe_installment', 'min_months
 
 # --- 工资识别增强参数 (2026-01-11 新增) ---
 HIGH_FREQUENCY_SALARY_CAP: int = _get_config('income_analysis', 'high_frequency_salary_cap', default=100000)
+# --- 工资识别增强参数 v2 (2026-03-05 优化) ---
+# 变异系数阈值（原来硬编码2.0太宽松，现在参数化）
+SALARY_CV_THRESHOLD_STRICT: float = _get_config('salary_detection', 'cv_threshold_strict', default=0.5)  # 严格模式：CV<0.5
+SALARY_CV_THRESHOLD_NORMAL: float = _get_config('salary_detection', 'cv_threshold_normal', default=1.0)  # 正常模式：CV<1.0
+SALARY_CV_THRESHOLD_LOOSE: float = _get_config('salary_detection', 'cv_threshold_loose', default=2.0)  # 宽松模式：CV<2.0
+
+# 发薪日期规律检测参数
+SALARY_PAYDAY_CONCENTRATION_MIN: float = _get_config('salary_detection', 'payday_concentration_min', default=0.6)  # 60%的发薪集中在同一天区间
+SALARY_PAYDAY_MIN_OCCURRENCES: int = _get_config('salary_detection', 'payday_min_occurrences', default=4)  # 最少4次发薪才检测日期规律
+
+# 高频收入检测参数（从硬编码迁移）
+SALARY_FREQUENCY_MIN_COUNT: int = _get_config('salary_detection', 'frequency_min_count', default=6)  # 最少笔数
+SALARY_FREQUENCY_MIN_MONTHS: int = _get_config('salary_detection', 'frequency_min_months', default=5)  # 最少月份数
+SALARY_FREQUENCY_MONTH_RATIO: float = _get_config('salary_detection', 'frequency_month_ratio', default=0.6)  # 笔数/月份数比例
+
 
 # --- 风险评分权重 (2026-01-11 新增) ---
 RISK_SCORE_FUND_CYCLE: int = _get_config('risk_score', 'fund_cycle', default=15)

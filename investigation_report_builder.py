@@ -537,10 +537,23 @@ class InvestigationReportBuilder:
         【修复】建立身份证号↔姓名的双向映射
 
         数据来源优先级：
-        1. family_summary.family_tree（户籍数据）
-        2. precisePropertyData（房产数据中的owner_name和owner_id）
-        3. vehicleData等其他外部数据源
+        1. metadata.id_to_name_map（从文件名提取的权威映射）
+        2. family_summary.family_tree（户籍数据）
+        3. precisePropertyData（房产数据中的owner_name和owner_id）
+        4. vehicleData等其他外部数据源
         """
+        # 【修复】来源0: 从metadata加载（最权威的映射，从原始文件名提取）
+        metadata = analysis_cache.get("metadata", {})
+        id_to_name_map_from_meta = metadata.get("id_to_name_map", {})
+        if id_to_name_map_from_meta:
+            for id_num, name in id_to_name_map_from_meta.items():
+                if id_num and name:
+                    self._id_to_name_map[str(id_num)] = name
+                    self._name_to_id_map[name] = str(id_num)
+            logger.info(f"[身份证号映射] 从metadata加载: {len(id_to_name_map_from_meta)} 条")
+
+        # 来源1: family_summary中的family_tree
+        family_summary = analysis_cache.get("familySummary", {})
         # 来源1: family_summary中的family_tree
         family_summary = analysis_cache.get("familySummary", {})
         family_tree = family_summary.get("family_tree", {})

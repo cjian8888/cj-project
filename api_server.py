@@ -1660,6 +1660,8 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                 "persons": all_persons,
                 "companies": all_companies,
                 "analysisTime": datetime.now().isoformat(),
+                # 【修复】添加身份证号到人名的映射
+                "id_to_name_map": id_to_name_map,
             }
             cache_mgr.save_metadata(metadata)
             logger.info("  ✓ 基础缓存已保存")
@@ -1677,9 +1679,35 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             vehicle_data = external_data["p1"].get("vehicle_data", {})
 
             if precise_property_data or vehicle_data:
-                family_assets = family_assets_helper.build_family_assets_simple(
-                    precise_property_data, vehicle_data, all_persons
-                )
+                # 【修复】构建姓名→身份证号映射，用于查询资产数据
+                name_to_id_map = {}
+                for id_num, name in id_to_name_map.items():
+                    name_to_id_map[name] = id_num
+                
+                # 【修复】将core_persons（姓名）映射到身份证号后查询资产数据
+                family_assets = {}
+                for person in all_persons:
+                    person_id = name_to_id_map.get(person)
+                    if person_id:
+                        # 用身份证号查询资产数据
+                        person_assets = family_assets_helper.build_family_assets_simple(
+                            {person_id: precise_property_data.get(person_id, [])},
+                            {person_id: vehicle_data.get(person_id, [])},
+                            [person_id]
+                        )
+                        if person_id in person_assets:
+                            family_assets[person] = person_assets[person_id]
+                    else:
+                        # 无身份证号映射，返回空资产
+                        family_assets[person] = {
+                            "家族成员": [person],
+                            "房产套数": 0,
+                            "房产总价值": 0.0,
+                            "车辆数量": 0,
+                            "房产": [],
+                            "车辆": [],
+                        }
+                
                 logger.info(f"  ✓ 家庭资产数据: {len(family_assets)} 个人员")
             else:
                 family_assets = {}
@@ -1846,7 +1874,8 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         logger.info("保存分析缓存...")
         try:
             _save_analysis_cache_refactored(
-                analysis_state.results, output_dirs["analysis_cache"]
+                analysis_state.results, output_dirs["analysis_cache"],
+                id_to_name_map
             )
             logger.info("  ✓ 分析缓存已保存")
         except Exception as e:
@@ -1953,19 +1982,18 @@ def _detect_hidden_assets_with_context(
     return hidden_assets
 
 
-def _save_analysis_cache_refactored(results, cache_dir):
+def _save_analysis_cache_refactored(results, cache_dir, id_to_name_map=None):
     """保存分析缓存到文件（使用缓存管理器）"""
     logger = logging.getLogger(__name__)
 
     try:
         # 使用缓存管理器保存所有缓存
         cache_mgr = CacheManager(cache_dir)
-        cache_mgr.save_results(results)
+        cache_mgr.save_results(results, id_to_name_map)
         logger.info(f"✓ 缓存已保存: {cache_dir}")
 
     except Exception as e:
         logger.error(f"✗ 保存缓存失败: {e}")
-
 
 # ==================== FastAPI 应用 ====================
 @asynccontextmanager
