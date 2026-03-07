@@ -1642,8 +1642,11 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             "income": analysis_results.get("income", {}),
             "time_series": analysis_results.get("timeSeries", {}),
             "large_transactions": analysis_results.get("large_transactions", []),
-            "family_summary": analysis_results.get("family_summary", {}),
-            "family_relations": analysis_results.get("family_relations", {}),
+            "family_summary": {
+                "family_units": analysis_results.get("family_units_v2", []),
+                "family_relations": analysis_results.get("family_relations", {}),
+                "all_family_summaries": analysis_results.get("all_family_summaries", {}),
+            },
             "family_units_v2": analysis_results.get("family_units_v2", []),
             "all_family_summaries": analysis_results.get("all_family_summaries", {}),
         }
@@ -2925,11 +2928,13 @@ async def generate_investigation_report_with_config(
                     # 保留原有数据
                     derived_data["all_family_summaries"] = updated_family_summaries
 
-                    # 更新第一个家庭的summary（用于旧版兼容）
-                    first_householder = list(updated_family_summaries.keys())[0]
-                    derived_data["family_summary"] = updated_family_summaries[
-                        first_householder
-                    ]
+                    # 【修复 2026-03-07】不要覆盖整个 family_summary，保留 family_units 字段
+                    existing_family_summary = derived_data.get("family_summary", {})
+                    derived_data["family_summary"] = {
+                        **existing_family_summary,  # 保留 family_units 等字段
+                        "all_family_summaries": updated_family_summaries,
+                        "first_family": updated_family_summaries[first_householder],
+                    }
 
                     f.seek(0)
                     f.truncate()  # 截断文件，避免旧数据残留

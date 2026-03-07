@@ -1325,6 +1325,11 @@ def _group_into_households(core_persons, family_summary):
 
     # ========== 优先使用新格式 family_units ==========
     family_units = family_summary.get('family_units', [])
+    
+    # 【修复 2026-03-07】兼容旧缓存：如果没有 family_units，尝试从 family_units_v2 读取
+    if not family_units:
+        family_units = family_summary.get('family_units_v2', [])
+    
     if family_units:
         modules = []
         used_persons = set()

@@ -45,6 +45,8 @@ try:
     extract_keywords = utils_module.extract_keywords
     get_timestamp = utils_module.get_timestamp
     get_day_of_month = utils_module.get_day_of_month
+    number_to_chinese = utils_module.number_to_chinese
+    safe_account_display = utils_module.safe_account_display
     # 【2026-02-23 修复】添加遗漏的函数
 
 finally:
@@ -52,8 +54,9 @@ finally:
     if parent_dir in sys.path:
         sys.path.remove(parent_dir)
 
-# Also export phrase_loader from this package
+# Also export phrase_loader and safe_types from this package
 from .phrase_loader import PhraseLoader
+from .safe_types import extract_id_from_filename
 
 __all__ = [
     "setup_logger",
@@ -77,5 +80,8 @@ __all__ = [
     "extract_keywords",
     "get_timestamp",
     "get_day_of_month",
+    "number_to_chinese",
+    "safe_account_display",
+    "extract_id_from_filename",
     "PhraseLoader",
 ]

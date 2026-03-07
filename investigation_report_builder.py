@@ -553,9 +553,7 @@ class InvestigationReportBuilder:
             logger.info(f"[身份证号映射] 从metadata加载: {len(id_to_name_map_from_meta)} 条")
 
         # 来源1: family_summary中的family_tree
-        family_summary = analysis_cache.get("familySummary", {})
-        # 来源1: family_summary中的family_tree
-        family_summary = analysis_cache.get("familySummary", {})
+        family_summary = analysis_cache.get("family_summary", {}) or analysis_cache.get("familySummary", {})
         family_tree = family_summary.get("family_tree", {})
 
         for person_name, members in family_tree.items():

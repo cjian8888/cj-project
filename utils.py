@@ -474,7 +474,10 @@ def extract_bank_name(filename: str) -> str:
         '兴业银行',
         '平安银行',
         '华夏银行',
-        '上海农村商业银行', '农村商业银行', '农商银行'
+        '上海农村商业银行', '农村商业银行', '农商银行',
+        '恒丰银行',
+        '上海银行',
+        '广东华兴银行', '华兴银行'
     ]
     
     filename_lower = filename.lower()
@@ -500,6 +503,12 @@ def extract_bank_name(filename: str) -> str:
                 return '浦发银行'
             elif bank in ['广东发展银行', '广发银行', '广发']:
                 return '广发银行'
+            elif bank in ['恒丰银行']:
+                return '恒丰银行'
+            elif bank in ['上海银行']:
+                return '上海银行'
+            elif bank in ['广东华兴银行', '华兴银行']:
+                return '华兴银行'
             else:
                 return bank
     
