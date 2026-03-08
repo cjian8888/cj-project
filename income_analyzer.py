@@ -477,13 +477,14 @@ def _detect_unknown_income(
                     category = str(row.get('category', 'unknown'))
                     confidence = float(row.get('category_confidence', 0.0))
                     
-                    if category in ['wealth_redemption', 'wealth_purchase'] and confidence >= 0.6:
+                    # 使用config中的置信度阈值
+                    if category in ['wealth_redemption', 'wealth_purchase'] and confidence >= config.WEALTH_CONFIDENCE_THRESHOLD_MEDIUM:
                         is_unknown = False
-                        reason = f'WealthAccountAnalyzer识别({category}, 置信度{confidence:.2f})'
+                        reason = f'WealthAccountAnalyzer识别({category}, 置信度{confidence:.2f}, 阈值{config.WEALTH_CONFIDENCE_THRESHOLD_MEDIUM})'
                         logger.info(f'[理财识别] {person} {row["income"]/10000:.2f}万 - {reason}')
-                    elif category in ['securities_inflow', 'securities_outflow'] and confidence >= 0.7:
+                    elif category in ['securities_inflow', 'securities_outflow'] and confidence >= config.SECURITIES_CONFIDENCE_THRESHOLD:
                         is_unknown = False
-                        reason = f'银证转账识别({category}, 置信度{confidence:.2f})'
+                        reason = f'银证转账识别({category}, 置信度{confidence:.2f}, 阈值{config.SECURITIES_CONFIDENCE_THRESHOLD})'
                         logger.debug(f'[银证识别] {person} {row["income"]/10000:.2f}万 - {reason}')
                     
                     # 方法2: 原有识别函数作为fallback

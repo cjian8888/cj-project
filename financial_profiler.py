@@ -2100,6 +2100,7 @@ def _empty_wealth_result() -> Dict:
 def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict:
     """
     分析理财产品交易（增强版 - 深度清洗空转资金）- 【P1-性能7修复】向量化优化版
+    【2026-03-08 增强】集成WealthAccountAnalyzer进行账户分类
 
     【性能优化】将140+行的iterrows主循环改为向量化操作，关键改进：
     1. 贷款/退款识别：使用布尔掩码+str.contains向量化匹配（原逐行keyword匹配）
@@ -2125,6 +2126,33 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
         理财交易分析字典
     """
     logger.info("正在分析理财产品交易（增强版 - 向量化优化）...")
+    
+    # 【2026-03-08 新增】使用WealthAccountAnalyzer进行账户分类
+    try:
+        from wealth_account_analyzer import WealthAccountAnalyzer
+        analyzer = WealthAccountAnalyzer(df, entity_name)
+        account_classification = analyzer.classify_accounts()
+        fund_flow_result = analyzer.analyze_fund_flow()
+        
+        # 统计账号分类结果
+        wealth_accounts = [acc for acc, info in account_classification.items() 
+                          if info['type'] in ('wealth', 'internal')]
+        securities_accounts = [acc for acc, info in account_classification.items() 
+                              if info['type'] == 'securities']
+        
+        logger.info(f'[WealthAccountAnalyzer] {entity_name or "对象"}: '
+                   f'{len(wealth_accounts)}个理财账户, {len(securities_accounts)}个证券账户')
+        
+        # 将分类结果添加到df中
+        df = df.copy()
+        df['_account_type'] = df['account'].map(
+            lambda x: account_classification.get(str(x), {}).get('type', 'unknown')
+        )
+    except Exception as e:
+        logger.warning(f'[WealthAccountAnalyzer] 账户分类失败: {e}')
+        df['_account_type'] = 'unknown'
+        wealth_accounts = []
+        securities_accounts = []
 
     if df.empty:
         return _empty_wealth_result()

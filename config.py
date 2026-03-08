@@ -676,6 +676,18 @@ WEALTH_PERIODIC_INTERVAL_TOLERANCE: int = _get_config('income_analysis', 'wealth
 WEALTH_PERIODIC_MIN_INTERVAL: int = _get_config('income_analysis', 'wealth_periodic_min_interval', default=60)
 WEALTH_INCREASING_RATIO: float = _get_config('income_analysis', 'wealth_increasing_ratio', default=0.6)
 
+# 【新增】WealthAccountAnalyzer 置信度阈值配置
+WEALTH_CONFIDENCE_THRESHOLD_HIGH: float = _get_config('income_analysis', 'wealth_confidence_threshold_high', default=0.7)
+WEALTH_CONFIDENCE_THRESHOLD_MEDIUM: float = _get_config('income_analysis', 'wealth_confidence_threshold_medium', default=0.6)
+WEALTH_CONFIDENCE_THRESHOLD_LOW: float = _get_config('income_analysis', 'wealth_confidence_threshold_low', default=0.5)
+SECURITIES_CONFIDENCE_THRESHOLD: float = _get_config('income_analysis', 'securities_confidence_threshold', default=0.7)
+WEALTH_IDENTIFICATION_MIN_AMOUNT: int = _get_config('income_analysis', 'wealth_identification_min_amount', default=100000)
+WEALTH_ROUND_AMOUNT_UNIT: int = _get_config('income_analysis', 'wealth_round_amount_unit', default=10000)
+WEALTH_PERIODIC_MIN_OCCURRENCES: int = _get_config('income_analysis', 'wealth_periodic_min_occurrences', default=4)
+WEALTH_PERIODIC_INTERVAL_TOLERANCE: int = _get_config('income_analysis', 'wealth_periodic_interval_tolerance', default=15)
+WEALTH_PERIODIC_MIN_INTERVAL: int = _get_config('income_analysis', 'wealth_periodic_min_interval', default=60)
+WEALTH_INCREASING_RATIO: float = _get_config('income_analysis', 'wealth_increasing_ratio', default=0.6)
+
 # --- 疑点检测阈值 ---
 SUSPICION_PROPERTY_HIGH_RISK: int = _get_config('suspicion', 'medium_high_amount', default=1000000)
 SUSPICION_VEHICLE_HIGH_RISK: int = _get_config('suspicion', 'medium_high_amount', default=500000)
