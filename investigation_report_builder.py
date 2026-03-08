@@ -18,6 +18,7 @@
 import os
 import json
 import re
+import hashlib
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from dataclasses import asdict
@@ -3200,6 +3201,14 @@ class InvestigationReportBuilder:
             and income_structure.get("salary_income")
         ):
             salary_total = income_structure.get("salary_income", 0) or 0
+        if not salary_total and isinstance(profile, dict):
+            yearly_salary_obj = profile.get("yearly_salary", {}) or profile.get(
+                "yearlySalary", {}
+            )
+            if isinstance(yearly_salary_obj, dict):
+                salary_summary = yearly_salary_obj.get("summary", {})
+                if isinstance(salary_summary, dict):
+                    salary_total = salary_summary.get("total", 0) or 0
 
         salary_ratio = (salary_total / total_income * 100) if total_income > 0 else 0.0
 
@@ -3226,9 +3235,50 @@ class InvestigationReportBuilder:
         self, name: str, profile: Dict
     ) -> DimensionAnalysis:
         """分析收支匹配度"""
-        total_income = profile.get("totalIncome", 0) or 0
-        total_expense = profile.get("totalExpense", 0) or 0
+        summary = profile.get("summary", {}) if isinstance(profile, dict) else {}
+        total_income = (
+            summary.get("real_income")
+            if summary.get("real_income") is not None
+            else summary.get("total_income")
+        )
+        if total_income is None:
+            total_income = profile.get("totalIncome", 0) or 0
+        total_expense = (
+            summary.get("real_expense")
+            if summary.get("real_expense") is not None
+            else summary.get("total_expense")
+        )
+        if total_expense is None:
+            total_expense = profile.get("totalExpense", 0) or 0
         salary_total, salary_ratio = self._get_salary_metrics(profile, total_income)
+        total_income = float(total_income or 0)
+        total_expense = float(total_expense or 0)
+
+        # 真实收入为0/负值时，使用专门话术，避免出现“工资占比正常”等逻辑矛盾
+        if total_income <= 0:
+            gap = total_expense - total_income
+            score = 10 if total_expense > 0 else 0
+            risk_level = "medium" if total_expense > 0 else "low"
+            findings = []
+            if total_expense > 0:
+                findings.append(
+                    f"核查期内未形成正向可识别收入（净额{total_income / 10000:.1f}万元），但仍发生支出{total_expense / 10000:.1f}万元"
+                )
+            narrative = (
+                f"{name}核查期内未形成正向可识别收入（净额{total_income / 10000:.1f}万元），"
+                f"支出合计{total_expense / 10000:.1f}万元，建议结合原始流水及凭证进一步核实资金性质。"
+            )
+            if gap > 0 and total_expense > 0:
+                narrative += f"；另支出超过收入{gap / 10000:.1f}万元。"
+            return DimensionAnalysis(
+                dimension_name="收支匹配度",
+                dimension_icon="💳",
+                score=score,
+                max_score=25,
+                risk_level=risk_level,
+                findings=findings,
+                narrative=narrative,
+            )
 
         # 其他收入（用于模板变量）
         other_income = max(total_income - salary_total, 0)
@@ -3588,7 +3638,15 @@ class InvestigationReportBuilder:
             findings.append(f"与可疑对手方存在{suspicious_count}笔资金往来")
 
         # 生成话术（优先使用配置）
-        total_income = profile.get("totalIncome", 0) or 0
+        summary = profile.get("summary", {}) if isinstance(profile, dict) else {}
+        total_income = (
+            summary.get("real_income")
+            if summary.get("real_income") is not None
+            else summary.get("total_income")
+        )
+        if total_income is None:
+            total_income = profile.get("totalIncome", 0) or 0
+        total_income = float(total_income or 0)
         salary_total, salary_ratio = self._get_salary_metrics(profile, total_income)
 
         if risk_level == "high":
@@ -3599,9 +3657,38 @@ class InvestigationReportBuilder:
             phrase_level = "normal"
 
         if score == 0:
-            fallback_narrative = (
-                f"{name}资金流入主要来源于工资收入（占比{salary_ratio:.0f}%），资金流向符合一般生活消费及理财投资规律。"
-            )
+            if total_income <= 0:
+                fallback_narrative = (
+                    f"{name}核查期内未形成正向可识别收入，当前流水以资金回流或冲减为主，暂未发现新增来源不明资金流入。"
+                )
+                narrative = fallback_narrative
+                return DimensionAnalysis(
+                    dimension_name="资金流向",
+                    dimension_icon="📊",
+                    score=score,
+                    max_score=25,
+                    risk_level=risk_level,
+                    findings=findings,
+                    narrative=narrative,
+                )
+            elif salary_total <= 0 or salary_ratio < 20:
+                fallback_narrative = (
+                    f"{name}资金流入以非工资往来为主（工资占比{salary_ratio:.0f}%），暂未发现明确来源不明收入，建议结合交易对手与用途持续核验。"
+                )
+                narrative = fallback_narrative
+                return DimensionAnalysis(
+                    dimension_name="资金流向",
+                    dimension_icon="📊",
+                    score=score,
+                    max_score=25,
+                    risk_level=risk_level,
+                    findings=findings,
+                    narrative=narrative,
+                )
+            else:
+                fallback_narrative = (
+                    f"{name}资金流入主要来源于工资收入（占比{salary_ratio:.0f}%），资金流向符合一般生活消费及理财投资规律。"
+                )
         else:
             fallback_narrative = (
                 f"{name}存在资金流向疑点：来源不明收入{unknown_total / 10000:.1f}万元，需核实资金来源。"
@@ -3734,8 +3821,23 @@ class InvestigationReportBuilder:
 
         根据风险等级生成符合纪检审计规范的专业描述。
         """
-        total_income = profile.get("totalIncome", 0) or 0
+        summary = profile.get("summary", {}) if isinstance(profile, dict) else {}
+        total_income = (
+            summary.get("real_income")
+            if summary.get("real_income") is not None
+            else summary.get("total_income")
+        )
+        if total_income is None:
+            total_income = profile.get("totalIncome", 0) or 0
+        total_income = float(total_income or 0)
         salary_total, salary_ratio = self._get_salary_metrics(profile, total_income)
+
+        if total_income <= 0:
+            fallback = (
+                f"经核查，{name}核查期内未形成正向可识别收入，银行流水以资金回流或冲减为主，"
+                f"建议结合原始流水与凭证进一步核实资金性质。"
+            )
+            return fallback
 
         if risk_level == "low":
             fallback = (
@@ -10606,24 +10708,40 @@ class InvestigationReportBuilder:
         # 资金特征综合描述
         fund_characteristics_parts = []
 
-        total_income = profile.get("totalIncome", 0) or 0
-        total_expense = profile.get("totalExpense", 0) or 0
-        salary_total = profile.get("salaryTotal", 0) or 0
+        summary = profile.get("summary", {}) if isinstance(profile, dict) else {}
+        total_income = (
+            summary.get("real_income")
+            if summary.get("real_income") is not None
+            else summary.get("total_income")
+        )
+        if total_income is None:
+            total_income = profile.get("totalIncome", 0) or 0
+        total_expense = (
+            summary.get("real_expense")
+            if summary.get("real_expense") is not None
+            else summary.get("total_expense")
+        )
+        if total_expense is None:
+            total_expense = profile.get("totalExpense", 0) or 0
+        salary_total, salary_ratio = self._get_salary_metrics(profile, float(total_income or 0))
 
         if total_income > 0:
-            salary_ratio = salary_total / total_income
-            if salary_ratio >= 0.7:
+            if salary_ratio >= 70:
                 fund_characteristics_parts.append(
                     f"{name}资金主要来源于工资收入，收入来源合法稳定"
                 )
-            elif salary_ratio >= 0.4:
+            elif salary_ratio >= 40:
                 fund_characteristics_parts.append(
-                    f"{name}资金来源较为多元，工资收入占比{salary_ratio * 100:.0f}%"
+                    f"{name}资金来源较为多元，工资收入占比{salary_ratio:.0f}%"
                 )
             else:
                 fund_characteristics_parts.append(
                     f"{name}非工资收入占比较高，需关注资金来源"
                 )
+        else:
+            fund_characteristics_parts.append(
+                f"{name}核查期内未形成正向可识别收入，资金性质需结合原始凭证进一步核实"
+            )
 
         # 检查借贷情况
         lending = self._build_lending_analysis_v4(name, profile)
@@ -10678,6 +10796,189 @@ class InvestigationReportBuilder:
             "high_risk_warnings": high_risk_warnings,
         }
 
+    def _pick_first_non_empty(self, data: Dict[str, Any], *keys: str) -> Any:
+        """按顺序提取首个非空字段值（兼容 camelCase/snake_case）。"""
+        if not isinstance(data, dict):
+            return None
+        for key in keys:
+            if key not in data:
+                continue
+            value = data.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                text = value.strip()
+                if not text or text.lower() in {"nan", "none", "null"}:
+                    continue
+                return text
+            if isinstance(value, (list, dict)) and not value:
+                continue
+            return value
+        return None
+
+    def _normalize_trace_source_name(self, value: Any) -> str:
+        """将证据来源字段归一化为可读文件名。"""
+        if value is None:
+            return "未提供"
+        text = str(value).strip()
+        if not text or text.lower() in {"nan", "none", "null"}:
+            return "未提供"
+        return os.path.basename(text)
+
+    def _normalize_trace_row(self, value: Any) -> Optional[int]:
+        """标准化行号字段，无法解析则返回 None。"""
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return int(float(text))
+        except (TypeError, ValueError):
+            return None
+
+    def _build_cache_fingerprint(self) -> str:
+        """
+        构建缓存指纹（用于报告溯源）。
+        指纹基于 metadata 和核心缓存文件的名称/大小/修改时间。
+        """
+        cache_dir = os.path.join(self.output_dir, "analysis_cache")
+        cache_files = [
+            "profiles.json",
+            "derived_data.json",
+            "suspicions.json",
+            "metadata.json",
+        ]
+
+        file_stats = []
+        for filename in cache_files:
+            file_path = os.path.join(cache_dir, filename)
+            if not os.path.exists(file_path):
+                continue
+            stat = os.stat(file_path)
+            file_stats.append(
+                {
+                    "file": filename,
+                    "size": int(stat.st_size),
+                    "mtime": int(stat.st_mtime),
+                }
+            )
+
+        payload = {
+            "metadata": self.metadata if isinstance(self.metadata, dict) else {},
+            "file_stats": file_stats,
+        }
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+    def _format_cash_collision_trace_line(self, item: Dict[str, Any]) -> str:
+        """格式化现金碰撞/时序伴随的证据溯源字段。"""
+        refs = item.get("evidence_refs") or item.get("evidenceRefs") or {}
+        if not isinstance(refs, dict):
+            refs = {}
+
+        wd_source = self._normalize_trace_source_name(
+            self._pick_first_non_empty(
+                item,
+                "withdrawalSource",
+                "withdrawal_source",
+                "withdrawSource",
+                "withdraw_source",
+                "source_file",
+                "sourceFile",
+            )
+        )
+        if wd_source == "未提供":
+            wd_source = self._normalize_trace_source_name(
+                self._pick_first_non_empty(refs, "withdrawal_source", "source_file")
+            )
+        dp_source = self._normalize_trace_source_name(
+            self._pick_first_non_empty(
+                item,
+                "depositSource",
+                "deposit_source",
+                "depositSourceFile",
+                "deposit_source_file",
+            )
+        )
+        if dp_source == "未提供":
+            dp_source = self._normalize_trace_source_name(
+                self._pick_first_non_empty(refs, "deposit_source")
+            )
+
+        wd_row = self._normalize_trace_row(
+            self._pick_first_non_empty(
+                item,
+                "withdrawalRow",
+                "withdrawal_row",
+                "withdrawSourceRow",
+                "withdraw_source_row",
+            )
+        )
+        if wd_row is None:
+            wd_row = self._normalize_trace_row(
+                self._pick_first_non_empty(refs, "withdrawal_row")
+            )
+        dp_row = self._normalize_trace_row(
+            self._pick_first_non_empty(
+                item,
+                "depositRow",
+                "deposit_row",
+                "depositSourceRow",
+                "deposit_source_row",
+            )
+        )
+        if dp_row is None:
+            dp_row = self._normalize_trace_row(
+                self._pick_first_non_empty(refs, "deposit_row")
+            )
+
+        wd_row_text = f"第{wd_row}行" if wd_row is not None else "行号未提供"
+        dp_row_text = f"第{dp_row}行" if dp_row is not None else "行号未提供"
+        return (
+            f"证据来源: 取现[{wd_source}, {wd_row_text}]，"
+            f"存现[{dp_source}, {dp_row_text}]"
+        )
+
+    def _format_direct_transfer_trace_line(self, item: Dict[str, Any]) -> str:
+        """格式化直接往来线索的证据溯源字段。"""
+        refs = item.get("evidence_refs") or item.get("evidenceRefs") or {}
+        if not isinstance(refs, dict):
+            refs = {}
+
+        source_file = self._normalize_trace_source_name(
+            self._pick_first_non_empty(item, "source_file", "sourceFile")
+        )
+        source_row = self._normalize_trace_row(
+            self._pick_first_non_empty(
+                item,
+                "source_row_index",
+                "sourceRowIndex",
+                "row_index",
+                "rowIndex",
+            )
+        )
+        if source_row is None:
+            source_row = self._normalize_trace_row(
+                self._pick_first_non_empty(
+                    refs, "source_row_index", "sourceRowIndex", "row_index"
+                )
+            )
+
+        tx_id = self._pick_first_non_empty(
+            item, "transaction_id", "transactionId", "tx_id", "txId"
+        )
+        if tx_id is None:
+            tx_id = self._pick_first_non_empty(refs, "transaction_id", "transactionId")
+
+        row_text = f"第{source_row}行" if source_row is not None else "行号未提供"
+        tx_text = str(tx_id) if tx_id else "未提供"
+        return f"证据来源: [{source_file}, {row_text}, 交易ID:{tx_text}]"
+
     def generate_complete_txt_report(self, output_path: str) -> str:
         """
         生成完整的核查结果分析报告.txt（增强版）
@@ -10715,6 +11016,9 @@ class InvestigationReportBuilder:
             return []
 
         cash_collisions = _get_suspicion_list("cashCollisions", "cash_collisions")
+        cash_timing_patterns = _get_suspicion_list(
+            "cashTimingPatterns", "cash_timing_patterns"
+        )
         direct_transfers = _get_suspicion_list("directTransfers", "direct_transfers")
         hidden_assets = _get_suspicion_list("hiddenAssets", "hidden_assets")
         aml_alerts = _get_suspicion_list("amlAlerts", "aml_alerts")
@@ -10730,6 +11034,7 @@ class InvestigationReportBuilder:
 
         total_suspicions = (
             len(cash_collisions)
+            + len(cash_timing_patterns)
             + len(direct_transfers)
             + len(hidden_assets)
             + len(credit_alerts)
@@ -10776,6 +11081,30 @@ class InvestigationReportBuilder:
         lines.append("")
         lines.append(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
+        metadata = self.metadata if isinstance(self.metadata, dict) else {}
+        cache_version = metadata.get("version", "未提供")
+        cache_generated_at = metadata.get("generatedAt", "未提供")
+        cache_manager_version = metadata.get("cacheManagerVersion", "未提供")
+        data_flow = metadata.get("dataFlow", "未提供")
+        analysis_run_id = (
+            metadata.get("analysis_run_id")
+            or metadata.get("run_id")
+            or metadata.get("runId")
+            or "未提供"
+        )
+        cache_fingerprint = self._build_cache_fingerprint()
+        cache_dir = os.path.join(self.output_dir, "analysis_cache")
+
+        lines.append("")
+        lines.append("【溯源元信息】")
+        lines.append(f"  • 缓存目录: {cache_dir}")
+        lines.append(f"  • 缓存版本: {cache_version}")
+        lines.append(f"  • 缓存生成时间: {cache_generated_at}")
+        lines.append(f"  • 缓存管理器版本: {cache_manager_version}")
+        lines.append(f"  • 数据流策略: {data_flow}")
+        lines.append(f"  • 分析运行ID: {analysis_run_id}")
+        lines.append(f"  • 缓存指纹: {cache_fingerprint}")
+
         # 【新增】数据来源及完整性声明
         lines.append("")
         lines.append("=" * 70)
@@ -10813,7 +11142,11 @@ class InvestigationReportBuilder:
         # 主要发现
         lines.append("【主要发现】:")
         if len(cash_collisions) > 0:
-            lines.append(f"  • 发现 {len(cash_collisions)} 组现金时空伴随")
+            lines.append(f"  • 发现 {len(cash_collisions)} 组现金碰撞")
+        if len(cash_timing_patterns) > 0:
+            lines.append(
+                f"  • 发现 {len(cash_timing_patterns)} 组现金时序伴随线索（同主体）"
+            )
         if len(direct_transfers) > 0:
             lines.append(f"  • 发现 {len(direct_transfers)} 条直接往来记录")
         if len(hidden_assets) > 0:
@@ -10958,6 +11291,41 @@ class InvestigationReportBuilder:
 
                 total_family_salary = sum(ys.total for ys in yearly_salaries)
                 years_count = len(yearly_salaries)
+                # 年度拆分缺失时，回退到成员工资汇总，避免“家庭年均工资”错误显示0
+                if years_count == 0:
+                    fallback_salary_total = 0.0
+                    fallback_year_counts = []
+                    for member in members:
+                        profile = self.profiles.get(member, {})
+                        if not isinstance(profile, dict):
+                            continue
+                        yearly_salary_obj = profile.get("yearly_salary", {}) or profile.get(
+                            "yearlySalary", {}
+                        )
+                        if not isinstance(yearly_salary_obj, dict):
+                            continue
+                        salary_summary = yearly_salary_obj.get("summary", {})
+                        if isinstance(salary_summary, dict):
+                            try:
+                                fallback_salary_total += float(salary_summary.get("total", 0) or 0)
+                            except (TypeError, ValueError):
+                                pass
+                            year_count = salary_summary.get("years") or salary_summary.get(
+                                "year_count"
+                            )
+                            try:
+                                yc = int(year_count)
+                                if yc > 0:
+                                    fallback_year_counts.append(yc)
+                            except (TypeError, ValueError):
+                                pass
+                    if fallback_salary_total > 0:
+                        total_family_salary = fallback_salary_total
+                        years_count = (
+                            max(fallback_year_counts)
+                            if fallback_year_counts
+                            else 1
+                        )
                 avg_yearly_salary = (
                     total_family_salary / years_count if years_count > 0 else 0
                 )
@@ -10982,6 +11350,10 @@ class InvestigationReportBuilder:
                 lines.append("  ├" + "─" * 58 + "┤")
                 for ys in yearly_salaries:
                     lines.append(f"  │ {ys.year:<8} │ {ys.total_wan:>14.2f}  │")
+                if not yearly_salaries and total_family_salary > 0:
+                    lines.append(
+                        f"  │ {'汇总':<8} │ {total_family_salary / 10000:>14.2f}  │"
+                    )
                 lines.append("  └" + "─" * 58 + "┘")
                 lines.append("")
 
@@ -11023,8 +11395,10 @@ class InvestigationReportBuilder:
                     )
 
                     # 工资收入（按年统计）
-                    # 修复：正确的数据路径是 yearly_salary.yearly
-                    yearly_salary_obj = profile.get("yearly_salary", {})
+                    # 兼容 yearly_salary / yearlySalary
+                    yearly_salary_obj = profile.get("yearly_salary", {}) or profile.get(
+                        "yearlySalary", {}
+                    )
                     salary_by_year = (
                         yearly_salary_obj.get("yearly", {})
                         if isinstance(yearly_salary_obj, dict)
@@ -11157,8 +11531,9 @@ class InvestigationReportBuilder:
         lines.append("")
 
         # 现金时空伴随
+        issue_index = 1
         if cash_collisions:
-            lines.append(f"1. 现金时空伴随（{len(cash_collisions)}组）：")
+            lines.append(f"{issue_index}. 现金碰撞（{len(cash_collisions)}组）：")
             for i, collision in enumerate(cash_collisions[:3], 1):  # 只显示前3组
                 withdraw_time = collision.get("withdraw_time") or collision.get(
                     "withdrawal_date", collision.get("time1", "未知")
@@ -11173,35 +11548,100 @@ class InvestigationReportBuilder:
                     or collision.get("amount1")
                     or 0
                 )
+                try:
+                    amount = float(amount)
+                except (TypeError, ValueError):
+                    amount = 0.0
                 lines.append(
-                    f"   1.{i} 现金取存: {amount:,.0f}元，取现时间 {withdraw_time}，存现时间 {deposit_time}"
+                    f"   {issue_index}.{i} 现金取存: {amount:,.0f}元，取现时间 {withdraw_time}，存现时间 {deposit_time}"
+                )
+                lines.append(
+                    f"      ↳ {self._format_cash_collision_trace_line(collision)}"
                 )
             if len(cash_collisions) > 3:
-                lines.append(f"   ... 还有 {len(cash_collisions) - 3} 组现金时空伴随")
+                lines.append(f"   ... 还有 {len(cash_collisions) - 3} 组现金碰撞")
+            issue_index += 1
+
+        if cash_timing_patterns:
+            lines.append(
+                f"{issue_index}. 现金时序伴随线索（{len(cash_timing_patterns)}组，同主体）:"
+            )
+            for i, item in enumerate(cash_timing_patterns[:3], 1):
+                t1 = item.get("time1") or item.get("withdrawal_date", "未知")
+                t2 = item.get("time2") or item.get("deposit_date", "未知")
+                p1 = item.get("person1", "")
+                p2 = item.get("person2", "")
+                a1 = item.get("amount1", 0) or item.get("withdrawal_amount", 0) or 0
+                a2 = item.get("amount2", 0) or item.get("deposit_amount", 0) or 0
+                try:
+                    a1 = float(a1)
+                except (TypeError, ValueError):
+                    a1 = 0.0
+                try:
+                    a2 = float(a2)
+                except (TypeError, ValueError):
+                    a2 = 0.0
+                lines.append(
+                    f"   {issue_index}.{i} {p1 or '未知主体'}→{p2 or '未知主体'}，金额{max(a1, a2):,.0f}元，时间 {t1} / {t2}"
+                )
+                lines.append(f"      ↳ {self._format_cash_collision_trace_line(item)}")
+            if len(cash_timing_patterns) > 3:
+                lines.append(
+                    f"   ... 还有 {len(cash_timing_patterns) - 3} 组现金时序伴随线索"
+                )
             lines.append("")
+            issue_index += 1
 
         # 直接往来
         if direct_transfers:
-            lines.append(f"2. 直接往来记录（{len(direct_transfers)}条）：")
+            lines.append(f"{issue_index}. 直接往来记录（{len(direct_transfers)}条）：")
             for i, transfer in enumerate(direct_transfers[:3], 1):  # 只显示前3条
                 date = transfer.get("date", "未知")
                 amount = transfer.get("amount", 0)
-                counterparty = (
-                    transfer.get("counterparty")
-                    or transfer.get("company")
-                    or transfer.get("target")
-                    or "未知"
+                try:
+                    amount = float(amount)
+                except (TypeError, ValueError):
+                    amount = 0.0
+
+                from_name = self._pick_first_non_empty(transfer, "from", "person")
+                to_name = self._pick_first_non_empty(
+                    transfer, "to", "company", "counterparty", "target"
                 )
-                lines.append(f"   2.{i} {date} 与 {counterparty} 往来 {amount:,.0f}元")
+                relation_text = (
+                    f"{from_name}→{to_name}"
+                    if from_name and to_name
+                    else (
+                        transfer.get("counterparty")
+                        or transfer.get("company")
+                        or transfer.get("target")
+                        or "未知"
+                    )
+                )
+                lines.append(
+                    f"   {issue_index}.{i} {date} 与 {relation_text} 往来 {amount:,.0f}元"
+                )
+                lines.append(
+                    f"      ↳ {self._format_direct_transfer_trace_line(transfer)}"
+                )
             if len(direct_transfers) > 3:
                 lines.append(f"   ... 还有 {len(direct_transfers) - 3} 条直接往来")
             lines.append("")
+            issue_index += 1
+
+        lines.append("【溯源说明】")
+        lines.append(
+            "  • 本报告统计与金额直接读取 output/analysis_cache 缓存，不重复计算原始流水"
+        )
+        lines.append(
+            "  • 线索条目优先输出证据来源文件、行号、交易ID；缺失字段将标记为“未提供”"
+        )
+        lines.append("")
 
         # 综合研判与建议
         lines.append("【综合研判与建议】")
         if risk_level == "高风险":
             lines.append("  ➡ 建议: 立即启动深入调查程序")
-            lines.append("  • 重点关注现金时空伴随和直接往来记录")
+            lines.append("  • 重点关注现金碰撞/时序伴随及直接往来记录")
             lines.append("  • 对大额收入来源进行逐笔核查")
         elif risk_level == "中风险":
             lines.append("  ➡ 建议: 对可疑交易进行重点核查")

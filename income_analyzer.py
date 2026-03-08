@@ -14,7 +14,19 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
 from collections import defaultdict
 import config
-import utils
+from counterparty_utils import (
+    is_wealth_management_transaction,
+    should_exclude_large_income,
+    is_individual_name,
+    ExclusionContext
+)
+from counterparty_utils import (
+    is_wealth_management_transaction,
+    should_exclude_large_income,
+    is_individual_name,
+    ExclusionContext
+)
+from wealth_account_analyzer import integrate_with_income_analyzer
 from counterparty_utils import (
     is_wealth_management_transaction,
     should_exclude_large_income,
@@ -401,15 +413,37 @@ def _detect_unknown_income(
     periodic_deposit_patterns = _identify_periodic_deposit_patterns(all_transactions, core_persons)
     
     for person in core_persons:
-        for key, df in all_transactions.items():
-            if person not in key or '公司' in key:
-                continue
-            
-            if df.empty:
-                continue
-            
-            for _, row in df.iterrows():
-                if row.get('income', 0) < min_amount:
+            for key, df in all_transactions.items():
+                if person not in key or '公司' in key:
+                    continue
+                
+                if df.empty:
+                    continue
+                
+                # 【重构】优先使用WealthAccountAnalyzer进行账户分类和交易识别
+                df_processed = df.copy()
+                wealth_analysis_success = False
+                
+                try:
+                    from wealth_account_analyzer import integrate_with_income_analyzer
+                    df_processed = integrate_with_income_analyzer(df, person)
+                    wealth_analysis_success = True
+                    
+                    # 统计分类结果
+                    category_counts = df_processed['category'].value_counts().to_dict()
+                    non_unknown = {k: v for k, v in category_counts.items() if k != 'unknown'}
+                    if non_unknown:
+                        logger.info(f'[WealthAccountAnalyzer] {person}: 识别出{sum(non_unknown.values())}笔特定交易')
+                        for cat, count in non_unknown.items():
+                            logger.info(f'  - {cat}: {count}笔')
+                except Exception as e:
+                    logger.warning(f'[WealthAccountAnalyzer] {person} 分析失败，使用备用识别: {e}')
+                    df_processed['category'] = 'unknown'
+                    df_processed['category_confidence'] = 0.0
+                
+                for _, row in df_processed.iterrows():
+                    if row.get('income', 0) < min_amount:
+                        continue
                     continue
                 
                 cp = str(row.get('counterparty', ''))
@@ -437,13 +471,27 @@ def _detect_unknown_income(
                     is_unknown = True
                     reason = '现金存入（来源不明）'
                 
-                # 理财产品识别 - 多维度判断
+                # 【重构】理财产品识别 - 优先使用WealthAccountAnalyzer结果
                 if is_unknown:
-                    # 理财产品识别 - 使用统一的识别函数
-                    is_wealth_mgmt, wealth_reason = is_wealth_management_transaction(desc, row['income'], cp)
-                    if is_wealth_mgmt:
+                    # 方法1: 优先使用WealthAccountAnalyzer的分类结果
+                    category = str(row.get('category', 'unknown'))
+                    confidence = float(row.get('category_confidence', 0.0))
+                    
+                    if category in ['wealth_redemption', 'wealth_purchase'] and confidence >= 0.6:
                         is_unknown = False
-                        logger.debug(f'  理财识别: {person} {row["income"]/10000:.2f}万 - {wealth_reason}')
+                        reason = f'WealthAccountAnalyzer识别({category}, 置信度{confidence:.2f})'
+                        logger.info(f'[理财识别] {person} {row["income"]/10000:.2f}万 - {reason}')
+                    elif category in ['securities_inflow', 'securities_outflow'] and confidence >= 0.7:
+                        is_unknown = False
+                        reason = f'银证转账识别({category}, 置信度{confidence:.2f})'
+                        logger.debug(f'[银证识别] {person} {row["income"]/10000:.2f}万 - {reason}')
+                    
+                    # 方法2: 原有识别函数作为fallback
+                    if is_unknown:
+                        is_wealth_mgmt, wealth_reason = is_wealth_management_transaction(desc, row['income'], cp)
+                        if is_wealth_mgmt:
+                            is_unknown = False
+                            logger.debug(f'  理财识别(fallback): {person} {row["income"]/10000:.2f}万 - {wealth_reason}')
                 
                 # 检查是否匹配定期存款模式
                 if is_unknown:
@@ -493,6 +541,13 @@ def _detect_unknown_income(
     
     # 按金额排序
     unknown_income.sort(key=lambda x: -x['amount'])
+    
+    # 【新增】统计WealthAccountAnalyzer识别效果
+    if unknown_income:
+        logger.info(f'【收入分析结果】')
+        logger.info(f'  - 总大额收入: {len([x for x in unknown_income if x.get("amount", 0) > 0]) + len(unknown_income)}笔')
+        logger.info(f'  - WealthAccountAnalyzer已识别: 从来源不明中排除')
+        logger.info(f'  - 剩余来源不明: {len(unknown_income)}笔')
     
     logger.info(f'  发现 {len(unknown_income)} 笔来源不明的大额收入')
     return unknown_income

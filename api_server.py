@@ -18,6 +18,7 @@ import sys
 import warnings
 import os
 import json
+import shutil
 import logging
 from datetime import datetime, timedelta, date
 from typing import Dict, List, Optional, Any
@@ -167,6 +168,17 @@ class AnalysisState:
                 "error": self.error,
             }
 
+    def reset(self, phase: str = "等待开始分析"):
+        """重置状态（清空内存结果）。"""
+        with self._lock:
+            self.status = "idle"
+            self.progress = 0
+            self.phase = phase
+            self.start_time = None
+            self.end_time = None
+            self.results = None
+            self.error = None
+
 
 analysis_state = AnalysisState()
 _current_config = {}
@@ -190,6 +202,68 @@ def _get_cache_manager() -> CacheManager:
         cache_dir = os.path.join(cache_dir, "analysis_cache")
         _cache_manager = CacheManager(cache_dir)
     return _cache_manager
+
+
+def _get_active_output_dir() -> str:
+    """获取当前生效的输出目录（优先使用最近一次分析配置）。"""
+    configured = _current_config.get("outputDirectory")
+    if configured:
+        return os.path.abspath(os.path.expanduser(str(configured)))
+    return str(OUTPUT_DIR)
+
+
+def _get_active_cache_dir() -> str:
+    return os.path.join(_get_active_output_dir(), "analysis_cache")
+
+
+def _get_active_results_dir() -> str:
+    return os.path.join(_get_active_output_dir(), "analysis_results")
+
+
+def _has_valid_disk_cache(output_dir: Optional[str] = None) -> bool:
+    """
+    判断磁盘缓存是否完整。
+    仅当核心缓存文件齐全时，认为可恢复历史结果。
+    """
+    base = output_dir or _get_active_output_dir()
+    cache_dir = os.path.join(base, "analysis_cache")
+    required_files = ("profiles.json", "derived_data.json", "suspicions.json", "metadata.json")
+    return all(os.path.exists(os.path.join(cache_dir, name)) for name in required_files)
+
+
+def _clear_directory_contents(directory: str):
+    """清空目录内容但保留目录本身。"""
+    if not os.path.exists(directory):
+        os.makedirs(directory, exist_ok=True)
+        return
+
+    for name in os.listdir(directory):
+        path = os.path.join(directory, name)
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(f"清理路径失败: {path}, {exc}")
+
+
+def _ensure_completed_state_consistent():
+    """
+    保证内存状态与磁盘一致：
+    - 若内存显示 completed，但磁盘缓存已被清空，则自动回退为 idle。
+    """
+    if analysis_state.status != "completed" or not analysis_state.results:
+        return
+
+    output_dir = _get_active_output_dir()
+    if _has_valid_disk_cache(output_dir):
+        return
+
+    logging.getLogger(__name__).warning(
+        f"检测到内存结果与磁盘不一致（缓存缺失），重置状态。output={output_dir}"
+    )
+    analysis_state.reset("缓存已清空，请重新开始分析")
 
 
 class WebSocketLogHandler(logging.Handler):
@@ -473,6 +547,15 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
 
     def convert_cash_collision(record: Dict) -> Dict:
         """转换单条 cash_collision 记录"""
+        evidence_refs = record.get("evidence_refs", {})
+        if not isinstance(evidence_refs, dict):
+            evidence_refs = {}
+        withdrawal_row = record.get("withdrawal_row")
+        if withdrawal_row is None:
+            withdrawal_row = evidence_refs.get("withdrawal_row")
+        deposit_row = record.get("deposit_row")
+        if deposit_row is None:
+            deposit_row = evidence_refs.get("deposit_row")
         return {
             # 核心字段映射 (后端 withdrawal_entity -> 前端 person1)
             "person1": record.get("withdrawal_entity", ""),
@@ -492,12 +575,26 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
             "depositBank": record.get("deposit_bank", ""),
             "withdrawalSource": record.get("withdrawal_source", ""),
             "depositSource": record.get("deposit_source", ""),
+            "withdrawalRow": withdrawal_row,
+            "depositRow": deposit_row,
+            "withdrawalTransactionId": record.get("withdrawal_transaction_id", ""),
+            "depositTransactionId": record.get("deposit_transaction_id", ""),
+            "evidenceRefs": evidence_refs,
             "type": record.get("type", ""),
             "patternCategory": record.get("pattern_category", ""),
         }
 
     def convert_direct_transfer(record: Dict) -> Dict:
         """转换单条 direct_transfer 记录"""
+        evidence_refs = record.get("evidence_refs", {})
+        if not isinstance(evidence_refs, dict):
+            evidence_refs = {}
+        source_row_index = record.get("source_row_index")
+        if source_row_index is None:
+            source_row_index = evidence_refs.get("source_row_index")
+        transaction_id = record.get("transaction_id", "")
+        if not transaction_id:
+            transaction_id = evidence_refs.get("transaction_id", "")
         return {
             # 核心字段映射 (后端 person -> 前端 from)
             "from": record.get("person", ""),
@@ -509,6 +606,9 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
             "direction": record.get("direction", ""),
             "bank": record.get("bank", ""),
             "sourceFile": record.get("source_file", ""),
+            "sourceRowIndex": source_row_index,
+            "transactionId": transaction_id,
+            "evidenceRefs": evidence_refs,
             "riskLevel": record.get("risk_level", "low"),
             "riskReason": record.get("risk_reason", ""),
         }
@@ -2145,6 +2245,7 @@ async def root():
 @app.get("/api/status")
 async def get_status():
     """获取分析状态"""
+    _ensure_completed_state_consistent()
     return analysis_state.to_dict()
 
 
@@ -2167,6 +2268,8 @@ async def get_results():
     logger = logging.getLogger(__name__)
 
     try:
+        _ensure_completed_state_consistent()
+
         # 如果内存中有结果，直接返回
         if analysis_state.status == "completed" and analysis_state.results:
             results_data = serialize_for_json(analysis_state.results)
@@ -2179,7 +2282,7 @@ async def get_results():
             return Response(content=response_body, media_type="application/json")
 
         # 内存中没有结果，尝试从缓存文件读取
-        cache_dir = os.path.join(str(OUTPUT_DIR), "analysis_cache")
+        cache_dir = _get_active_cache_dir()
         cache_mgr = CacheManager(cache_dir)
         results_data = cache_mgr.load_results()
 
@@ -2187,6 +2290,8 @@ async def get_results():
             # 将缓存结果加载到内存
             analysis_state.results = results_data
             analysis_state.status = "completed"
+            if not analysis_state.end_time:
+                analysis_state.end_time = datetime.now()
             results_serialized = serialize_for_json(results_data)
             results_serialized = to_camel_case(results_serialized)
             results_serialized = serialize_for_json(results_serialized)
@@ -2251,6 +2356,8 @@ async def get_reports():
 @app.get("/api/reports/subjects")
 async def get_report_subjects():
     """获取报告生成可选的核查对象列表"""
+    _ensure_completed_state_consistent()
+
     # 优先从缓存中获取
     if analysis_state.status == "completed" and analysis_state.results:
         results = analysis_state.results
@@ -2298,7 +2405,7 @@ async def get_report_subjects():
         return {"success": True, "subjects": subjects}
 
     # 尝试从缓存文件中读取
-    cache_dir = os.path.join(str(OUTPUT_DIR), "analysis_cache")
+    cache_dir = _get_active_cache_dir()
     metadata_path = os.path.join(cache_dir, "metadata.json")
     profiles_path = os.path.join(cache_dir, "profiles.json")
 
@@ -2357,7 +2464,7 @@ async def get_report_subjects():
 @app.get("/api/cache/info")
 async def get_cache_info():
     """获取缓存信息（用于调试和监控）"""
-    cache_dir = os.path.join(str(OUTPUT_DIR), "analysis_cache")
+    cache_dir = _get_active_cache_dir()
     try:
         cache_mgr = CacheManager(cache_dir)
         cache_info = cache_mgr.get_cache_info()
@@ -2374,7 +2481,7 @@ async def invalidate_cache(cache_name: Optional[str] = None):
     Args:
         cache_name: 缓存名称（如 'profiles'），None 表示失效所有缓存
     """
-    cache_dir = os.path.join(str(OUTPUT_DIR), "analysis_cache")
+    cache_dir = _get_active_cache_dir()
     try:
         cache_mgr = CacheManager(cache_dir)
         if cache_name:
@@ -2382,7 +2489,35 @@ async def invalidate_cache(cache_name: Optional[str] = None):
             return {"success": True, "message": f"已失效缓存: {cache_name}"}
         else:
             cache_mgr.clear_all()
+            # 缓存失效后同步清空内存态，避免旧结果继续返回
+            analysis_state.reset("缓存已失效，请重新开始分析")
             return {"success": True, "message": "已清除所有缓存"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/cache/clear")
+async def clear_cache():
+    """彻底清空缓存（内存 + 当前输出目录）。"""
+    if analysis_state.status == "running":
+        return {"success": False, "error": "分析正在运行，无法清空缓存"}
+
+    output_dir = _get_active_output_dir()
+    cache_dir = _get_active_cache_dir()
+    results_dir = _get_active_results_dir()
+    cleaned_data_dir = os.path.join(output_dir, "cleaned_data")
+
+    try:
+        with _cache_lock:
+            _clear_directory_contents(cache_dir)
+            _clear_directory_contents(results_dir)
+            _clear_directory_contents(cleaned_data_dir)
+
+        analysis_state.reset("缓存已清空，等待开始分析")
+        return {
+            "success": True,
+            "message": f"缓存已清空: output={output_dir}",
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
 

@@ -292,6 +292,137 @@ function OverviewTab() {
     const incomeSummary = data.analysisResults?.income?.summary || {};
     const incomeDetailsData = data.analysisResults?.income?.details || [];
 
+    // 初步研判提示专用口径：拆分“总条目/去重条目/分类构成”，避免用户误解
+    const preliminaryMetrics = useMemo(() => {
+        const safeIncomeDetails = Array.isArray(incomeDetailsData) ? incomeDetailsData : [];
+        const safeLoanDetails = Array.isArray(loanDetailsData) ? loanDetailsData : [];
+
+        const toAmount = (item: any): number => {
+            const candidates = [
+                item?.amount,
+                item?.income_total,
+                item?.total_amount,
+                item?.avg_amount,
+                item?.income_amount,
+                item?.loan_amount,
+            ];
+            for (const value of candidates) {
+                const num = Number(value || 0);
+                if (Number.isFinite(num) && num !== 0) return num;
+            }
+            return 0;
+        };
+
+        const getSourceFile = (item: any): string =>
+            String(
+                item?.source_file ||
+                item?.sourceFile ||
+                item?.loan_source_file ||
+                item?.income_source_file ||
+                ''
+            ).trim();
+
+        const getSourceRow = (item: any): string => {
+            const row = item?.source_row_index ??
+                item?.sourceRowIndex ??
+                item?.loan_source_row ??
+                item?.income_source_row ??
+                item?.source_row;
+            if (row === null || row === undefined) return '';
+            const text = String(row).trim();
+            return text && text.toLowerCase() !== 'nan' ? text : '';
+        };
+
+        const getSourceKey = (item: any): string => {
+            const file = getSourceFile(item);
+            if (!file) return '';
+            const row = getSourceRow(item);
+            return `${file}::${row || '*'}`;
+        };
+
+        const getRelationKey = (item: any): string => {
+            const person = String(
+                item?.person || item?.name || item?.borrower || item?.lender || ''
+            ).trim();
+            const counterparty = String(
+                item?.counterparty || item?.platform || item?.company || item?.target || ''
+            ).trim();
+            if (!person || !counterparty) return '';
+            return `${person}::${counterparty}`;
+        };
+
+        const incomeTypeCounts = safeIncomeDetails.reduce((acc: Record<string, number>, item: any) => {
+            const key = String(item?._type || 'unknown');
+            acc[key] = (acc[key] || 0) + 1;
+            return acc;
+        }, {});
+
+        const loanTypeCounts = safeLoanDetails.reduce((acc: Record<string, number>, item: any) => {
+            const key = String(item?._type || 'unknown');
+            acc[key] = (acc[key] || 0) + 1;
+            return acc;
+        }, {});
+
+        const incomeIndependentTypes = new Set([
+            'large_single',
+            'large_individual',
+            'unknown_source',
+            'regular_non_salary',
+            'same_source_multi',
+            'bribe_installment',
+        ]);
+
+        const incomeIndependentSourceKeys = new Set(
+            safeIncomeDetails
+                .filter((item: any) => incomeIndependentTypes.has(String(item?._type || '')))
+                .map((item: any) => getSourceKey(item))
+                .filter((key: string) => !!key)
+        );
+        const incomeAllSourceKeys = new Set(
+            safeIncomeDetails.map((item: any) => getSourceKey(item)).filter((key: string) => !!key)
+        );
+        const incomeRiskRollupCount =
+            (incomeTypeCounts.high_risk || 0) + (incomeTypeCounts.medium_risk || 0);
+        const incomeAmount = safeIncomeDetails.reduce(
+            (sum: number, item: any) => sum + toAmount(item),
+            0
+        );
+
+        const loanAllSourceKeys = new Set(
+            safeLoanDetails.map((item: any) => getSourceKey(item)).filter((key: string) => !!key)
+        );
+        const loanRelationKeys = new Set(
+            safeLoanDetails.map((item: any) => getRelationKey(item)).filter((key: string) => !!key)
+        );
+        const loanTradeCount = loanTypeCounts.online_loan || 0;
+        const loanPatternCount = loanTypeCounts.regular_repayment || 0;
+        const loanRelationCount =
+            (loanTypeCounts.bidirectional || 0) +
+            (loanTypeCounts.no_repayment || 0) +
+            (loanTypeCounts.loan_pair || 0) +
+            (loanTypeCounts.abnormal_interest || 0);
+
+        return {
+            income: {
+                total: safeIncomeDetails.length,
+                amount: incomeAmount,
+                independentSourceCount: incomeIndependentSourceKeys.size,
+                allSourceCount: incomeAllSourceKeys.size,
+                riskRollupCount: incomeRiskRollupCount,
+                typeCounts: incomeTypeCounts,
+            },
+            loan: {
+                total: safeLoanDetails.length,
+                uniqueRelationCount: loanRelationKeys.size,
+                sourceCount: loanAllSourceKeys.size,
+                tradeCount: loanTradeCount,
+                patternCount: loanPatternCount,
+                relationCount: loanRelationCount,
+                typeCounts: loanTypeCounts,
+            },
+        };
+    }, [incomeDetailsData, loanDetailsData]);
+
     // 🆕 审计发现类型分布 - 按借贷分析和收入分析的分类显示
     const auditFindingsDistribution = useMemo(() => {
         if (!hasRealData) return [{ name: '等待分析', value: 100, color: '#374151' }];
@@ -412,7 +543,7 @@ function OverviewTab() {
             label: '借贷风险分析',
             value: loanDetails.length,
             color: 'text-red-400',
-            desc: '点击查看分类汇总',
+            desc: '总条目（含交易/关系/模式）',
             icon: Users
         },
         // 2. 异常收入分析 - 显示所有收入类型总数，弹窗中分类展示
@@ -421,7 +552,7 @@ function OverviewTab() {
             label: '异常收入分析',
             value: incomeDetails.length,
             color: 'text-orange-400',
-            desc: '点击查看分类汇总',
+            desc: '总条目（含风险汇总重叠）',
             icon: TrendingUp
         },
         // 4. 核心人员往来
@@ -1119,10 +1250,14 @@ function OverviewTab() {
                                     {incomeDetails.length > 0 && (
                                         <div className="flex items-start gap-2 theme-text-secondary">
                                             <span className="text-orange-400 mt-0.5">•</span>
-                                            <span>
-                                                检测到 <span className="text-orange-400 font-bold">{incomeDetails.length}</span> 条疑似异常收入记录，
-                                                涉及金额 <span className="text-orange-400 font-bold">
-                                                    ¥{(incomeDetails.reduce((sum: number, d: any) => sum + (d.amount || d.income_total || 0), 0) / 10000).toFixed(1)}万
+                                            <span className="space-y-1">
+                                                <span>
+                                                    异常收入线索共 <span className="text-orange-400 font-bold">{preliminaryMetrics.income.total}</span> 条
+                                                    （含高/中风险汇总 <span className="text-orange-400 font-bold">{preliminaryMetrics.income.riskRollupCount}</span> 条），
+                                                    涉及金额约 <span className="text-orange-400 font-bold">¥{(preliminaryMetrics.income.amount / 10000).toFixed(1)}万</span>
+                                                </span>
+                                                <span className="block text-xs theme-text-dim">
+                                                    去重后独立源记录约 <span className="font-semibold">{preliminaryMetrics.income.independentSourceCount}</span> 条（按来源文件+行号）
                                                 </span>
                                             </span>
                                         </div>
@@ -1132,9 +1267,14 @@ function OverviewTab() {
                                     {loanDetails.length > 0 && (
                                         <div className="flex items-start gap-2 theme-text-secondary">
                                             <span className="text-yellow-400 mt-0.5">•</span>
-                                            <span>
-                                                识别出 <span className="text-yellow-400 font-bold">{loanDetails.length}</span> 组疑似借贷异常关系，
-                                                建议逐一核查资金性质
+                                            <span className="space-y-1">
+                                                <span>
+                                                    借贷线索共 <span className="text-yellow-400 font-bold">{preliminaryMetrics.loan.total}</span> 条
+                                                    （交易类{preliminaryMetrics.loan.tradeCount}、模式类{preliminaryMetrics.loan.patternCount}、关系类{preliminaryMetrics.loan.relationCount}）
+                                                </span>
+                                                <span className="block text-xs theme-text-dim">
+                                                    去重后约 <span className="font-semibold">{preliminaryMetrics.loan.uniqueRelationCount}</span> 组人员-对手方关系
+                                                </span>
                                             </span>
                                         </div>
                                     )}
@@ -1156,7 +1296,7 @@ function OverviewTab() {
                                 <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 text-xs text-yellow-300/90">
                                     <span className="font-bold">⚠️ 重要提示：</span>{' '}
                                     以上结论由系统通过规则识别逻辑自动生成，仅供参考。<span className="font-medium">重要数据仍需人工复核确认</span>，
-                                    请结合业务背景及下方成品资料开展深入核查。
+                                    且“总条目数”包含分类重叠，不等同于独立交易笔数，请优先参考去重口径。
                                 </div>
                             </div>
                         </div>
