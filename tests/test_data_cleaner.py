@@ -89,6 +89,19 @@ class TestDeduplicateTransactions:
         assert 'dedup_rate' in stats
         assert 'dedup_details' in stats
 
+    def test_deduplicate_same_amount_opposite_direction_not_removed(self):
+        """同金额反方向交易不应互相去重"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01 10:00:00', '2024-01-01 10:00:01']),
+            'income': [1000, 0],
+            'expense': [0, 1000],
+            'counterparty': ['A公司', 'A公司'],
+            'description': ['转账', '转账']
+        })
+        result, stats = deduplicate_transactions(df)
+        assert len(result) == 2
+        assert stats['duplicates'] == 0
+
 
 class TestValidateDataQuality:
     """测试数据质量验证函数"""
@@ -234,6 +247,34 @@ class TestStandardizeBankFields:
                         'description', 'balance', 'is_cash']
         for col in required_cols:
             assert col in result.columns
+
+    def test_standardize_negative_sign_normalization_without_dc_flag(self):
+        """无借贷标志时，负值应自动翻转到对侧字段"""
+        df = pd.DataFrame({
+            '交易日期': ['2024-01-01', '2024-01-02'],
+            '收入': [-1000, 0],
+            '支出': [0, -2000],
+            '摘要': ['测试1', '测试2']
+        })
+        result = standardize_bank_fields(df)
+        assert result.iloc[0]['income'] == 0
+        assert result.iloc[0]['expense'] == 1000
+        assert result.iloc[1]['income'] == 2000
+        assert result.iloc[1]['expense'] == 0
+
+    def test_standardize_company_entity_account_category(self):
+        """公司主体应按对公账户口径识别"""
+        df = pd.DataFrame({
+            '交易时间': ['2024-01-01'],
+            '交易金额': [15000],
+            '借贷标志': ['贷'],
+            '本方账号': ['123456789012'],
+            '交易摘要': ['货款回款']
+        })
+        result = standardize_bank_fields(df, bank_name='中国银行', entity_name='某某科技有限公司')
+        assert result.iloc[0]['account_category'] == '对公账户'
+        assert result.iloc[0]['account_type'] == '对公结算账户'
+        assert bool(result.iloc[0]['is_real_bank_card']) is True
 
 
 class TestGenerateCleaningReport:

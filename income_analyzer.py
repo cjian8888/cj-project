@@ -14,12 +14,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
 from collections import defaultdict
 import config
-from counterparty_utils import (
-    is_wealth_management_transaction,
-    should_exclude_large_income,
-    is_individual_name,
-    ExclusionContext
-)
+import utils
 from counterparty_utils import (
     is_wealth_management_transaction,
     should_exclude_large_income,
@@ -27,12 +22,6 @@ from counterparty_utils import (
     ExclusionContext
 )
 from wealth_account_analyzer import integrate_with_income_analyzer
-from counterparty_utils import (
-    is_wealth_management_transaction,
-    should_exclude_large_income,
-    is_individual_name,
-    ExclusionContext
-)
 
 logger = utils.setup_logger(__name__)
 

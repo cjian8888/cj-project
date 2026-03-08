@@ -16,6 +16,82 @@ import utils
 logger = utils.setup_logger(__name__)
 
 
+def _looks_like_company_entity(entity_name: str) -> bool:
+    """根据实体名做轻量公司识别（用于清洗阶段口径修正）。"""
+    if not entity_name:
+        return False
+    name = str(entity_name)
+    company_keywords = [
+        "公司",
+        "有限",
+        "集团",
+        "企业",
+        "科技",
+        "投资",
+        "贸易",
+        "实业",
+        "中心",
+        "研究所",
+    ]
+    return any(kw in name for kw in company_keywords)
+
+
+def _normalize_income_expense_signs(
+    income_series: pd.Series, expense_series: pd.Series
+) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    """
+    统一收支符号语义：
+    - income >= 0
+    - expense >= 0
+    负值按方向翻转到对侧字段，避免后续汇总/规则口径混乱。
+    """
+    income = pd.to_numeric(income_series, errors="coerce").fillna(0.0)
+    expense = pd.to_numeric(expense_series, errors="coerce").fillna(0.0)
+
+    neg_income = income < 0
+    neg_expense = expense < 0
+
+    normalized_income = income.clip(lower=0) + (-expense.where(neg_expense, 0.0))
+    normalized_expense = expense.clip(lower=0) + (-income.where(neg_income, 0.0))
+    corrected_mask = neg_income | neg_expense
+
+    return normalized_income, normalized_expense, corrected_mask
+
+
+def _build_dedup_direction_amount_keys(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
+    """
+    生成去重分组键：
+    - direction_key: I(收入) / E(支出) / M(混合)
+    - amount_key: 对应方向金额（混合时为收入+支出的绝对值和）
+    """
+    income_col = (
+        pd.to_numeric(df["income"], errors="coerce")
+        if "income" in df.columns
+        else pd.Series(0.0, index=df.index)
+    ).fillna(0.0)
+    expense_col = (
+        pd.to_numeric(df["expense"], errors="coerce")
+        if "expense" in df.columns
+        else pd.Series(0.0, index=df.index)
+    ).fillna(0.0)
+
+    income_abs = income_col.abs()
+    expense_abs = expense_col.abs()
+
+    is_income = (income_abs > 0) & (expense_abs <= 0)
+    is_expense = (expense_abs > 0) & (income_abs <= 0)
+
+    direction_key = pd.Series("M", index=df.index, dtype="object")
+    direction_key.loc[is_income] = "I"
+    direction_key.loc[is_expense] = "E"
+
+    amount_key = income_abs + expense_abs
+    amount_key.loc[is_income] = income_abs.loc[is_income]
+    amount_key.loc[is_expense] = expense_abs.loc[is_expense]
+
+    return direction_key, amount_key.round(2)
+
+
 def deduplicate_transactions(
     df: pd.DataFrame, output_dir: str = None
 ) -> Tuple[pd.DataFrame, Dict]:
@@ -41,15 +117,7 @@ def deduplicate_transactions(
     if not pd.api.types.is_datetime64_any_dtype(df["date"]):
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df["_timestamp"] = df["date"].astype("int64") // 10**9  # 转为秒级时间戳
-    # 【P1-异常3修复】添加列存在性检查，避免KeyError
-    income_col = (
-        df["income"] if "income" in df.columns else pd.Series(0.0, index=df.index)
-    )
-    expense_col = (
-        df["expense"] if "expense" in df.columns else pd.Series(0.0, index=df.index)
-    )
-    df["_amount_rounded"] = income_col.fillna(0) + expense_col.fillna(0)
-    df["_amount_rounded"] = df["_amount_rounded"].round(2)
+    df["_direction_key"], df["_amount_rounded"] = _build_dedup_direction_amount_keys(df)
 
     # DEBUG: 打印前几行数据，检查是否有大量重复值
     if len(df) > 0:
@@ -58,8 +126,9 @@ def deduplicate_transactions(
             row = df.iloc[i]
             tx_id = row.get("transaction_id", "N/A")
             ts = row.get("_timestamp", "N/A")
+            direction = row.get("_direction_key", "N/A")
             amt = row.get("_amount_rounded", "N/A")
-            logger.debug(f"  Row {i}: ID={tx_id}, Time={ts}, Amt={amt}")
+            logger.debug(f"  Row {i}: ID={tx_id}, Time={ts}, Dir={direction}, Amt={amt}")
 
     # 标记潜在重复组
     # 同一账号、相近时间(容差范围内)、相同金额的交易可能是重复
@@ -106,20 +175,7 @@ def deduplicate_transactions(
             df = df.sort_values("date").reset_index(drop=True)
             # 重新计算临时列
             df["_timestamp"] = df["date"].astype("int64") // 10**9
-            # 【P1-异常3修复】添加列存在性检查，避免KeyError
-            income_col = (
-                df["income"]
-                if "income" in df.columns
-                else pd.Series(0.0, index=df.index)
-            )
-            expense_col = (
-                df["expense"]
-                if "expense" in df.columns
-                else pd.Series(0.0, index=df.index)
-            )
-            df["_amount_rounded"] = (
-                income_col.fillna(0) + expense_col.fillna(0)
-            ).round(2)
+            df["_direction_key"], df["_amount_rounded"] = _build_dedup_direction_amount_keys(df)
         else:
             logger.info("流水号字段存在但均无效，将使用启发式去重")
     else:
@@ -138,7 +194,7 @@ def deduplicate_transactions(
     # 按金额分组进行向量化去重（金额相同的记录才可能是重复）
     tolerance = config.DEDUP_TIME_TOLERANCE_SECONDS
 
-    for amount, group in df.groupby("_amount_rounded"):
+    for (_, _), group in df.groupby(["_direction_key", "_amount_rounded"], dropna=False):
         if len(group) < 2:
             continue
 
@@ -220,6 +276,7 @@ def deduplicate_transactions(
                             {
                                 "原始行号": int(next_idx),
                                 "日期": next_row.get("date"),
+                                "方向": str(next_row.get("_direction_key", "M")),
                                 "金额": float(next_row.get("_amount_rounded", 0)),
                                 "对手方": str(next_row.get("counterparty", "")),
                                 "摘要": str(next_row.get("description", ""))[:30],
@@ -237,7 +294,9 @@ def deduplicate_transactions(
     df_dedup = df[~duplicates_mask].copy()
 
     # 清理临时列
-    df_dedup = df_dedup.drop(["_timestamp", "_amount_rounded"], axis=1)
+    df_dedup = df_dedup.drop(
+        ["_timestamp", "_direction_key", "_amount_rounded"], axis=1
+    )
 
     duplicate_count = duplicates_mask.sum()
     final_count = len(df_dedup)
@@ -378,7 +437,9 @@ def validate_data_quality(
     return df_valid, quality_report
 
 
-def standardize_bank_fields(df: pd.DataFrame, bank_name: str = None) -> pd.DataFrame:
+def standardize_bank_fields(
+    df: pd.DataFrame, bank_name: str = None, entity_name: str = None
+) -> pd.DataFrame:
     """
     标准化银行字段(增强版,支持真实银行数据格式)
 
@@ -389,9 +450,12 @@ def standardize_bank_fields(df: pd.DataFrame, bank_name: str = None) -> pd.DataF
     Returns:
         标准化后的DataFrame
     """
-    logger.info(f"标准化银行字段,银行: {bank_name or '未知'}")
+    logger.info(
+        f"标准化银行字段,银行: {bank_name or '未知'}, 实体: {entity_name or '未知'}"
+    )
 
     normalized = pd.DataFrame()
+    is_company_entity = _looks_like_company_entity(entity_name)
 
     # 1. 日期字段 - 支持"交易时间"
     date_col = None
@@ -444,7 +508,7 @@ def standardize_bank_fields(df: pd.DataFrame, bank_name: str = None) -> pd.DataF
         normalized["expense"] = 0.0
 
         # 向量化处理金额和借贷标志
-        amounts = df[amount_col].apply(utils.format_amount)
+        amounts = df[amount_col].apply(utils.format_amount).abs()
         flags = df[debit_credit_col].astype(str).str.strip().str.upper()
 
         # 定义收入/支出标志
@@ -457,7 +521,11 @@ def standardize_bank_fields(df: pd.DataFrame, bank_name: str = None) -> pd.DataF
         # 布尔索引：借方标志
         debit_mask = flags.isin(debit_flags)
         # 布尔索引：根据摘要推断收入
-        desc_lower = df[desc_col].astype(str).str.lower()
+        desc_lower = (
+            df[desc_col].astype(str).str.lower()
+            if desc_col and desc_col in df.columns
+            else pd.Series("", index=df.index)
+        )
         inferred_income_mask = (
             ~credit_mask
             & ~debit_mask
@@ -501,6 +569,14 @@ def standardize_bank_fields(df: pd.DataFrame, bank_name: str = None) -> pd.DataF
             normalized["expense"] = df[expense_col].apply(utils.format_amount)
         else:
             normalized["expense"] = 0.0
+
+    # 3.1 统一收支符号语义（收入/支出均为非负）
+    normalized["income"], normalized["expense"], sign_fixed_mask = (
+        _normalize_income_expense_signs(normalized["income"], normalized["expense"])
+    )
+    sign_fixed_count = int(sign_fixed_mask.sum())
+    if sign_fixed_count > 0:
+        logger.warning(f"检测到并修复 {sign_fixed_count} 条收支符号异常记录")
 
     # 4. 对手方字段 - 支持"交易对方名称"
     counterparty_col = None
@@ -587,17 +663,22 @@ def standardize_bank_fields(df: pd.DataFrame, bank_name: str = None) -> pd.DataF
             账户类型: 借记卡/信用卡/理财账户/证券账户
         """
         account_str = str(account_num).strip()
+        account_clean = account_str.replace(" ", "").replace("-", "")
         desc_str = str(description).upper()
         bank_str = str(bank_name).upper()
 
         # 1. 基于账号长度和特征判断
-        account_len = len(account_str.replace(" ", ""))
+        account_len = len(account_clean)
 
         # 理财账户/证券账户特征
         if any(kw in desc_str for kw in ["理财", "基金", "证券", "股票", "债券"]):
             if any(kw in bank_str for kw in ["证券", "基金"]):
                 return "证券账户"
             return "理财账户"
+
+        # 对公结算账户常见特征（长度通常短于个人银行卡，且为纯数字）
+        if account_clean.isdigit() and 9 <= account_len <= 15:
+            return "对公结算账户"
 
         # 基于账号长度判断
         if 16 <= account_len <= 19:
@@ -613,10 +694,9 @@ def standardize_bank_fields(df: pd.DataFrame, bank_name: str = None) -> pd.DataF
                 return "借记卡"
             return "借记卡"
         elif account_len < 16:
-            # 短账号可能是理财或证券账户
             if any(kw in desc_str for kw in ["证券", "股票"]):
                 return "证券账户"
-            return "理财账户"
+            return "其他"
         else:
             # 超长账号
             return "其他"
@@ -638,6 +718,15 @@ def standardize_bank_fields(df: pd.DataFrame, bank_name: str = None) -> pd.DataF
         """
         desc_str = str(description).upper()
         cp_str = str(counterparty).upper()
+        account_str = str(account_num).replace(" ", "").replace("-", "")
+
+        # 联名账户特征
+        if any(kw in desc_str for kw in ["联名", "共同", "夫妻"]):
+            return "联名账户"
+
+        # 公司实体兜底：公司主体清洗时默认按对公口径
+        if is_company_entity:
+            return "对公账户"
 
         # 对公账户特征
         if any(kw in desc_str for kw in ["对公", "公司", "企业", "单位"]):
@@ -645,15 +734,20 @@ def standardize_bank_fields(df: pd.DataFrame, bank_name: str = None) -> pd.DataF
         if any(kw in cp_str for kw in ["公司", "企业", "有限", "股份", "集团"]):
             return "对公账户"
 
-        # 联名账户特征
-        if any(kw in desc_str for kw in ["联名", "共同", "夫妻"]):
-            return "联名账户"
+        # 对公账号常见长度（各银行口径不一）
+        if account_str.isdigit() and (9 <= len(account_str) <= 15 or len(account_str) > 19):
+            return "对公账户"
 
         # 默认为个人账户
         return "个人账户"
 
     # 7.3 真实银行卡识别 (过滤基金/理财/证券账户)
-    def is_real_bank_card(account_num: str, account_type: str, bank_name: str) -> bool:
+    def is_real_bank_card(
+        account_num: str,
+        account_type: str,
+        bank_name: str,
+        account_category: str = "个人账户",
+    ) -> bool:
         """
         判断是否为真实银行卡
 
@@ -666,15 +760,11 @@ def standardize_bank_fields(df: pd.DataFrame, bank_name: str = None) -> pd.DataF
             是否为真实银行卡
         """
         account_str = str(account_num).strip()
+        account_clean = account_str.replace(" ", "").replace("-", "")
         bank_str = str(bank_name).upper()
 
         # 排除条件1: 账户类型为理财或证券
         if account_type in ["理财账户", "证券账户"]:
-            return False
-
-        # 排除条件2: 账号长度异常 (非16-19位)
-        account_len = len(account_str.replace(" ", ""))
-        if account_len < 16 or account_len > 19:
             return False
 
         # 排除条件3: 银行名称包含基金/证券关键词
@@ -683,6 +773,19 @@ def standardize_bank_fields(df: pd.DataFrame, bank_name: str = None) -> pd.DataF
 
         # 排除条件4: 账号包含特殊关键词
         if any(kw in account_str.upper() for kw in ["FUND", "SEC", "基金", "理财"]):
+            return False
+
+        account_len = len(account_clean)
+
+        # 对公账户按对公结算账号口径识别
+        if account_category == "对公账户":
+            digit_count = sum(ch.isdigit() for ch in account_clean)
+            if digit_count < 6:
+                return False
+            return 8 <= account_len <= 32
+
+        # 个人银行卡按16-19位识别
+        if account_len < 16 or account_len > 19:
             return False
 
         return True
@@ -711,6 +814,7 @@ def standardize_bank_fields(df: pd.DataFrame, bank_name: str = None) -> pd.DataF
             row["account_number"],
             row["account_type"],
             row.get("银行来源", bank_name or ""),
+            row["account_category"],
         ),
         axis=1,
     )
@@ -888,7 +992,9 @@ def clean_and_merge_files(
             original_rows = len(df_raw)
 
             # 标准化字段
-            df_normalized = standardize_bank_fields(df_raw, bank_name)
+            df_normalized = standardize_bank_fields(
+                df_raw, bank_name, entity_name=entity_name
+            )
 
             # 数据验证
             df_valid, quality_report = validate_data_quality(df_normalized)

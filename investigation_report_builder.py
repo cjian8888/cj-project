@@ -175,36 +175,37 @@ class UnifiedMetricsCalculator:
                 profile = self._profiles[name_key]
                 # 优先从 summary.real_income 获取
                 summary = profile.get("summary", {})
-                if "real_income" in summary and summary["real_income"]:
-                    value = summary["real_income"]
+                if "real_income" in summary and summary["real_income"] is not None:
+                    # real_income=0 代表有效结果，不能因为假值回退到 totalIncome
+                    value = max(0.0, float(summary["real_income"]))
                     if cache_key not in self._cache:
                         self._cache[cache_key] = {}
-                    self._cache[cache_key][name] = float(value)
+                    self._cache[cache_key][name] = value
                     self._calculation_log.append({
                         "timestamp": utils.get_timestamp(),
                         "name": name,
                         "metric": "real_income",
-                        "value": float(value),
+                        "value": value,
                         "data_source": "profiles.summary.real_income"
                     })
-                    logger.info(f"[UnifiedMetricsCalculator] get_real_income({name})={float(value)} from profiles.summary.real_income")
-                    return float(value)
+                    logger.info(f"[UnifiedMetricsCalculator] get_real_income({name})={value} from profiles.summary.real_income")
+                    return value
                 
                 # 回退到 totalIncome (原始流水)
                 if "totalIncome" in profile:
-                    value = profile["totalIncome"]
+                    value = max(0.0, float(profile["totalIncome"] or 0))
                     if cache_key not in self._cache:
                         self._cache[cache_key] = {}
-                    self._cache[cache_key][name] = float(value)
+                    self._cache[cache_key][name] = value
                     self._calculation_log.append({
                         "timestamp": utils.get_timestamp(),
                         "name": name,
                         "metric": "real_income",
-                        "value": float(value),
+                        "value": value,
                         "data_source": "profiles.totalIncome (fallback)"
                     })
-                    logger.info(f"[UnifiedMetricsCalculator] get_real_income({name})={float(value)} from profiles.totalIncome (fallback)")
-                    return float(value)
+                    logger.info(f"[UnifiedMetricsCalculator] get_real_income({name})={value} from profiles.totalIncome (fallback)")
+                    return value
 
             return 0.0
 
@@ -237,36 +238,37 @@ class UnifiedMetricsCalculator:
                 profile = self._profiles[name_key]
                 # 优先从 summary.real_expense 获取
                 summary = profile.get("summary", {})
-                if "real_expense" in summary and summary["real_expense"]:
-                    value = summary["real_expense"]
+                if "real_expense" in summary and summary["real_expense"] is not None:
+                    # real_expense=0 代表有效结果，不能因为假值回退到 totalExpense
+                    value = max(0.0, float(summary["real_expense"]))
                     if cache_key not in self._cache:
                         self._cache[cache_key] = {}
-                    self._cache[cache_key][name] = float(value)
+                    self._cache[cache_key][name] = value
                     self._calculation_log.append({
                         "timestamp": utils.get_timestamp(),
                         "name": name,
                         "metric": "real_expense",
-                        "value": float(value),
+                        "value": value,
                         "data_source": "profiles.summary.real_expense"
                     })
-                    logger.info(f"[UnifiedMetricsCalculator] get_real_expense({name})={float(value)} from profiles.summary.real_expense")
-                    return float(value)
+                    logger.info(f"[UnifiedMetricsCalculator] get_real_expense({name})={value} from profiles.summary.real_expense")
+                    return value
                 
                 # 回退到 totalExpense (原始流水)
                 if "totalExpense" in profile:
-                    value = profile["totalExpense"]
+                    value = max(0.0, float(profile["totalExpense"] or 0))
                     if cache_key not in self._cache:
                         self._cache[cache_key] = {}
-                    self._cache[cache_key][name] = float(value)
+                    self._cache[cache_key][name] = value
                     self._calculation_log.append({
                         "timestamp": utils.get_timestamp(),
                         "name": name,
                         "metric": "real_expense",
-                        "value": float(value),
+                        "value": value,
                         "data_source": "profiles.totalExpense (fallback)"
                     })
-                    logger.info(f"[UnifiedMetricsCalculator] get_real_expense({name})={float(value)} from profiles.totalExpense (fallback)")
-                    return float(value)
+                    logger.info(f"[UnifiedMetricsCalculator] get_real_expense({name})={value} from profiles.totalExpense (fallback)")
+                    return value
 
             return 0.0
 
@@ -292,17 +294,26 @@ class UnifiedMetricsCalculator:
 
         try:
             name_key = name.replace("\u200b", "")  # 处理零宽空格
-            if name_key in self._profiles and "total_income" in self._profiles[name_key]:
-                value = self._profiles[name_key]["total_income"]
+            if name_key in self._profiles:
+                profile = self._profiles[name_key]
+                value = profile.get("total_income")
+                if value is None:
+                    value = profile.get("totalIncome")
+                if value is None:
+                    return 0.0
+                if cache_key not in self._cache:
+                    self._cache[cache_key] = {}
                 self._cache[cache_key][name] = float(value)
                 self._calculation_log.append({
                     "timestamp": utils.get_timestamp(),
                     "name": name,
                     "metric": "total_inflow",
                     "value": float(value),
-                    "data_source": "profiles.total_income"
+                    "data_source": "profiles.total_income/totalIncome"
                 })
-                logger.info(f"[UnifiedMetricsCalculator] get_total_inflow({name})={float(value)} from profiles.total_income")
+                logger.info(
+                    f"[UnifiedMetricsCalculator] get_total_inflow({name})={float(value)} from profiles.total_income/totalIncome"
+                )
                 return float(value)
 
             return 0.0
@@ -329,17 +340,26 @@ class UnifiedMetricsCalculator:
 
         try:
             name_key = name.replace("\u200b", "")  # 处理零宽空格
-            if name_key in self._profiles and "total_expense" in self._profiles[name_key]:
-                value = self._profiles[name_key]["total_expense"]
+            if name_key in self._profiles:
+                profile = self._profiles[name_key]
+                value = profile.get("total_expense")
+                if value is None:
+                    value = profile.get("totalExpense")
+                if value is None:
+                    return 0.0
+                if cache_key not in self._cache:
+                    self._cache[cache_key] = {}
                 self._cache[cache_key][name] = float(value)
                 self._calculation_log.append({
                     "timestamp": utils.get_timestamp(),
                     "name": name,
                     "metric": "total_outflow",
                     "value": float(value),
-                    "data_source": "profiles.total_expense"
+                    "data_source": "profiles.total_expense/totalExpense"
                 })
-                logger.info(f"[UnifiedMetricsCalculator] get_total_outflow({name})={float(value)} from profiles.total_expense")
+                logger.info(
+                    f"[UnifiedMetricsCalculator] get_total_outflow({name})={float(value)} from profiles.total_expense/totalExpense"
+                )
                 return float(value)
 
             return 0.0
@@ -401,6 +421,10 @@ class InvestigationReportBuilder:
         # 运行时报告选项（由前端报告生成参数注入）
         self._runtime_thresholds: Dict[str, float] = {}
         self._enabled_sections: List[str] = []
+        # 默认禁止在报告阶段回读原始 data，确保来源与 cleaned_data/analysis_cache 一致
+        self._allow_raw_data_fallback = (
+            os.getenv("FPAS_REPORT_ALLOW_RAW_DATA_FALLBACK", "0").strip() == "1"
+        )
 
         # 【修复】加载外部数据源缓存（房产、车辆、理财等，按身份证号索引）
         self._external_property_cache = analysis_cache.get("precisePropertyData", {})
@@ -839,6 +863,10 @@ class InvestigationReportBuilder:
         return cleaned
 
     # ==================== 铁律-数据回退工具 ====================
+
+    def _is_raw_data_fallback_enabled(self) -> bool:
+        """是否允许报告阶段回读原始 data 目录（默认关闭）。"""
+        return bool(self._allow_raw_data_fallback)
 
     def _load_workbook_sheet(self, sheet_name: str) -> Optional[List[Dict]]:
         """
@@ -2143,7 +2171,7 @@ class InvestigationReportBuilder:
             score = 10
             verdict = "数据不足"
 
-        return DimensionScore(score=score, verdict=verdict, details="")
+        return LegacyDimensionScore(score=score, verdict=verdict, details="")
 
     def _analyze_lending_behavior_unified(
         self, name: str, profile: Dict
@@ -2154,7 +2182,7 @@ class InvestigationReportBuilder:
         verdict = "无明显异常借贷行为"
         details = ""
 
-        return DimensionScore(score=score, verdict=verdict, details=details)
+        return LegacyDimensionScore(score=score, verdict=verdict, details=details)
 
     def _analyze_consumption_pattern_unified(
         self, name: str, profile: Dict
@@ -2164,7 +2192,7 @@ class InvestigationReportBuilder:
         verdict = "消费模式正常"
         details = ""
 
-        return DimensionScore(score=score, verdict=verdict, details=details)
+        return LegacyDimensionScore(score=score, verdict=verdict, details=details)
 
     def _analyze_fund_flow_unified(self, name: str, profile: Dict):
         """资金流向分析（统一版本）"""
@@ -2172,7 +2200,7 @@ class InvestigationReportBuilder:
         verdict = "资金流向正常"
         details = ""
 
-        return DimensionScore(score=score, verdict=verdict, details=details)
+        return LegacyDimensionScore(score=score, verdict=verdict, details=details)
 
     def _analyze_cash_operation_unified(
         self, name: str, profile: Dict
@@ -2182,7 +2210,7 @@ class InvestigationReportBuilder:
         verdict = "现金操作正常"
         details = ""
 
-        return DimensionScore(score=score, verdict=verdict, details=details)
+        return LegacyDimensionScore(score=score, verdict=verdict, details=details)
 
     def _build_analysis_unit_section(self, unit: AnalysisUnit) -> Dict:
         """
@@ -7498,13 +7526,6 @@ class InvestigationReportBuilder:
 
                 risk_levels[risk_level] += 1
 
-                # 【2026-03-03 新增】统计五维度评分的风险等级（病灶三修复）
-                five_dimension = analysis.get("five_dimension_score", {})
-                if five_dimension:
-                    fd_risk_level = five_dimension.get("risk_level")
-                    if fd_risk_level and fd_risk_level in risk_levels:
-                        risk_levels[fd_risk_level] += 1
-
                 # 【2026-02-22 修复】修正逻辑矛盾，优化描述文本
                 # 原问题："工资收入占比仅39.9%，正常，不足以支撑日常开支" - 既说正常又说不支撑，矛盾
                 # 修复：根据风险等级给出一致性的描述
@@ -8745,6 +8766,14 @@ class InvestigationReportBuilder:
             or profile.get("totalExpense", 0)
             or 0
         )
+        try:
+            total_income = max(0.0, float(total_income or 0.0))
+        except (TypeError, ValueError):
+            total_income = 0.0
+        try:
+            total_expense = max(0.0, float(total_expense or 0.0))
+        except (TypeError, ValueError):
+            total_expense = 0.0
 
         section = {
             "name": name,
@@ -9598,26 +9627,28 @@ class InvestigationReportBuilder:
 
     def _get_external_travel_data(self, name: str) -> Dict:
         """
-        【铁律-数据回退】从外部提取器获取出行数据（铁路+航班）
+        获取出行数据（默认仅使用缓存，不回读原始data）
         """
         if not hasattr(self, "_external_travel_cache"):
             self._external_travel_cache = {"railway": {}, "flight": {}}
-            try:
-                import railway_extractor
-                import flight_extractor
-                from paths import DATA_DIR
+            if self._is_raw_data_fallback_enabled():
+                try:
+                    import railway_extractor
+                    import flight_extractor
+                    from paths import DATA_DIR
 
-                # 【P1修复】统一使用DATA_DIR路径
-                data_dir = str(DATA_DIR)
-                self._external_travel_cache["railway"] = (
-                    railway_extractor.extract_railway_data(data_dir)
-                )
-                self._external_travel_cache["flight"] = (
-                    flight_extractor.extract_flight_data(data_dir)
-                )
-                logger.info(f"[外部数据] 出行数据加载完成")
-            except Exception as e:
-                logger.warning(f"[外部数据] 出行数据加载失败: {e}")
+                    data_dir = str(DATA_DIR)
+                    self._external_travel_cache["railway"] = (
+                        railway_extractor.extract_railway_data(data_dir)
+                    )
+                    self._external_travel_cache["flight"] = (
+                        flight_extractor.extract_flight_data(data_dir)
+                    )
+                    logger.info("[外部数据] 出行数据加载完成（原始data回源模式）")
+                except Exception as e:
+                    logger.warning(f"[外部数据] 出行数据加载失败: {e}")
+            else:
+                logger.info("[外部数据] 已禁用出行数据原始data回源，按缓存/画像数据生成报告")
 
         person_id = self._name_to_id_map.get(name) or getattr(
             self, "_external_name_to_id_map", {}
@@ -9633,19 +9664,23 @@ class InvestigationReportBuilder:
 
     def _get_external_aml_data(self, name: str) -> Dict:
         """
-        【铁律-数据回退】从外部提取器获取反洗钱数据
+        获取反洗钱数据（默认仅使用缓存，不回读原始data）
         """
         if not hasattr(self, "_external_aml_cache"):
             self._external_aml_cache = {}
-            try:
-                import aml_analyzer
+            if self._is_raw_data_fallback_enabled():
+                try:
+                    import aml_analyzer
+                    from paths import DATA_DIR
 
-                self._external_aml_cache = aml_analyzer.extract_aml_data("./data")
-                logger.info(
-                    f"[外部数据] 反洗钱数据加载完成: {len(self._external_aml_cache)} 条记录"
-                )
-            except Exception as e:
-                logger.warning(f"[外部数据] 反洗钱数据加载失败: {e}")
+                    self._external_aml_cache = aml_analyzer.extract_aml_data(str(DATA_DIR))
+                    logger.info(
+                        f"[外部数据] 反洗钱数据加载完成: {len(self._external_aml_cache)} 条记录（原始data回源模式）"
+                    )
+                except Exception as e:
+                    logger.warning(f"[外部数据] 反洗钱数据加载失败: {e}")
+            else:
+                logger.info("[外部数据] 已禁用AML原始data回源，按缓存/疑点数据生成报告")
 
         person_id = self._name_to_id_map.get(name) or getattr(
             self, "_external_name_to_id_map", {}
@@ -10207,31 +10242,55 @@ class InvestigationReportBuilder:
 
     def _build_aml_analysis_v4(self, name: str, profile: Dict) -> Dict:
         """构建反洗钱数据分析"""
-        # 从 suspicions 获取 AML 数据
-        aml_data = profile.get("aml_alerts", [])
-        aml_count = len(aml_data) if isinstance(aml_data, list) else 0
-        aml_total = (
-            sum(a.get("amount", 0) for a in aml_data)
-            if isinstance(aml_data, list)
-            else 0
-        )
+        aml_records: List[Dict] = []
 
-        # 【4.2修复】在反洗钱数据为0时，添加说明
+        profile_alerts = profile.get("aml_alerts", [])
+        if isinstance(profile_alerts, list) and profile_alerts:
+            aml_records.extend([a for a in profile_alerts if isinstance(a, dict)])
+
+        # 兼容当前主链路：AML线索主要落在 suspicions.amlAlerts
+        if not aml_records:
+            aml_alerts = self.suspicions.get("amlAlerts", [])
+            if isinstance(aml_alerts, list) and aml_alerts:
+                person_id = self._name_to_id_map.get(name, "")
+                person_id_upper = str(person_id).upper() if person_id else ""
+                for alert in aml_alerts:
+                    if not isinstance(alert, dict):
+                        continue
+                    alert_name = str(alert.get("name", "") or "").strip()
+                    alert_person_id = str(alert.get("person_id", "") or "").upper()
+                    if alert_name == name or (
+                        person_id_upper and alert_person_id == person_id_upper
+                    ):
+                        aml_records.append(alert)
+
+        aml_count = len(aml_records)
+        aml_total = 0.0
+        for record in aml_records:
+            try:
+                aml_total += float(record.get("amount", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+
         if aml_count == 0:
             narrative = (
-                f"涉及数据共0条0.0万元，未查见可疑交易记录。"
-                f"（说明：可能原因为：1. 未调取反洗钱监测数据；2. 该人员未触发反洗钱预警；3. 数据源中未包含反洗钱记录）"
+                "未检出该人员反洗钱预警记录（按 analysis_cache.suspicions 与画像缓存核对）。"
+            )
+        elif aml_total > 0:
+            narrative = (
+                f"检出反洗钱相关预警{aml_count}条，涉及金额{aml_total / 10000:.2f}万元，"
+                "建议结合交易对手、交易目的及凭证进一步核验。"
             )
         else:
             narrative = (
-                f"涉及数据共{aml_count}条{aml_total / 10000:.2f}万元，"
-                f"主要是单位发放工资和报销款，未查见可疑大额转账记录。"
+                f"检出反洗钱相关预警{aml_count}条（当前数据未提供可汇总金额），"
+                "建议结合原始证据附件进一步核验。"
             )
 
         return {
             "count": aml_count,
             "total": aml_total,
-            "records": aml_data[:20] if isinstance(aml_data, list) else [],
+            "records": aml_records[:20],
             "narrative": narrative,
         }
 
@@ -10528,173 +10587,56 @@ class InvestigationReportBuilder:
         }
 
     def _build_five_dimension_score_v4(self, name: str, profile: Dict) -> Dict:
-        """【v5.0】构建五维度风险评分"""
-        from report_schema import DimensionScore, FiveDimensionScore
+        """【v5.0】构建五维度风险评分（与文本报告统一：分高=风险高）"""
+        # 统一复用文本报告同一套五维分析器，避免口径分叉
+        income_expense = self._analyze_income_expense_match(name, profile)
+        lending_behavior = self._analyze_lending_behavior(name, profile)
+        consumption_pattern = self._analyze_consumption_pattern(name, profile)
+        fund_flow = self._analyze_fund_flow(name, profile)
+        cash_operation = self._analyze_cash_operation(name, profile)
 
-        # 【2026-02-12 修复】使用真实收入和正确工资数据
-        summary = profile.get("summary", {})
-        total_income = summary.get("real_income", summary.get("total_income", 0))
-        total_expense = summary.get("real_expense", summary.get("total_expense", 0))
-
-        # 从 yearly_salary 获取工资
-        yearly_salary = profile.get("yearly_salary", {}) or profile.get(
-            "yearlySalary", {}
-        )
-        salary_summary = yearly_salary.get("summary", {}) if yearly_salary else {}
-        salary_total = salary_summary.get("total", 0)
-
-        # 1. 收支匹配度（25分满分）
-        if total_income > 0:
-            salary_ratio = salary_total / total_income
-            income_expense_score = (
-                25 * min(1.0, salary_ratio) if salary_ratio < 0.5 else 25
-            )
-        else:
-            salary_ratio = 0
-            income_expense_score = 0
-
-        income_expense = DimensionScore(
-            name="收支匹配度",
-            score=round(income_expense_score, 1),
-            max_score=25,
-            risk_level="low"
-            if income_expense_score >= 20
-            else ("medium" if income_expense_score >= 10 else "high"),
-            description=f"工资收入占比{salary_ratio * 100:.1f}%"
-            if total_income > 0
-            else "无收入数据",
-        )
-
-        # 2. 借贷行为（20分满分）
-        lending_analysis = self._build_lending_analysis_v4(name, profile)
-        if lending_analysis["has_multi_platform"]:
-            lending_score = 5
-        elif lending_analysis["total_platforms"] > 0:
-            lending_score = 15
-        else:
-            lending_score = 20
-
-        lending_behavior = DimensionScore(
-            name="借贷行为",
-            score=lending_score,
-            max_score=20,
-            risk_level="low"
-            if lending_score >= 16
-            else ("medium" if lending_score >= 10 else "high"),
-            description=f"涉及{lending_analysis['total_platforms']}个借贷平台"
-            if lending_analysis["total_platforms"] > 0
-            else "无借贷记录",
-        )
-
-        # 3. 消费特征（15分满分）
-        # 简化：基于支出金额评估
-        if total_income > 0:
-            expense_ratio = total_expense / total_income
-            consumption_score = (
-                15 * (1 - min(0.8, expense_ratio)) if expense_ratio < 0.8 else 3
-            )
-        else:
-            consumption_score = 10
-
-        consumption_pattern = DimensionScore(
-            name="消费特征",
-            score=round(consumption_score, 1),
-            max_score=15,
-            risk_level="low"
-            if consumption_score >= 12
-            else ("medium" if consumption_score >= 8 else "high"),
-            description=f"支出占收入{expense_ratio * 100:.1f}%"
-            if total_income > 0
-            else "无法评估",
-        )
-
-        # 4. 资金流向（25分满分）
-        # 简化：基于交易对手方多样性
-        counterparties = set()
-        for tx in profile.get("transactions", []):
-            counterparties.add(tx.get("counterparty", ""))
-
-        diversity_score = (
-            min(25, len(counterparties) / 10 * 25) if counterparties else 15
-        )
-        fund_flow = DimensionScore(
-            name="资金流向",
-            score=round(diversity_score, 1),
-            max_score=25,
-            risk_level="low"
-            if diversity_score >= 20
-            else ("medium" if diversity_score >= 12 else "high"),
-            description=f"交易对手方{len(counterparties)}个",
-        )
-
-        # 5. 现金操作（15分满分）
-        cash_analysis = self._build_large_cash_analysis_v4(name, profile)
-        if cash_analysis.get("risk_level") == "high":
-            cash_score = 5
-        elif cash_analysis.get("risk_level") == "medium":
-            cash_score = 10
-        else:
-            cash_score = 15
-
-        cash_operation = DimensionScore(
-            name="现金操作",
-            score=cash_score,
-            max_score=15,
-            risk_level=cash_analysis.get("risk_level", "low"),
-            description=cash_analysis.get("narrative", "无大额现金记录")[:50],
-        )
-
-        # 总分
         total_score = (
-            income_expense.score
-            + lending_behavior.score
-            + consumption_pattern.score
-            + fund_flow.score
-            + cash_operation.score
+            float(income_expense.score or 0)
+            + float(lending_behavior.score or 0)
+            + float(consumption_pattern.score or 0)
+            + float(fund_flow.score or 0)
+            + float(cash_operation.score or 0)
         )
 
-        risk_level = (
-            "low" if total_score >= 80 else ("medium" if total_score >= 60 else "high")
+        # 阈值语义：分值越高风险越高（默认 high>=60, medium>=30）
+        five_dim_thresholds = self._risk_thresholds.get("five_dimension", {})
+        high_threshold = float(five_dim_thresholds.get("high", 60))
+        medium_threshold = float(five_dim_thresholds.get("medium", 30))
+        if total_score > high_threshold:
+            risk_level = "high"
+        elif total_score > medium_threshold:
+            risk_level = "medium"
+        else:
+            risk_level = "low"
+
+        narrative = (
+            f"五维度综合评分{total_score:.0f}分（满分100分，分值越高风险越高），"
+            f"整体风险等级：{'高' if risk_level == 'high' else ('中' if risk_level == 'medium' else '低')}"
         )
 
-        narrative = f"五维度综合评分{total_score:.0f}分（满分100分），整体风险等级：{'低' if risk_level == 'low' else ('中' if risk_level == 'medium' else '高')}"
+        def _dim_dict(dim: Any) -> Dict[str, Any]:
+            description = dim.narrative if getattr(dim, "narrative", "") else ""
+            if not description and getattr(dim, "findings", None):
+                description = "；".join([str(x) for x in dim.findings[:2]])
+            return {
+                "name": dim.dimension_name,
+                "score": round(float(dim.score or 0), 1),
+                "max_score": dim.max_score,
+                "risk_level": dim.risk_level,
+                "description": description or "—",
+            }
 
         return {
-            "income_expense_match": {
-                "name": income_expense.name,
-                "score": income_expense.score,
-                "max_score": income_expense.max_score,
-                "risk_level": income_expense.risk_level,
-                "description": income_expense.description,
-            },
-            "lending_behavior": {
-                "name": lending_behavior.name,
-                "score": lending_behavior.score,
-                "max_score": lending_behavior.max_score,
-                "risk_level": lending_behavior.risk_level,
-                "description": lending_behavior.description,
-            },
-            "consumption_pattern": {
-                "name": consumption_pattern.name,
-                "score": consumption_pattern.score,
-                "max_score": consumption_pattern.max_score,
-                "risk_level": consumption_pattern.risk_level,
-                "description": consumption_pattern.description,
-            },
-            "fund_flow": {
-                "name": fund_flow.name,
-                "score": fund_flow.score,
-                "max_score": fund_flow.max_score,
-                "risk_level": fund_flow.risk_level,
-                "description": fund_flow.description,
-            },
-            "cash_operation": {
-                "name": cash_operation.name,
-                "score": cash_operation.score,
-                "max_score": cash_operation.max_score,
-                "risk_level": cash_operation.risk_level,
-                "description": cash_operation.description,
-            },
+            "income_expense_match": _dim_dict(income_expense),
+            "lending_behavior": _dim_dict(lending_behavior),
+            "consumption_pattern": _dim_dict(consumption_pattern),
+            "fund_flow": _dim_dict(fund_flow),
+            "cash_operation": _dim_dict(cash_operation),
             "total_score": round(total_score, 1),
             "total_max": 100,
             "risk_level": risk_level,
@@ -11630,7 +11572,7 @@ class InvestigationReportBuilder:
 
         lines.append("【溯源说明】")
         lines.append(
-            "  • 本报告统计与金额直接读取 output/analysis_cache 缓存，不重复计算原始流水"
+            "  • 本报告统计与金额来源于清洗后数据链路（output/cleaned_data -> output/analysis_cache），报告阶段不回到原始data重算"
         )
         lines.append(
             "  • 线索条目优先输出证据来源文件、行号、交易ID；缺失字段将标记为“未提供”"
