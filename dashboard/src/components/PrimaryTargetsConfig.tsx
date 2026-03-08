@@ -18,8 +18,7 @@ import {
     Users, Building2, Plus, Trash2, Save, RefreshCw,
     ChevronDown, ChevronUp, Check, AlertTriangle, Info
 } from 'lucide-react';
-
-const API_BASE_URL = 'http://localhost:8000';
+import { API_BASE_URL } from '../services/api';
 
 // 类型定义
 interface EntityInfo {
@@ -324,7 +323,6 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
     // 获取可选的人员（未被分配到任何单元的人员）
     const getAvailablePersons = useCallback((excludeUnitIndex?: number) => {
         if (!entities || !config) {
-            console.log('[getAvailablePersons] entities or config missing', { entities, config });
             return [];
         }
 
@@ -336,11 +334,6 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
         });
 
         const available = entities.persons.filter(p => !assignedPersons.has(p.name));
-        console.log('[getAvailablePersons] excludeUnitIndex:', excludeUnitIndex,
-            'assignedPersons:', Array.from(assignedPersons),
-            'entities.persons:', entities.persons.map(p => p.name),
-            'available:', available.map(p => p.name));
-
         return available;
     }, [entities, config]);
 

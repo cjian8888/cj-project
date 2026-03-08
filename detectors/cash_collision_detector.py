@@ -50,6 +50,10 @@ class CashCollisionDetector(BaseDetector):
 
         cash_time_window_hours = config.get("cash_time_window_hours", 48)
         amount_tolerance_ratio = config.get("amount_tolerance_ratio", 0.05)
+        # 单实体自循环默认不进入风险主清单，避免“本人取现-本人存现”噪声淹没跨实体风险
+        include_single_entity = bool(
+            config.get("include_single_entity_collisions", False)
+        )
 
         results = []
 
@@ -77,7 +81,8 @@ class CashCollisionDetector(BaseDetector):
                 cash_time_window_hours,
                 amount_tolerance_ratio,
             )
-            results.extend(single_collisions)
+            if include_single_entity:
+                results.extend(single_collisions)
 
             # 收集用于跨实体检测
             all_withdrawals.extend(self._extract_records(withdrawals, entity_name))
@@ -139,12 +144,15 @@ class CashCollisionDetector(BaseDetector):
         """提取记录用于跨实体检测。"""
         records = []
         for _, row in df.iterrows():
+            parsed_date = pd.to_datetime(row.get("date"), errors="coerce")
+            if pd.isna(parsed_date):
+                continue
             bank_val = row.get("银行来源", row.get("bank", ""))
             source_val = row.get("数据来源", row.get("source_file", ""))
             records.append(
                 {
                     "entity": entity_name,
-                    "date": row["date"],
+                    "date": parsed_date,
                     "amount": row["amount"],
                     "bank": str(bank_val)
                     if bank_val and str(bank_val) != "nan"
@@ -226,17 +234,13 @@ class CashCollisionDetector(BaseDetector):
                 if amount_ratio > amount_tolerance:
                     continue
 
-                # 确定风险等级
-                if time_diff < 4 and amount_ratio < 0.01:
-                    risk = "high"
-                elif time_diff < 24:
-                    risk = "medium"
-                else:
-                    risk = "low"
+                # 单实体碰撞仅作为线索，不进入高/中风险主清单
+                risk = "low"
 
                 collisions.append(
                     {
                         "type": "single_entity",
+                        "pattern_category": "self_cycle",
                         "withdrawal_entity": entity_name,
                         "deposit_entity": entity_name,
                         "withdrawal_date": wd_date,
@@ -251,7 +255,11 @@ class CashCollisionDetector(BaseDetector):
                         "amount_diff": round(amount_diff_abs, 2),
                         "amount_diff_ratio": round(amount_ratio, 2),
                         "risk_level": risk,
-                        "risk_reason": f"取现{wd_amount}元与存现{dp_amount}元时间间隔{time_diff:.1f}小时内，金额接近",
+                        "risk_reason": (
+                            f"[单实体线索] {entity_name}取现{wd_amount}元后"
+                            f"{time_diff:.1f}小时存现{dp_amount}元，金额接近；"
+                            "默认仅作资金循环线索。"
+                        ),
                     }
                 )
 

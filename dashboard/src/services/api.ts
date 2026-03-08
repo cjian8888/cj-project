@@ -19,6 +19,7 @@ export interface AnalysisStatus {
     status: 'idle' | 'running' | 'completed' | 'failed';
     progress: number;
     currentPhase: string;
+    phase?: string; // 兼容后端旧字段
     startTime: string | null;
     endTime: string | null;
 }

@@ -20,7 +20,11 @@ tax_analysis, travel_analysis
 {# 中文序号映射 #}
 {% set cn_nums = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'] %}
 {% set section_num = cn_nums[unit.section_index - 1] if unit.section_index and unit.section_index <= 10 else
-    unit.section_index %} {# 成员主标题 - 使用成员编号 #} {% if unit.relation=='本人' %} <h2 class="subsection-title">（{{ section_num
+    unit.section_index %}
+{% set enabled_sections = report.meta.generation_options.sections if report.meta and report.meta.generation_options and report.meta.generation_options.sections else [] %}
+{% set show_assets = enabled_sections|length == 0 or 'assets' in enabled_sections %}
+{% set show_risks = enabled_sections|length == 0 or 'risks' in enabled_sections %}
+{# 成员主标题 - 使用成员编号 #} {% if unit.relation=='本人' %} <h2 class="subsection-title">（{{ section_num
     }}）{{ unit.name }}（本人）</h2>
     {% else %}
     <h2 class="subsection-title">（{{ section_num }}）{{ unit.name }}（{{ unit.relation }}）</h2>
@@ -152,14 +156,29 @@ tax_analysis, travel_analysis
     {% endif %}
 
 
+    {% if show_assets %}
     {# 第一部分：资产收入情况 #}
     <h3 class="part-title">第一部分 资产收入情况</h3>
 
     {# 人员基本信息介绍段落 #}
     {% set bg = unit.asset_income_section.personal_background %}
     <p>
-        {{ bg.name }}，{{ bg.gender }}，{{ bg.birth_date }}出生，
+        {{ bg.name }}，
+        {% if bg.gender and bg.gender not in ['暂无数据', '暂未获取', '未知'] %}
+        {{ bg.gender }}，
+        {% else %}
+        性别暂未获取，
+        {% endif %}
+        {% if bg.birth_date and bg.birth_date not in ['暂无数据', '暂未获取', '未知'] %}
+        {{ bg.birth_date }}出生，
+        {% else %}
+        出生日期暂未获取，
+        {% endif %}
+        {% if bg.birth_place and bg.birth_place not in ['暂无数据', '暂未获取', '未知'] %}
         {{ bg.birth_place }}人。
+        {% else %}
+        籍贯暂未获取。
+        {% endif %}
         {% if bg.employer and bg.employer != '暂无数据' %}
         从业单位为{{ bg.employer }}。
         {% endif %}
@@ -328,8 +347,10 @@ tax_analysis, travel_analysis
     {% else %}
     <p>未查见名下车辆情况。</p>
     {% endif %}
+    {% endif %}
 
 
+    {% if show_risks %}
     {# ==================== 第二部分 数据分析 ==================== #}
     <h3 class="part-title">第二部分 数据分析</h3>
     {% set analysis = unit.data_analysis_section %}
@@ -519,7 +540,7 @@ tax_analysis, travel_analysis
             {% set transfer = analysis.large_transfer_analysis %}
             <h3 class="item-title">{{ ns.idx }}、大额转账记录分析</h3>
             <p>
-                查看单笔1万元以上银行流入流水，共{{ transfer.inflow.count if transfer.inflow else (transfer.inflow_count or 0) }}笔共计金额{{
+                查看单笔{{ ((transfer.threshold or 10000) / 10000)|round(2) }}万元以上银行流入流水，共{{ transfer.inflow.count if transfer.inflow else (transfer.inflow_count or 0) }}笔共计金额{{
                 (transfer.inflow.total/10000)|round(2) if transfer.inflow and transfer.inflow.total else (
                 transfer.inflow_amount_wan|round(2) if transfer.inflow_amount_wan else (transfer.inflow_amount or
                 0)/10000|round(2)
@@ -527,7 +548,7 @@ tax_analysis, travel_analysis
                 {{ transfer.inflow_breakdown or '主要是工资收入、个人转账等' }}，{{ transfer.inflow_relation or '未查见与涉案公司存在关联。' }}
             </p>
             <p>
-                查看单笔1万元以上银行支出流水，共{{ transfer.outflow.count if transfer.outflow else (transfer.outflow_count or 0)
+                查看单笔{{ ((transfer.threshold or 10000) / 10000)|round(2) }}万元以上银行支出流水，共{{ transfer.outflow.count if transfer.outflow else (transfer.outflow_count or 0)
                 }}笔共计金额{{
                 (transfer.outflow.total/10000)|round(2) if transfer.outflow and transfer.outflow.total else (
                 transfer.outflow_amount_wan|round(2) if transfer.outflow_amount_wan else (transfer.outflow_amount or
@@ -910,3 +931,4 @@ tax_analysis, travel_analysis
             <p>
                 {{ travel.narrative or '未查见航班同行人、铁路同行人、同住宿人与本次核查的相关当事人存在关联。' }}
             </p>
+            {% endif %}

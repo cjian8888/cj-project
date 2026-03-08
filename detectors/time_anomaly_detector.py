@@ -6,6 +6,7 @@
 from datetime import date, datetime, time
 from typing import Dict, List, Any, Optional, Set, Tuple
 
+import config as global_config
 from detectors.base_detector import BaseDetector
 from schemas.suspicion import SuspicionSeverity, SuspicionType
 
@@ -172,21 +173,13 @@ class TimeAnomalyDetector(BaseDetector):
 
     def _get_default_holidays(self) -> List[Tuple[str, str, str]]:
         """获取默认节假日列表。"""
-        return [
-            ("2024-01-01", "2024-01-01", "元旦"),
-            ("2024-02-10", "2024-02-17", "春节"),
-            ("2024-04-04", "2024-04-06", "清明节"),
-            ("2024-05-01", "2024-05-05", "劳动节"),
-            ("2024-06-08", "2024-06-10", "端午节"),
-            ("2024-09-15", "2024-09-17", "中秋节"),
-            ("2024-10-01", "2024-10-07", "国庆节"),
-            ("2025-01-01", "2025-01-01", "元旦"),
-            ("2025-01-28", "2025-02-04", "春节"),
-            ("2025-04-04", "2025-04-06", "清明节"),
-            ("2025-05-01", "2025-05-05", "劳动节"),
-            ("2025-05-31", "2025-06-02", "端午节"),
-            ("2025-10-01", "2025-10-08", "国庆节"),
-        ]
+        # 优先使用全局配置中的按年节假日，避免检测器内置日期过期
+        holiday_map = getattr(global_config, "CHINESE_HOLIDAYS", {})
+        merged: List[Tuple[str, str, str]] = []
+        if isinstance(holiday_map, dict):
+            for year in sorted(holiday_map.keys()):
+                merged.extend(holiday_map.get(year, []))
+        return merged
 
     def _create_off_hours_suspicions(
         self, transactions: List[Dict], entity_name: str

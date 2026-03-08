@@ -17,6 +17,7 @@
 
 import os
 import json
+import re
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from dataclasses import asdict
@@ -27,6 +28,7 @@ from paths import OUTPUT_DIR, APP_ROOT
 import config
 import utils
 import yaml
+from utils.phrase_loader import PhraseLoader
 from report_schema import (
     InvestigationReport,
     InvestigationMeta,
@@ -110,6 +112,7 @@ from financial_profiler import _calculate_real_income_expense
 
 # 【2026-02-21 新增】导入公司风险分析模块
 from company_risk_analyzer import analyze_company_risk, RiskThresholds
+from name_normalizer import normalize_for_matching
 
 logger = utils.setup_logger(__name__)
 
@@ -384,13 +387,19 @@ class InvestigationReportBuilder:
         self.derived_data = analysis_cache.get("derived_data", {})
         # Initialize phrase loader for configurable phrases in analysis descriptions
         try:
-            self.phrase_loader = PhraseLoader()
+            phrase_config = os.path.join(str(APP_ROOT), "config", "report_phrases.yaml")
+            self.phrase_loader = PhraseLoader(phrase_config)
+            self.phrase_loader.load_config()
+            logger.info(f"PhraseLoader 初始化成功: {phrase_config}")
         except Exception as e:
             logger.warning(f"Failed to initialize PhraseLoader: {e}")
             self.phrase_loader = None
         self.suspicions = analysis_cache.get("suspicions", {})
         self.graph_data = analysis_cache.get("graph_data", {})
         self.metadata = analysis_cache.get("metadata", {})
+        # 运行时报告选项（由前端报告生成参数注入）
+        self._runtime_thresholds: Dict[str, float] = {}
+        self._enabled_sections: List[str] = []
 
         # 【修复】加载外部数据源缓存（房产、车辆、理财等，按身份证号索引）
         self._external_property_cache = analysis_cache.get("precisePropertyData", {})
@@ -423,8 +432,7 @@ class InvestigationReportBuilder:
         self.profiles = analysis_cache.get("profiles", {})
         # 缓存核心人员列表
         self._core_persons = self._extract_core_persons()
-        # 【2026-03-03 新增】加载风险等级阈值配置
-        self._companies = []  # 【2026-03-03 修复】初始化公司列表
+        self._companies = self._extract_companies()
         # 【2026-03-03 新增】加载风险等级阈值配置
         try:
             with open('config/risk_thresholds.yaml', 'r', encoding='utf-8') as f:
@@ -491,6 +499,46 @@ class InvestigationReportBuilder:
         """判断是否为公司"""
         company_keywords = ["公司", "集团", "有限", "股份", "企业", "中心", "事务所"]
         return any(kw in name for kw in company_keywords)
+
+    def _resolve_profile_person_name(
+        self, raw_name: str, candidate_names: set
+    ) -> Optional[str]:
+        """
+        将配置/关系数据中的姓名解析到画像中的标准姓名。
+
+        解析顺序：
+        1. 精确匹配
+        2. normalize_for_matching 匹配
+        3. 常见同形姓氏误差匹配（如 侯/候，仅单字差异）
+        """
+        if not raw_name:
+            return None
+
+        clean_name = str(raw_name).replace("\u200b", "").strip()
+        if not clean_name:
+            return None
+        if clean_name in candidate_names:
+            return clean_name
+
+        target_norm = normalize_for_matching(clean_name)
+        norm_hits = [n for n in candidate_names if normalize_for_matching(n) == target_norm]
+        if len(norm_hits) == 1:
+            return norm_hits[0]
+
+        alias_pairs = {("侯", "候"), ("候", "侯")}
+        confusable_hits = []
+        for candidate in candidate_names:
+            if len(candidate) != len(clean_name):
+                continue
+            diff = [(a, b) for a, b in zip(clean_name, candidate) if a != b]
+            if len(diff) == 1 and diff[0] in alias_pairs:
+                confusable_hits.append(candidate)
+
+        if len(confusable_hits) == 1:
+            logger.info(f"[姓名归一] '{clean_name}' -> '{confusable_hits[0]}'")
+            return confusable_hits[0]
+
+        return None
 
     def _normalize_property_address(self, address: str) -> str:
         """
@@ -599,6 +647,18 @@ class InvestigationReportBuilder:
                     self._id_to_name_map[person_id_str] = owner_name
                     self._name_to_id_map[owner_name] = person_id_str
 
+        # 来源4: profiles.fund_flow.*_transactions.source_file（兜底）
+        profiles_data = analysis_cache.get("profiles", {}) or {}
+        for person_name, profile in profiles_data.items():
+            if not person_name or person_name in self._name_to_id_map:
+                continue
+            if not isinstance(profile, dict):
+                continue
+            person_id = self._guess_person_id_from_profile(person_name, profile)
+            if person_id:
+                self._id_to_name_map[person_id] = person_name
+                self._name_to_id_map[person_name] = person_id
+
         logger.debug(f"[身份证号映射] 建立完成: {len(self._id_to_name_map)} 条记录")
 
         # 【v4.1 新增】用户配置（家庭归集）
@@ -615,6 +675,48 @@ class InvestigationReportBuilder:
         logger.info(
             f"[初查报告] 已设置用户配置: {len(config.analysis_units) if config else 0} 个分析单元"
         )
+
+    def set_generation_options(
+        self,
+        thresholds: Optional[Dict[str, Any]] = None,
+        sections: Optional[List[str]] = None,
+    ) -> None:
+        """
+        设置报告生成的运行时参数（阈值、模块开关）。
+
+        Args:
+            thresholds: 前端传入阈值，如 {"largeTransfer": 50000, "largeCash": 50000}
+            sections: 前端选择章节，如 ["summary", "assets", "risks"]
+        """
+        normalized_thresholds: Dict[str, float] = {}
+        for key, value in (thresholds or {}).items():
+            try:
+                numeric = float(value)
+                if numeric > 0:
+                    normalized_thresholds[str(key)] = numeric
+            except (TypeError, ValueError):
+                continue
+
+        normalized_sections = []
+        for section in (sections or []):
+            section_name = str(section).strip()
+            if section_name:
+                normalized_sections.append(section_name)
+
+        self._runtime_thresholds = normalized_thresholds
+        self._enabled_sections = normalized_sections
+        logger.info(
+            f"[初查报告] 已设置运行时参数: thresholds={self._runtime_thresholds}, sections={self._enabled_sections}"
+        )
+
+    def _get_runtime_threshold(self, key: str, default: float) -> float:
+        """读取运行时阈值，缺失/非法时回退默认值。"""
+        value = self._runtime_thresholds.get(key, default)
+        try:
+            numeric = float(value)
+            return numeric if numeric > 0 else float(default)
+        except (TypeError, ValueError):
+            return float(default)
 
     def _is_numeric(self, value) -> bool:
         """判断值是否可以转换为数字"""
@@ -641,6 +743,67 @@ class InvestigationReportBuilder:
             except (ValueError, TypeError):
                 normalized_id = person_id_str
         return self._id_to_name_map.get(normalized_id)
+
+    def _extract_id_from_source_file(self, source_file: str) -> Optional[str]:
+        """从 source_file 文件名中提取身份证号。"""
+        if not source_file:
+            return None
+        match = re.search(r"_(\d{17}[0-9Xx])_", str(source_file))
+        return match.group(1).upper() if match else None
+
+    def _guess_person_id_from_profile(self, name: str, profile: Dict) -> Optional[str]:
+        """从画像数据中推断身份证号（用于报告字段回填）。"""
+        direct_id = str(profile.get("entity_id", "") or "").strip()
+        if re.fullmatch(r"\d{17}[0-9Xx]", direct_id):
+            return direct_id.upper()
+
+        mapped_id = self._get_person_id(name)
+        if mapped_id and re.fullmatch(r"\d{17}[0-9Xx]", str(mapped_id)):
+            return str(mapped_id).upper()
+
+        fund_flow = profile.get("fund_flow", {}) if isinstance(profile, dict) else {}
+        tx_keys = [
+            "third_party_expense_transactions",
+            "third_party_income_transactions",
+            "cash_expense_transactions",
+            "cash_income_transactions",
+            "cash_transactions",
+        ]
+        for key in tx_keys:
+            tx_list = fund_flow.get(key, [])
+            if not isinstance(tx_list, list):
+                continue
+            for tx in tx_list[:3000]:
+                if not isinstance(tx, dict):
+                    continue
+                person_id = self._extract_id_from_source_file(tx.get("source_file", ""))
+                if person_id:
+                    return person_id
+
+        return None
+
+    def _decode_id_card_brief(self, person_id: str) -> Dict[str, str]:
+        """从身份证号解码出生日期与性别。"""
+        if not person_id:
+            return {}
+        pid = str(person_id).upper()
+        if not re.fullmatch(r"\d{17}[0-9X]", pid):
+            return {}
+
+        result = {}
+        birth_raw = pid[6:14]
+        try:
+            birth_dt = datetime.strptime(birth_raw, "%Y%m%d")
+            result["birth_date"] = birth_dt.strftime("%Y年%m月%d日")
+        except Exception:
+            pass
+
+        try:
+            result["gender"] = "男" if int(pid[16]) % 2 == 1 else "女"
+        except Exception:
+            pass
+
+        return result
 
     def _clean_nan(self, value, default: str = "未知") -> str:
         """
@@ -1757,7 +1920,9 @@ class InvestigationReportBuilder:
         self, name: str, profile: Dict
     ) -> YearlySalaryData:
         """构建成员年度工资数据（统一版本）"""
-        yearly_salary_obj = profile.get("yearlySalary", {})
+        yearly_salary_obj = profile.get("yearly_salary", {}) or profile.get(
+            "yearlySalary", {}
+        )
         salary_by_year = (
             yearly_salary_obj.get("yearly", {})
             if isinstance(yearly_salary_obj, dict)
@@ -2845,9 +3010,10 @@ class InvestigationReportBuilder:
             if not profile:
                 continue
 
-            # 尝试从 yearlySalary 获取年度工资数据（驼峰式：yearlySalary.yearly）
-            # 修复：profiles.json和analysis_results_cache.json中使用驼峰式字段名
-            yearly_salary_obj = profile.get("yearlySalary", {})
+            # 兼容 snake_case 与 camelCase 两种缓存格式
+            yearly_salary_obj = profile.get("yearly_salary", {}) or profile.get(
+                "yearlySalary", {}
+            )
             salary_by_year = (
                 yearly_salary_obj.get("yearly", {})
                 if isinstance(yearly_salary_obj, dict)
@@ -2995,16 +3161,77 @@ class InvestigationReportBuilder:
             has_alerts=len(high_risk_alerts) > 0,
         )
 
+    def _render_configured_phrase(
+        self,
+        category: str,
+        scenario: str,
+        level: str,
+        template_key: str,
+        variables: Dict[str, Any],
+        fallback: str,
+    ) -> str:
+        """从 report_phrases.yaml 渲染话术，失败时回退 fallback。"""
+        if self.phrase_loader is None:
+            return fallback
+        try:
+            phrase = self.phrase_loader.get_phrase(category, scenario, level)
+            if not isinstance(phrase, dict):
+                return fallback
+            template = phrase.get(template_key) or phrase.get("detail")
+            if not template:
+                return fallback
+            rendered = self.phrase_loader.render_with_calculation(template, variables)
+            return rendered or fallback
+        except Exception:
+            return fallback
+
+    def _get_salary_metrics(self, profile: Dict, total_income: float) -> tuple[float, float]:
+        """
+        统一获取工资总额与工资占比（百分比）。
+
+        Returns:
+            (salary_total, salary_ratio_percent)
+        """
+        salary_total = profile.get("salaryTotal", 0) or 0
+        income_structure = profile.get("income_structure", {})
+        if (
+            (not salary_total)
+            and isinstance(income_structure, dict)
+            and income_structure.get("salary_income")
+        ):
+            salary_total = income_structure.get("salary_income", 0) or 0
+
+        salary_ratio = (salary_total / total_income * 100) if total_income > 0 else 0.0
+
+        # 兼容 profile.salaryRatio（可能是 0-1，也可能是 0-100）
+        profile_salary_ratio = profile.get("salaryRatio")
+        if total_income > 0 and profile_salary_ratio is not None:
+            try:
+                ratio_val = float(profile_salary_ratio)
+                if ratio_val > 0:
+                    if ratio_val <= 1:
+                        salary_ratio = ratio_val * 100
+                        if not salary_total:
+                            salary_total = total_income * ratio_val
+                    else:
+                        salary_ratio = ratio_val
+                        if not salary_total:
+                            salary_total = total_income * ratio_val / 100
+            except (TypeError, ValueError):
+                pass
+
+        return float(salary_total), float(salary_ratio)
+
     def _analyze_income_expense_match(
         self, name: str, profile: Dict
     ) -> DimensionAnalysis:
         """分析收支匹配度"""
         total_income = profile.get("totalIncome", 0) or 0
         total_expense = profile.get("totalExpense", 0) or 0
-        salary_total = profile.get("salaryTotal", 0) or 0
+        salary_total, salary_ratio = self._get_salary_metrics(profile, total_income)
 
-        # 计算工资占收入比例
-        salary_ratio = (salary_total / total_income * 100) if total_income > 0 else 0
+        # 其他收入（用于模板变量）
+        other_income = max(total_income - salary_total, 0)
 
         # 计算收支差
         gap = total_expense - total_income
@@ -3041,13 +3268,48 @@ class InvestigationReportBuilder:
                 f"工资收入仅占总收入{salary_ratio:.0f}%，非工资收入占比较大"
             )
 
-        # 生成话术
-        if score == 0:
-            narrative = f"{name}收入合计{total_income / 10000:.1f}万元，支出合计{total_expense / 10000:.1f}万元，收支基本平衡，其中工资性收入{salary_total / 10000:.1f}万元，占比{salary_ratio:.0f}%。"
-        elif risk_level == "high":
-            narrative = f"{name}累计支出{total_expense / 10000:.1f}万元，远超其收入{total_income / 10000:.1f}万元（工资仅{salary_total / 10000:.1f}万元，占比{salary_ratio:.0f}%），需进一步核查超额支出资金来源。"
+        # 生成话术（优先使用配置）
+        if salary_ratio < 20:
+            phrase_level = "critical"
+        elif salary_ratio < 40:
+            phrase_level = "high_risk"
+        elif salary_ratio < 60:
+            phrase_level = "warning"
         else:
-            narrative = f"{name}收支匹配度一般，存在{gap / 10000:.1f}万元的支出缺口，建议结合其他证据综合判断。"
+            phrase_level = "normal"
+
+        if score == 0:
+            fallback_narrative = (
+                f"{name}收入合计{total_income / 10000:.1f}万元，支出合计{total_expense / 10000:.1f}万元，"
+                f"收支基本平衡，其中工资性收入{salary_total / 10000:.1f}万元，占比{salary_ratio:.0f}%。"
+            )
+        elif risk_level == "high":
+            fallback_narrative = (
+                f"{name}累计支出{total_expense / 10000:.1f}万元，远超其收入{total_income / 10000:.1f}万元"
+                f"（工资仅{salary_total / 10000:.1f}万元，占比{salary_ratio:.0f}%），需进一步核查超额支出资金来源。"
+            )
+        else:
+            fallback_narrative = (
+                f"{name}收支匹配度一般，存在{gap / 10000:.1f}万元的支出缺口，建议结合其他证据综合判断。"
+            )
+
+        narrative = self._render_configured_phrase(
+            category="income_analysis",
+            scenario="salary_ratio",
+            level=phrase_level,
+            template_key="detail",
+            variables={
+                "name": name,
+                "salary_ratio": round(salary_ratio, 1),
+                "other_income_wan": round(other_income / 10000, 2),
+                "real_income_wan": round(total_income / 10000, 2),
+            },
+            fallback=fallback_narrative,
+        )
+
+        # 收支缺口是收支匹配度核心信息，配置话术中未覆盖时补充
+        if gap > 0:
+            narrative += f"；另支出超过收入{gap / 10000:.1f}万元（超支{gap_ratio:.0f}%）。"
 
         return DimensionAnalysis(
             dimension_name="收支匹配度",
@@ -3062,21 +3324,88 @@ class InvestigationReportBuilder:
     def _analyze_lending_behavior(self, name: str, profile: Dict) -> DimensionAnalysis:
         """分析借贷行为"""
         loan_data = self.derived_data.get("loan", {})
+        bidirectional_flows = loan_data.get("bidirectional_flows", [])
+        if not isinstance(bidirectional_flows, list):
+            bidirectional_flows = []
         loan_details = loan_data.get("details", [])
+        if not isinstance(loan_details, list):
+            loan_details = []
 
         # 查找该人员的借贷记录
-        person_loans = [d for d in loan_details if d.get("person") == name]
+        person_loans = [d for d in bidirectional_flows if d.get("person") == name]
+        if not person_loans:
+            person_loans = [
+                d
+                for d in loan_details
+                if d.get("person") == name
+                and (
+                    d.get("_type") in {"bidirectional", "loan_pair", "no_repayment"}
+                    or d.get("income_total") is not None
+                    or d.get("expense_total") is not None
+                    or d.get("loan_amount") is not None
+                    or d.get("repay_amount") is not None
+                )
+            ]
 
-        # 网贷平台记录
-        online_platforms = self.derived_data.get("online_lending_platforms", [])
+        def _loan_in_amount(item: Dict) -> float:
+            try:
+                return float(
+                    item.get("income_total", item.get("loan_amount", item.get("amount", 0)))
+                    or 0
+                )
+            except (TypeError, ValueError):
+                return 0.0
+
+        def _loan_out_amount(item: Dict) -> float:
+            try:
+                return float(
+                    item.get(
+                        "expense_total", item.get("repay_amount", item.get("out_amount", 0))
+                    )
+                    or 0
+                )
+            except (TypeError, ValueError):
+                return 0.0
+
+        # 过滤无金额借贷标签（避免“0金额但高风险”误判）
+        person_loans = [
+            d
+            for d in person_loans
+            if abs(_loan_in_amount(d)) > 1 or abs(_loan_out_amount(d)) > 1
+        ]
+
+        # 网贷平台记录（修复：来自 loan.online_loan_platforms）
+        online_platforms = loan_data.get("online_loan_platforms", [])
+        if not isinstance(online_platforms, list):
+            online_platforms = []
         person_platforms = [p for p in online_platforms if p.get("person") == name]
+
+        def _to_float(val: Any) -> float:
+            try:
+                return float(val or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        platform_names_all = {
+            str(p.get("platform", "")).strip()
+            for p in person_platforms
+            if str(p.get("platform", "")).strip()
+            and str(p.get("platform", "")).strip().lower() not in {"nan", "none"}
+        }
+        active_platform_names = {
+            str(p.get("platform", "")).strip()
+            for p in person_platforms
+            if abs(_to_float(p.get("amount", 0))) > 1
+            and str(p.get("platform", "")).strip()
+            and str(p.get("platform", "")).strip().lower() not in {"nan", "none"}
+        }
 
         findings = []
         score = 0
         risk_level = "low"
 
         # 多头借贷判定
-        platform_count = len(person_platforms)
+        platform_count = len(active_platform_names)
         if platform_count >= 3:
             score = 20
             risk_level = "high"
@@ -3085,19 +3414,70 @@ class InvestigationReportBuilder:
             score = 10
             risk_level = "medium"
             findings.append(f"与{platform_count}家网贷平台存在资金往来")
+        elif platform_names_all:
+            findings.append(
+                f"检测到{len(platform_names_all)}家平台标签交易，但金额均为0或调账类记录"
+            )
 
         # 借贷规模判定
-        total_borrowed = sum([l.get("income_total", 0) for l in person_loans])
+        total_borrowed = sum([_loan_in_amount(l) for l in person_loans])
+        total_repaid = sum([_loan_out_amount(l) for l in person_loans])
+        loan_balance = total_borrowed - total_repaid
         if total_borrowed > 1000000:
             score = max(score, 15)
             risk_level = "high" if score >= 15 else risk_level
             findings.append(f"借贷规模较大，累计{total_borrowed / 10000:.1f}万元")
 
-        # 生成话术
+        # 生成话术（优先使用配置）
+        loan_count_for_phrase = len(person_loans)
+        effective_loan_count = (
+            loan_count_for_phrase
+            if loan_count_for_phrase > 0
+            else max(platform_count, len(platform_names_all))
+        )
         if score == 0:
-            narrative = f"经查，{name}名下银行流水未发现与网贷平台的资金往来记录，不存在多头借贷、以贷养贷等异常借贷行为。"
+            fallback_narrative = (
+                f"经查，{name}名下银行流水未发现与网贷平台的资金往来记录，不存在多头借贷、以贷养贷等异常借贷行为。"
+            )
+            if platform_names_all:
+                fallback_narrative = (
+                    f"经查，{name}名下流水出现{len(platform_names_all)}家平台标签交易，"
+                    "但均为0金额或调账类记录，暂未形成实质借贷证据。"
+                )
+            phrase_level = "normal"
         else:
-            narrative = f"经查，{name}与{platform_count}家网贷平台存在资金往来，累计借款{total_borrowed / 10000:.1f}万元，存在一定财务压力。"
+            fallback_narrative = (
+                f"经查，{name}与{platform_count}家网贷平台存在资金往来，累计借款{total_borrowed / 10000:.1f}万元，存在一定财务压力。"
+            )
+            if (platform_count >= 3 or total_borrowed > 1000000) and (
+                loan_count_for_phrase > 0 or total_borrowed > 0 or total_repaid > 0
+            ):
+                phrase_level = "high_risk"
+            elif loan_balance >= 0:
+                phrase_level = "frequent_borrower"
+            else:
+                phrase_level = "frequent_lender"
+
+        narrative = self._render_configured_phrase(
+            category="behavioral_analysis",
+            scenario="loan_behavior",
+            level=phrase_level,
+            template_key="detail",
+            variables={
+                "name": name,
+                "loan_inflow": float(total_borrowed),
+                "loan_outflow": float(total_repaid),
+                "loan_balance": float(loan_balance),
+                "loan_inflow_wan": round(total_borrowed / 10000, 2),
+                "loan_outflow_wan": round(total_repaid / 10000, 2),
+                "loan_balance_wan": round(loan_balance / 10000, 2),
+                "abs_loan_balance_wan": round(abs(loan_balance) / 10000, 2),
+                "loan_count": loan_count_for_phrase,
+                "effective_loan_count": effective_loan_count,
+                "platform_count": platform_count,
+            },
+            fallback=fallback_narrative,
+        )
 
         return DimensionAnalysis(
             dimension_name="借贷行为",
@@ -3130,18 +3510,41 @@ class InvestigationReportBuilder:
             if any(kw in desc for kw in luxury_keywords):
                 luxury_count += 1
 
-        if luxury_count > 0:
+        if luxury_count >= 5:
+            score = 15
+            risk_level = "high"
+            findings.append(f"查见疑似奢侈品消费{luxury_count}笔，频次较高")
+        elif luxury_count > 0:
             score = 10
             risk_level = "medium"
             findings.append(f"查见疑似奢侈品消费{luxury_count}笔")
 
-        # 生成话术
+        # 生成话术（优先使用配置）
         if score == 0:
-            narrative = f"{name}消费行为符合日常生活规律，未发现明显异常消费特征。"
+            fallback_narrative = f"{name}消费行为符合日常生活规律，未发现明显异常消费特征。"
+            phrase_level = "normal"
+        elif risk_level == "high":
+            fallback_narrative = (
+                f"{name}存在{luxury_count}笔疑似高档消费，频次较高，建议结合其收入水平与资产来源重点核查。"
+            )
+            phrase_level = "high_risk"
         else:
-            narrative = (
+            fallback_narrative = (
                 f"{name}存在{luxury_count}笔疑似高档消费，建议结合其收入水平综合判断。"
             )
+            phrase_level = "warning"
+
+        narrative = self._render_configured_phrase(
+            category="consumption_analysis",
+            scenario="luxury_spending",
+            level=phrase_level,
+            template_key="detail",
+            variables={
+                "name": name,
+                "luxury_count": luxury_count,
+            },
+            fallback=fallback_narrative,
+        )
 
         return DimensionAnalysis(
             dimension_name="消费特征",
@@ -3178,20 +3581,46 @@ class InvestigationReportBuilder:
 
         # 可疑对手方交易
         suspicious_counterparty = self._get_suspicious_counterparty_transfers(name)
+        suspicious_count = len(suspicious_counterparty)
         if suspicious_counterparty:
             score = max(score, 10)
             risk_level = "medium" if risk_level != "high" else "high"
-            findings.append(f"与可疑对手方存在{len(suspicious_counterparty)}笔资金往来")
+            findings.append(f"与可疑对手方存在{suspicious_count}笔资金往来")
 
-        # 生成话术
+        # 生成话术（优先使用配置）
         total_income = profile.get("totalIncome", 0) or 0
-        salary_total = profile.get("salaryTotal", 0) or 0
-        salary_ratio = (salary_total / total_income * 100) if total_income > 0 else 0
+        salary_total, salary_ratio = self._get_salary_metrics(profile, total_income)
+
+        if risk_level == "high":
+            phrase_level = "high_risk"
+        elif score > 0:
+            phrase_level = "warning"
+        else:
+            phrase_level = "normal"
 
         if score == 0:
-            narrative = f"{name}资金流入主要来源于工资收入（占比{salary_ratio:.0f}%），资金流向符合一般生活消费及理财投资规律。"
+            fallback_narrative = (
+                f"{name}资金流入主要来源于工资收入（占比{salary_ratio:.0f}%），资金流向符合一般生活消费及理财投资规律。"
+            )
         else:
-            narrative = f"{name}存在资金流向疑点：来源不明收入{unknown_total / 10000:.1f}万元，需核实资金来源。"
+            fallback_narrative = (
+                f"{name}存在资金流向疑点：来源不明收入{unknown_total / 10000:.1f}万元，需核实资金来源。"
+            )
+
+        narrative = self._render_configured_phrase(
+            category="fund_flow_analysis",
+            scenario="unknown_income",
+            level=phrase_level,
+            template_key="detail",
+            variables={
+                "name": name,
+                "salary_total": salary_total,
+                "salary_ratio": round(salary_ratio, 1),
+                "unknown_income_wan": round(unknown_total / 10000, 2),
+                "suspicious_count": suspicious_count,
+            },
+            fallback=fallback_narrative,
+        )
 
         return DimensionAnalysis(
             dimension_name="资金流向",
@@ -3207,39 +3636,85 @@ class InvestigationReportBuilder:
         """分析现金操作"""
         cash_total = profile.get("cashTotal", 0) or 0
         cash_transactions = profile.get("cashTransactions", []) or []
+        fund_flow = profile.get("fund_flow", {}) if isinstance(profile.get("fund_flow"), dict) else {}
+        cash_expense = fund_flow.get("cash_expense", 0) or 0
+        if not cash_expense:
+            # 回退：按现金交易明细推断支出
+            for tx in cash_transactions:
+                tx_type = str(tx.get("类型", "") or tx.get("type", ""))
+                if "取现" in tx_type or "支出" in tx_type:
+                    try:
+                        cash_expense += float(tx.get("金额", tx.get("amount", 0)) or 0)
+                    except (TypeError, ValueError):
+                        pass
 
         findings = []
         score = 0
         risk_level = "low"
 
-        # 大额现金判定（单笔5万以上）
+        # 大额现金判定（支持前端阈值配置）
+        large_cash_threshold = self._get_runtime_threshold("largeCash", 50000)
+        high_total_threshold = large_cash_threshold * 10
+        medium_total_threshold = large_cash_threshold * 2
         large_cash_count = 0
         large_cash_total = 0.0
 
         for tx in cash_transactions:
-            amount = tx.get("amount", 0) or 0
-            if amount >= 50000:
+            amount = tx.get("amount", tx.get("金额", 0)) or 0
+            try:
+                amount = float(amount)
+            except (TypeError, ValueError):
+                amount = 0.0
+            if amount >= large_cash_threshold:
                 large_cash_count += 1
                 large_cash_total += amount
 
-        if large_cash_count >= 5 or large_cash_total > 500000:
+        if large_cash_count >= 5 or large_cash_total > high_total_threshold:
             score = 15
             risk_level = "high"
             findings.append(
                 f"存在大额现金操作{large_cash_count}笔，合计{large_cash_total / 10000:.1f}万元"
             )
-        elif large_cash_count >= 2 or large_cash_total > 100000:
+        elif large_cash_count >= 2 or large_cash_total > medium_total_threshold:
             score = 8
             risk_level = "medium"
             findings.append(
                 f"存在大额现金操作{large_cash_count}笔，合计{large_cash_total / 10000:.1f}万元"
             )
 
-        # 生成话术
+        # 生成话术（优先使用配置）
+        total_expense = profile.get("totalExpense", 0) or 0
+        anomaly_ratio = (cash_expense / total_expense * 100) if total_expense > 0 else 0.0
+
         if score == 0:
-            narrative = f"{name}银行流水中现金存取合计{cash_total / 10000:.1f}万元，均为日常取现，未发现大额现金存取规避监管的异常行为。"
+            fallback_narrative = (
+                f"{name}银行流水中现金存取合计{cash_total / 10000:.1f}万元，均为日常取现，未发现大额现金存取规避监管的异常行为。"
+            )
+            phrase_level = "normal"
+        elif score >= 15:
+            fallback_narrative = (
+                f"{name}存在大额现金操作{large_cash_count}笔，合计{large_cash_total / 10000:.1f}万元，其中单笔{large_cash_threshold / 10000:.1f}万元以上现金{large_cash_count}笔，需核实资金来源。"
+            )
+            phrase_level = "high_risk"
         else:
-            narrative = f"{name}存在大额现金操作{large_cash_count}笔，合计{large_cash_total / 10000:.1f}万元，其中单笔5万元以上现金{large_cash_count}笔，需核实资金来源。"
+            fallback_narrative = (
+                f"{name}存在大额现金操作{large_cash_count}笔，合计{large_cash_total / 10000:.1f}万元，其中单笔{large_cash_threshold / 10000:.1f}万元以上现金{large_cash_count}笔，需核实资金来源。"
+            )
+            phrase_level = "warning"
+
+        narrative = self._render_configured_phrase(
+            category="expense_analysis",
+            scenario="cash_expense",
+            level=phrase_level,
+            template_key="detail",
+            variables={
+                "name": name,
+                "cash_expense": float(cash_expense),
+                "cash_expense_wan": round(cash_expense / 10000, 2),
+                "anomaly_ratio": round(anomaly_ratio, 1),
+            },
+            fallback=fallback_narrative,
+        )
 
         return DimensionAnalysis(
             dimension_name="现金操作",
@@ -3260,16 +3735,25 @@ class InvestigationReportBuilder:
         根据风险等级生成符合纪检审计规范的专业描述。
         """
         total_income = profile.get("totalIncome", 0) or 0
-        total_expense = profile.get("totalExpense", 0) or 0
-        salary_total = profile.get("salaryTotal", 0) or 0
-        salary_ratio = (salary_total / total_income * 100) if total_income > 0 else 0
+        salary_total, salary_ratio = self._get_salary_metrics(profile, total_income)
 
         if risk_level == "low":
-            return (
+            fallback = (
                 f"经核查，{name}资金往来符合正常收支规律，"
                 f"工资性收入占比{salary_ratio:.0f}%，与其职务级别及所在单位薪酬水平基本相当，"
                 f"银行流水未发现异常交易特征，资金往来对手方身份清晰，"
                 f"不存在明显的利益输送或隐形资产迹象。"
+            )
+            return self._render_configured_phrase(
+                category="overall_assessment",
+                scenario="professional_narrative",
+                level="normal",
+                template_key="detail",
+                variables={
+                    "name": name,
+                    "salary_ratio": round(salary_ratio, 1),
+                },
+                fallback=fallback,
             )
         elif risk_level == "medium":
             # 收集需要关注的事项
@@ -3283,9 +3767,20 @@ class InvestigationReportBuilder:
             concern_text = (
                 "；".join(concerns[:3]) if concerns else "部分资金流向需进一步核实"
             )
-            return (
+            fallback = (
                 f"经核查，{name}存在以下需关注事项：{concern_text}。"
                 f"上述情况需结合其他证据进一步核实，建议调取相关材料深入审查。"
+            )
+            return self._render_configured_phrase(
+                category="overall_assessment",
+                scenario="professional_narrative",
+                level="warning",
+                template_key="detail",
+                variables={
+                    "name": name,
+                    "concern_text": concern_text,
+                },
+                fallback=fallback,
             )
         else:  # high
             # 收集重大疑点
@@ -3299,9 +3794,20 @@ class InvestigationReportBuilder:
             risk_text = (
                 "；".join(major_risks[:3]) if major_risks else "存在重大资金异常"
             )
-            return (
+            fallback = (
                 f"经核查，{name}存在以下重大疑点：{risk_text}。"
                 f"上述异常情况与廉洁规定存在潜在冲突，建议立即采取措施进一步核查。"
+            )
+            return self._render_configured_phrase(
+                category="overall_assessment",
+                scenario="professional_narrative",
+                level="high_risk",
+                template_key="detail",
+                variables={
+                    "name": name,
+                    "risk_text": risk_text,
+                },
+                fallback=fallback,
             )
 
     def _generate_conclusion_narrative(
@@ -3326,9 +3832,24 @@ class InvestigationReportBuilder:
 
         dim_text = "、".join(dim_summaries)
 
-        return (
+        fallback = (
             f"{name}资金特征综合评分{total_score}分，风险等级为{risk_label}。"
             f"各维度评分：{dim_text}。"
+        )
+        phrase_level_map = {"low": "normal", "medium": "warning", "high": "high_risk"}
+        phrase_level = phrase_level_map.get(risk_level, "normal")
+        return self._render_configured_phrase(
+            category="overall_assessment",
+            scenario="conclusion_narrative",
+            level=phrase_level,
+            template_key="detail",
+            variables={
+                "name": name,
+                "total_score": total_score,
+                "risk_label": risk_label,
+                "dim_text": dim_text,
+            },
+            fallback=fallback,
         )
 
     def _generate_family_overview_narrative(
@@ -3432,6 +3953,8 @@ class InvestigationReportBuilder:
         self, doc_number: str, case_background: str, data_scope: str
     ) -> InvestigationMeta:
         """构建元信息"""
+        normalized_doc_number = str(doc_number or "").strip() or "国监查"
+
         # 从 metadata 中提取数据范围
         if not data_scope and self.metadata:
             date_range = self.metadata.get("date_range", {})
@@ -3442,7 +3965,7 @@ class InvestigationReportBuilder:
                     data_scope = f"{start[:10]} 至 {end[:10]} 银行流水数据"
 
         return InvestigationMeta(
-            doc_number=doc_number or "",
+            doc_number=normalized_doc_number,
             case_background=case_background or "",
             data_scope=data_scope or "",
             generated_at=datetime.now().isoformat(),
@@ -4158,20 +4681,35 @@ class InvestigationReportBuilder:
     def _build_large_transfer_analysis(self, name: str) -> LargeTransferAnalysis:
         """构建大额转账分析"""
         large_transactions = self.derived_data.get("large_transactions", [])
+        threshold = self._get_runtime_threshold(
+            "largeTransfer", getattr(config, "LARGE_TRANSACTION_THRESHOLD", 50000)
+        )
+
+        def _amount_value(tx: Dict) -> float:
+            try:
+                return float(tx.get("amount", 0) or 0)
+            except (TypeError, ValueError):
+                return 0.0
 
         # large_transactions 是一个列表，按 person 字段筛选
         person_transactions = []
         if isinstance(large_transactions, list):
             person_transactions = [
-                t for t in large_transactions if t.get("person") == name
+                t
+                for t in large_transactions
+                if t.get("person") == name and _amount_value(t) >= threshold
             ]
         elif isinstance(large_transactions, dict):
-            person_transactions = large_transactions.get(name, []) or []
+            person_transactions = [
+                t
+                for t in (large_transactions.get(name, []) or [])
+                if _amount_value(t) >= threshold
+            ]
 
         total_amount = sum(t.get("amount", 0) for t in person_transactions)
 
         return LargeTransferAnalysis(
-            threshold=getattr(config, "LARGE_TRANSACTION_THRESHOLD", 50000),
+            threshold=threshold,
             count=len(person_transactions),
             total_amount=total_amount,
             transactions=person_transactions[:20],  # 限制数量
@@ -5195,25 +5733,11 @@ class InvestigationReportBuilder:
 
         # 1. 确定核查对象和家庭分组
         if config:
-            all_persons = []
-            families = {}  # anchor -> members
-            for unit in config.analysis_units:
-                anchor = unit.anchor
-                members_in_unit = []
-                for member in unit.members:
-                    if not self._is_company(member):
-                        if member not in all_persons:
-                            all_persons.append(member)
-                        members_in_unit.append(member)
-                if members_in_unit:
-                    families[anchor] = {
-                        "anchor": anchor,
-                        "members": members_in_unit,
-                        "unit_type": unit.unit_type
-                        if hasattr(unit, "unit_type")
-                        else "family",
-                    }
+            all_persons = self._core_persons.copy()
             include_companies = config.include_companies or self._companies
+            families = self._build_families_from_config_or_cache(
+                all_persons, config=config
+            )
         else:
             # 【修复】无config时，优先尝试加载 primary_targets.json 配置文件
             try:
@@ -5231,29 +5755,12 @@ class InvestigationReportBuilder:
                     logger.info(
                         f"[初查报告v4] 自动加载配置文件，包含 {len(loaded_config.analysis_units)} 个分析单元"
                     )
-                    all_persons = []
-                    families = {}
-                    for unit in loaded_config.analysis_units:
-                        anchor = unit.anchor
-                        members_in_unit = []
-                        for member in unit.members:
-                            if not self._is_company(member):
-                                if member not in all_persons:
-                                    all_persons.append(member)
-                                members_in_unit.append(member)
-                        if members_in_unit:
-                            families[anchor] = {
-                                "anchor": anchor,
-                                "members": members_in_unit,
-                                "unit_type": unit.unit_type
-                                if hasattr(unit, "unit_type")
-                                else "family",
-                                "member_details": unit.member_details
-                                if hasattr(unit, "member_details")
-                                else [],
-                            }
+                    all_persons = self._core_persons.copy()
                     include_companies = (
                         loaded_config.include_companies or self._companies.copy()
+                    )
+                    families = self._build_families_from_config_or_cache(
+                        all_persons, config=loaded_config
                     )
                 else:
                     raise ValueError("配置文件为空或无分析单元")
@@ -5295,9 +5802,15 @@ class InvestigationReportBuilder:
         next_steps = self._build_v4_next_steps(person_sections, company_sections)
 
         # 组装完整报告（新增family_sections字段）
+        v4_doc_number = ""
+        if config and getattr(config, "doc_number", None):
+            v4_doc_number = str(config.doc_number).strip()
+        if not v4_doc_number:
+            v4_doc_number = "国监查"
+
         report = {
             "meta": {
-                "doc_number": config.doc_number if config else "",
+                "doc_number": v4_doc_number,
                 "generated_at": datetime.now().isoformat(),
                 "version": "4.1.0",  # 版本升级
                 "generator": "穿云审计初查报告引擎 v4.1.0（家庭优先）",
@@ -5370,10 +5883,11 @@ class InvestigationReportBuilder:
         base_report = self.build_report_v4(config, case_background, data_scope)
 
         # v5.0增强：构建完整四部分架构（同时保留v4.0字段用于HTML模板兼容）
+        doc_number = str(base_report.get("meta", {}).get("doc_number", "")).strip() or "国监查"
         report = {
             # v4.0 兼容字段（用于HTML模板渲染）
             "meta": {
-                "doc_number": base_report["meta"].get("doc_number", ""),
+                "doc_number": doc_number,
                 "case_background": case_background
                 or "根据相关线索反映，现对相关人员进行资金穿透核查。",
                 "data_scope": data_scope
@@ -5474,193 +5988,189 @@ class InvestigationReportBuilder:
         """
         families = {}
         assigned = set()
+        candidate_order = [p for p in all_persons if p and not self._is_company(p)]
+        candidate_names = set(candidate_order)
 
-        # ========== 优先级1: 使用用户配置的 analysis_units ==========
-        if config and hasattr(config, 'analysis_units') and config.analysis_units:
+        # ========== 优先级1: 使用用户配置 ==========
+        if config and hasattr(config, "analysis_units") and config.analysis_units:
             logger.info(
                 f"[配置优先] 使用用户配置的 analysis_units，共 {len(config.analysis_units)} 个单元"
             )
 
             for unit in config.analysis_units:
-                anchor = unit.anchor if hasattr(unit, 'anchor') else unit.get('anchor', '')
-                members_raw = unit.members if hasattr(unit, 'members') else unit.get('members', [])
+                anchor_raw = (
+                    unit.anchor if hasattr(unit, "anchor") else unit.get("anchor", "")
+                )
+                members_raw = (
+                    unit.members if hasattr(unit, "members") else unit.get("members", [])
+                )
                 unit_type = (
-                    unit.unit_type if hasattr(unit, 'unit_type') else unit.get('unit_type', 'family')
+                    unit.unit_type
+                    if hasattr(unit, "unit_type")
+                    else unit.get("unit_type", "family")
                 )
 
-                # 只保留在 all_persons 中的成员
-                members = [m for m in members_raw if m in all_persons]
+                resolved_members = []
+                for member_name in members_raw:
+                    resolved = self._resolve_profile_person_name(
+                        member_name, candidate_names
+                    )
+                    if resolved and resolved not in resolved_members:
+                        resolved_members.append(resolved)
 
-                if not members:
+                if not resolved_members:
                     continue
 
-                # 确保 anchor 在 members 中
-                if anchor not in members:
-                    anchor = members[0]
+                resolved_anchor = self._resolve_profile_person_name(
+                    anchor_raw, set(resolved_members)
+                ) or resolved_members[0]
 
-                # 标记为已分配
-                for m in members:
-                    assigned.add(m)
-
-                # 提取 member_details 中的关系信息
                 member_details_list = []
                 unit_member_details = (
-                    unit.member_details if hasattr(unit, 'member_details') else unit.get('member_details', [])
+                    unit.member_details
+                    if hasattr(unit, "member_details")
+                    else unit.get("member_details", [])
                 )
-                if unit_member_details:
-                    for md in unit_member_details:
-                        if hasattr(md, 'name'):
-                            # AnalysisUnitMember 对象
-                            member_details_list.append({
-                                'name': md.name,
-                                'relation': md.relation if hasattr(md, 'relation') else '家庭成员',
-                                'has_data': md.has_data if hasattr(md, 'has_data') else (md.name in self.profiles),
-                            })
-                        elif isinstance(md, dict):
-                            # 字典格式
-                            member_details_list.append({
-                                'name': md.get('name', ''),
-                                'relation': md.get('relation', '家庭成员'),
-                                'has_data': md.get('has_data', md.get('name') in self.profiles),
-                            })
+                for md in unit_member_details or []:
+                    if hasattr(md, "name"):
+                        raw_name = md.name
+                        relation = md.relation if hasattr(md, "relation") else "家庭成员"
+                        has_data = (
+                            md.has_data
+                            if hasattr(md, "has_data")
+                            else raw_name in self.profiles
+                        )
+                    elif isinstance(md, dict):
+                        raw_name = md.get("name", "")
+                        relation = md.get("relation", "家庭成员")
+                        has_data = md.get("has_data", raw_name in self.profiles)
+                    else:
+                        continue
 
-                families[anchor] = {
-                    'anchor': anchor,
-                    'members': members,
-                    'unit_type': unit_type if len(members) > 1 else 'individual',
-                    'member_details': member_details_list,
-                    'source': 'user_config',  # 标记来源
-                }
+                    resolved_name = self._resolve_profile_person_name(
+                        raw_name, set(resolved_members)
+                    )
+                    if not resolved_name:
+                        continue
+                    if any(x.get("name") == resolved_name for x in member_details_list):
+                        continue
+                    member_details_list.append(
+                        {
+                            "name": resolved_name,
+                            "relation": relation,
+                            "has_data": has_data or (resolved_name in self.profiles),
+                        }
+                    )
 
+                if resolved_anchor in families:
+                    existed = families[resolved_anchor]
+                    existed["members"] = list(
+                        dict.fromkeys(existed["members"] + resolved_members)
+                    )
+                    existed_md = existed.get("member_details", [])
+                    for md in member_details_list:
+                        if not any(x.get("name") == md.get("name") for x in existed_md):
+                            existed_md.append(md)
+                    existed["member_details"] = existed_md
+                    existed["unit_type"] = (
+                        "family" if len(existed["members"]) > 1 else "individual"
+                    )
+                else:
+                    families[resolved_anchor] = {
+                        "anchor": resolved_anchor,
+                        "members": resolved_members,
+                        "unit_type": unit_type if len(resolved_members) > 1 else "individual",
+                        "member_details": member_details_list,
+                        "source": "user_config",
+                    }
+
+                assigned.update(resolved_members)
                 logger.info(
-                    f"[配置优先] 家庭 anchor={anchor}, 成员={members}, type={unit_type}, "
+                    f"[配置优先] 家庭 anchor={resolved_anchor}, 成员={resolved_members}, "
                     f"关系数={len(member_details_list)}"
                 )
 
-            logger.info(f"[配置优先] 已从用户配置构建 {len(families)} 个家庭单元")
-
-        # ========== 优先级2: 未分配人员使用 family_units_v2（户籍数据） ==========
-        """
-        从缓存中的family_units_v2构建家庭分组（户主优先原则）
-
-        【户主优先原则】
-        1. 优先使用 family_units_v2（来自真实户籍同户人数据）
-        2. family_units_v2 基于公安部同户人数据，准确记录了户籍关系
-        3. 只有未被 family_units_v2 覆盖的人员才使用 extended_relatives 推断
-
-        Args:
-            all_persons: 所有核查人员列表
-
-        Returns:
-            家庭分组字典 {anchor: {anchor, members, unit_type}}
-        """
-        families = {}
-        assigned = set()
-
-        # ========== 优先级1: 使用 family_units_v2 或 family_units（真实户籍数据） ==========
-        # 优先使用 family_units_v2，如果为空则回退到 family_units
+        # ========== 优先级2: 未分配人员使用 family_units_v2 / family_units ==========
         family_units_v2 = self.derived_data.get("family_units_v2", [])
         family_units = self.derived_data.get("family_units", [])
-
-        # 选择有数据的家庭单元
         effective_units = family_units_v2 if family_units_v2 else family_units
         source_name = "family_units_v2" if family_units_v2 else "family_units"
 
         if effective_units:
             logger.info(
-                f"[户主优先原则] 使用 {source_name} 构建家庭分组，共 {len(effective_units)} 个家庭单元"
+                f"[户主优先原则] 使用 {source_name} 补齐分组，共 {len(effective_units)} 个家庭单元"
             )
-
             for unit in effective_units:
-                anchor = unit.get("anchor", "") or unit.get("householder", "")
+                anchor_raw = unit.get("anchor", "") or unit.get("householder", "")
                 members_raw = unit.get("members", [])
-                unit_type = unit.get("unit_type", "family")
 
-                # 只保留在 all_persons 中的成员（已查询数据的人员）
-                members = [m for m in members_raw if m in all_persons]
+                resolved_members = []
+                for member_name in members_raw:
+                    resolved = self._resolve_profile_person_name(
+                        member_name, candidate_names
+                    )
+                    if resolved and resolved not in assigned and resolved not in resolved_members:
+                        resolved_members.append(resolved)
 
-                if not members:
+                if not resolved_members:
                     continue
 
-                # 确保 anchor 在 members 中，否则使用第一个成员作为 anchor
-                if anchor not in members:
-                    anchor = members[0]
+                resolved_anchor = self._resolve_profile_person_name(
+                    anchor_raw, set(resolved_members)
+                ) or resolved_members[0]
 
-                # 标记为已分配
-                for m in members:
-                    assigned.add(m)
-
-                # 确定 unit_type
-                actual_unit_type = "family" if len(members) > 1 else "individual"
-
-                families[anchor] = {
-                    "anchor": anchor,
-                    "members": members,
-                    "unit_type": actual_unit_type,
+                families[resolved_anchor] = {
+                    "anchor": resolved_anchor,
+                    "members": resolved_members,
+                    "unit_type": "family" if len(resolved_members) > 1 else "individual",
                     "member_details": unit.get("member_details", [])
-                    or unit.get("relations", {}),  # 保留成员详情
+                    or unit.get("relations", []),
+                    "source": source_name,
                 }
+                assigned.update(resolved_members)
 
-                logger.info(
-                    f"[户主优先原则] 家庭 anchor={anchor}, 成员={members}, type={actual_unit_type}"
-                )
-
-        # ========== 优先级2: 未分配的人员使用 extended_relatives 推断 ==========
+        # ========== 优先级3: 未分配人员使用 extended_relatives 推断 ==========
         family_summary = self.derived_data.get("family_summary", {})
         extended_relatives = family_summary.get("extended_relatives", [])
-
-        # 构建推断关系图
         relation_graph = {}
         for rel in extended_relatives:
-            a = rel.get("person_a", "")
-            b = rel.get("person_b", "")
+            a = self._resolve_profile_person_name(rel.get("person_a", ""), candidate_names)
+            b = self._resolve_profile_person_name(rel.get("person_b", ""), candidate_names)
             relation = rel.get("relation", "")
+            if not a or not b:
+                continue
+            relation_graph.setdefault(a, []).append({"name": b, "relation": relation})
+            relation_graph.setdefault(b, []).append({"name": a, "relation": relation})
 
-            if a and b:
-                if a not in relation_graph:
-                    relation_graph[a] = []
-                if b not in relation_graph:
-                    relation_graph[b] = []
-                relation_graph[a].append({"name": b, "relation": relation})
-                relation_graph[b].append({"name": a, "relation": relation})
-
-        # 按推断关系分组（仅处理未分配的人员）
-        for person in all_persons:
+        for person in candidate_order:
             if person in assigned:
                 continue
-
-            # 收集该人员相关的所有家庭成员
             family_members = [person]
             assigned.add(person)
+            for rel in relation_graph.get(person, []):
+                related = rel.get("name")
+                if related in candidate_names and related not in assigned:
+                    family_members.append(related)
+                    assigned.add(related)
 
-            # 从关系图中获取关联人员
-            if person in relation_graph:
-                for rel in relation_graph[person]:
-                    related = rel["name"]
-                    if related in all_persons and related not in assigned:
-                        family_members.append(related)
-                        assigned.add(related)
-
-            # 以第一个人为anchor
             anchor = family_members[0]
             families[anchor] = {
                 "anchor": anchor,
                 "members": family_members,
                 "unit_type": "family" if len(family_members) > 1 else "individual",
+                "source": "extended_relatives",
             }
 
-            if len(family_members) > 1:
-                logger.info(f"[推断关系] 家庭 anchor={anchor}, 成员={family_members}")
-
-        # ========== 处理剩余未分组的人员 ==========
-        for person in all_persons:
-            if person not in assigned:
-                families[person] = {
-                    "anchor": person,
-                    "members": [person],
-                    "unit_type": "individual",
-                }
-                logger.info(f"[独立个人] {person}")
+        # ========== 优先级4: 剩余独立人员 ==========
+        for person in candidate_order:
+            if person in assigned:
+                continue
+            families[person] = {
+                "anchor": person,
+                "members": [person],
+                "unit_type": "individual",
+                "source": "single",
+            }
 
         return families
 
@@ -5688,7 +6198,12 @@ class InvestigationReportBuilder:
 
         # 2. 构建成员分析章节（按排序后顺序）
         member_sections = []
-        for idx, member in enumerate(sorted_members):
+        detailed_members = [m for m in sorted_members if m in self.profiles]
+        if not detailed_members and sorted_members:
+            # 回退：至少保留1个成员，避免章节为空
+            detailed_members = [sorted_members[0]]
+
+        for idx, member in enumerate(detailed_members):
             relation = self._infer_relation_from_members(member, anchor, members)
             section = self.build_v4_person_section(member, relation)
             section["section_index"] = idx + 1  # 添加章节序号
@@ -5871,13 +6386,17 @@ class InvestigationReportBuilder:
                             or prop.get("坐落", "")
                             or prop.get("address", "")
                         )
-                        if location:
-                            normalized_loc = self._normalize_property_address(location)
-                            if (
-                                normalized_loc
-                                and normalized_loc not in unique_properties
-                            ):
-                                unique_properties[normalized_loc] = prop
+                        normalized_loc = (
+                            self._normalize_property_address(location) if location else ""
+                        )
+                        fallback_key = (
+                            f"{member}|{prop.get('产权证号', '')}|{prop.get('登记时间', '')}"
+                        )
+                        property_key = normalized_loc or fallback_key
+                        if property_key in unique_properties:
+                            continue
+
+                        unique_properties[property_key] = prop
                         prop_value = prop.get("value", 0) or prop.get("price", 0) or 0
                         total_property_value += prop_value
                         # 【2026-02-13 新增】累加房产面积（面积字段可能是字符串如"182.29平方米"）
@@ -5925,12 +6444,14 @@ class InvestigationReportBuilder:
         for member in members:
             profile = self.profiles.get(member, {})
             # 【修复】从yearly_salary获取真实工资数据
-            yearly_salary = profile.get('yearly_salary', {})
-            if yearly_salary and 'summary' in yearly_salary:
-                member_salary = yearly_salary['summary'].get('total', 0)
+            yearly_salary = profile.get("yearly_salary", {}) or profile.get(
+                "yearlySalary", {}
+            )
+            if yearly_salary and "summary" in yearly_salary:
+                member_salary = yearly_salary["summary"].get("total", 0)
             else:
                 # 回退到旧字段
-                member_salary = profile.get('salaryTotal', 0) or 0
+                member_salary = profile.get("salaryTotal", 0) or 0
             total_salary += member_salary
 
             # 成员关系：优先使用用户配置，其次推断
@@ -5939,35 +6460,11 @@ class InvestigationReportBuilder:
                 relation = self._infer_relation_from_members(member, anchor, members)
             member_relations.append(
                 {
-                    'name': member,
-                    'relation': relation,
-                    'has_data': member in self.profiles,
-                }
-            )
-        total_salary = 0.0
-        member_relations = []
-
-        for member in members:
-            profile = self.profiles.get(member, {})
-            # 【修复】从yearly_salary获取真实工资数据
-            yearly_salary = profile.get("yearly_salary", {})
-            if yearly_salary and "summary" in yearly_salary:
-                member_salary = yearly_salary["summary"].get("total", 0)
-            else:
-                # 回退到旧字段
-                member_salary = profile.get("salaryTotal", 0) or 0
-            total_salary += member_salary
-
-            # 成员关系
-            relation = self._infer_relation_from_members(member, anchor, members)
-            member_relations.append(
-                {
                     "name": member,
                     "relation": relation,
                     "has_data": member in self.profiles,
                 }
             )
-
         # 【2026-02-23 修复】直接使用summary.salary_ratio（工资/总收入）
         salary_ratio = (
             (total_salary / total_real_income * 100) if total_real_income > 0 else 0
@@ -7537,9 +8034,19 @@ class InvestigationReportBuilder:
         cash_withdrawal_total = profile.get("cashExpense", 0) or 0
         cash_withdrawal_count = profile.get("cashExpenseCount", 0) or 0
 
-        # 大额转账(从derived_data获取)
+        # 大额转账(从derived_data获取，支持运行时阈值)
+        transfer_threshold = self._get_runtime_threshold("largeTransfer", 10000)
         large_txs = self.derived_data.get("large_transactions", [])
-        person_large_txs = [tx for tx in large_txs if tx.get("person") == name]
+        person_large_txs = []
+        for tx in large_txs:
+            if tx.get("person") != name:
+                continue
+            try:
+                amount = float(tx.get("amount", 0) or 0)
+            except (TypeError, ValueError):
+                amount = 0.0
+            if amount >= transfer_threshold:
+                person_large_txs.append(tx)
 
         return {
             "large_cash": {
@@ -7548,6 +8055,7 @@ class InvestigationReportBuilder:
                 "withdrawal_count": cash_withdrawal_count,
                 "withdrawal_total": cash_withdrawal_total,
             },
+            "large_transfer_threshold": transfer_threshold,
             "large_transfers": person_large_txs[:10],  # 取前10笔
             "suspicious_patterns": [],  # 从suspicions获取
         }
@@ -8215,41 +8723,70 @@ class InvestigationReportBuilder:
             if huji_info:
                 break
 
-        # 格式化出生日期
-        birth_date_raw = huji_info.get("出生日期", "")
+        id_info = profile.get("id_info", {}) if isinstance(profile, dict) else {}
+        person_id = self._guess_person_id_from_profile(name, profile)
+        decoded = self._decode_id_card_brief(person_id) if person_id else {}
+
+        # 格式化出生日期（优先户籍，再回退到画像/身份证反解）
+        birth_date_raw = (
+            huji_info.get("出生日期")
+            or id_info.get("birth_date")
+            or id_info.get("birthday")
+            or decoded.get("birth_date")
+            or ""
+        )
+        birth_date = "暂未获取"
         if birth_date_raw:
-            # 处理 YYYYMMDD 格式
+            raw_str = str(birth_date_raw).strip()
             if isinstance(birth_date_raw, (int, float)):
-                birth_date_raw = str(int(birth_date_raw))
-            if len(str(birth_date_raw)) == 8:
-                birth_date = f"{str(birth_date_raw)[:4]}年{str(birth_date_raw)[4:6]}月{str(birth_date_raw)[6:]}日"
-            else:
-                birth_date = str(birth_date_raw)
-        else:
-            birth_date = "暂无数据"
+                raw_str = str(int(birth_date_raw))
+            if re.fullmatch(r"\d{8}", raw_str):
+                birth_date = f"{raw_str[:4]}年{raw_str[4:6]}月{raw_str[6:8]}日"
+            elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_str):
+                birth_date = (
+                    f"{raw_str[:4]}年{raw_str[5:7]}月{raw_str[8:10]}日"
+                )
+            elif "年" in raw_str and "月" in raw_str and "日" in raw_str:
+                birth_date = raw_str
 
         # 获取籍贯/出生地
         birth_place = (
-            huji_info.get("籍贯", "") or huji_info.get("出生地", "") or "暂无数据"
+            huji_info.get("籍贯", "")
+            or huji_info.get("出生地", "")
+            or id_info.get("native_place", "")
+            or id_info.get("birth_place", "")
+            or "暂未获取"
         )
 
         # 获取从业单位
-        employer = huji_info.get("从业单位", "") or "暂无数据"
+        employer = (
+            huji_info.get("从业单位", "")
+            or id_info.get("employer", "")
+            or self._person_identity_map.get(name, {}).get("employer", "")
+            or "信息待补充"
+        )
 
         # 获取性别
-        gender = huji_info.get("性别", "") or "暂无数据"
+        gender = (
+            huji_info.get("性别", "")
+            or id_info.get("gender", "")
+            or decoded.get("gender", "")
+            or "暂未获取"
+        )
 
         return {
             "name": name,
             "gender": gender,
             "birth_date": birth_date,
             "birth_place": birth_place,
+            "id_number": person_id or id_info.get("id_number", "暂未获取"),
             "entry_date": "暂无数据",  # 入职日期需要人事档案
             "current_position": "暂无数据",  # 职务需要人事档案
             "employer": employer,
             "family_members_desc": self._build_family_members_desc(name),
             "has_complete_info": bool(
-                huji_info.get("出生日期") and huji_info.get("从业单位")
+                birth_date not in ("暂未获取", "暂无数据")
+                and employer not in ("暂未获取", "暂无数据", "信息待补充")
             ),
         }
 
@@ -8310,31 +8847,43 @@ class InvestigationReportBuilder:
             total_salary / (years_count * 12) if years_count > 0 else 0
         )
 
-        # 【M-02修复】查询时间范围（优先使用metadata，回退到年度数据推断）
+        # 查询时间范围（优先使用 metadata，其次 profile.summary.date_range，最后年度数据）
         date_range = self.metadata.get("date_range", {})
         start_date = date_range.get("start", "")
         end_date = date_range.get("end", "")
+        profile_date_range = profile.get("summary", {}).get("date_range", [])
+        profile_start = (
+            profile_date_range[0]
+            if isinstance(profile_date_range, list) and len(profile_date_range) >= 1
+            else ""
+        )
+        profile_end = (
+            profile_date_range[1]
+            if isinstance(profile_date_range, list) and len(profile_date_range) >= 2
+            else ""
+        )
 
-        # 从年度数据推断起止年份
-        if years_with_data:
-            start_year = min(years_with_data)
-            end_year = max(years_with_data)
-        else:
-            start_year = "【起始】"
-            end_year = "【结束】"
-
-        # 优先使用 date_range 中的年份，回退到年度数据推断的年份
-        if start_date and len(start_date) >= 4:
-            period_start = start_date[:4]  # 提取年份
-        else:
-            period_start = start_year
-
-        if end_date and len(end_date) >= 4:
-            period_end = end_date[:4]  # 提取年份
-        else:
-            period_end = end_year
-
-        period_desc = f"{period_start}年至{period_end}年"
+        start_year = min(years_with_data) if years_with_data else ""
+        end_year = max(years_with_data) if years_with_data else ""
+        period_start = (
+            start_date[:4]
+            if start_date and len(start_date) >= 4
+            else profile_start[:4]
+            if profile_start and len(profile_start) >= 4
+            else start_year
+        )
+        period_end = (
+            end_date[:4]
+            if end_date and len(end_date) >= 4
+            else profile_end[:4]
+            if profile_end and len(profile_end) >= 4
+            else end_year
+        )
+        period_desc = (
+            f"{period_start}年至{period_end}年"
+            if period_start and period_end
+            else "查询期间"
+        )
 
         return {
             "period": period_desc,
@@ -8381,14 +8930,16 @@ class InvestigationReportBuilder:
         if not period_start or not period_end:
             period = self.metadata.get("date_range", {})
             period_start = period_start or (
-                period.get("start", "")[:4] if period.get("start") else "起始"
+                period.get("start", "")[:4] if period.get("start") else ""
             )
             period_end = period_end or (
-                period.get("end", "")[:4] if period.get("end") else "结束"
+                period.get("end", "")[:4] if period.get("end") else ""
             )
 
         if not yearly_breakdown:
-            return f"{name}{period_start}年至{period_end}年未查见工资收入记录。"
+            if period_start and period_end:
+                return f"{name}{period_start}年至{period_end}年未查见工资收入记录。"
+            return f"{name}在查询期间未查见工资收入记录。"
 
         breakdown_str = "，".join(yearly_breakdown)
         return (
@@ -9005,18 +9556,21 @@ class InvestigationReportBuilder:
         """构建家庭存款与家庭收入匹配分析"""
         # 【2026-02-20 修复】增强回退逻辑，优先使用 real_income
         summary = profile.get("summary", {})
+        total_income = summary.get("real_income")
+        if total_income is None:
+            total_income = summary.get("total_income")
+        if total_income is None:
+            total_income = profile.get("totalIncome", 0)
 
-        # 优先级：1. real_income -> 2. total_income -> 3. totalIncome（扁平化缓存）
-        total_income = (
-            summary.get("real_income")
-            or summary.get("total_income")
-            or profile.get("totalIncome", 0)
-        )
-        total_expense = (
-            summary.get("real_expense")
-            or summary.get("total_expense")
-            or profile.get("totalExpense", 0)
-        )
+        total_expense = summary.get("real_expense")
+        if total_expense is None:
+            total_expense = summary.get("total_expense")
+        if total_expense is None:
+            total_expense = profile.get("totalExpense", 0)
+
+        # 入/出流量展示不应为负值
+        total_income = max(0.0, float(total_income or 0.0))
+        total_expense = max(0.0, float(total_expense or 0.0))
         net_balance = total_income - total_expense
 
         # 获取银行余额
@@ -9085,8 +9639,16 @@ class InvestigationReportBuilder:
 
     def _build_counterparty_analysis_v4(self, name: str, profile: Dict) -> Dict:
         """构建银行流水交易对象分析"""
-        total_income = profile.get("totalIncome", 0)
-        total_expense = profile.get("totalExpense", 0)
+        summary = profile.get("summary", {}) if isinstance(profile, dict) else {}
+        total_income = summary.get("real_income")
+        if total_income is None:
+            total_income = profile.get("totalIncome", 0)
+        total_expense = summary.get("real_expense")
+        if total_expense is None:
+            total_expense = profile.get("totalExpense", 0)
+
+        total_income = max(0.0, float(total_income or 0.0))
+        total_expense = max(0.0, float(total_expense or 0.0))
         salary_total = profile.get("salaryTotal", 0)
         cash_income = profile.get("cashIncome", 0)
         cash_expense = profile.get("cashExpense", 0)
@@ -9282,6 +9844,8 @@ class InvestigationReportBuilder:
         6. 存取时间异常（深夜0-6点大额存取）→ 高风险
         """
         warnings = []
+        large_cash_threshold = self._get_runtime_threshold("largeCash", 50000)
+        cumulative_cash_threshold = large_cash_threshold * 10
 
         # 获取总收入/支出用于计算占比
         summary = profile.get("summary", {})
@@ -9291,12 +9855,16 @@ class InvestigationReportBuilder:
         # 1. 检测单笔大额现金交易
         for tx in cash_transactions:
             amount = tx.get("金额") or tx.get("amount", 0)
+            try:
+                amount = float(amount or 0)
+            except (TypeError, ValueError):
+                amount = 0.0
             tx_type = tx.get("类型") or tx.get("type", "")
             date = tx.get("日期") or tx.get("date", "")
             desc = tx.get("摘要") or tx.get("description", "")
 
-            # 检测单笔≥5万
-            if amount >= 50000:
+            # 检测单笔大额现金阈值
+            if amount >= large_cash_threshold:
                 if tx_type == "存现" or "存" in desc:
                     warnings.append(
                         {
@@ -9305,7 +9873,7 @@ class InvestigationReportBuilder:
                             "level_text": "中风险",
                             "date": date,
                             "amount": amount,
-                            "description": f"单笔现金存入{amount / 10000:.2f}万元，需核实现金来源",
+                            "description": f"单笔现金存入{amount / 10000:.2f}万元（阈值{large_cash_threshold / 10000:.2f}万元），需核实现金来源",
                         }
                     )
                 elif tx_type == "取现" or "取" in desc:
@@ -9316,7 +9884,7 @@ class InvestigationReportBuilder:
                             "level_text": "中风险",
                             "date": date,
                             "amount": amount,
-                            "description": f"单笔现金取出{amount / 10000:.2f}万元，需核实资金流向",
+                            "description": f"单笔现金取出{amount / 10000:.2f}万元（阈值{large_cash_threshold / 10000:.2f}万元），需核实资金流向",
                         }
                     )
 
@@ -9342,14 +9910,14 @@ class InvestigationReportBuilder:
                     pass
 
         # 2. 检测累计现金超标
-        if cash_income + cash_expense >= 500000:
+        if cash_income + cash_expense >= cumulative_cash_threshold:
             warnings.append(
                 {
                     "type": "累计现金超标",
                     "level": "high",
                     "level_text": "高风险",
                     "amount": cash_income + cash_expense,
-                    "description": f"累计现金交易{(cash_income + cash_expense) / 10000:.2f}万元，超过50万阈值，需全面核查",
+                    "description": f"累计现金交易{(cash_income + cash_expense) / 10000:.2f}万元，超过{cumulative_cash_threshold / 10000:.2f}万阈值，需全面核查",
                 }
             )
 
@@ -9390,14 +9958,18 @@ class InvestigationReportBuilder:
             "large_transactions", []
         ) or self.derived_data.get("largeTransactions", [])
 
-        # 筛选该人员的大额转账（≥1万元）
+        # 筛选该人员的大额转账（支持运行时阈值）
         person_transfers_in = []
         person_transfers_out = []
-        threshold = 10000
+        threshold = self._get_runtime_threshold("largeTransfer", 10000)
 
         if isinstance(large_transactions, list):
             for t in large_transactions:
-                if t.get("person") == name and t.get("amount", 0) >= threshold:
+                try:
+                    amount = float(t.get("amount", 0) or 0)
+                except (TypeError, ValueError):
+                    amount = 0.0
+                if t.get("person") == name and amount >= threshold:
                     if t.get("direction") == "income":
                         person_transfers_in.append(t)
                     else:
@@ -9412,13 +9984,14 @@ class InvestigationReportBuilder:
         if include_companies:
             company_names = "、".join(include_companies[:3])
             company_clause = f"未查见与{company_names}存在关联。"
+        threshold_wan = threshold / 10000
 
         in_narrative = (
-            f"查看单笔1万元以上银行流入流水，共{len(person_transfers_in)}笔共计金额{in_total / 10000:.2f}万元，"
+            f"查看单笔{threshold_wan:.2f}万元以上银行流入流水，共{len(person_transfers_in)}笔共计金额{in_total / 10000:.2f}万元，"
             f"主要是工资收入、个人转账等。{company_clause}"
         )
         out_narrative = (
-            f"查看单笔1万元以上银行支出流水，共{len(person_transfers_out)}笔共计金额{out_total / 10000:.2f}万元，"
+            f"查看单笔{threshold_wan:.2f}万元以上银行支出流水，共{len(person_transfers_out)}笔共计金额{out_total / 10000:.2f}万元，"
             f"主要是生活消费、个人转账等。{company_clause}"
         )
 
@@ -10133,24 +10706,67 @@ class InvestigationReportBuilder:
         for name, profile in self.profiles.items():
             total_transactions += profile.get("transactionCount", 0) or 0
 
-        # 计算疑点总数
-        cash_collisions = self.suspicions.get("cash_collisions", [])
-        direct_transfers = self.suspicions.get("direct_transfers", [])
-        hidden_assets = self.suspicions.get("hidden_assets", [])
+        # 计算疑点总数（兼容 camelCase / snake_case）
+        def _get_suspicion_list(*keys: str) -> List[Dict]:
+            for key in keys:
+                value = self.suspicions.get(key, [])
+                if isinstance(value, list):
+                    return value
+            return []
+
+        cash_collisions = _get_suspicion_list("cashCollisions", "cash_collisions")
+        direct_transfers = _get_suspicion_list("directTransfers", "direct_transfers")
+        hidden_assets = _get_suspicion_list("hiddenAssets", "hidden_assets")
+        aml_alerts = _get_suspicion_list("amlAlerts", "aml_alerts")
+        credit_alerts = _get_suspicion_list("creditAlerts", "credit_alerts")
+
+        aml_positive = 0
+        for alert in aml_alerts:
+            suspicious_count = alert.get("suspicious_transaction_count", 0) or 0
+            large_count = alert.get("large_transaction_count", 0) or 0
+            payment_count = alert.get("payment_transaction_count", 0) or 0
+            if suspicious_count > 0 or large_count > 0 or payment_count > 0:
+                aml_positive += 1
+
         total_suspicions = (
-            len(cash_collisions) + len(direct_transfers) + len(hidden_assets)
+            len(cash_collisions)
+            + len(direct_transfers)
+            + len(hidden_assets)
+            + len(credit_alerts)
+            + aml_positive
         )
 
-        # 风险评级算法
-        if total_suspicions > 20:
+        # 风险评级算法（加权）
+        weighted_risk_score = (
+            len(cash_collisions) * 3
+            + len(direct_transfers) * 2
+            + len(hidden_assets) * 4
+            + aml_positive * 2
+            + len(credit_alerts)
+        )
+
+        if weighted_risk_score >= 50 or len(hidden_assets) > 0 or len(cash_collisions) >= 12:
             risk_level = "高风险"
-            risk_reason = f"发现 {total_suspicions} 条可疑交易/线索"
-        elif total_suspicions > 10:
+            risk_reason = (
+                f"加权风险分 {weighted_risk_score} 分，"
+                f"现金碰撞{len(cash_collisions)}组、直接往来{len(direct_transfers)}条、"
+                f"隐形资产{len(hidden_assets)}处"
+            )
+        elif weighted_risk_score >= 18 or len(cash_collisions) >= 4 or aml_positive > 0:
             risk_level = "中风险"
-            risk_reason = f"发现 {total_suspicions} 条可疑交易/线索"
+            risk_reason = (
+                f"加权风险分 {weighted_risk_score} 分，"
+                f"发现可核查线索 {total_suspicions} 条"
+            )
         else:
             risk_level = "低风险"
-            risk_reason = "未发现重大可疑交易"
+            if total_suspicions > 0:
+                risk_reason = (
+                    f"加权风险分 {weighted_risk_score} 分，"
+                    f"已发现 {total_suspicions} 条提示性线索，暂未触发高风险条件"
+                )
+            else:
+                risk_reason = "未发现可核查资金异常线索"
 
         # 构建报告内容
         lines = []
@@ -10202,6 +10818,10 @@ class InvestigationReportBuilder:
             lines.append(f"  • 发现 {len(direct_transfers)} 条直接往来记录")
         if len(hidden_assets) > 0:
             lines.append(f"  • 发现 {len(hidden_assets)} 处隐形资产")
+        if aml_positive > 0:
+            lines.append(f"  • 发现 {aml_positive} 条实质AML预警（可疑/大额/支付交易触发）")
+        if len(credit_alerts) > 0:
+            lines.append(f"  • 发现 {len(credit_alerts)} 条征信预警")
 
         # 从 derived_data 提取借贷和收入分析结果
         derived_data = self.derived_data
@@ -10209,18 +10829,58 @@ class InvestigationReportBuilder:
         income_data = derived_data.get("income", {})
 
         # 借贷分析发现
-        loan_details = loan_data.get("details", [])
-        if loan_details:
-            bidirectional_flows = [
-                item for item in loan_details if item.get("_type") == "bidirectional"
-            ]
-            if bidirectional_flows:
-                lines.append(f"  • 发现 {len(bidirectional_flows)} 对双向往来关系")
+        bidirectional_flows = (
+            loan_data.get("bidirectional_flows", [])
+            if isinstance(loan_data.get("bidirectional_flows", []), list)
+            else []
+        )
+        no_repayment_loans = (
+            loan_data.get("no_repayment_loans", [])
+            if isinstance(loan_data.get("no_repayment_loans", []), list)
+            else []
+        )
+        online_loan_platforms = (
+            loan_data.get("online_loan_platforms", [])
+            if isinstance(loan_data.get("online_loan_platforms", []), list)
+            else []
+        )
+        if bidirectional_flows:
+            lines.append(f"  • 发现 {len(bidirectional_flows)} 对双向往来关系")
+        if no_repayment_loans:
+            lines.append(f"  • 发现 {len(no_repayment_loans)} 笔长期无还款借贷")
+        if online_loan_platforms:
+            platform_names = {
+                str(item.get("platform", "")).strip()
+                for item in online_loan_platforms
+                if str(item.get("platform", "")).strip()
+                and str(item.get("platform", "")).strip().lower() not in {"nan", "none"}
+            }
+            lines.append(
+                f"  • 发现 {len(online_loan_platforms)} 笔网贷平台交易（涉及{len(platform_names)}个平台）"
+            )
 
         # 收入分析发现
-        high_risk_income = income_data.get("high_risk_income", [])
-        if high_risk_income:
-            lines.append(f"  • 发现 {len(high_risk_income)} 笔大额可疑收入")
+        large_single_income = (
+            income_data.get("large_single_income", [])
+            if isinstance(income_data.get("large_single_income", []), list)
+            else []
+        )
+        unknown_source_income = (
+            income_data.get("unknown_source_income", [])
+            if isinstance(income_data.get("unknown_source_income", []), list)
+            else []
+        )
+        regular_non_salary = (
+            income_data.get("regular_non_salary", [])
+            if isinstance(income_data.get("regular_non_salary", []), list)
+            else []
+        )
+        if large_single_income:
+            lines.append(f"  • 发现 {len(large_single_income)} 笔大额单笔收入")
+        if unknown_source_income:
+            lines.append(f"  • 发现 {len(unknown_source_income)} 笔来源不明收入")
+        if regular_non_salary:
+            lines.append(f"  • 发现 {len(regular_non_salary)} 组规律性非工资收入")
 
         lines.append("")
 
@@ -10229,35 +10889,24 @@ class InvestigationReportBuilder:
         lines.append("-" * 70)
         lines.append("")
 
-        # 【v4.1 修改】获取家庭单元（优先使用用户配置）
-        if self._primary_config and self._primary_config.analysis_units:
-            # 使用用户配置
-            family_units = [
-                {
-                    "anchor": unit.anchor,
-                    "members": unit.members,
-                    "householder": unit.anchor,
-                    "relations": {},  # 可选：从unit.member_details构建
-                }
-                for unit in self._primary_config.analysis_units
-                if unit.unit_type == "family"
-            ]
-            logger.info(f"[txt报告] 使用用户配置: {len(family_units)} 个家庭单元")
-        else:
-            # 回退到使用 derived_data 中的家庭单元
-            family_units = derived_data.get("family_units_v2", [])
-            logger.info("[txt报告] 没有用户配置，使用derived_data中的家庭单元")
-
-        # 如果还是没有家庭单元数据，使用所有核心人员作为默认家庭
-        if not family_units:
-            family_units = [
-                {
-                    "members": self._core_persons,
-                    "anchor": self._core_persons[0] if self._core_persons else "",
-                    "householder": self._core_persons[0] if self._core_persons else "",
-                }
-            ]
-            logger.info("[txt报告] 没有家庭单元数据，使用所有核心人员作为默认家庭")
+        # 获取家庭单元（与 HTML 统一：仅输出可核查核心人员，并执行姓名归一）
+        families_map = self._build_families_from_config_or_cache(
+            self._core_persons,
+            config=self._primary_config
+            if self._primary_config and self._primary_config.analysis_units
+            else None,
+        )
+        family_units = [
+            {
+                "anchor": info.get("anchor", anchor),
+                "members": info.get("members", []),
+                "householder": info.get("anchor", anchor),
+                "relations": info.get("member_details", []),
+            }
+            for anchor, info in families_map.items()
+            if info.get("members")
+        ]
+        logger.info(f"[txt报告] 家庭单元数: {len(family_units)}")
 
         for family_index, family_unit in enumerate(family_units, 1):
             try:
@@ -10283,11 +10932,23 @@ class InvestigationReportBuilder:
                     profile = self.profiles.get(member, {})
 
                     if profile:
-                        # 修复：使用正确的字段名（驼峰式：totalIncome, totalExpense）
+                        member_summary = profile.get("summary", {})
+                        member_income = member_summary.get("real_income")
+                        if member_income is None:
+                            member_income = member_summary.get("total_income")
+                        if member_income is None:
+                            member_income = profile.get("totalIncome", 0)
 
-                        total_family_income += profile.get("totalIncome", 0) or 0
+                        member_expense = member_summary.get("real_expense")
+                        if member_expense is None:
+                            member_expense = member_summary.get("total_expense")
+                        if member_expense is None:
+                            member_expense = profile.get("totalExpense", 0)
 
-                        total_family_expense += profile.get("totalExpense", 0) or 0
+                        total_family_income += max(0.0, float(member_income or 0.0))
+                        total_family_expense += max(
+                            0.0, float(member_expense or 0.0)
+                        )
 
                         family_assets_total += profile.get("wealthTotal", 0) or 0
 
@@ -10338,117 +10999,129 @@ class InvestigationReportBuilder:
                     lines.append(f"  👤 {member}")
                     lines.append("")
 
-                # 资金概况
-                # 修复：使用正确的字段名（驼峰式：totalIncome, totalExpense）
-                inflow = profile.get("totalIncome", 0) or 0
-                outflow = profile.get("totalExpense", 0) or 0
-                net_flow = inflow - outflow
-                tx_count = profile.get("transactionCount", 0) or 0
+                    # 资金概况
+                    member_summary = profile.get("summary", {})
+                    inflow = member_summary.get("real_income")
+                    if inflow is None:
+                        inflow = member_summary.get("total_income")
+                    if inflow is None:
+                        inflow = profile.get("totalIncome", 0)
 
-                lines.append(
-                    f"    💰 资金规模（{inflow / 10000:,.2f}万元流入 / {outflow / 10000:,.2f}万元流出 / {tx_count}笔）"
-                )
+                    outflow = member_summary.get("real_expense")
+                    if outflow is None:
+                        outflow = member_summary.get("total_expense")
+                    if outflow is None:
+                        outflow = profile.get("totalExpense", 0)
 
-                # 工资收入（按年统计）
-                # 修复：正确的数据路径是 yearly_salary.yearly
-                yearly_salary_obj = profile.get("yearly_salary", {})
-                salary_by_year = (
-                    yearly_salary_obj.get("yearly", {})
-                    if isinstance(yearly_salary_obj, dict)
-                    else {}
-                )
-                salary_by_year = salary_by_year or {}
+                    inflow = max(0.0, float(inflow or 0.0))
+                    outflow = max(0.0, float(outflow or 0.0))
+                    net_flow = inflow - outflow
+                    tx_count = profile.get("transactionCount", 0) or 0
 
-                if salary_by_year:
-                    # 修复：yearly 中的值是字典 {'total': ..., 'transaction_count': ...}
-                    # 需要提取 total 值进行汇总
-                    total_salary = sum(
-                        year_data.get("total", 0)
-                        for year, year_data in salary_by_year.items()
-                        if isinstance(year_data, dict)
-                    )
-                    years_with_data = len(salary_by_year)
-                    avg_yearly = (
-                        total_salary / years_with_data if years_with_data > 0 else 0
+                    lines.append(
+                        f"    💰 资金规模（{inflow / 10000:,.2f}万元流入 / {outflow / 10000:,.2f}万元流出 / {tx_count}笔）"
                     )
 
-                    lines.append(f"    💵 工资收入（按年统计）")
-                    lines.append(f"      • 总工资: {total_salary / 10000:,.2f}万元")
-                    lines.append(f"      • 年均工资: {avg_yearly / 10000:,.2f}万元")
-                    lines.append(f"      • 跨年份数: {years_with_data}年")
-
-                    # 年度工资明细表格
-                    sorted_years = sorted(salary_by_year.keys())
-                    lines.append("")
-                    lines.append("      年度工资明细:")
-                    lines.append("      ┌" + "─" * 56 + "┐")
-                    lines.append("      │ 年份    │ 工资(万元)  │")
-                    lines.append("      ├" + "─" * 56 + "┤")
-                    for year in sorted_years:
-                        year_data = salary_by_year[year]
-                        # 修复：year_data 可能是 dict {'total': ..., 'transaction_count': ...}
-                        if isinstance(year_data, dict):
-                            salary_value = year_data.get("total", 0)
-                        else:
-                            salary_value = (
-                                year_data if isinstance(year_data, (int, float)) else 0
-                            )
-                        salary_wan = salary_value / 10000
-                        lines.append(f"      │ {year:<8} │ {salary_wan:>10.2f}  │")
-                    lines.append("      └" + "─" * 56 + "┘")
-                    lines.append("")
-
-                # 个人资金特征分析
-                lines.append(f"    💰 个人资金特征分析")
-                try:
-                    personal_profile = self._build_personal_financial_profile(
-                        member, profile
+                    # 工资收入（按年统计）
+                    # 修复：正确的数据路径是 yearly_salary.yearly
+                    yearly_salary_obj = profile.get("yearly_salary", {})
+                    salary_by_year = (
+                        yearly_salary_obj.get("yearly", {})
+                        if isinstance(yearly_salary_obj, dict)
+                        else {}
                     )
+                    salary_by_year = salary_by_year or {}
 
-                    # 风险等级
-                    lines.append(f"      • 风险等级: {personal_profile.risk_label}")
-                    lines.append(f"      • 证据评分: {personal_profile.risk_score}/100")
-                    lines.append("")
+                    if salary_by_year:
+                        # 修复：yearly 中的值是字典 {'total': ..., 'transaction_count': ...}
+                        # 需要提取 total 值进行汇总
+                        total_salary = sum(
+                            year_data.get("total", 0)
+                            for year, year_data in salary_by_year.items()
+                            if isinstance(year_data, dict)
+                        )
+                        years_with_data = len(salary_by_year)
+                        avg_yearly = (
+                            total_salary / years_with_data if years_with_data > 0 else 0
+                        )
 
-                    # 五维度分析
-                    lines.append(f"      【各维度分析】")
+                        lines.append(f"    💵 工资收入（按年统计）")
+                        lines.append(f"      • 总工资: {total_salary / 10000:,.2f}万元")
+                        lines.append(f"      • 年均工资: {avg_yearly / 10000:,.2f}万元")
+                        lines.append(f"      • 跨年份数: {years_with_data}年")
 
-                    dimensions = [
-                        (personal_profile.income_expense_match, "💳 收支匹配度"),
-                        (personal_profile.lending_behavior, "💴 借贷行为"),
-                        (personal_profile.consumption_pattern, "🛍 消费特征"),
-                        (personal_profile.fund_flow, "📊 资金流向"),
-                        (personal_profile.cash_operation, "💵 现金操作"),
-                    ]
-
-                    for dim, dim_name in dimensions:
-                        lines.append(f"      • {dim_name} ({dim.score}分)")
-                        if dim.risk_level == "high":
-                            lines.append(f"        ⚠️ {dim.narrative}")
-                        else:
-                            lines.append(f"        {dim.narrative}")
-
-                    lines.append("")
-                    lines.append(f"      📋 专业审计描述话术")
-                    lines.append(f"        {personal_profile.professional_narrative}")
-
-                    if personal_profile.high_risk_alerts:
+                        # 年度工资明细表格
+                        sorted_years = sorted(salary_by_year.keys())
                         lines.append("")
-                        lines.append(f"      ⚠️ 高风险预警")
-                        for alert in personal_profile.high_risk_alerts:
-                            lines.append(f"        • {alert}")
+                        lines.append("      年度工资明细:")
+                        lines.append("      ┌" + "─" * 56 + "┐")
+                        lines.append("      │ 年份    │ 工资(万元)  │")
+                        lines.append("      ├" + "─" * 56 + "┤")
+                        for year in sorted_years:
+                            year_data = salary_by_year[year]
+                            # 修复：year_data 可能是 dict {'total': ..., 'transaction_count': ...}
+                            if isinstance(year_data, dict):
+                                salary_value = year_data.get("total", 0)
+                            else:
+                                salary_value = (
+                                    year_data if isinstance(year_data, (int, float)) else 0
+                                )
+                            salary_wan = salary_value / 10000
+                            lines.append(f"      │ {year:<8} │ {salary_wan:>10.2f}  │")
+                        lines.append("      └" + "─" * 56 + "┘")
+                        lines.append("")
 
+                    # 个人资金特征分析
+                    lines.append(f"    💰 个人资金特征分析")
+                    try:
+                        personal_profile = self._build_personal_financial_profile(
+                            member, profile
+                        )
+
+                        # 风险等级
+                        lines.append(f"      • 风险等级: {personal_profile.risk_label}")
+                        lines.append(f"      • 证据评分: {personal_profile.risk_score}/100")
+                        lines.append("")
+
+                        # 五维度分析
+                        lines.append(f"      【各维度分析】")
+
+                        dimensions = [
+                            (personal_profile.income_expense_match, "💳 收支匹配度"),
+                            (personal_profile.lending_behavior, "💴 借贷行为"),
+                            (personal_profile.consumption_pattern, "🛍 消费特征"),
+                            (personal_profile.fund_flow, "📊 资金流向"),
+                            (personal_profile.cash_operation, "💵 现金操作"),
+                        ]
+
+                        for dim, dim_name in dimensions:
+                            lines.append(f"      • {dim_name} ({dim.score}分)")
+                            if dim.risk_level == "high":
+                                lines.append(f"        ⚠️ {dim.narrative}")
+                            else:
+                                lines.append(f"        {dim.narrative}")
+
+                        lines.append("")
+                        lines.append(f"      📋 专业审计描述话术")
+                        lines.append(f"        {personal_profile.professional_narrative}")
+
+                        if personal_profile.high_risk_alerts:
+                            lines.append("")
+                            lines.append(f"      ⚠️ 高风险预警")
+                            for alert in personal_profile.high_risk_alerts:
+                                lines.append(f"        • {alert}")
+
+                        lines.append("")
+
+                    except Exception as e:
+                        logger.warning(f"[个人资金特征分析] {member} 分析失败: {e}")
+                        lines.append(f"      💰 个人资金特征分析: 分析失败 - {str(e)[:50]}")
+                        lines.append("")
+
+                    lines.append(
+                        "  ──────────────────────────────────────────────────────────────────"
+                    )
                     lines.append("")
-
-                except Exception as e:
-                    logger.warning(f"[个人资金特征分析] {member} 分析失败: {e}")
-                    lines.append(f"      💰 个人资金特征分析: 分析失败 - {str(e)[:50]}")
-                    lines.append("")
-
-                lines.append(
-                    "  ──────────────────────────────────────────────────────────────────"
-                )
-                lines.append("")
             except Exception as e:
                 logger.warning(f"[家庭分析] 家庭 {family_index} 处理失败: {e}")
                 continue
@@ -10487,9 +11160,19 @@ class InvestigationReportBuilder:
         if cash_collisions:
             lines.append(f"1. 现金时空伴随（{len(cash_collisions)}组）：")
             for i, collision in enumerate(cash_collisions[:3], 1):  # 只显示前3组
-                withdraw_time = collision.get("withdraw_time", "未知")
-                deposit_time = collision.get("deposit_time", "未知")
-                amount = collision.get("amount", 0)
+                withdraw_time = collision.get("withdraw_time") or collision.get(
+                    "withdrawal_date", collision.get("time1", "未知")
+                )
+                deposit_time = collision.get("deposit_time") or collision.get(
+                    "deposit_date", collision.get("time2", "未知")
+                )
+                amount = (
+                    collision.get("amount")
+                    or collision.get("withdrawal_amount")
+                    or collision.get("deposit_amount")
+                    or collision.get("amount1")
+                    or 0
+                )
                 lines.append(
                     f"   1.{i} 现金取存: {amount:,.0f}元，取现时间 {withdraw_time}，存现时间 {deposit_time}"
                 )
@@ -10503,7 +11186,12 @@ class InvestigationReportBuilder:
             for i, transfer in enumerate(direct_transfers[:3], 1):  # 只显示前3条
                 date = transfer.get("date", "未知")
                 amount = transfer.get("amount", 0)
-                counterparty = transfer.get("counterparty", "未知")
+                counterparty = (
+                    transfer.get("counterparty")
+                    or transfer.get("company")
+                    or transfer.get("target")
+                    or "未知"
+                )
                 lines.append(f"   2.{i} {date} 与 {counterparty} 往来 {amount:,.0f}元")
             if len(direct_transfers) > 3:
                 lines.append(f"   ... 还有 {len(direct_transfers) - 3} 条直接往来")
@@ -10645,7 +11333,22 @@ class InvestigationReportBuilder:
         lines.append("-" * 70)
         lines.append("")
         lines.append("【使用说明】:")
-        lines.append("  1. 优先查看'初查报告_v4.html'获取完整分析")
+        preferred_html = None
+        if html_files:
+            preferred_candidates = [
+                f for f in html_files if ("最终版" in f["name"] or "v5" in f["name"].lower())
+            ]
+            if preferred_candidates:
+                preferred_html = sorted(
+                    preferred_candidates, key=lambda x: x["size"], reverse=True
+                )[0]["name"]
+            else:
+                preferred_html = sorted(
+                    html_files, key=lambda x: x["size"], reverse=True
+                )[0]["name"]
+        lines.append(
+            f"  1. 优先查看'{preferred_html or 'HTML综合报告'}'获取完整分析"
+        )
         lines.append("  2. 需要深入某个方面时，查看对应的专项报告txt")
         lines.append("  3. 需要数据底稿时，打开'资金核查底稿.xlsx'")
         lines.append("  4. 所有分析基于 output/cleaned_data/ 中的标准化银行流水")

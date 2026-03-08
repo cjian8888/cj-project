@@ -52,6 +52,8 @@ class SpecializedReportGenerator:
         self.profiles = profiles
         self.suspicions = suspicions
         self.output_dir = output_dir
+        self._person_flow_df_cache: Dict[str, pd.DataFrame] = {}
+        self._day_transaction_cache: Dict[tuple, List[Dict]] = {}
 
         logger.info(
             f"[专项报告] 初始化完成，分析结果包含: {', '.join(list(analysis_results.keys()))}"
@@ -123,6 +125,43 @@ class SpecializedReportGenerator:
             lines.append(f"{prefix}📁 溯源: {source_file}")
         if source_row is not None:
             lines.append(f"{prefix}📍 行号: 第{source_row}行")
+
+    @staticmethod
+    def _clean_text(value: Any, default: str = "未知") -> str:
+        """清洗文本字段，统一处理空值/nan。"""
+        if value is None:
+            return default
+        text = str(value).strip()
+        if not text or text.lower() in {"nan", "none", "null", "-", "n/a"}:
+            return default
+        return text
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        """安全转换金额字段。"""
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _resolve_cleaned_person_flow_path(self, person: str) -> str:
+        """定位个人合并流水文件路径（兼容 analysis_results 子目录输出场景）。"""
+        filename = f"{person}_合并流水.xlsx"
+        candidate_roots = [
+            self.output_dir,
+            os.path.dirname(self.output_dir),
+            str(getattr(config, "OUTPUT_DIR", "")),
+            "output",
+        ]
+        for root in candidate_roots:
+            if not root:
+                continue
+            path = os.path.join(root, "cleaned_data", "个人", filename)
+            if os.path.exists(path):
+                return path
+        return ""
     
     def _classify_transaction(self, counterparty: str, description: str, amount: float, person_name: str, category: str = '') -> Dict[str, Any]:
         """
@@ -221,44 +260,93 @@ class SpecializedReportGenerator:
     def _get_day_transactions(self, person: str, target_date: str) -> List[Dict]:
         """获取指定人员指定日期的所有交易"""
         try:
-            # 构建文件路径
-            file_path = os.path.join(self.output_dir, 'cleaned_data', '个人', f'{person}_合并流水.xlsx')
-            if not os.path.exists(file_path):
+            cache_key = (person, target_date)
+            if cache_key in self._day_transaction_cache:
+                return self._day_transaction_cache[cache_key]
+
+            if person not in self._person_flow_df_cache:
+                file_path = self._resolve_cleaned_person_flow_path(person)
+                if not os.path.exists(file_path):
+                    self._person_flow_df_cache[person] = pd.DataFrame()
+                    self._day_transaction_cache[cache_key] = []
+                    return []
+
+                df = pd.read_excel(file_path)
+
+                date_col = next(
+                    (c for c in ["交易时间", "transaction_time", "date"] if c in df.columns),
+                    None,
+                )
+                if not date_col:
+                    self._person_flow_df_cache[person] = pd.DataFrame()
+                    self._day_transaction_cache[cache_key] = []
+                    return []
+
+                income_col = next(
+                    (
+                        c
+                        for c in ["收入(元)", "income", "income_amount", "in_amount"]
+                        if c in df.columns
+                    ),
+                    None,
+                )
+                counterparty_col = next(
+                    (c for c in ["交易对手", "counterparty", "对手方"] if c in df.columns),
+                    None,
+                )
+                desc_col = next(
+                    (c for c in ["交易摘要", "description", "摘要"] if c in df.columns),
+                    None,
+                )
+                category_col = next((c for c in ["交易分类", "category"] if c in df.columns), None)
+
+                normalized = pd.DataFrame()
+                normalized["_tx_dt"] = pd.to_datetime(df[date_col], errors="coerce")
+                normalized["_date_str"] = normalized["_tx_dt"].dt.strftime("%Y-%m-%d")
+                normalized["_amount"] = (
+                    pd.to_numeric(df[income_col], errors="coerce").fillna(0.0)
+                    if income_col
+                    else 0.0
+                )
+                normalized["_counterparty"] = (
+                    df[counterparty_col].fillna("") if counterparty_col else ""
+                )
+                normalized["_desc"] = df[desc_col].fillna("") if desc_col else ""
+                normalized["_category"] = df[category_col].fillna("") if category_col else ""
+                self._person_flow_df_cache[person] = normalized
+
+            df = self._person_flow_df_cache.get(person, pd.DataFrame())
+            if df.empty:
+                self._day_transaction_cache[cache_key] = []
                 return []
-            
-            df = pd.read_excel(file_path)
-            df['date'] = pd.to_datetime(df['交易时间'])
-            df['date_str'] = df['date'].dt.strftime('%Y-%m-%d')
-            
+
             # 筛选当天交易
-            day_df = df[df['date_str'] == target_date]
-            
+            day_df = df[df["_date_str"] == target_date]
+
             transactions = []
             for _, row in day_df.iterrows():
-                amount = row.get('收入(元)', 0) or row.get('income', 0) or 0
+                amount = self._safe_float(row.get("_amount", 0))
                 if amount > 0:
-                    cp = row.get('交易对手', '')
-                    desc = row.get('交易摘要', '')
-                    time = row.get('交易时间', '')
-                    if pd.notna(time):
-                        time = str(time)[11:16]  # 只取时间部分
+                    cp = self._clean_text(row.get("_counterparty", ""), default="")
+                    desc = self._clean_text(row.get("_desc", ""), default="")
+                    tx_dt = row.get("_tx_dt")
+                    time = tx_dt.strftime("%H:%M") if pd.notna(tx_dt) else "未知"
                     # 读取交易分类字段
-                    category = row.get('交易分类', '')
-                    if pd.notna(category):
-                        category = str(category)
-                    
+                    category = self._clean_text(row.get("_category", ""), default="")
+
                     # 识别交易类型（传入交易分类）
                     tx_type = self._classify_transaction(cp, desc, amount, person, category)
-                    
+
                     transactions.append({
                         'time': time,
                         'amount': amount,
-                        'counterparty': cp if pd.notna(cp) else '',
-                        'description': desc if pd.notna(desc) else '',
+                        'counterparty': cp,
+                        'description': desc,
                         'category': category,
                         'type_info': tx_type
                     })
-            
+            transactions.sort(key=lambda x: x["amount"], reverse=True)
+            self._day_transaction_cache[cache_key] = transactions
             return transactions
         except Exception as e:
             logger.warning(f"获取{person} {target_date}交易失败: {e}")
@@ -303,18 +391,27 @@ class SpecializedReportGenerator:
         lines.append("")
 
         # ==================== 数据加载 ====================
-        loan_data = self.analysis_results.get("loan", {})
-        bidirectional_flows = loan_data.get("bidirectional_flows", [])
-        if not isinstance(bidirectional_flows, list):
-            bidirectional_flows = []
+        loan_data = self.analysis_results.get("loan", {}) or {}
 
-        regular_repayments = loan_data.get("regular_repayments", [])
-        if not isinstance(regular_repayments, list):
-            regular_repayments = []
+        def _as_list(key: str) -> List[Dict]:
+            val = loan_data.get(key, [])
+            return val if isinstance(val, list) else []
 
-        online_loan_platforms = loan_data.get("online_loan_platforms", [])
-        if not isinstance(online_loan_platforms, list):
-            online_loan_platforms = []
+        bidirectional_flows = _as_list("bidirectional_flows")
+        regular_repayments = _as_list("regular_repayments")
+        online_loan_platforms = _as_list("online_loan_platforms")
+        no_repayment_loans = _as_list("no_repayment_loans")
+        loan_pairs = _as_list("loan_pairs")
+        abnormal_interest = _as_list("abnormal_interest")
+
+        # 兼容旧结构：部分检测结果只出现在 details
+        details = _as_list("details")
+        if not no_repayment_loans and details:
+            no_repayment_loans = [d for d in details if d.get("_type") == "no_repayment"]
+        if not loan_pairs and details:
+            loan_pairs = [d for d in details if d.get("_type") == "loan_pair"]
+        if not abnormal_interest and loan_pairs:
+            abnormal_interest = [d for d in loan_pairs if d.get("abnormal_type")]
 
         # ==================== 一、双向往来关系 ====================
         lines.append("一、双向往来关系分析")
@@ -356,7 +453,31 @@ class SpecializedReportGenerator:
         # ==================== 二、无还款借贷 ====================
         lines.append("二、无还款借贷识别")
         lines.append("-" * 70)
-        lines.append("  未发现无还款借贷（当前版本暂未实现检测）")
+
+        if no_repayment_loans:
+            for i, loan in enumerate(no_repayment_loans, 1):
+                person = self._clean_text(loan.get("person"))
+                counterparty = self._clean_text(loan.get("counterparty"))
+                amount = self._safe_float(loan.get("income_amount", loan.get("loan_amount", 0)))
+                days_since = int(self._safe_float(loan.get("days_since", 0)))
+                repay_ratio = self._safe_float(loan.get("repay_ratio", 0.0)) * 100
+
+                lines.append(f"【发现 {i}】")
+                lines.append(f"  借入方: {person}")
+                lines.append(f"  出借方: {counterparty}")
+                lines.append(f"  借入日期: {self._format_date(loan.get('income_date', loan.get('loan_date', '未知')))}")
+                lines.append(f"  借入金额: {utils.format_currency(amount)} 元")
+                lines.append(f"  距今未还款: {days_since} 天")
+                lines.append(f"  已偿还比例: {repay_ratio:.1f}%")
+                risk_reason = self._clean_text(loan.get("risk_reason"), default="")
+                if risk_reason:
+                    lines.append(f"  风险说明: {risk_reason}")
+                self._add_traceability(lines, loan)
+                lines.append("")
+            lines.append("  【审计提示】: 长期未还款借贷可能对应账外资金占用或隐性利益输送，")
+            lines.append("            建议核查借款背景、借据合同及后续资金去向。")
+        else:
+            lines.append("  未发现无还款借贷")
         lines.append("")
 
         # ==================== 三、规律还款 ====================
@@ -401,27 +522,97 @@ class SpecializedReportGenerator:
 
         lines.append("")
 
-        # ==================== 四、网贷平台 ====================
-        lines.append("四、网贷平台交易识别")
+        # ==================== 四、借贷配对与异常利率 ====================
+        lines.append("四、借贷配对与异常利率")
+        lines.append("-" * 70)
+
+        if loan_pairs:
+            lines.append(f"发现 {len(loan_pairs)} 组借贷配对记录，列示重点异常如下：")
+            lines.append("")
+            focus_pairs = abnormal_interest if abnormal_interest else loan_pairs[:20]
+            for i, pair in enumerate(focus_pairs[:30], 1):
+                person = self._clean_text(pair.get("person"))
+                counterparty = self._clean_text(pair.get("counterparty"))
+                loan_amount = self._safe_float(pair.get("loan_amount", 0))
+                repay_amount = self._safe_float(pair.get("repay_amount", 0))
+                annual_rate = self._safe_float(pair.get("annual_rate", 0.0))
+                days = int(self._safe_float(pair.get("days", 0)))
+
+                lines.append(f"【发现 {i}】")
+                lines.append(f"  借入方: {person}")
+                lines.append(f"  对手方: {counterparty}")
+                lines.append(f"  借款日期: {self._format_date(pair.get('loan_date', '未知'))}")
+                lines.append(f"  还款日期: {self._format_date(pair.get('repay_date', '未知'))}")
+                lines.append(f"  借款金额: {utils.format_currency(loan_amount)} 元")
+                lines.append(f"  还款金额: {utils.format_currency(repay_amount)} 元")
+                lines.append(f"  借贷周期: {days} 天")
+                lines.append(f"  年化利率: {annual_rate:.2f}%")
+                abnormal_type = self._clean_text(pair.get("abnormal_type"), default="")
+                risk_reason = self._clean_text(pair.get("risk_reason"), default="")
+                if abnormal_type:
+                    lines.append(f"  异常类型: {abnormal_type}")
+                if risk_reason:
+                    lines.append(f"  风险说明: {risk_reason}")
+
+                # 兼容 loan_source_* / repay_source_* 结构
+                if pair.get("loan_source_file"):
+                    lines.append(f"  📁 借款来源: {pair.get('loan_source_file')}")
+                if pair.get("loan_source_row") is not None:
+                    lines.append(f"  📍 借款行号: 第{pair.get('loan_source_row')}行")
+                if pair.get("repay_source_file"):
+                    lines.append(f"  📁 还款来源: {pair.get('repay_source_file')}")
+                if pair.get("repay_source_row") is not None:
+                    lines.append(f"  📍 还款行号: 第{pair.get('repay_source_row')}行")
+                lines.append("")
+
+            if len(focus_pairs) > 30:
+                lines.append(f"  ... 其余 {len(focus_pairs) - 30} 组异常借贷详见缓存明细")
+                lines.append("")
+        else:
+            lines.append("  未发现可配对借贷记录")
+            lines.append("")
+
+        # ==================== 五、网贷平台 ====================
+        lines.append("五、网贷平台交易识别")
         lines.append("-" * 70)
 
         if online_loan_platforms:
             platform_summary = {}
             for transaction in online_loan_platforms:
-                platform = transaction.get("platform", "未知")
+                platform = self._clean_text(transaction.get("platform"), default="未知平台")
                 if platform not in platform_summary:
-                    platform_summary[platform] = {"count": 0, "amount": 0.0}
-                platform_summary[platform]["count"] += transaction.get("count", 0)
-                platform_summary[platform]["amount"] += transaction.get("amount", 0)
+                    platform_summary[platform] = {
+                        "count": 0,
+                        "amount": 0.0,
+                        "income_amount": 0.0,
+                        "expense_amount": 0.0,
+                        "persons": set(),
+                    }
+                count = int(self._safe_float(transaction.get("count", 0)))
+                if count <= 0:
+                    count = 1
+                amount = self._safe_float(transaction.get("amount", 0))
+                direction = self._clean_text(transaction.get("direction"), default="unknown")
+                person = self._clean_text(transaction.get("person"), default="")
+
+                platform_summary[platform]["count"] += count
+                platform_summary[platform]["amount"] += abs(amount)
+                if direction == "income":
+                    platform_summary[platform]["income_amount"] += abs(amount)
+                elif direction == "expense":
+                    platform_summary[platform]["expense_amount"] += abs(amount)
+                if person:
+                    platform_summary[platform]["persons"].add(person)
 
             lines.append(f"发现 {len(platform_summary)} 个网贷平台相关交易:")
             lines.append("")
             for platform, stats in platform_summary.items():
                 lines.append(f"  平台: {platform}")
                 lines.append(f"  交易笔数: {stats['count']} 笔")
-                lines.append(
-                    f"   交易金额: {utils.format_currency(stats['amount'])} 元"
-                )
+                lines.append(f"  涉及人数: {len(stats['persons'])} 人")
+                lines.append(f"  总交易额: {utils.format_currency(stats['amount'])} 元")
+                lines.append(f"  借入金额: {utils.format_currency(stats['income_amount'])} 元")
+                lines.append(f"  偿还金额: {utils.format_currency(stats['expense_amount'])} 元")
                 lines.append("")
 
             lines.append("  【审计提示】: 网贷平台交易可能涉及:")
@@ -435,13 +626,22 @@ class SpecializedReportGenerator:
 
         lines.append("")
 
-        # ==================== 五、综合研判 ====================
-        lines.append("五、综合研判与建议")
+        # ==================== 六、综合研判 ====================
+        lines.append("六、综合研判与建议")
         lines.append("-" * 70)
 
-        if bidirectional_flows or regular_repayments or online_loan_platforms:
+        total_findings = (
+            len(bidirectional_flows)
+            + len(no_repayment_loans)
+            + len(regular_repayments)
+            + len(loan_pairs)
+            + len(online_loan_platforms)
+        )
+        if total_findings > 0:
             lines.append("【总体评价】: ")
-            lines.append("  发现多层次借贷行为，建议深入调查借贷关系网络，")
+            lines.append(
+                f"  共识别 {total_findings} 条借贷相关线索，发现多层次借贷行为，建议深入调查借贷关系网络，"
+            )
             lines.append("  追踪资金最终用途和来源，评估是否存在利益输送或洗钱风险。")
         else:
             lines.append("【总体评价】: ")
@@ -507,113 +707,224 @@ class SpecializedReportGenerator:
         lines.append("")
 
         # ==================== 数据加载 ====================
-        income_results = self.analysis_results.get("income", {})
+        income_results = self.analysis_results.get("income", {}) or {}
+        details = income_results.get("details", []) if isinstance(income_results, dict) else []
+        details = details if isinstance(details, list) else []
+
+        def _load_list(key: str, detail_type: str = "") -> List[Dict]:
+            val = income_results.get(key, [])
+            if isinstance(val, list) and val:
+                return val
+            if detail_type:
+                return [d for d in details if d.get("_type") == detail_type]
+            return val if isinstance(val, list) else []
+
+        large_single = _load_list("large_single_income", "large_single_income")
+        regular_non_salary = _load_list("regular_non_salary", "regular_non_salary")
+        large_individual = _load_list("large_individual_income", "large_individual_income")
+        unknown_source = _load_list("unknown_source_income", "unknown_source_income")
+        same_source = _load_list("same_source_multi", "same_source_multi")
+        bribe_installments = _load_list(
+            "potential_bribe_installment", "potential_bribe_installment"
+        )
+
+        max_items = 80
 
         # ==================== 一、大额单笔收入 ====================
         lines.append("一、大额单笔收入分析（≥10万元）")
         lines.append("-" * 70)
 
-        large_single = income_results.get("large_single_income", [])
         if large_single:
-            for i, income in enumerate(large_single, 1):
+            sorted_items = sorted(
+                large_single,
+                key=lambda x: self._safe_float(x.get("amount", 0)),
+                reverse=True,
+            )
+            if len(sorted_items) > max_items:
+                lines.append(f"  共发现 {len(sorted_items)} 笔，以下列示金额前 {max_items} 笔：")
+                lines.append("")
+            for i, income in enumerate(sorted_items[:max_items], 1):
                 lines.append(f"【发现 {i}】")
-                # 修复字段映射：name -> person
-                person = income.get("person", income.get("name", "未知"))
+                person = self._clean_text(income.get("person", income.get("name")))
                 lines.append(f"  收款人: {person}")
+                lines.append(f"  收款金额: {utils.format_currency(income.get('amount', 0))} 元")
+                lines.append(f"  收款日期: {self._format_date(income.get('date', '未知'))}")
+                lines.append(f"  付款方: {self._clean_text(income.get('counterparty'))}")
                 lines.append(
-                    f"  收款金额: {utils.format_currency(income.get('amount', 0))} 元"
+                    f"  交易摘要: {self._clean_text(income.get('description', income.get('income_type')), default='未知')}"
                 )
-                lines.append(
-                    f"  收款日期: {self._format_date(income.get('date', '未知'))}"
-                )
-                lines.append(f"   付款方: {income.get('counterparty', '未知')}")
-                lines.append(
-                    f"   交易摘要: {income.get('description', income.get('income_type', '未知'))}"
-                )
-
-                # 添加溯源
                 self._add_traceability(lines, income)
                 lines.append("")
-
-            # 通用审计提示
-            lines.append("  【审计提示】: 大额单笔收入需核实:")
-            lines.append("            1. 收款来源是否合法合规")
-            lines.append("            2. 是否与业务往来匹配")
-            lines.append("            3. 是否存在代收代付情形")
-            lines.append("")
+            lines.append("  【审计提示】: 大额单笔收入需核实来源合法性与交易背景真实性。")
         else:
             lines.append("  未发现大额单笔收入")
-
         lines.append("")
 
-        # ==================== 二、疑似分期受贿 ====================
-        lines.append("二、疑似分期受贿分析")
+        # ==================== 二、规律性非工资收入 ====================
+        lines.append("二、规律性非工资收入分析")
         lines.append("-" * 70)
 
-        bribe_installments = income_results.get("potential_bribe_installment", [])
-        if bribe_installments:
-            for i, case in enumerate(bribe_installments, 1):
+        if regular_non_salary:
+            sorted_items = sorted(
+                regular_non_salary,
+                key=lambda x: self._safe_float(x.get("total_amount", 0)),
+                reverse=True,
+            )
+            if len(sorted_items) > max_items:
+                lines.append(f"  共发现 {len(sorted_items)} 组，以下列示累计金额前 {max_items} 组：")
+                lines.append("")
+            for i, item in enumerate(sorted_items[:max_items], 1):
                 lines.append(f"【发现 {i}】")
-                person = case.get("person", case.get("name", "未知"))
+                lines.append(f"  收款人: {self._clean_text(item.get('person', item.get('name')))}")
+                lines.append(f"  付款方: {self._clean_text(item.get('counterparty'))}")
+                lines.append(f"  发生次数: {int(self._safe_float(item.get('occurrences', 0)))} 次")
+                lines.append(f"  平均间隔: {self._safe_float(item.get('avg_interval_days', 0)):.1f} 天")
+                lines.append(f"  平均金额: {utils.format_currency(item.get('avg_amount', 0))} 元")
+                lines.append(f"  累计金额: {utils.format_currency(item.get('total_amount', 0))} 元")
+                lines.append(
+                    f"  时间跨度: {self._format_date(item.get('date_range', ['未知'])[0] if isinstance(item.get('date_range'), list) and item.get('date_range') else item.get('first_date', '未知'))}"
+                    f" 至 {self._format_date(item.get('date_range', ['未知', '未知'])[1] if isinstance(item.get('date_range'), list) and len(item.get('date_range')) > 1 else item.get('last_date', '未知'))}"
+                )
+                possible_type = self._clean_text(item.get("possible_type"), default="")
+                if possible_type:
+                    lines.append(f"  识别类型: {possible_type}")
+                self._add_traceability(lines, item)
+                lines.append("")
+            lines.append("  【审计提示】: 建议核查规律性收入与劳动、投资、分红等合法来源的对应关系。")
+        else:
+            lines.append("  未发现规律性非工资收入")
+        lines.append("")
+
+        # ==================== 三、个人大额转入 ====================
+        lines.append("三、个人大额转入分析（≥5万元）")
+        lines.append("-" * 70)
+
+        if large_individual:
+            sorted_items = sorted(
+                large_individual,
+                key=lambda x: self._safe_float(x.get("amount", 0)),
+                reverse=True,
+            )
+            if len(sorted_items) > max_items:
+                lines.append(f"  共发现 {len(sorted_items)} 笔，以下列示金额前 {max_items} 笔：")
+                lines.append("")
+            for i, item in enumerate(sorted_items[:max_items], 1):
+                lines.append(f"【发现 {i}】")
+                lines.append(f"  收款人: {self._clean_text(item.get('person'))}")
+                lines.append(
+                    f"  付款人: {self._clean_text(item.get('from_individual', item.get('counterparty')))}"
+                )
+                lines.append(f"  交易日期: {self._format_date(item.get('date', '未知'))}")
+                lines.append(f"  交易金额: {utils.format_currency(item.get('amount', 0))} 元")
+                desc = self._clean_text(item.get("description"), default="")
+                if desc:
+                    lines.append(f"  交易摘要: {desc}")
+                self._add_traceability(lines, item)
+                lines.append("")
+            lines.append("  【审计提示】: 大额个人往来建议核实双方关系、资金用途及借贷/赠与凭证。")
+        else:
+            lines.append("  未发现个人大额转入")
+        lines.append("")
+
+        # ==================== 四、来源不明收入 ====================
+        lines.append("四、来源不明收入分析")
+        lines.append("-" * 70)
+
+        if unknown_source:
+            sorted_items = sorted(
+                unknown_source,
+                key=lambda x: self._safe_float(x.get("amount", 0)),
+                reverse=True,
+            )
+            if len(sorted_items) > max_items:
+                lines.append(f"  共发现 {len(sorted_items)} 笔，以下列示金额前 {max_items} 笔：")
+                lines.append("")
+            for i, item in enumerate(sorted_items[:max_items], 1):
+                lines.append(f"【发现 {i}】")
+                lines.append(f"  收款人: {self._clean_text(item.get('person'))}")
+                lines.append(f"  入账日期: {self._format_date(item.get('date', '未知'))}")
+                lines.append(f"  入账金额: {utils.format_currency(item.get('amount', 0))} 元")
+                lines.append(f"  对手方: {self._clean_text(item.get('counterparty'))}")
+                lines.append(f"  判定原因: {self._clean_text(item.get('reason', '来源待核实'))}")
+                self._add_traceability(lines, item)
+                lines.append("")
+            lines.append("  【审计提示】: 来源不明收入需重点开展资金来源穿透，补充凭证链条。")
+        else:
+            lines.append("  未发现来源不明收入")
+        lines.append("")
+
+        # ==================== 五、同源多次收入 ====================
+        lines.append("五、同源多次收入分析")
+        lines.append("-" * 70)
+
+        if same_source:
+            sorted_items = sorted(
+                same_source,
+                key=lambda x: self._safe_float(x.get("total", x.get("total_amount", 0))),
+                reverse=True,
+            )
+            if len(sorted_items) > max_items:
+                lines.append(f"  共发现 {len(sorted_items)} 组，以下列示累计金额前 {max_items} 组：")
+                lines.append("")
+            for i, item in enumerate(sorted_items[:max_items], 1):
+                lines.append(f"【发现 {i}】")
+                lines.append(f"  收款人: {self._clean_text(item.get('person', item.get('name')))}")
+                lines.append(f"  付款方: {self._clean_text(item.get('counterparty'))}")
+                lines.append(f"  累计次数: {int(self._safe_float(item.get('count', item.get('occurrences', 0))))} 次")
+                lines.append(
+                    f"  累计金额: {utils.format_currency(item.get('total', item.get('total_amount', 0)))} 元"
+                )
+                lines.append(f"  平均金额: {utils.format_currency(item.get('avg_amount', 0))} 元")
+                source_type = self._clean_text(item.get("source_type"), default="")
+                if source_type:
+                    lines.append(f"  来源类型: {source_type}")
+                self._add_traceability(lines, item)
+                lines.append("")
+            lines.append("  【审计提示】: 同源高频入账需核查是否为代收代付、经营回款或利益输送。")
+        else:
+            lines.append("  未发现同源多次收入")
+        lines.append("")
+
+        # ==================== 六、疑似分期受贿 ====================
+        lines.append("六、疑似分期受贿分析")
+        lines.append("-" * 70)
+
+        if bribe_installments:
+            sorted_items = sorted(
+                bribe_installments,
+                key=lambda x: self._safe_float(x.get("total_amount", x.get("total", 0))),
+                reverse=True,
+            )
+            if len(sorted_items) > max_items:
+                lines.append(f"  共发现 {len(sorted_items)} 组，以下列示累计金额前 {max_items} 组：")
+                lines.append("")
+            for i, case in enumerate(sorted_items[:max_items], 1):
+                lines.append(f"【发现 {i}】")
+                person = self._clean_text(case.get("person", case.get("name")))
                 lines.append(f"  收款人: {person}")
                 lines.append(
-                    f"  分期模式: 每 {case.get('interval_days', 0)} 天收 {case.get('occurrences', 0)} 次"
+                    f"  付款方: {self._clean_text(case.get('counterparty'))}"
+                )
+                lines.append(f"  收款次数: {int(self._safe_float(case.get('occurrences', 0)))} 次")
+                lines.append(f"  覆盖月份: {int(self._safe_float(case.get('months', 0)))} 个月")
+                lines.append(
+                    f"  单笔均额: {utils.format_currency(case.get('avg_amount', case.get('amount', 0)))} 元"
                 )
                 lines.append(
-                    f"  单笔金额: {utils.format_currency(case.get('amount', 0))} 元"
+                    f"  总金额: {utils.format_currency(case.get('total_amount', case.get('total', 0)))} 元"
                 )
-                lines.append(
-                    f"  总金额: {utils.format_currency(case.get('total', 0))} 元"
-                )
-                lines.append(
-                    f"  时间跨度: {case.get('start_date', '未知')} 至 {case.get('end_date', '未知')}"
-                )
-
-                # 添加溯源
+                first_date = case.get("first_date", case.get("start_date", "未知"))
+                last_date = case.get("last_date", case.get("end_date", "未知"))
+                lines.append(f"  时间跨度: {self._format_date(first_date)} 至 {self._format_date(last_date)}")
+                risk_factors = self._clean_text(case.get("risk_factors"), default="")
+                if risk_factors:
+                    lines.append(f"  风险特征: {risk_factors}")
                 self._add_traceability(lines, case)
                 lines.append("")
 
-            lines.append("  【审计提示】: 疑似分期受贿特征:")
-            lines.append("            1. 固定周期规律性收款")
-            lines.append("            2. 收款人与被调查人存在潜在关系")
-            lines.append("            3. 单笔金额相对固定")
-            lines.append("            4. 长期持续性收款")
-            lines.append("            建议核实收款人身份、工作职责，")
-            lines.append("            调查收款业务背景是否存在。")
-            lines.append("")
+            lines.append("  【审计提示】: 疑似分期受贿需结合职务权限、业务节点和对手方关系做交叉核验。")
         else:
             lines.append("  未发现疑似分期受贿模式")
-
-        lines.append("")
-
-        # ==================== 三、同源多次收入 ====================
-        lines.append("三、同源多次收入分析")
-        lines.append("-" * 70)
-
-        same_source = income_results.get("same_source_multi", [])
-        if same_source:
-            for i, item in enumerate(same_source, 1):
-                lines.append(f"【发现 {i}】")
-                person = item.get("person", item.get("name", "未知"))
-                lines.append(f"  收款人: {person}")
-                lines.append(f"   付款方: {item.get('counterparty', '未知')}")
-                lines.append(
-                    f"   累计次数: {item.get('count', item.get('occurrences', 0))} 次"
-                )
-                lines.append(
-                    f"   累计金额: {utils.format_currency(item.get('total', item.get('total_amount', 0)))} 元"
-                )
-                lines.append(
-                    f"   平均金额: {utils.format_currency(item.get('avg_amount', 0))} 元"
-                )
-
-                # 添加溯源
-                self._add_traceability(lines, item)
-                lines.append("")
-            lines.append("")
-        else:
-            lines.append("  未发现同源多次收入")
-
         lines.append("")
 
         lines.append("=" * 70)
@@ -661,9 +972,16 @@ class SpecializedReportGenerator:
         lines.append("")
 
         # ==================== 数据加载 ====================
-        time_series = self.analysis_results.get("timeSeries", {})
-        periodic_income = time_series.get("periodic_income", [])
-        sudden_changes = time_series.get("sudden_changes", [])
+        time_series = self.analysis_results.get("timeSeries", {}) or self.analysis_results.get("time_series", {}) or {}
+        periodic_income = (
+            time_series.get("periodic_income", []) if isinstance(time_series.get("periodic_income", []), list) else []
+        )
+        sudden_changes = (
+            time_series.get("sudden_changes", []) if isinstance(time_series.get("sudden_changes", []), list) else []
+        )
+        delayed_transfers = (
+            time_series.get("delayed_transfers", []) if isinstance(time_series.get("delayed_transfers", []), list) else []
+        )
 
         # ==================== 一、周期性收入 ====================
         lines.append("一、周期性收入分析（疑似养廉资金）")
@@ -672,10 +990,9 @@ class SpecializedReportGenerator:
         if periodic_income:
             for i, income in enumerate(periodic_income, 1):
                 lines.append(f"【发现 {i}】")
-                # 修复字段映射：name -> person
-                person = income.get("person", income.get("name", "未知"))
+                person = self._clean_text(income.get("person", income.get("name")))
                 lines.append(f"  收款人: {person}")
-                lines.append(f"  付款方: {income.get('counterparty', '未知')}")
+                lines.append(f"  付款方: {self._clean_text(income.get('counterparty'))}")
                 lines.append(
                     f"  周期: {income.get('period_type', '每' + str(income.get('avg_interval_days', 0)) + '天')}"
                 )
@@ -715,16 +1032,55 @@ class SpecializedReportGenerator:
 
         lines.append("")
 
-        # ==================== 二、资金突变 ====================
-        lines.append("二、大额突变分析")
+        # ==================== 二、固定延迟转账 ====================
+        lines.append("二、固定延迟转账分析")
+        lines.append("-" * 70)
+
+        if delayed_transfers:
+            sorted_transfers = sorted(
+                delayed_transfers,
+                key=lambda x: self._safe_float(x.get("total_amount", 0)),
+                reverse=True,
+            )
+            for i, transfer in enumerate(sorted_transfers[:100], 1):
+                lines.append(f"【发现 {i}】")
+                lines.append(f"  人员: {self._clean_text(transfer.get('person', transfer.get('name')))}")
+                lines.append(f"  资金来源方: {self._clean_text(transfer.get('income_from'))}")
+                lines.append(f"  资金去向方: {self._clean_text(transfer.get('expense_to'))}")
+                lines.append(f"  固定延迟: {int(self._safe_float(transfer.get('delay_days', 0)))} 天")
+                lines.append(f"  匹配次数: {int(self._safe_float(transfer.get('occurrences', 0)))} 次")
+                lines.append(f"  平均金额: {utils.format_currency(transfer.get('avg_amount', 0))} 元")
+                lines.append(f"  累计金额: {utils.format_currency(transfer.get('total_amount', 0))} 元")
+                lines.append(f"  首次发生: {self._format_date(transfer.get('first_income_date', '未知'))}")
+                self._add_traceability(lines, transfer)
+                lines.append("")
+            if len(sorted_transfers) > 100:
+                lines.append(f"  ... 其余 {len(sorted_transfers) - 100} 组延迟转账详见缓存明细")
+                lines.append("")
+            lines.append("  【审计提示】: 固定延迟转账反映“先收后付”模式，需核查是否存在资金通道或利益分配协议。")
+        else:
+            lines.append("  未发现固定延迟转账模式")
+
+        lines.append("")
+
+        # ==================== 三、资金突变 ====================
+        lines.append("三、大额突变分析")
         lines.append("-" * 70)
 
         if sudden_changes:
+            change_type_map = {
+                "income_spike": "收入突增",
+                "expense_spike": "支出突增",
+                "income_drop": "收入骤降",
+                "expense_drop": "支出骤降",
+            }
             for i, change in enumerate(sudden_changes, 1):
                 lines.append(f"【发现 {i}】")
-                # 修复字段映射：name -> person, type -> change_type
-                person = change.get("person", change.get("name", "未知"))
-                change_type = change.get("change_type", change.get("type", "收入突增"))
+                person = self._clean_text(change.get("person", change.get("name")))
+                raw_change_type = self._clean_text(
+                    change.get("change_type", change.get("type", "income_spike"))
+                )
+                change_type = change_type_map.get(raw_change_type, raw_change_type)
                 lines.append(f"  人员: {person}")
                 lines.append(f"  变化类型: {change_type}")
                 lines.append(
@@ -741,21 +1097,28 @@ class SpecializedReportGenerator:
                 # 获取该日交易明细
                 target_date = self._format_date(change.get('date', ''))
                 day_transactions = self._get_day_transactions(person, target_date)
-                
+
                 if day_transactions:
-                    lines.append(f"  📋 该日收入交易明细（共{len(day_transactions)}笔）:")
-                    for tx in day_transactions:
+                    shown = day_transactions[:8]
+                    lines.append(f"  📋 该日收入交易明细（共{len(day_transactions)}笔，展示前{len(shown)}笔）:")
+                    for tx in shown:
                         amount_str = utils.format_currency(tx['amount'])
                         type_info = tx['type_info']
-                        cp = tx['counterparty'] if tx['counterparty'] else '(对手方不明)'
+                        cp = tx['counterparty'] if tx['counterparty'] else '对手方不明'
                         cat = tx.get('category', '')
                         cat_str = f" [{cat}]" if cat else ""
                         lines.append(f"    {tx['time']} {type_info['icon']} {amount_str:>12}元{cat_str} | {cp}")
                         if type_info['type'] != '正常交易':
                             lines.append(f"           └─ {type_info['type']}: {type_info['detail']}")
+                    if len(day_transactions) > len(shown):
+                        lines.append(f"    ... 其余 {len(day_transactions) - len(shown)} 笔未展示")
                 else:
-                    lines.append(f"  ⚠️ 无法获取该日交易明细")
-                
+                    if self._resolve_cleaned_person_flow_path(person):
+                        lines.append("  ⚠️ 该日期未检索到收入交易明细（可能为支出突变或原始日期格式异常）")
+                    else:
+                        lines.append("  ⚠️ 未找到该人员对应的合并流水文件，无法回溯当日明细")
+
+                self._add_traceability(lines, change)
                 lines.append("")
             lines.append("")
         else:
@@ -807,21 +1170,52 @@ class SpecializedReportGenerator:
         lines.append("")
 
         # ==================== 数据加载 ====================
-        penetration = self.analysis_results.get("penetration", {})
+        related_party = self.analysis_results.get("relatedParty", {}) or {}
+        penetration = self.analysis_results.get("penetration", {}) or {}
+
+        def _to_float(value: Any) -> float:
+            """安全转换金额字段，避免 None/字符串导致格式化异常。"""
+            if value is None:
+                return 0.0
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0.0
 
         # ==================== 一、资金闭环 ====================
         lines.append("一、资金闭环检测")
         lines.append("-" * 70)
 
-        cycles = penetration.get("fund_cycles", [])
+        # 兼容新旧结构：优先 relatedParty.fund_loops，回退 penetration.fund_cycles
+        cycles = related_party.get("fund_loops") or penetration.get("fund_cycles") or []
         if cycles:
             for i, cycle in enumerate(cycles, 1):
+                if isinstance(cycle, dict):
+                    path = cycle.get("path")
+                    if not path:
+                        nodes = cycle.get("nodes") or cycle.get("participants") or []
+                        path = " → ".join(nodes) if nodes else "未知路径"
+                    length = cycle.get("length") or len(
+                        cycle.get("nodes") or cycle.get("participants") or []
+                    )
+                    risk_level = str(cycle.get("risk_level", "medium")).upper()
+                    total_amount = _to_float(cycle.get("total_amount"))
+                elif isinstance(cycle, list):
+                    path = " → ".join(cycle)
+                    length = len(cycle)
+                    risk_level = "HIGH" if length >= 3 else "MEDIUM"
+                    total_amount = 0.0
+                else:
+                    path = str(cycle)
+                    length = 0
+                    risk_level = "MEDIUM"
+                    total_amount = 0.0
+
                 lines.append(f"【资金闭环 {i}】")
-                lines.append(f"  闭环路径: {' → '.join(cycle.get('nodes', []))}")
-                lines.append(f"  闭环长度: {len(cycle.get('nodes', []))} 个节点")
-                lines.append(
-                    f"  总资金: {utils.format_currency(cycle.get('total_amount', 0))} 元"
-                )
+                lines.append(f"  闭环路径: {path}")
+                lines.append(f"  闭环长度: {length} 个节点")
+                lines.append(f"  风险等级: {risk_level}")
+                lines.append(f"  总资金: {utils.format_currency(total_amount)}")
                 lines.append("")
                 lines.append("  【审计提示】: 资金闭环可能是:")
                 lines.append("            1. 资金回流洗钱（通过多层转账回到原点）")
@@ -839,21 +1233,53 @@ class SpecializedReportGenerator:
         lines.append("二、过账通道识别")
         lines.append("-" * 70)
 
-        pass_throughs = penetration.get("pass_through_nodes", [])
+        # 兼容新旧结构：优先 relatedParty.third_party_relays
+        pass_throughs = (
+            related_party.get("third_party_relays")
+            or penetration.get("pass_through_nodes")
+            or penetration.get("passthrough_channels")
+            or []
+        )
         if pass_throughs:
             for i, node in enumerate(pass_throughs, 1):
                 lines.append(f"【过账通道 {i}】")
-                lines.append(f"  节点: {node.get('name', '未知')}")
-                lines.append(
-                    f"  总流入: {utils.format_currency(node.get('total_inflow', 0))} 元"
-                )
-                lines.append(
-                    f"  总流出: {utils.format_currency(node.get('total_outflow', 0))} 元"
-                )
-                lines.append(
-                    f"  净流量: {utils.format_currency(node.get('net_flow', 0))} 元"
-                )
-                lines.append(f"  转账频次: {node.get('transfer_count', 0)} 笔")
+
+                # relatedParty.third_party_relays 结构
+                if isinstance(node, dict) and (
+                    "relay" in node or ("from" in node and "to" in node)
+                ):
+                    lines.append(
+                        f"  链路: {node.get('from', '未知')} → {node.get('relay', '未知')} → {node.get('to', '未知')}"
+                    )
+                    lines.append(f"  中转人: {node.get('relay', '未知')}")
+                    lines.append(
+                        f"  转出金额: {utils.format_currency(_to_float(node.get('outflow_amount')))}"
+                    )
+                    lines.append(
+                        f"  转入金额: {utils.format_currency(_to_float(node.get('inflow_amount')))}"
+                    )
+                    lines.append(
+                        f"  金额差: {utils.format_currency(_to_float(node.get('amount_diff')))}"
+                    )
+                    time_diff = node.get("time_diff_hours")
+                    if time_diff is not None:
+                        lines.append(f"  时差: {_to_float(time_diff):.1f} 小时")
+                    lines.append(
+                        f"  风险等级: {str(node.get('risk_level', 'unknown')).upper()}"
+                    )
+                else:
+                    lines.append(f"  节点: {node.get('name', '未知') if isinstance(node, dict) else '未知'}")
+                    if isinstance(node, dict):
+                        lines.append(
+                            f"  总流入: {utils.format_currency(_to_float(node.get('total_inflow')))}"
+                        )
+                        lines.append(
+                            f"  总流出: {utils.format_currency(_to_float(node.get('total_outflow')))}"
+                        )
+                        lines.append(
+                            f"  净流量: {utils.format_currency(_to_float(node.get('net_flow')))}"
+                        )
+                        lines.append(f"  转账频次: {node.get('transfer_count', 0)} 笔")
                 lines.append("")
                 lines.append("  【审计提示】: 过账通道特征:")
                 lines.append("            1. 大额资金快速进出（停留时间短）")
@@ -890,7 +1316,7 @@ class SpecializedReportGenerator:
         lines.append("【算法说明】")
         lines.append("-" * 50)
         lines.append("1. 现金时空伴随检测：")
-        lines.append("   同一人在48小时内取现和存现，时间差<小时，")
+        lines.append("   同一人在48小时内取现和存现，时间差<48小时，")
         lines.append("   金额差异<10%，识别现金搬运模式。")
         lines.append("")
         lines.append("2. 跨实体现金碰撞：")
@@ -912,6 +1338,7 @@ class SpecializedReportGenerator:
 
         # ==================== 一、现金时空伴随 ====================
         lines.append("一、现金时空伴随检测")
+        lines.append("-" * 70)
         
         # 加载现金碰撞数据（支持两种键名）
         cash_collisions = self.suspicions.get('cashCollisions', []) or self.suspicions.get('cash_collisions', [])
@@ -926,7 +1353,7 @@ class SpecializedReportGenerator:
                 deposit_date = collision.get('deposit_date') or collision.get('time2', '未知')
                 withdrawal_amount = collision.get('withdrawal_amount') or collision.get('amount1', 0)
                 deposit_amount = collision.get('deposit_amount') or collision.get('amount2', 0)
-                time_diff = collision.get('time_diff_hours') or collision.get('timeDiff', 0)
+                time_diff = self._safe_float(collision.get('time_diff_hours', collision.get('timeDiff', 0)))
                 risk_level = collision.get('risk_level') or collision.get('riskLevel', '未知')
                 
                 lines.append(f"  取现方: {withdrawal_entity}")
@@ -936,7 +1363,7 @@ class SpecializedReportGenerator:
                 lines.append(f"  时间差: {time_diff:.1f} 小时")
                 lines.append(f"  取现金额: {utils.format_currency(withdrawal_amount)} 元")
                 lines.append(f"  存现金额: {utils.format_currency(deposit_amount)} 元")
-                lines.append(f"  风险等级: {risk_level}")
+                lines.append(f"  风险等级: {self._clean_text(risk_level)}")
 
                 # 添加溯源
                 source_file = collision.get("withdrawalSource", collision.get("withdrawal_source", ""))
@@ -1001,19 +1428,34 @@ class SpecializedReportGenerator:
         lines.append("三、反洗钱预警")
         lines.append("-" * 70)
 
-        aml_alerts = self.suspicions.get("amlAlerts", [])
+        aml_alerts = self.suspicions.get("amlAlerts", []) or self.suspicions.get("aml_alerts", [])
         if aml_alerts:
+            positive_alerts = []
             for alert in aml_alerts:
-                name = alert.get("name", "未知")
-                alert_type = alert.get("alert_type", "未知")
-                lines.append(f"【预警】{name} - {alert_type}")
-                suspicious_count = alert.get("suspicious_transaction_count", 0)
-                large_count = alert.get("large_transaction_count", 0)
-                lines.append(f"  可疑交易数: {suspicious_count}")
-                lines.append(f"  大额交易数: {large_count}")
-                source = alert.get("source", "")
-                if source:
-                    lines.append(f"  📁 数据来源: {source}")
+                suspicious_count = int(self._safe_float(alert.get("suspicious_transaction_count", 0)))
+                large_count = int(self._safe_float(alert.get("large_transaction_count", 0)))
+                payment_count = int(self._safe_float(alert.get("payment_transaction_count", 0)))
+                if suspicious_count > 0 or large_count > 0 or payment_count > 0:
+                    positive_alerts.append(alert)
+
+            if positive_alerts:
+                for alert in positive_alerts:
+                    name = self._clean_text(alert.get("name"))
+                    alert_type = self._clean_text(alert.get("alert_type"))
+                    suspicious_count = int(self._safe_float(alert.get("suspicious_transaction_count", 0)))
+                    large_count = int(self._safe_float(alert.get("large_transaction_count", 0)))
+                    payment_count = int(self._safe_float(alert.get("payment_transaction_count", 0)))
+                    lines.append(f"【预警】{name} - {alert_type}")
+                    lines.append(f"  可疑交易数: {suspicious_count}")
+                    lines.append(f"  大额交易数: {large_count}")
+                    lines.append(f"  支付交易数: {payment_count}")
+                    source = alert.get("source", "")
+                    if source:
+                        lines.append(f"  📁 数据来源: {source}")
+                    lines.append("")
+            else:
+                lines.append(f"  AML查询命中 {len(aml_alerts)} 人次，但交易指标均为0（可疑/大额/支付交易均未触发）。")
+                lines.append("  建议保留底稿作为查询记录，不将其直接定性为资金异常。")
                 lines.append("")
         else:
             lines.append("  未发现反洗钱预警")
@@ -1024,7 +1466,7 @@ class SpecializedReportGenerator:
         lines.append("四、征信预警")
         lines.append("-" * 70)
 
-        credit_alerts = self.suspicions.get("creditAlerts", [])
+        credit_alerts = self.suspicions.get("creditAlerts", []) or self.suspicions.get("credit_alerts", [])
         if credit_alerts:
             for alert in credit_alerts:
                 name = alert.get("name", "未知")
@@ -1157,8 +1599,8 @@ class SpecializedReportGenerator:
                 lines.append(f"  时间差: {hours_diff:.1f} 小时")
                 lines.append(f"  流入金额: {utils.format_currency(income_amount)} 元")
                 lines.append(f"  流出金额: {utils.format_currency(expense_amount)} 元")
-                income_cp = str(pattern.get('income_counterparty', '')).strip()
-                expense_cp = str(pattern.get('expense_counterparty', '')).strip()
+                income_cp = self._clean_text(pattern.get('income_counterparty'), default='对手方不明')
+                expense_cp = self._clean_text(pattern.get('expense_counterparty'), default='对手方不明')
                 lines.append(f"  收入方: {income_cp}")
                 lines.append(f"  支出方: {expense_cp}")
 
@@ -1193,7 +1635,7 @@ class SpecializedReportGenerator:
                 lines.append(
                     f"  类型: {'整进散出' if pattern_type == 'large_in_split_out' else '散进整出'}"
                 )
-                lines.append(f"  大额方: {pattern.get('large_counterparty', '未知')}")
+                lines.append(f"  大额方: {self._clean_text(pattern.get('large_counterparty'))}")
                 lines.append(
                     f"  大额金额: {utils.format_currency(pattern.get('large_amount', 0))} 元"
                 )
@@ -1503,4 +1945,3 @@ class SpecializedReportGenerator:
         with open(index_path, 'w', encoding='utf-8') as f:
             f.write("\n".join(lines))
         
-

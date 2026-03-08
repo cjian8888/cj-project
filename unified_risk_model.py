@@ -228,7 +228,10 @@ class UnifiedRiskModel:
         # 检查Z值（如果有的话）
         high_z_count = sum(
             1 for anomaly in ml_anomalies
-            if isinstance(anomaly, dict) and anomaly.get('z_score', 0) > 5
+            if isinstance(anomaly, dict) and max(
+                anomaly.get('z_score', 0),
+                anomaly.get('score', 0)
+            ) > 5
         )
         
         if high_z_count > 0:

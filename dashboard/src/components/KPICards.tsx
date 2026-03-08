@@ -22,9 +22,36 @@ export function KPICards() {
         (sum, p) => sum + (p.cashTotal || 0), 0
     );
 
-    const highRiskFunds = (data.suspicions.directTransfers || []).reduce(
+    const toAmount = (value: unknown): number => {
+        const n = Number(value);
+        return Number.isFinite(n) ? n : 0;
+    };
+
+    const directTransferRiskFunds = (data.suspicions.directTransfers || []).reduce(
         (sum, tx) => sum + (tx.amount || 0), 0
     );
+    const cashCollisionRiskFunds = (data.suspicions.cashCollisions || []).reduce((sum, item) => {
+        const pairAmount = Math.max(
+            toAmount(item.amount1),
+            toAmount(item.amount2),
+            toAmount((item as any).withdrawalAmount),
+            toAmount((item as any).depositAmount),
+            toAmount((item as any).amount),
+        );
+        return sum + pairAmount;
+    }, 0);
+    const cashTimingRiskFunds = (data.suspicions.cashTimingPatterns || []).reduce((sum, item) => {
+        const pairAmount = Math.max(
+            toAmount(item.amount1),
+            toAmount(item.amount2),
+            toAmount((item as any).withdrawalAmount),
+            toAmount((item as any).depositAmount),
+            toAmount((item as any).amount),
+        );
+        return sum + pairAmount;
+    }, 0);
+    const highRiskFunds = directTransferRiskFunds + cashCollisionRiskFunds + cashTimingRiskFunds;
+
     const suspicionCount = (data.suspicions.directTransfers || []).length +
         (data.suspicions.cashCollisions || []).length +
         (data.suspicions.cashTimingPatterns || []).length;

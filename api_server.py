@@ -160,6 +160,8 @@ class AnalysisState:
                 "status": self.status,
                 "progress": self.progress,
                 "phase": self.phase,
+                # 兼容前端字段命名（REST/WS 对齐）
+                "currentPhase": self.phase,
                 "startTime": self.start_time.isoformat() if self.start_time else None,
                 "endTime": self.end_time.isoformat() if self.end_time else None,
                 "error": self.error,
@@ -490,6 +492,8 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
             "depositBank": record.get("deposit_bank", ""),
             "withdrawalSource": record.get("withdrawal_source", ""),
             "depositSource": record.get("deposit_source", ""),
+            "type": record.get("type", ""),
+            "patternCategory": record.get("pattern_category", ""),
         }
 
     def convert_direct_transfer(record: Dict) -> Dict:
@@ -540,6 +544,8 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
 
         # 对特定字段的记录进行内部转换
         if key == "cash_collisions" and isinstance(value, list):
+            result[new_key] = [convert_cash_collision(r) for r in value]
+        elif key == "cash_timing_patterns" and isinstance(value, list):
             result[new_key] = [convert_cash_collision(r) for r in value]
         elif key == "direct_transfers" and isinstance(value, list):
             result[new_key] = [convert_direct_transfer(r) for r in value]
@@ -1100,21 +1106,20 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         profiles = {}
         id_to_name_map = {}
 
-        # 🔄 构建身份证号到人名的映射（直接扫描数据目录的文件名）
+        # 🔄 构建身份证号到人名的映射（递归扫描 data_dir 下所有文件名）
         import glob
+        import re
 
-        transaction_dir = os.path.join(data_dir, "银行业金融机构交易流水（定向查询）")
-        if os.path.exists(transaction_dir):
-            pattern = os.path.join(transaction_dir, "*_*_*.xlsx")
-            for file_path in glob.glob(pattern):
-                # 从文件名提取: 滕雳_310230196811100267_...
-                basename = os.path.basename(file_path)
-                parts = basename.split("_")
-                if len(parts) >= 2:
-                    name = parts[0]
-                    id_part = parts[1]
-                    if len(id_part) == 18 and id_part.isdigit():
-                        id_to_name_map[id_part.upper()] = name
+        id_pattern = re.compile(r"^([^_]+)_([0-9]{17}[0-9Xx])_")
+        for file_path in glob.glob(os.path.join(data_dir, "**", "*.xlsx"), recursive=True):
+            basename = os.path.basename(file_path)
+            match = id_pattern.match(basename)
+            if not match:
+                continue
+            name = match.group(1).strip()
+            id_part = match.group(2).upper()
+            if name and id_part not in id_to_name_map:
+                id_to_name_map[id_part] = name
 
         logger.info(f"身份证号映射表构建完成: {len(id_to_name_map)} 个人员")
 
@@ -1187,18 +1192,22 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                         profile["vehicles"] = vehicles
                         break
 
-                # P1.2: 理财产品
-                if entity in external_data["p1"].get("wealth_product_data", {}):
-                    wealth_info = external_data["p1"]["wealth_product_data"][entity]
-                    profile["wealth_products"] = wealth_info.get("products", [])
-                    profile["wealth_summary"] = wealth_info.get("summary", {})
+                # P1.2: 理财产品（使用身份证号映射，与车辆/房产保持一致）
+                wealth_data = external_data["p1"].get("wealth_product_data", {})
+                for person_id, wealth_info in wealth_data.items():
+                    person_name = id_to_name_map.get(person_id, person_id)
+                    if person_name == entity:
+                        profile["wealth_products"] = wealth_info.get("products", [])
+                        profile["wealth_summary"] = wealth_info.get("summary", {})
+                        break
 
-                # P1.3: 证券
-                if entity in external_data["p1"].get("securities_data", {}):
-                    profile["securities"] = external_data["p1"]["securities_data"][
-                        entity
-                    ]
-
+                # P1.3: 证券（使用身份证号映射，与车辆/房产保持一致）
+                securities_data = external_data["p1"].get("securities_data", {})
+                for person_id, securities in securities_data.items():
+                    person_name = id_to_name_map.get(person_id, person_id)
+                    if person_name == entity:
+                        profile["securities"] = securities
+                        break
                 # P1.4: 房产
                 property_data = external_data["p1"].get("precise_property_data", {})
                 for person_id, properties in property_data.items():
@@ -1270,11 +1279,23 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             modules_config = {
                 "loanAnalysis": True,
                 "incomeAnalysis": True,
+                "fundPenetration": True,
+                "mlAnalysis": True,
                 "relatedParty": True,
                 "multiSourceCorrelation": True,
                 "timeSeriesAnalysis": True,
                 "clueAggregation": True,
             }
+        # 兼容旧配置：缺省时启用关键分析模块
+        if not isinstance(modules_config, dict):
+            if hasattr(modules_config, "dict"):
+                modules_config = modules_config.dict()
+            elif hasattr(modules_config, "items"):
+                modules_config = dict(modules_config.items())
+            else:
+                modules_config = {}
+        modules_config.setdefault("fundPenetration", True)
+        modules_config.setdefault("mlAnalysis", True)
 
         # 6.1 借贷分析
         if modules_config.get("loanAnalysis", True):
@@ -1301,7 +1322,40 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             except Exception as e:
                 logger.warning(f"  ✗ 收入分析失败: {e}")
 
-        # 6.3 关联方分析
+        # 6.3 资金穿透分析
+        if modules_config.get("fundPenetration", True):
+            try:
+                personal_transactions = {
+                    person: cleaned_data[person]
+                    for person in all_persons
+                    if person in cleaned_data
+                }
+                company_transactions = {
+                    company: cleaned_data[company]
+                    for company in all_companies
+                    if company in cleaned_data
+                }
+                analysis_results["penetration"] = fund_penetration.analyze_fund_penetration(
+                    personal_transactions,
+                    company_transactions,
+                    all_persons,
+                    all_companies,
+                )
+                logger.info("  ✓ 资金穿透分析完成")
+            except Exception as e:
+                logger.warning(f"  ✗ 资金穿透分析失败: {e}")
+
+        # 6.4 机器学习分析
+        if modules_config.get("mlAnalysis", True):
+            try:
+                analysis_results["ml"] = ml_analyzer.run_ml_analysis(
+                    cleaned_data, all_persons, all_companies
+                )
+                logger.info("  ✓ 机器学习分析完成")
+            except Exception as e:
+                logger.warning(f"  ✗ 机器学习分析失败: {e}")
+
+        # 6.5 关联方分析
         if modules_config.get("relatedParty", True):
             try:
                 analysis_results["relatedParty"] = (
@@ -1337,7 +1391,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             except Exception as e:
                 logger.warning(f"  ✗ 关联方分析失败: {e}")
 
-        # 6.4 多源数据碰撞
+        # 6.6 多源数据碰撞
         if modules_config.get("multiSourceCorrelation", True):
             try:
                 analysis_results["correlation"] = (
@@ -1349,7 +1403,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             except Exception as e:
                 logger.warning(f"  ✗ 多源数据碰撞失败: {e}")
 
-        # 6.5 时序分析
+        # 6.7 时序分析
         if modules_config.get("timeSeriesAnalysis", True):
             try:
                 logger.info("  ▶ 时序分析开始...")
@@ -1360,15 +1414,15 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             except Exception as e:
                 logger.warning(f"  ✗ 时序分析失败: {e}")
 
-        # 6.6 线索聚合
+        # 6.8 线索聚合
         if modules_config.get("clueAggregation", True):
             try:
                 logger.info("  ▶ 线索聚合开始...")
                 analysis_results["aggregation"] = clue_aggregator.aggregate_all_results(
                     all_persons,
                     all_companies,
-                    penetration_results=None,
-                    ml_results=None,
+                    penetration_results=analysis_results.get("penetration"),
+                    ml_results=analysis_results.get("ml"),
                     ts_results=analysis_results.get("timeSeries"),
                     related_party_results=analysis_results.get("relatedParty"),
                     loan_results=analysis_results.get("loan"),
@@ -1585,15 +1639,43 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
 
         phase7_start = time.time()
 
-        # 7.1 基础疑点检测
+        # 7.1 基础疑点检测（以稳定版旧检测器为主，插件引擎做增强）
+        suspicions = suspicion_detector.run_all_detections(
+            cleaned_data, all_persons, all_companies
+        )
         try:
             engine = SuspicionEngine()
-            suspicions = engine.run_all(cleaned_data, all_persons, all_companies)
+            detector_input = {
+                "cleaned_data": cleaned_data,
+                "all_persons": all_persons,
+                "all_companies": all_companies,
+            }
+            detector_config = {
+                "cash_time_window_hours": getattr(config, "CASH_TIME_WINDOW_HOURS", 48),
+                "amount_tolerance_ratio": getattr(config, "AMOUNT_TOLERANCE_RATIO", 0.05),
+                "income_high_risk_min": getattr(config, "INCOME_HIGH_RISK_MIN", 50000),
+                "suspicion_medium_high_amount": getattr(
+                    config, "SUSPICION_MEDIUM_HIGH_AMOUNT", 20000
+                ),
+                # 默认不把“本人取现-本人存现”当作风险主清单
+                "include_single_entity_collisions": False,
+                # 节假日由配置统一管理（支持多年）
+                "holidays": [
+                    holiday
+                    for _, holidays in sorted(
+                        getattr(config, "CHINESE_HOLIDAYS", {}).items()
+                    )
+                    for holiday in holidays
+                ],
+            }
+            plugin_results = engine.run_all(detector_input, detector_config)
+            # 字段对齐：插件键名 -> 系统标准键名
+            if plugin_results.get("direct_transfer"):
+                suspicions["direct_transfers"] = plugin_results["direct_transfer"]
+            if plugin_results.get("cash_collision"):
+                suspicions["cash_collisions"] = plugin_results["cash_collision"]
         except Exception as e:
-            logger.warning(f"SuspicionEngine 失败，回退到旧检测器: {e}")
-            suspicions = suspicion_detector.run_all_detections(
-                cleaned_data, all_persons, all_companies
-            )
+            logger.warning(f"SuspicionEngine 增强失败，保留旧检测器结果: {e}")
 
         # 7.2 🔄 融合外部疑点数据
         # 反洗钱预警
@@ -1638,6 +1720,8 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         # 这样报告生成器可以读取缓存文件
         # ========================================================================
         derived_data = {
+            "penetration": analysis_results.get("penetration", {}),
+            "ml": analysis_results.get("ml", {}),
             "loan": analysis_results.get("loan", {}),
             "income": analysis_results.get("income", {}),
             "time_series": analysis_results.get("timeSeries", {}),
@@ -1671,12 +1755,88 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         except Exception as e:
             logger.warning(f"  ✗ 保存基础缓存失败: {e}")
 
+        # 【修复】在报告生成前保存外部数据缓存，确保报告生成器能读取到
+        logger.info("保存外部数据缓存（供报告生成）...")
+        try:
+            external_cache_mapping = {
+                "precisePropertyData": external_data["p1"].get("precise_property_data", {}),
+                "vehicleData": external_data["p1"].get("vehicle_data", {}),
+                "wealthProductData": external_data["p1"].get("wealth_product_data", {}),
+                "securitiesData": external_data["p1"].get("securities_data", {}),
+                "creditData": external_data["p0"].get("credit_data", {}),
+                "amlData": external_data["p0"].get("aml_data", {}),
+            }
+            for key, data in external_cache_mapping.items():
+                if data:
+                    cache_mgr.save_cache(key, data)
+                    logger.info(f"  ✓ 已保存 {key}")
+        except Exception as e:
+            logger.warning(f"  ✗ 保存外部数据缓存失败: {e}")
+
         analysis_state.update(progress=95, phase="生成分析报告...")
         broadcast_log("INFO", "▶ Phase 8: 生成分析报告...")
 
         phase8_start = time.time()
 
-        # 8.1 构建家庭资产数据
+        # 8.1 预计算图谱数据（提前执行，确保报告生成器可读取 graph_data.json）
+        logger.info("预计算图谱数据...")
+        graph_data_cache = None
+        try:
+            flow_stats = flow_visualizer._calculate_flow_stats(cleaned_data, all_persons)
+            nodes, edges, edge_stats = flow_visualizer._prepare_graph_data(
+                flow_stats, all_persons, all_companies
+            )
+
+            max_nodes, max_edges = config.GRAPH_MAX_NODES, config.GRAPH_MAX_EDGES
+            sorted_nodes = sorted(nodes, key=lambda x: x.get("size", 0), reverse=True)
+            sampled_nodes = sorted_nodes[:max_nodes]
+            sampled_node_ids = {node["id"] for node in sampled_nodes}
+
+            sampled_edges = [
+                e
+                for e in edges
+                if e["from"] in sampled_node_ids and e["to"] in sampled_node_ids
+            ]
+            sampled_edges.sort(key=lambda x: x.get("value", 0), reverse=True)
+            sampled_edges = sampled_edges[:max_edges]
+
+            loan_results = analysis_results.get("loan", {})
+            income_results = analysis_results.get("income", {})
+
+            graph_data_cache = {
+                "nodes": sampled_nodes,
+                "edges": sampled_edges,
+                "sampling": {
+                    "totalNodes": len(nodes),
+                    "totalEdges": len(edges),
+                    "sampledNodes": len(sampled_nodes),
+                    "sampledEdges": len(sampled_edges),
+                    "message": "为保证流畅度，仅展示核心资金网络。",
+                },
+                "stats": {
+                    "nodeCount": len(nodes),
+                    "edgeCount": len(edges),
+                    "corePersonCount": len(all_persons),
+                    "corePersonNames": all_persons,
+                    "involvedCompanyCount": len(all_companies),
+                    "highRiskCount": len(income_results.get("high_risk", [])),
+                    "mediumRiskCount": len(income_results.get("medium_risk", [])),
+                    "loanPairCount": len(loan_results.get("bidirectional_flows", [])),
+                },
+            }
+            logger.info(
+                f"  ✓ 图谱缓存: {len(sampled_nodes)} 节点, {len(sampled_edges)} 边"
+            )
+
+            # 提前落盘，避免报告生成阶段出现 graph_data.json 不存在
+            CacheManager(output_dirs["analysis_cache"]).save_cache(
+                "graph_data", graph_data_cache
+            )
+            logger.info("  ✓ 图谱缓存已提前保存（供报告生成）")
+        except Exception as e:
+            logger.warning(f"  ✗ 图谱缓存失败: {e}")
+
+        # 8.2 构建家庭资产数据
         try:
             precise_property_data = external_data["p1"].get("precise_property_data", {})
             vehicle_data = external_data["p1"].get("vehicle_data", {})
@@ -1747,7 +1907,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                 penetration_results=analysis_results.get("penetration", {}),
                 loan_results=analysis_results.get("loan", {}),
                 income_results=analysis_results.get("income", {}),
-                time_series_results=analysis_results.get("time_series", {}),
+                time_series_results=analysis_results.get("timeSeries", {}),
                 derived_data=derived_data if "derived_data" in dir() else {},
             )
             logger.info(f"  ✓ Excel核查底稿已生成: {excel_path}")
@@ -1800,60 +1960,6 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         except Exception as e:
             logger.warning(f"  ✗ 报告目录清单生成失败: {e}")
             broadcast_log("WARN", f"  ✗ 报告目录清单生成失败: {str(e)[:50]}")
-
-        # 8.6 预计算图谱数据
-        logger.info("预计算图谱数据...")
-        graph_data_cache = None
-        try:
-            flow_stats = flow_visualizer._calculate_flow_stats(
-                cleaned_data, all_persons
-            )
-            nodes, edges, edge_stats = flow_visualizer._prepare_graph_data(
-                flow_stats, all_persons, all_companies
-            )
-
-            max_nodes, max_edges = config.GRAPH_MAX_NODES, config.GRAPH_MAX_EDGES
-            sorted_nodes = sorted(nodes, key=lambda x: x.get("size", 0), reverse=True)
-            sampled_nodes = sorted_nodes[:max_nodes]
-            sampled_node_ids = {node["id"] for node in sampled_nodes}
-
-            sampled_edges = [
-                e
-                for e in edges
-                if e["from"] in sampled_node_ids and e["to"] in sampled_node_ids
-            ]
-            sampled_edges.sort(key=lambda x: x.get("value", 0), reverse=True)
-            sampled_edges = sampled_edges[:max_edges]
-
-            loan_results = analysis_results.get("loan", {})
-            income_results = analysis_results.get("income", {})
-
-            graph_data_cache = {
-                "nodes": sampled_nodes,
-                "edges": sampled_edges,
-                "sampling": {
-                    "totalNodes": len(nodes),
-                    "totalEdges": len(edges),
-                    "sampledNodes": len(sampled_nodes),
-                    "sampledEdges": len(sampled_edges),
-                    "message": "为保证流畅度，仅展示核心资金网络。",
-                },
-                "stats": {
-                    "nodeCount": len(nodes),
-                    "edgeCount": len(edges),
-                    "corePersonCount": len(all_persons),
-                    "corePersonNames": all_persons,
-                    "involvedCompanyCount": len(all_companies),
-                    "highRiskCount": len(income_results.get("high_risk", [])),
-                    "mediumRiskCount": len(income_results.get("medium_risk", [])),
-                    "loanPairCount": len(loan_results.get("bidirectional_flows", [])),
-                },
-            }
-            logger.info(
-                f"  ✓ 图谱缓存: {len(sampled_nodes)} 节点, {len(sampled_edges)} 边"
-            )
-        except Exception as e:
-            logger.warning(f"  ✗ 图谱缓存失败: {e}")
 
         # 增强疑点数据
         enhanced_suspicions = _enhance_suspicions_with_analysis(
@@ -2098,7 +2204,7 @@ async def get_results():
         raise HTTPException(status_code=500, detail=f"获取结果失败: {str(e)}")
 
 
-@app.get("/api/reports")
+@app.get("/api/reports/legacy")
 async def get_reports():
     """获取报告列表（递归扫描所有子目录）"""
     reports = []
@@ -2161,9 +2267,15 @@ async def get_report_subjects():
                 {
                     "name": person,
                     "type": "person",
-                    "transactionCount": profile.get("transaction_count", 0),
-                    "totalIncome": profile.get("total_income", 0),
-                    "salaryRatio": profile.get("salary_ratio", 1.0),
+                    "transactionCount": profile.get(
+                        "transactionCount", profile.get("transaction_count", 0)
+                    ),
+                    "totalIncome": profile.get(
+                        "totalIncome", profile.get("total_income", 0)
+                    ),
+                    "salaryRatio": profile.get(
+                        "salaryRatio", profile.get("salary_ratio", 1.0)
+                    ),
                 }
             )
 
@@ -2174,8 +2286,12 @@ async def get_report_subjects():
                 {
                     "name": company,
                     "type": "company",
-                    "transactionCount": profile.get("transaction_count", 0),
-                    "totalIncome": profile.get("total_income", 0),
+                    "transactionCount": profile.get(
+                        "transactionCount", profile.get("transaction_count", 0)
+                    ),
+                    "totalIncome": profile.get(
+                        "totalIncome", profile.get("total_income", 0)
+                    ),
                 }
             )
 
@@ -2204,9 +2320,15 @@ async def get_report_subjects():
                     {
                         "name": person,
                         "type": "person",
-                        "transactionCount": profile.get("transaction_count", 0),
-                        "totalIncome": profile.get("total_income", 0),
-                        "salaryRatio": profile.get("salary_ratio", 1.0),
+                        "transactionCount": profile.get(
+                            "transactionCount", profile.get("transaction_count", 0)
+                        ),
+                        "totalIncome": profile.get(
+                            "totalIncome", profile.get("total_income", 0)
+                        ),
+                        "salaryRatio": profile.get(
+                            "salaryRatio", profile.get("salary_ratio", 1.0)
+                        ),
                     }
                 )
 
@@ -2216,8 +2338,12 @@ async def get_report_subjects():
                     {
                         "name": company,
                         "type": "company",
-                        "transactionCount": profile.get("transaction_count", 0),
-                        "totalIncome": profile.get("total_income", 0),
+                        "transactionCount": profile.get(
+                            "transactionCount", profile.get("transaction_count", 0)
+                        ),
+                        "totalIncome": profile.get(
+                            "totalIncome", profile.get("total_income", 0)
+                        ),
                     }
                 )
 
@@ -2573,6 +2699,7 @@ async def get_report_files():
 
                     reports.append(
                         {
+                            "name": display_name,  # 兼容前端旧字段
                             "filename": display_name,
                             "type": report_types[ext],
                             "size": stat.st_size,
@@ -2659,7 +2786,7 @@ async def preview_report_file(filename: str):
     )
 
     # 确保路径在允许的目录内
-    if not filepath.startswith(base_dir):
+    if not (filepath == base_dir or filepath.startswith(base_dir + os.sep)):
         return JSONResponse(
             status_code=400,
             content={"success": False, "error": "非法文件路径"},
@@ -2695,6 +2822,7 @@ async def preview_report_file(filename: str):
 
         elif ext == ".xlsx":
             # Excel 文件，返回下载链接
+            safe_filename = normalized_path
             return {
                 "success": True,
                 "filename": safe_filename,
@@ -2745,7 +2873,7 @@ async def download_report_file(filename: str):
     )
 
     # 确保路径在允许的目录内
-    if not filepath.startswith(base_dir):
+    if not (filepath == base_dir or filepath.startswith(base_dir + os.sep)):
         return JSONResponse(
             status_code=400,
             content={"success": False, "error": "非法文件路径"},
@@ -2772,6 +2900,107 @@ class InvestigationReportRequest(BaseModel):
 
     case_background: Optional[str] = None
     data_scope: Optional[str] = None
+    # v5.2: 报告生成模块参数（前端可配置）
+    doc_number: Optional[str] = None
+    selected_subjects: Optional[List[str]] = None
+    thresholds: Optional[Dict[str, float]] = None
+    sections: Optional[List[str]] = None
+
+
+def _apply_report_generation_overrides(config_obj, request_obj):
+    """
+    将前端报告生成参数应用到归集配置。
+
+    支持:
+    - doc_number 覆盖
+    - selected_subjects 过滤分析单元和公司列表
+    """
+    if request_obj is None:
+        return config_obj
+
+    if getattr(request_obj, "doc_number", None):
+        config_obj.doc_number = str(request_obj.doc_number).strip()
+
+    selected_subjects = getattr(request_obj, "selected_subjects", None) or []
+    selected = {str(name).strip() for name in selected_subjects if str(name).strip()}
+    if not selected:
+        return config_obj
+
+    try:
+        from report_config.primary_targets_schema import AnalysisUnit, AnalysisUnitMember
+    except Exception:
+        return config_obj
+
+    filtered_units = []
+    for unit in config_obj.analysis_units:
+        members = [m for m in unit.members if m in selected]
+        if unit.anchor in selected and unit.anchor not in members:
+            members.insert(0, unit.anchor)
+
+        if unit.unit_type == "independent":
+            if unit.anchor not in selected:
+                continue
+            members = [unit.anchor]
+
+        if not members:
+            continue
+
+        anchor = unit.anchor if unit.anchor in members else members[0]
+
+        filtered_member_details = []
+        for md in unit.member_details or []:
+            if md.name in members:
+                filtered_member_details.append(
+                    AnalysisUnitMember(
+                        name=md.name,
+                        relation=md.relation,
+                        has_data=md.has_data,
+                        id_number=getattr(md, "id_number", ""),
+                    )
+                )
+
+        if not filtered_member_details:
+            for m in members:
+                filtered_member_details.append(
+                    AnalysisUnitMember(
+                        name=m,
+                        relation="本人" if m == anchor else "家庭成员",
+                        has_data=True,
+                    )
+                )
+
+        filtered_units.append(
+            AnalysisUnit(
+                anchor=anchor,
+                members=members,
+                unit_type=unit.unit_type,
+                member_details=filtered_member_details,
+                note=unit.note,
+            )
+        )
+
+    if filtered_units:
+        config_obj.analysis_units = filtered_units
+    if config_obj.include_companies:
+        config_obj.include_companies = [
+            c for c in config_obj.include_companies if c in selected
+        ]
+
+    return config_obj
+
+
+def _apply_runtime_report_options(builder_obj, request_obj) -> None:
+    """
+    将前端运行时报告参数注入报告构建器（阈值、章节开关）。
+    """
+    if builder_obj is None:
+        return
+
+    thresholds = getattr(request_obj, "thresholds", None) if request_obj else None
+    sections = getattr(request_obj, "sections", None) if request_obj else None
+
+    if hasattr(builder_obj, "set_generation_options"):
+        builder_obj.set_generation_options(thresholds=thresholds, sections=sections)
 
 
 @app.post("/api/investigation-report/generate-with-config")
@@ -2817,6 +3046,7 @@ async def generate_investigation_report_with_config(
         logger.info(
             f"[报告生成] 配置加载成功: {len(config.analysis_units)} 个分析单元, is_new={is_new}"
         )
+        config = _apply_report_generation_overrides(config, request)
 
         # 3. 加载报告构建器
         builder = load_investigation_report_builder(str(OUTPUT_DIR))
@@ -2829,6 +3059,7 @@ async def generate_investigation_report_with_config(
 
         # 【v4.1 新增】设置用户配置到报告构建器
         builder.set_primary_config(config)
+        _apply_runtime_report_options(builder, request)
         logger.info(
             f"[报告生成] 已设置用户配置: {len(config.analysis_units)} 个分析单元"
         )
@@ -2930,6 +3161,7 @@ async def generate_investigation_report_with_config(
 
                     # 【修复 2026-03-07】不要覆盖整个 family_summary，保留 family_units 字段
                     existing_family_summary = derived_data.get("family_summary", {})
+                    first_householder = list(updated_family_summaries.keys())[0]
                     derived_data["family_summary"] = {
                         **existing_family_summary,  # 保留 family_units 等字段
                         "all_family_summaries": updated_family_summaries,
@@ -2954,6 +3186,7 @@ async def generate_investigation_report_with_config(
             )
 
         builder.set_primary_config(config)
+        _apply_runtime_report_options(builder, request)
         logger.info(
             f"[报告生成] 已设置用户配置: {len(config.analysis_units)} 个分析单元"
         )
@@ -2964,6 +3197,13 @@ async def generate_investigation_report_with_config(
             case_background=case_background or config.case_notes,
             data_scope=data_scope,
         )
+        if request and isinstance(report, dict):
+            report.setdefault("meta", {})
+            report["meta"]["generation_options"] = {
+                "selected_subjects": request.selected_subjects or [],
+                "thresholds": request.thresholds or {},
+                "sections": request.sections or [],
+            }
 
         logger.info(f"[报告生成] v5.0 报告生成成功（完整四部分架构）")
 
@@ -3031,6 +3271,7 @@ async def generate_investigation_report_v5(
         logger.info(
             f"[报告生成v5] 配置加载成功: {len(config.analysis_units)} 个分析单元"
         )
+        config = _apply_report_generation_overrides(config, request)
 
         # 3. 加载报告构建器
         builder = load_investigation_report_builder(str(OUTPUT_DIR))
@@ -3043,6 +3284,7 @@ async def generate_investigation_report_v5(
 
         # 4. 设置用户配置
         builder.set_primary_config(config)
+        _apply_runtime_report_options(builder, request)
 
         # 5. 使用v5.0方法生成报告
         report = builder.build_report_v5(
@@ -3050,6 +3292,13 @@ async def generate_investigation_report_v5(
             case_background=case_background or config.case_notes,
             data_scope=data_scope,
         )
+        if request and isinstance(report, dict):
+            report.setdefault("meta", {})
+            report["meta"]["generation_options"] = {
+                "selected_subjects": request.selected_subjects or [],
+                "thresholds": request.thresholds or {},
+                "sections": request.sections or [],
+            }
 
         logger.info(f"[报告生成v5] v5.0报告生成成功")
 
@@ -3119,6 +3368,7 @@ async def generate_investigation_report_html(
         logger.info(
             f"[HTML报告生成] 配置加载成功: {len(config.analysis_units)} 个分析单元"
         )
+        config = _apply_report_generation_overrides(config, request)
 
         # 3. 加载报告构建器
         builder = load_investigation_report_builder(output_dir)
@@ -3131,6 +3381,7 @@ async def generate_investigation_report_html(
 
         # 4. 设置用户配置
         builder.set_primary_config(config)
+        _apply_runtime_report_options(builder, request)
 
         # 5. 【关键】使用 build_report_v5 生成完整报告数据
         report = builder.build_report_v5(
@@ -3138,6 +3389,13 @@ async def generate_investigation_report_html(
             case_background=case_background or config.case_notes,
             data_scope=data_scope,
         )
+        if request and isinstance(report, dict):
+            report.setdefault("meta", {})
+            report["meta"]["generation_options"] = {
+                "selected_subjects": request.selected_subjects or [],
+                "thresholds": request.thresholds or {},
+                "sections": request.sections or [],
+            }
 
         logger.info(f"[HTML报告生成] 报告数据生成完成，开始渲染HTML模板")
 
@@ -3153,6 +3411,9 @@ async def generate_investigation_report_html(
             "config_info": {
                 "analysis_units_count": len(config.analysis_units),
                 "doc_number": config.doc_number,
+                "selected_subjects_count": len(request.selected_subjects or [])
+                if request
+                else 0,
             },
         }
 
@@ -3189,7 +3450,44 @@ async def save_html_report(request: dict):
         reports_dir = os.path.join(str(OUTPUT_DIR), "analysis_results")
         os.makedirs(reports_dir, exist_ok=True)
 
-        filepath = os.path.join(reports_dir, filename)
+        # 路径安全校验：仅允许保存到 analysis_results 根目录
+        if not filename or not str(filename).strip():
+            filename = "初查报告.html"
+        filename = str(filename).strip()
+        if len(filename) > 255:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "文件名过长"},
+            )
+        invalid_chars = ["<", ">", ":", '"', "|", "?", "*", "\x00"]
+        if any(char in filename for char in invalid_chars):
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "文件名包含非法字符"},
+            )
+        normalized_name = os.path.normpath(filename)
+        if (
+            ".." in normalized_name
+            or normalized_name.startswith("/")
+            or normalized_name.startswith("\\")
+            or "/" in normalized_name
+            or "\\" in normalized_name
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "非法文件路径"},
+            )
+        if not normalized_name.lower().endswith(".html"):
+            normalized_name += ".html"
+
+        base_dir = os.path.abspath(reports_dir)
+        filepath = os.path.abspath(os.path.join(reports_dir, normalized_name))
+        if not filepath.startswith(base_dir + os.sep):
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "error": "非法文件路径"},
+            )
+
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(html_content)
 
@@ -3535,9 +3833,8 @@ async def websocket_endpoint(websocket: WebSocket):
             # 判断消息类型
             current_status = state_dict.get("status")
 
-            if current_status == "completed":
-                # 状态为 completed，总是发送 complete 消息
-                # 修复：确保前端总是能收到 complete 消息并自动加载数据
+            if current_status == "completed" and last_status != "completed":
+                # 仅在 completed 边沿发送一次 complete，避免前端重复拉取结果
                 message = {"type": "complete", "data": message_data}
             else:
                 # 发送普通状态更新

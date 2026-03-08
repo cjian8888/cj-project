@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from 'react';
 import { Download, Users, Settings, FileText, ChevronDown, ChevronUp, ArrowLeft, ArrowRight, CheckCircle } from 'lucide-react';
 import { PrimaryTargetsConfig } from './PrimaryTargetsConfig';
+import { API_BASE_URL } from '../services/api';
 
 interface ReportSection {
     id: string;
@@ -49,8 +50,6 @@ interface PrimaryTargetsConfigType {
 interface ReportBuilderProps {
     className?: string;
 }
-
-const API_BASE_URL = 'http://localhost:8000';
 
 // 步骤定义
 type BuilderStep = 'config' | 'generate';
@@ -165,7 +164,14 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
                 },
                 body: JSON.stringify({
                     case_background: caseName,
-                    data_scope: '',
+                    data_scope: sections
+                        .filter(section => section.checked)
+                        .map(section => section.name)
+                        .join('、'),
+                    doc_number: docNumber || undefined,
+                    selected_subjects: selectedSubjects,
+                    thresholds,
+                    sections: sections.filter(section => section.checked).map(section => section.id),
                 }),
             });
 
@@ -208,7 +214,7 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
         } finally {
             setIsGenerating(false);
         }
-    }, [caseName]);
+    }, [caseName, docNumber, selectedSubjects, thresholds, sections]);
 
     // 【v5.1 删除】前端不再使用独立模板渲染
     // 报告HTML统一由后端 /api/investigation-report/generate-html 生成

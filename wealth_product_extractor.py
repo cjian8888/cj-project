@@ -468,8 +468,8 @@ def _deduplicate_accounts(accounts: List[Dict]) -> List[Dict]:
 
 def _calculate_summary(products: List[Dict]) -> Dict:
     """计算理财产品汇总"""
-    total = sum(p.get("amount", 0) for p in products)
-    available = sum(p.get("available_amount", 0) for p in products)
+    total = sum((p.get("amount") or 0) for p in products)
+    available = sum((p.get("available_amount") or 0) for p in products)
     
     return {
         "total_amount": round(total, 2),

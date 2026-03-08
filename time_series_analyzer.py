@@ -93,32 +93,9 @@ def detect_periodic_income(
             dates = pd.to_datetime(group['date'])
             amounts = group['income'].values
             
-            # 【2026-03-04 优化】使用向量化计算日期间隔
-            if len(dates) >= 2:
-                # 使用diff()向量化计算间隔，而不是循环
-                intervals = dates.diff().dt.days.dropna()
-                intervals = intervals[intervals > 0].tolist()
-            else:
-                intervals = []
-            
-            if len(intervals) < min_occurrences - 1:
-                continue
-        # 按对手方分组
-        for cp, group in income_df.groupby('counterparty'):
-            if pd.isna(cp) or len(group) < min_occurrences:
-                continue
-            
-            # 分析时间间隔
-            group = group.sort_values('date')
-            dates = pd.to_datetime(group['date'])
-            amounts = group['income'].values
-            
-            # 计算日期间隔
-            intervals = []
-            for i in range(1, len(dates)):
-                delta = (dates.iloc[i] - dates.iloc[i-1]).days
-                if delta > 0:
-                    intervals.append(delta)
+            # 向量化计算日期间隔
+            intervals = dates.diff().dt.days.dropna()
+            intervals = intervals[intervals > 0].tolist()
             
             if len(intervals) < min_occurrences - 1:
                 continue
@@ -261,14 +238,16 @@ def detect_sudden_changes(
         daily = df.groupby(df['date'].dt.date).agg({
             'income': 'sum',
             'expense': 'sum'
-        }).reset_index()
+        }).reset_index().sort_values('date')
         
         if len(daily) < window_days * 2:
             continue
         
-        # 计算滑动均值和标准差
-        daily['income_ma'] = daily['income'].rolling(window=window_days, min_periods=1).mean()
-        daily['income_std'] = daily['income'].rolling(window=window_days, min_periods=1).std()
+        # 使用历史窗口（shift后）计算均值和标准差，避免当前值泄漏到基线
+        min_history = max(5, window_days // 3)
+        income_history = daily['income'].shift(1)
+        daily['income_ma'] = income_history.rolling(window=window_days, min_periods=min_history).mean()
+        daily['income_std'] = income_history.rolling(window=window_days, min_periods=min_history).std()
         
         # 检测突变
         for idx, row in daily.iterrows():
@@ -530,4 +509,3 @@ def generate_time_series_report(results: Dict, output_dir: str) -> str:
     
     logger.info(f'时序分析报告已生成: {report_path}')
     return report_path
-

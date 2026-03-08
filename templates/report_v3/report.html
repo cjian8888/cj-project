@@ -3,11 +3,16 @@
 {% block title %}{{ report.meta.doc_number }} - 信息查询结果分析报告{% endblock %}
 
 {% block content %}
+{% set enabled_sections = report.meta.generation_options.sections if report.meta and report.meta.generation_options and report.meta.generation_options.sections else [] %}
+{% set show_summary = enabled_sections|length == 0 or 'summary' in enabled_sections %}
+{% set show_assets = enabled_sections|length == 0 or 'assets' in enabled_sections %}
+{% set show_risks = enabled_sections|length == 0 or 'risks' in enabled_sections %}
 {# 报告标题 #}
 <div class="report-title">关于{{ report.preface.persons_queried[0] if report.preface.persons_queried else '相关人员'
     }}等信息查询结果分析报告</div>
 
 {# 报告开头说明 #}
+{% if show_summary %}
 <p class="report-intro">
     {{ report.preface.case_background }}
 </p>
@@ -38,10 +43,12 @@
         <li><strong style="color: #ffc107;">配偶资产</strong>: 建议调取配偶银行流水及资产信息</li>
     </ul>
 </div>
+{% endif %}
 
 
 
 {# ==================== 家庭章节循环（v4.1新结构） ==================== #}
+{% if show_assets or show_risks %}
 {% if report.family_sections %}
 {% for family in report.family_sections %}
 {% set family_num = loop.index %}
@@ -96,8 +103,10 @@
                         {% include 'company_section.html' %}
 
                         {% endfor %}
+                        {% endif %}
 
                         {# ==================== 结论章节 ==================== #}
+                        {% if show_summary %}
                         {% set conclusion_num = (report.family_sections|length if report.family_sections else
                         report.person_sections|length) + report.company_sections|length + 1 %}
                         <h1 class="section-title">{{ ['一','二','三','四','五','六','七','八','九','十'][conclusion_num-1] if
@@ -112,6 +121,7 @@
                                     nextstep_num <= 10 else nextstep_num }}、下一步工作计划</h1>
 
                                         {% include 'next_steps.html' %}
+                                        {% endif %}
 
                                         {# 报告尾部区域（可选） #}
                                         {% if report.meta.show_footer %}

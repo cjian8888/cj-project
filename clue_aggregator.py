@@ -322,7 +322,8 @@ class ClueAggregator:
         logger.info('聚合借贷分析结果...')
         
         # 双向往来
-        for relation in loan_results.get('bidirectional', []):
+        relations = loan_results.get('bidirectional_flows', loan_results.get('bidirectional', []))
+        for relation in relations:
             entity = relation.get('person')
             if entity in self.evidence_packs:
                 self.evidence_packs[entity]['evidence']['loans'].append(relation)
@@ -350,16 +351,25 @@ class ClueAggregator:
         
         for entity, pack in self.evidence_packs.items():
             evidence = pack['evidence']
+            stats = pack.get('statistics', {})
+            hub_entities = [
+                hub.get('node') if isinstance(hub, dict) else hub
+                for hub in evidence.get('hub_connections', [])
+            ]
+            community_members = [
+                member
+                for community in evidence.get('communities', [])
+                if isinstance(community, dict)
+                for member in community.get('members', [])
+            ]
             
             # 准备风险评分所需的数据
             risk_evidence = {
                 'money_loops': evidence.get('fund_cycles', []),
                 'transit_channel': self._extract_transit_channel_info(evidence),
-                'related_entities': evidence.get('hub_connections', []) + 
-                                  [member for community in evidence.get('communities', []) 
-                                   for member in community.get('members', [])],
-                'ml_anomalies': evidence.get('sudden_changes', []),
-                'total_records': pack.get('statistics', {}).get('total_records', 0)
+                'related_entities': [x for x in (hub_entities + community_members) if x],
+                'ml_anomalies': evidence.get('high_risk_transactions', []),
+                'total_records': stats.get('total_records', stats.get('transaction_count', 0))
             }
             
             # 计算理财交易占比（从cleaned_data中读取）
@@ -387,14 +397,22 @@ class ClueAggregator:
     
     def _extract_transit_channel_info(self, evidence: Dict) -> Dict:
         """提取过账通道信息"""
-        if not evidence.get('pass_through'):
+        channels = evidence.get('pass_through', [])
+        if not channels:
             return {}
         
-        # 从evidence中提取进账和出账金额
-        # 需要根据实际数据结构调整
+        # 聚合所有过账通道的进出总额
+        in_amount = 0.0
+        out_amount = 0.0
+        for channel in channels:
+            if not isinstance(channel, dict):
+                continue
+            in_amount += float(channel.get('inflow', 0) or 0)
+            out_amount += float(channel.get('outflow', 0) or 0)
+
         return {
-            'in': evidence.get('pass_through_income', 0),
-            'out': evidence.get('pass_through_expense', 0)
+            'in': in_amount,
+            'out': out_amount
         }
     
     def _calculate_financial_ratio(self, entity: str) -> float:
@@ -594,9 +612,9 @@ def _write_aggregation_report_header(f) -> None:
 
 def _write_risk_overview_section(f, ranked: List[Dict]) -> None:
     """写入风险概览部分"""
-    critical = [e for e in ranked if e['risk_level'] == 'critical']
-    high = [e for e in ranked if e['risk_level'] == 'high']
-    medium = [e for e in ranked if e['risk_level'] == 'medium']
+    critical = [e for e in ranked if str(e.get('risk_level', '')).upper() == 'CRITICAL']
+    high = [e for e in ranked if str(e.get('risk_level', '')).upper() == 'HIGH']
+    medium = [e for e in ranked if str(e.get('risk_level', '')).upper() == 'MEDIUM']
     
     f.write('一、风险概览\n')
     f.write('-'*40 + '\n')
@@ -767,64 +785,3 @@ def generate_aggregation_report(aggregator: ClueAggregator, output_dir: str) -> 
     
     logger.info(f'线索聚合报告已生成: {report_path}')
     return report_path
-
-    def calculate_entity_risk_scores(self):
-        """
-        计算每个实体的综合风险分
-        
-        【P1 修复 2026-01-27】使用统一风险模型
-        解决问题:
-        - 理财交易被误判为高风险
-        - 家庭内部正常转账被误判为资金闭环
-        - 风险评分与常识不符
-        
-        改进方案:
-        1. 引入 UnifiedRiskModel 统一风险评分
-        2. 计算理财交易占比，降低风险权重
-        3. 计算家庭转账占比，降低风险权重
-        4. 区分理财相关的资金闭环
-        """
-        logger.info('计算实体综合风险分（使用统一风险模型）...')
-        
-        # 初始化统一风险模型
-        risk_model = UnifiedRiskModel()
-        
-        for entity, pack in self.evidence_packs.items():
-            evidence = pack['evidence']
-            
-            # 准备风险评分所需的数据
-            risk_evidence = {
-                'money_loops': evidence.get('fund_cycles', []),
-                'transit_channel': self._extract_transit_channel_info(evidence),
-                'related_entities': evidence.get('hub_connections', []) + 
-                                      [member for community in evidence.get('communities', []) 
-                                       for member in community.get('members', [])],
-                'ml_anomalies': evidence.get('sudden_changes', []),
-                'total_records': pack.get('statistics', {}).get('total_records', 0)
-            }
-            
-            # 计算理财交易占比（从cleaned_data中读取）
-            financial_ratio = self._calculate_financial_ratio(entity)
-            
-            # 计算家庭转账占比
-            family_ratio = self._calculate_family_transfer_ratio(entity)
-            
-            # 使用统一风险模型计算评分
-            risk_score = risk_model.calculate_score(
-                entity_name=entity,
-                evidence=risk_evidence,
-                financial_ratio=financial_ratio,
-                family_ratio=family_ratio
-            )
-            
-            # 更新风险评分到evidence_pack
-            pack['risk_score'] = risk_score.total_score
-            pack['risk_level'] = risk_score.risk_level
-            pack['summary'] = risk_score.reason
-            pack['risk_confidence'] = risk_score.confidence
-            pack['risk_details'] = risk_score.details
-            
-            logger.info(f"{entity} 统一风险评分: {risk_score.total_score:.1f} ({risk_score.risk_level})")
-        
-        # 【P1 修复 2026-01-27】添加return语句
-        return None

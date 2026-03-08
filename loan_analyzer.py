@@ -546,13 +546,25 @@ def _detect_loan_pairs(
                 if incomes.empty or expenses.empty:
                     continue
                 
-                # 尝试配对
+                # 按时间排序并执行一对一配对，避免同一笔还款重复匹配
+                incomes = incomes.sort_values('date')
+                expenses = expenses.sort_values('date')
+                used_expense_indices = set()
+
                 for _, income_row in incomes.iterrows():
                     income_date = income_row['date']
                     income_amt = income_row['income']
-                    
-                    # 在时间窗口内查找可能的还款
-                    for _, expense_row in expenses.iterrows():
+
+                    best_match_idx = None
+                    best_match_row = None
+                    best_days_diff = None
+                    best_score = None
+
+                    # 在时间窗口内查找最优还款候选
+                    for expense_idx, expense_row in expenses.iterrows():
+                        if expense_idx in used_expense_indices:
+                            continue
+
                         expense_date = expense_row['date']
                         expense_amt = expense_row['expense']
                         
@@ -570,10 +582,20 @@ def _detect_loan_pairs(
                         
                         # 只接受还款≥借入的配对（真正的借贷）
                         if ratio_min <= ratio <= ratio_max:
-                            loan_pairs.append(_create_loan_pair_entry(
-                                person, cp_str, income_row, expense_row,
-                                days_diff, income_amt, expense_amt
-                            ))
+                            # 优先金额最接近（ratio≈1），其次时间更近
+                            match_score = (abs(ratio - 1.0), days_diff)
+                            if best_score is None or match_score < best_score:
+                                best_score = match_score
+                                best_match_idx = expense_idx
+                                best_match_row = expense_row
+                                best_days_diff = days_diff
+
+                    if best_match_row is not None:
+                        used_expense_indices.add(best_match_idx)
+                        loan_pairs.append(_create_loan_pair_entry(
+                            person, cp_str, income_row, best_match_row,
+                            best_days_diff, income_amt, best_match_row['expense']
+                        ))
     
     # 按借贷金额排序
     loan_pairs.sort(key=lambda x: -x['loan_amount'])

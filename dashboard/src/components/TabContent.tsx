@@ -22,7 +22,7 @@ import {
     ExternalLink,
     Info
 } from 'lucide-react';
-import { api } from '../services/api';
+import { api, API_BASE_URL } from '../services/api';
 import type { Report } from '../services/api';
 import {
     BarChart,
@@ -159,7 +159,7 @@ function OverviewTab() {
     useEffect(() => {
         const loadNavigationData = async () => {
             try {
-                const response = await fetch('http://localhost:8000/api/audit-navigation');
+                const response = await fetch(`${API_BASE_URL}/api/audit-navigation`);
                 if (response.ok) {
                     const navData = await response.json();
                     setAuditNavigation(navData);
@@ -1200,7 +1200,7 @@ function OverviewTab() {
                                     {/* 打开文件夹按钮 */}
                                     <button
                                         onClick={() => {
-                                            fetch('http://localhost:8000/api/open-folder', {
+                                            fetch(`${API_BASE_URL}/api/open-folder`, {
                                                 method: 'POST',
                                                 headers: { 'Content-Type': 'application/json' },
                                                 body: JSON.stringify({ relativePath: auditNavigation.paths.cleanedDataPerson })
@@ -1237,7 +1237,7 @@ function OverviewTab() {
                                     {/* 打开文件夹按钮 */}
                                     <button
                                         onClick={() => {
-                                            fetch('http://localhost:8000/api/open-folder', {
+                                            fetch(`${API_BASE_URL}/api/open-folder`, {
                                                 method: 'POST',
                                                 headers: { 'Content-Type': 'application/json' },
                                                 body: JSON.stringify({ relativePath: auditNavigation.paths.cleanedDataCompany })
@@ -1280,7 +1280,7 @@ function OverviewTab() {
                                     {/* 打开文件夹按钮 */}
                                     <button
                                         onClick={() => {
-                                            fetch('http://localhost:8000/api/open-folder', {
+                                            fetch(`${API_BASE_URL}/api/open-folder`, {
                                                 method: 'POST',
                                                 headers: { 'Content-Type': 'application/json' },
                                                 body: JSON.stringify({ relativePath: auditNavigation.paths.analysisResults })

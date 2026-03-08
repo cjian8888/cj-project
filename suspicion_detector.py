@@ -42,6 +42,12 @@ def detect_cash_time_collision(
     # 使用 .copy() 避免修改原始 DataFrame（关键修复：防止数据污染）
     wd = withdrawals.copy()
     dp = deposits.copy()
+    wd["date"] = pd.to_datetime(wd["date"], errors="coerce")
+    dp["date"] = pd.to_datetime(dp["date"], errors="coerce")
+    wd = wd.dropna(subset=["date"])
+    dp = dp.dropna(subset=["date"])
+    if wd.empty or dp.empty:
+        return collisions
     wd["join_key"] = 1
     dp["join_key"] = 1
 
@@ -78,16 +84,13 @@ def detect_cash_time_collision(
     # 6. 格式化结果 (适配 report_generator.py 字段要求)
     if not valid_collisions.empty:
         for _, row in valid_collisions.iterrows():
-            # 简单的风险等级判定
-            if row["hours_diff"] < 4 and row["amount_ratio"] < 0.01:
-                risk = "high"
-            elif row["hours_diff"] < 24:
-                risk = "medium"
-            else:
-                risk = "low"
+            # 单实体现金循环默认仅作线索，不计入高/中风险主清单
+            risk = "low"
 
             collisions.append(
                 {
+                    "type": "single_entity",
+                    "pattern_category": "self_cycle",
                     "withdrawal_entity": entity_name,  # 取现方
                     "deposit_entity": entity_name,  # 存现方
                     "withdrawal_date": row["date_wd"],
@@ -102,7 +105,11 @@ def detect_cash_time_collision(
                     "amount_diff": round(row["amount_diff_abs"], 2),  # 字段名适配
                     "amount_diff_ratio": round(row["amount_ratio"], 2),
                     "risk_level": risk,
-                    "risk_reason": f"取现{row['amount_wd']}元与存现{row['amount_dp']}元时间间隔{row['hours_diff']:.1f}小时内，金额接近",
+                    "risk_reason": (
+                        f"[单实体线索] {entity_name}取现{row['amount_wd']}元后"
+                        f"{row['hours_diff']:.1f}小时存现{row['amount_dp']}元，金额接近；"
+                        "默认仅作资金循环线索。"
+                    ),
                 }
             )
 
@@ -373,14 +380,13 @@ def run_all_detections(
             withdrawals["amount"] = withdrawals["amount"].abs()
             deposits["amount"] = deposits["amount"]
 
-        # 执行单实体内检测
-        collisions = detect_cash_time_collision(withdrawals, deposits, entity_name)
-
-        if collisions:
+        # 执行单实体内检测（线索化，不计入 cash_collisions 风险主清单）
+        self_cycles = detect_cash_time_collision(withdrawals, deposits, entity_name)
+        if self_cycles:
             logger.info(
-                f"    [{entity_name}] 发现 {len(collisions)} 处现金时空伴随(单实体)"
+                f"    [{entity_name}] 发现 {len(self_cycles)} 处现金循环线索(单实体)"
             )
-            results["cash_collisions"].extend(collisions)
+            results["cash_timing_patterns"].extend(self_cycles)
 
         # 收集取现和存现记录用于跨实体检测
         for _, row in withdrawals.iterrows():
@@ -459,7 +465,7 @@ def run_all_detections(
                     "交易摘要" if "交易摘要" in df_person.columns else "description"
                 )
                 transfers_out = df_person[
-                    df_person[counterparty_col].str.contains(
+                    df_person[counterparty_col].astype(str).str.contains(
                         re.escape(company), na=False, regex=True
                     )
                 ]
@@ -521,14 +527,25 @@ def run_all_detections(
 
                 # 检测：公司 -> 人员 (收入)
                 df_company = cleaned_data[company]
+                company_counterparty_col = (
+                    "交易对手" if "交易对手" in df_company.columns else "counterparty"
+                )
+                company_expense_col = (
+                    "支出(元)" if "支出(元)" in df_company.columns else "expense"
+                )
+                company_description_col = (
+                    "交易摘要" if "交易摘要" in df_company.columns else "description"
+                )
                 transfers_in = df_company[
-                    df_company[counterparty_col].str.contains(
+                    df_company[company_counterparty_col].astype(str).str.contains(
                         re.escape(person), na=False, regex=True
                     )
                 ]
                 if not transfers_in.empty:
                     for _, row in transfers_in.iterrows():
-                        amount = row.get(income_col, 0)
+                        amount = row.get(company_expense_col, 0)
+                        if not amount or amount <= 0:
+                            continue
                         # 简单的风险定级
                         if amount > config.INCOME_HIGH_RISK_MIN:
                             risk = "high"
@@ -558,7 +575,7 @@ def run_all_detections(
                                 "date": row["date"],
                                 "amount": amount,
                                 "direction": "receive",  # 收款
-                                "description": row.get(description_col, ""),
+                                "description": row.get(company_description_col, ""),
                                 "bank": bank,
                                 "source_file": source_file,
                                 "risk_level": risk,

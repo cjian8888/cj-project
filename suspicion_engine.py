@@ -71,11 +71,13 @@ class SuspicionEngine:
                         try:
                             detector_instance = attr()
                             self.detectors[detector_instance.name] = detector_instance
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(
+                                f"注册检测器失败 {module_path}.{attr_name}: {type(e).__name__}: {e}"
+                            )
                             
-            except ImportError:
-                pass
+            except ImportError as e:
+                logger.warning(f"导入检测器模块失败 {module_name}: {e}")
     
     def list_detectors(self) -> List[Dict[str, Any]]:
         """列出所有已注册的检测器信息。"""

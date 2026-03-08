@@ -103,6 +103,42 @@ HIGH_RISK_COUNTERPARTY_PATTERNS = [
 ]
 
 
+def _get_weighted_score_ceiling() -> float:
+    """
+    计算加权分理论上限，用于把当前分值归一化到 0-100。
+    """
+    amount_max = max(RISK_SCORE_WEIGHTS["amount"]["thresholds"].values())
+    counterparty_max = max(
+        RISK_SCORE_WEIGHTS["counterparty"]["unknown"],
+        RISK_SCORE_WEIGHTS["counterparty"]["individual"],
+        RISK_SCORE_WEIGHTS["counterparty"]["known_risky"],
+        RISK_SCORE_WEIGHTS["counterparty"]["normal"],
+    )
+    time_max = (
+        RISK_SCORE_WEIGHTS["time"]["holiday"]
+        + RISK_SCORE_WEIGHTS["time"]["night"]
+        + RISK_SCORE_WEIGHTS["time"]["weekend"]
+    )
+    description_max = max(
+        RISK_SCORE_WEIGHTS["description"]["empty"],
+        RISK_SCORE_WEIGHTS["description"]["cash"],
+        RISK_SCORE_WEIGHTS["description"]["suspicious_keywords"],
+    )
+    correlation_max = RISK_SCORE_WEIGHTS["correlation"]["related_party"]
+
+    weighted_ceiling = (
+        amount_max * RISK_SCORE_WEIGHTS["amount"]["weight"]
+        + counterparty_max * RISK_SCORE_WEIGHTS["counterparty"]["weight"]
+        + time_max * RISK_SCORE_WEIGHTS["time"]["weight"]
+        + description_max * RISK_SCORE_WEIGHTS["description"]["weight"]
+        + correlation_max * RISK_SCORE_WEIGHTS["correlation"]["weight"]
+    )
+    return weighted_ceiling if weighted_ceiling > 0 else 1.0
+
+
+WEIGHTED_SCORE_CEILING = _get_weighted_score_ceiling()
+
+
 # ============================================================
 # 辅助函数
 # ============================================================
@@ -214,17 +250,20 @@ def score_transaction(
     scores['correlation'] = correlation_score
     total_score += correlation_score * RISK_SCORE_WEIGHTS['correlation']['weight']
     
+    # 归一化到 0-100，确保与分级阈值一致
+    normalized_score = min(100.0, (total_score / WEIGHTED_SCORE_CEILING) * 100.0)
+
     # 计算风险等级
     risk_level = 'low'
-    if total_score >= 70:
+    if normalized_score >= 70:
         risk_level = 'critical'
-    elif total_score >= 50:
+    elif normalized_score >= 50:
         risk_level = 'high'
-    elif total_score >= 30:
+    elif normalized_score >= 30:
         risk_level = 'medium'
     
     return {
-        'total_score': round(total_score, 1),
+        'total_score': round(normalized_score, 1),
         'risk_level': risk_level,
         'breakdown': scores,
         'amount': amount,

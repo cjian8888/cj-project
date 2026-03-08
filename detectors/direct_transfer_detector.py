@@ -62,7 +62,9 @@ class DirectTransferDetector(BaseDetector):
                 # 检测：人员 -> 公司 (支出)
                 df_person = cleaned_data[person]
                 transfers_out = df_person[
-                    df_person["counterparty"].str.contains(company, na=False)
+                    df_person["counterparty"].astype(str).str.contains(
+                        company, na=False, regex=False
+                    )
                 ]
 
                 for _, row in transfers_out.iterrows():
@@ -123,7 +125,9 @@ class DirectTransferDetector(BaseDetector):
                 # 检测：公司 -> 人员 (收入)
                 df_company = cleaned_data[company]
                 transfers_in = df_company[
-                    df_company["counterparty"].str.contains(person, na=False)
+                    df_company["counterparty"].astype(str).str.contains(
+                        person, na=False, regex=False
+                    )
                 ]
 
                 for _, row in transfers_in.iterrows():

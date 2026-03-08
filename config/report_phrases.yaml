@@ -215,8 +215,90 @@ behavioral_analysis:
       - level: "high_risk"
         phrases:
           summary: "⚠️ 频繁借贷，资金往来复杂"
-          detail: "借贷笔数达{loan_count}笔，涉及金额{max(loan_inflow, loan_outflow)/10000:.2f}万元，资金往来异常频繁"
+          detail: "借贷记录达{effective_loan_count}条，涉及金额{max(loan_inflow, loan_outflow)/10000:.2f}万元，资金往来复杂，风险较高"
           suggestion: "【重点关注】建议：1)绘制借贷关系图谱；2)排查是否涉及职业放贷；3)核查资金来源合法性"
+
+# ============================================================
+# 场景三补充：消费与资金流向话术
+# ============================================================
+consumption_analysis:
+  luxury_spending:
+    description: "奢侈消费特征分析"
+    conditions:
+      - level: "normal"
+        phrases:
+          summary: "消费行为整体正常"
+          detail: "{name}消费行为符合日常生活规律，未发现明显异常消费特征"
+          suggestion: "无需特别处理"
+      - level: "warning"
+        phrases:
+          summary: "发现疑似高档消费"
+          detail: "{name}存在{luxury_count}笔疑似高档消费，建议结合其收入水平综合判断"
+          suggestion: "建议核查消费场景及资金来源"
+      - level: "high_risk"
+        phrases:
+          summary: "⚠️ 高档消费频繁"
+          detail: "{name}存在{luxury_count}笔疑似高档消费，频次较高，需重点核查是否与其合法收入匹配"
+          suggestion: "【重点关注】建议调取交易凭证并核查消费真实性"
+
+fund_flow_analysis:
+  unknown_income:
+    description: "资金流向与不明收入分析"
+    conditions:
+      - level: "normal"
+        phrases:
+          summary: "资金流向总体可解释"
+          detail: "{name}资金流入主要来源于工资收入（占比{salary_ratio:.1f}%），资金流向符合一般生活消费及理财投资规律"
+          suggestion: "持续关注异常波动"
+      - level: "warning"
+        phrases:
+          summary: "存在需关注资金流向"
+          detail: "{name}存在资金流向疑点：来源不明收入{unknown_income_wan}万元，并与可疑对手方存在{suspicious_count}笔资金往来"
+          suggestion: "建议核实不明收入来源及交易对手背景"
+      - level: "high_risk"
+        phrases:
+          summary: "⚠️ 资金流向风险较高"
+          detail: "{name}存在较大规模来源不明收入{unknown_income_wan}万元，且与可疑对手方往来{suspicious_count}笔，资金来源合法性存疑"
+          suggestion: "【重点关注】建议立即开展资金来源穿透核查"
+
+overall_assessment:
+  professional_narrative:
+    description: "专业审计叙述"
+    conditions:
+      - level: "normal"
+        phrases:
+          summary: "整体风险较低"
+          detail: "经核查，{name}资金往来符合正常收支规律，工资性收入占比{salary_ratio:.1f}%，银行流水未发现异常交易特征"
+          suggestion: "保持常规监督"
+      - level: "warning"
+        phrases:
+          summary: "存在需关注事项"
+          detail: "经核查，{name}存在以下需关注事项：{concern_text}。上述情况需结合其他证据进一步核实，建议调取相关材料深入审查"
+          suggestion: "开展补充核查"
+      - level: "high_risk"
+        phrases:
+          summary: "⚠️ 存在重大疑点"
+          detail: "经核查，{name}存在以下重大疑点：{risk_text}。上述异常情况与廉洁规定存在潜在冲突，建议立即采取措施进一步核查"
+          suggestion: "尽快启动深度核查"
+
+  conclusion_narrative:
+    description: "综合结论叙述"
+    conditions:
+      - level: "normal"
+        phrases:
+          summary: "综合风险低"
+          detail: "{name}资金特征综合评分{total_score}分，风险等级为{risk_label}。各维度评分：{dim_text}"
+          suggestion: "建议保持常规监测"
+      - level: "warning"
+        phrases:
+          summary: "综合风险中"
+          detail: "{name}资金特征综合评分{total_score}分，风险等级为{risk_label}。各维度评分：{dim_text}"
+          suggestion: "建议针对中风险维度开展专项核查"
+      - level: "high_risk"
+        phrases:
+          summary: "综合风险高"
+          detail: "{name}资金特征综合评分{total_score}分，风险等级为{risk_label}。各维度评分：{dim_text}"
+          suggestion: "建议立即启动重点核查程序"
 
 # ============================================================
 # 场景四：时序异常分析话术

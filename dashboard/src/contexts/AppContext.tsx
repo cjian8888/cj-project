@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, useEffect } from 'react';
+import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 import type {
     AppState,
@@ -143,6 +143,7 @@ export function AppProvider({ children }: AppProviderProps) {
     const [data, setData] = useState<DataState>(defaultData);
     const [logs, setLogs] = useState<LogEntry[]>(initialLogs);
     const [ui, setUI] = useState<UIState>(defaultUI);
+    const completeHandledRef = useRef(false);
 
     // ==================== Config Actions ====================
 
@@ -235,6 +236,7 @@ export function AppProvider({ children }: AppProviderProps) {
                 status: 'running',
                 isLoading: false,
             });
+            completeHandledRef.current = false;
 
             addLog({ time: timeStr, level: 'INFO', msg: '▶ 分析引擎已启动' });
 
@@ -262,13 +264,18 @@ export function AppProvider({ children }: AppProviderProps) {
                 addLog(logEntry);
             } else if (message.type === 'status') {
                 const status = message.data as AnalysisStatus;
+                const phaseText = (status as any).currentPhase ?? (status as any).phase ?? '';
                 setAnalysis(prev => ({
                     ...prev,
                     progress: status.progress,
-                    currentPhase: status.currentPhase,
+                    currentPhase: phaseText,
                     status: status.status as AnalysisState['status'],
                 }));
             } else if (message.type === 'complete') {
+                if (completeHandledRef.current) {
+                    return;
+                }
+                completeHandledRef.current = true;
                 // 分析完成，先更新状态
                 setAnalysis(prev => ({
                     ...prev,
@@ -475,6 +482,7 @@ export function AppProvider({ children }: AppProviderProps) {
 
                 // 1. 获取后端状态
                 const status = await api.getStatus();
+                const phaseText = (status as any).currentPhase ?? (status as any).phase ?? '';
 
                 // 2. 如果后端已有完成的分析结果，加载它们
                 if (status.status === 'completed') {
@@ -558,7 +566,7 @@ export function AppProvider({ children }: AppProviderProps) {
                     setAnalysis({
                         isRunning: true,
                         progress: status.progress,
-                        currentPhase: status.currentPhase,
+                        currentPhase: phaseText,
                         lastRunTime: status.startTime ? new Date(status.startTime) : null,
                         status: 'running',
                         isLoading: false,
@@ -570,7 +578,7 @@ export function AppProvider({ children }: AppProviderProps) {
                     setAnalysis(prev => ({
                         ...prev,
                         status: status.status as AnalysisState['status'],
-                        currentPhase: status.currentPhase || '等待开始分析',
+                        currentPhase: phaseText || '等待开始分析',
                         isLoading: false,
                     }));
                     // 无论状态如何，都尝试连接 WebSocket 以显示正确的连接状态
