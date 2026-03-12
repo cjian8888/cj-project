@@ -2,12 +2,16 @@
 # -*- coding: utf-8 -*-
 """正式报告关键口径单元测试。"""
 
+import json
 import os
 import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from investigation_report_builder import InvestigationReportBuilder
+from investigation_report_builder import (
+    InvestigationReportBuilder,
+    load_investigation_report_builder,
+)
 from report_config.primary_targets_schema import (
     AnalysisUnit,
     AnalysisUnitMember,
@@ -230,6 +234,37 @@ def test_build_report_v4_prefers_injected_primary_config_over_disk_fallback():
     assert report["meta"]["title_subject"] == "张三"
     assert report["family_sections"][0]["family_name"] == "张三"
     assert report["person_sections"][0]["name"] == "张三"
+
+
+def test_load_builder_keeps_valid_profiles_when_first_entity_has_no_income(tmp_path):
+    cache_dir = tmp_path / "analysis_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    (cache_dir / "profiles.json").write_text(
+        json.dumps(
+            {
+                "待补成员": {"summary": {}},
+                "张三": {"totalIncome": 10000, "summary": {"total_income": 10000}},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    for filename, payload in {
+        "derived_data.json": {},
+        "suspicions.json": {},
+        "graph_data.json": {},
+        "metadata.json": {"persons": ["张三"], "companies": []},
+    }.items():
+        (cache_dir / filename).write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+        )
+
+    builder = load_investigation_report_builder(str(tmp_path))
+
+    assert builder is not None
+    assert "张三" in builder.profiles
+    assert builder.profiles["张三"]["totalIncome"] == 10000
 
 
 def test_counterparty_analysis_prefers_reason_breakdown_amount_over_truncated_details():
@@ -663,3 +698,37 @@ def test_property_analysis_marks_missing_value_without_wan_placeholder():
     assert result["value_available"] is False
     assert result["value_text"] == "成交价信息缺失"
     assert "房产总交易价格信息缺失" in result["narrative"]
+
+
+def test_build_family_summary_v5_uses_yuan_inputs_and_outputs_wan():
+    builder = InvestigationReportBuilder(
+        {
+            "profiles": {},
+            "derived_data": {},
+            "suspicions": {},
+            "graph_data": {},
+            "metadata": {},
+        },
+        output_dir="output",
+    )
+
+    result = builder._build_family_summary_v5(
+        [
+            {
+                "member_sections": [{"name": "张三"}],
+                "family_overview": {
+                    "assets_overview": {
+                        "property_value": 500_000,
+                        "bank_balance": 100_000,
+                        "wealth_holding": 50_000,
+                    }
+                },
+            }
+        ]
+    )
+
+    assert result["total_assets_summary"]["property_value_wan"] == 50.0
+    assert result["total_assets_summary"]["bank_balance_wan"] == 10.0
+    assert result["total_assets_summary"]["wealth_holding_wan"] == 5.0
+    assert result["total_assets_summary"]["total_assets_wan"] == 65.0
+    assert "总资产约65.0万元" in result["narrative"]

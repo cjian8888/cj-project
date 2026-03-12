@@ -26,7 +26,7 @@ import os
 import json
 import pandas as pd
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import config
 import utils
 
@@ -74,7 +74,12 @@ class SpecializedReportGenerator:
     )
 
     def __init__(
-        self, analysis_results: Dict, profiles: Dict, suspicions: Dict, output_dir: str
+        self,
+        analysis_results: Dict,
+        profiles: Dict,
+        suspicions: Dict,
+        output_dir: str,
+        input_dir: Optional[str] = None,
     ):
         """
         初始化
@@ -84,11 +89,13 @@ class SpecializedReportGenerator:
             profiles: 画像数据
             suspicions: 疑点检测结果
             output_dir: 输出目录
+            input_dir: 输入目录（用于定位正式 primary_targets.json）
         """
         self.analysis_results = analysis_results
         self.profiles = profiles
         self.suspicions = suspicions
         self.output_dir = output_dir
+        self.input_dir = input_dir or os.path.join(os.getcwd(), "data")
         self._person_flow_df_cache: Dict[str, pd.DataFrame] = {}
         self._day_transaction_cache: Dict[tuple, List[Dict]] = {}
 
@@ -207,7 +214,7 @@ class SpecializedReportGenerator:
         return os.path.join(os.path.dirname(self.output_dir), "analysis_cache")
 
     def _load_primary_analysis_units(self) -> List[Dict[str, Any]]:
-        """优先加载归一后的归集配置快照，回退到原始 family_units_v2。"""
+        """优先加载用户正式配置，回退到自动快照和 family_units_v2。"""
         def _dedupe_units(units: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             deduped: List[Dict[str, Any]] = []
             seen_keys = set()
@@ -239,8 +246,8 @@ class SpecializedReportGenerator:
 
         cache_dir = self._get_cache_dir()
         config_candidates = [
+            os.path.join(self.input_dir, "primary_targets.json"),
             os.path.join(cache_dir, "primary_targets.auto.json"),
-            os.path.join(os.getcwd(), "data", "primary_targets.json"),
         ]
         for path in config_candidates:
             if not os.path.exists(path):

@@ -11,7 +11,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from specialized_reports import SpecializedReportGenerator
 
 
-def _make_generator(tmp_path, analysis_results=None, profiles=None, suspicions=None):
+def _make_generator(
+    tmp_path, analysis_results=None, profiles=None, suspicions=None, input_dir=None
+):
     output_dir = tmp_path / "output" / "analysis_results"
     cache_dir = tmp_path / "output" / "analysis_cache"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -21,6 +23,7 @@ def _make_generator(tmp_path, analysis_results=None, profiles=None, suspicions=N
         profiles=profiles or {},
         suspicions=suspicions or {},
         output_dir=str(output_dir),
+        input_dir=str(input_dir) if input_dir else None,
     )
 
 
@@ -75,6 +78,37 @@ def test_asset_report_prefers_auto_config_and_does_not_fabricate_property_value(
     assert "成交价: 未获取" in report
     assert "估值:" not in report
     assert "平方米㎡" not in report
+
+
+def test_primary_analysis_units_prefers_user_config_over_auto_snapshot(tmp_path):
+    data_dir = tmp_path / "custom_data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    generator = _make_generator(tmp_path, input_dir=data_dir)
+    cache_dir = tmp_path / "output" / "analysis_cache"
+
+    (cache_dir / "primary_targets.auto.json").write_text(
+        json.dumps(
+            {"analysis_units": [{"anchor": "自动户主", "members": ["自动户主"]}]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (data_dir / "primary_targets.json").write_text(
+        json.dumps(
+            {
+                "analysis_units": [
+                    {"anchor": "用户户主", "members": ["用户户主", "配偶"]}
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    units = generator._load_primary_analysis_units()
+
+    assert units[0]["anchor"] == "用户户主"
+    assert units[0]["members"] == ["用户户主", "配偶"]
 
 
 def test_asset_report_dedupes_analysis_units_in_auto_config(tmp_path):

@@ -6340,16 +6340,16 @@ class InvestigationReportBuilder:
             "total_families": total_families,
             "total_members": total_members,
             "total_assets_summary": {
-                "property_value_wan": round(total_property_value, 2),
+                "property_value_wan": round(total_property_value / 10000, 2),
                 "bank_balance_wan": round(total_bank_balance / 10000, 2),
                 "wealth_holding_wan": round(total_wealth / 10000, 2),
                 "total_assets_wan": round(
-                    (total_property_value * 10000 + total_bank_balance + total_wealth)
+                    (total_property_value + total_bank_balance + total_wealth)
                     / 10000,
                     2,
                 ),
             },
-            "narrative": f"本次核查共涉及{total_families}个家庭，{total_members}名人员，总资产约{(total_property_value * 10000 + total_bank_balance + total_wealth) / 10000:.1f}万元。",
+            "narrative": f"本次核查共涉及{total_families}个家庭，{total_members}名人员，总资产约{(total_property_value + total_bank_balance + total_wealth) / 10000:.1f}万元。",
         }
 
     def _build_families_from_config_or_cache(
@@ -12928,25 +12928,29 @@ def load_investigation_report_builder(
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
                     profiles = json.load(f)
-                # 验证数据是否有效（检查第一个人的 totalIncome 或 summary.total_income 是否存在）
-                first_person = list(profiles.keys())[0] if profiles else None
-                if first_person:
-                    has_total_income = (
-                        profiles[first_person].get("totalIncome")  # 扁平化字段
-                        or profiles[first_person]
-                        .get("summary", {})
-                        .get("total_income")  # 嵌套字段
+                def _has_expected_income_fields(profile: Any) -> bool:
+                    if not isinstance(profile, dict):
+                        return False
+                    if "totalIncome" in profile:
+                        return True
+                    summary = profile.get("summary", {})
+                    return isinstance(summary, dict) and "total_income" in summary
+
+                valid_profile_count = sum(
+                    1
+                    for profile in profiles.values()
+                    if _has_expected_income_fields(profile)
+                )
+                if profiles and valid_profile_count > 0:
+                    analysis_cache[key] = profiles
+                    logger.info(
+                        f"[初查报告] 已加载画像: profiles.json ({len(profiles)} 个实体, {valid_profile_count} 个有效画像)"
                     )
-                    if has_total_income:
-                        analysis_cache[key] = profiles
-                        logger.info(
-                            f"[初查报告] 已加载画像: profiles.json ({len(profiles)} 个实体)"
-                        )
-                        continue
-                    else:
-                        logger.warning(
-                            f"[初查报告] profiles.json 数据无效：缺少收入数据"
-                        )
+                    continue
+                elif profiles:
+                    logger.warning(
+                        f"[初查报告] profiles.json 数据无效：{len(profiles)} 个实体均缺少收入字段"
+                    )
                 else:
                     logger.warning(f"[初查报告] profiles.json 为空")
             except Exception as e:

@@ -2672,6 +2672,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                     profiles=builder.profiles,
                     suspicions=builder.suspicions,
                     output_dir=output_dirs["analysis_results"],
+                    input_dir=_get_active_input_dir(),
                 )
                 specialized_files = specialized_gen.generate_all_reports()
                 if specialized_files:
