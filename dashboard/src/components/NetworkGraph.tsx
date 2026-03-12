@@ -101,6 +101,10 @@ interface GraphData {
 }
 
 function NetworkGraph({ onLog }: NetworkGraphProps) {
+  const htmlReportName = '资金流向可视化.html';
+  const excelReportName = '资金核查底稿.xlsx';
+  const htmlReportUrl = `${API_BASE_URL}/api/reports/preview/${encodeURIComponent(htmlReportName)}`;
+  const excelReportUrl = `${API_BASE_URL}/api/reports/download/${encodeURIComponent(excelReportName)}`;
   const networkRef = useRef<HTMLDivElement>(null);
   const networkInstance = useRef<Network | null>(null);
   const [graphData, setGraphData] = useState<GraphData | null>(null);
@@ -142,15 +146,15 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
 
   useEffect(() => {
     // Check if report exists (only run once on mount)
-    fetch(`${API_BASE_URL}/api/reports/资金流向可视化.html`, { method: 'HEAD' })
+    fetch(htmlReportUrl, { method: 'HEAD' })
       .then(res => {
         if (res.ok) {
-          setReportUrl(`${API_BASE_URL}/api/reports/资金流向可视化.html`);
+          setReportUrl(htmlReportUrl);
           // Always keep graph view as default, don't auto-switch to report
         }
       })
       .catch(() => { });
-  }, []); // Empty deps - only run once
+  }, [htmlReportUrl]); // Empty deps except derived URL
 
   // 获取图谱数据
   const fetchGraphData = async () => {
@@ -617,7 +621,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                 关闭
               </button>
               <a
-                href={`${API_BASE_URL}/api/reports/资金核查底稿.xlsx`}
+                href={excelReportUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center gap-2 px-4 py-2 bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-400 text-sm rounded-lg transition-colors"

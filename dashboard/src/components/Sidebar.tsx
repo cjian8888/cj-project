@@ -75,13 +75,11 @@ export function Sidebar() {
     };
 
     const modulesList = [
-        { key: 'profileAnalysis', label: '资金画像分析', icon: BarChart3 },
-        { key: 'suspicionDetection', label: '疑点碰撞检测', icon: AlertTriangle },
-        { key: 'assetAnalysis', label: '资产提取分析', icon: Wallet },
+        { key: 'loanAnalysis', label: '借贷行为分析', icon: TrendingUp },
+        { key: 'incomeAnalysis', label: '异常收入检测', icon: BarChart3 },
         { key: 'fundPenetration', label: '资金穿透分析', icon: GitBranch },
         { key: 'relatedParty', label: '关联方分析', icon: Users },
-        { key: 'loanAnalysis', label: '借贷行为分析', icon: TrendingUp },
-        { key: 'incomeAnalysis', label: '异常收入检测', icon: Zap },
+        { key: 'multiSourceCorrelation', label: '多源数据碰撞', icon: Wallet },
         { key: 'mlAnalysis', label: 'ML风险预测', icon: Cpu },
         { key: 'timeSeriesAnalysis', label: '时间序列分析', icon: Clock },
         { key: 'clueAggregation', label: '线索聚合', icon: Layers },

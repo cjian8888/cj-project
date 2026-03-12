@@ -183,21 +183,9 @@ class CacheManager:
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2, cls=CustomJSONEncoder)
 
-        self.logger.info(f"[缓存保存] {cache_name} -> {cache_path.name} ({len(str(data))} 字符)")
-        """
-        保存缓存数据
-
-        Args:
-            cache_name: 缓存名称
-            data: 要保存的数据（可以是字典、列表等）
-        """
-        cache_path = self.get_cache_path(cache_name)
-
-        # 使用自定义编码器处理特殊类型
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2, cls=CustomJSONEncoder)
-
-        self.logger.info(f"[缓存保存] {cache_name} -> {cache_path.name}")
+        self.logger.info(
+            f"[缓存保存] {cache_name} -> {cache_path.name} ({len(str(data))} 字符)"
+        )
 
     def load_cache(self, cache_name: str) -> Optional[Dict]:
         """

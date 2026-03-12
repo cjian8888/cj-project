@@ -64,8 +64,13 @@ import related_party_analyzer
 import multi_source_correlator
 import loan_analyzer
 import income_analyzer
+import salary_analyzer
 import flow_visualizer
 import ml_analyzer
+from real_salary_income_analyzer import RealSalaryIncomeAnalyzer
+from professional_finance_analyzer import FinancialProductAnalyzer
+from income_expense_match_analyzer import IncomeExpenseMatchAnalyzer
+from personal_fund_feature_analyzer import PersonalFundFeatureAnalyzer
 
 # 导入缓存管理器
 from cache_manager import CacheManager
@@ -142,6 +147,7 @@ class AnalysisState:
         self.end_time = None
         self.results = None
         self.error = None
+        self.stop_requested = False
         self._lock = threading.Lock()
 
     def update(self, status=None, progress=None, phase=None, error=None):
@@ -166,6 +172,7 @@ class AnalysisState:
                 "startTime": self.start_time.isoformat() if self.start_time else None,
                 "endTime": self.end_time.isoformat() if self.end_time else None,
                 "error": self.error,
+                "stopRequested": self.stop_requested,
             }
 
     def reset(self, phase: str = "等待开始分析"):
@@ -178,6 +185,23 @@ class AnalysisState:
             self.end_time = None
             self.results = None
             self.error = None
+            self.stop_requested = False
+
+    def request_stop(self):
+        with self._lock:
+            self.stop_requested = True
+
+    def clear_stop_request(self):
+        with self._lock:
+            self.stop_requested = False
+
+    def is_stop_requested(self) -> bool:
+        with self._lock:
+            return self.stop_requested
+
+
+class AnalysisStoppedError(RuntimeError):
+    """用于中断分析流程的显式停止异常。"""
 
 
 analysis_state = AnalysisState()
@@ -212,12 +236,60 @@ def _get_active_output_dir() -> str:
     return str(OUTPUT_DIR)
 
 
+def _get_active_input_dir() -> str:
+    """获取当前生效的输入目录（优先使用最近一次分析配置）。"""
+    configured = _current_config.get("inputDirectory")
+    if configured:
+        return os.path.abspath(os.path.expanduser(str(configured)))
+    return str(DATA_DIR)
+
+
 def _get_active_cache_dir() -> str:
     return os.path.join(_get_active_output_dir(), "analysis_cache")
 
 
 def _get_active_results_dir() -> str:
     return os.path.join(_get_active_output_dir(), "analysis_results")
+
+
+def _is_path_within(base_dir: str, target_path: str) -> bool:
+    """判断目标路径是否位于指定目录内（解析符号链接后）。"""
+    try:
+        base_real = os.path.realpath(base_dir)
+        target_real = os.path.realpath(target_path)
+        return os.path.commonpath([base_real, target_real]) == base_real
+    except ValueError:
+        return False
+
+
+def _get_allowed_open_folder_roots() -> List[str]:
+    """限制可通过 open-folder 打开的目录范围。"""
+    output_dir = _get_active_output_dir()
+    return [
+        os.path.join(output_dir, "cleaned_data", "个人"),
+        os.path.join(output_dir, "cleaned_data", "公司"),
+        os.path.join(output_dir, "analysis_results"),
+    ]
+
+
+def _resolve_open_folder_path(requested_path: str) -> str:
+    """校验并返回允许打开的目录路径。"""
+    if not requested_path or not str(requested_path).strip():
+        raise HTTPException(status_code=400, detail="路径不能为空")
+
+    resolved_path = os.path.realpath(os.path.abspath(os.path.expanduser(str(requested_path).strip())))
+
+    if not os.path.exists(resolved_path):
+        raise HTTPException(status_code=404, detail=f"路径不存在: {requested_path}")
+
+    if os.path.isfile(resolved_path):
+        resolved_path = os.path.dirname(resolved_path)
+
+    allowed_roots = _get_allowed_open_folder_roots()
+    if not any(_is_path_within(root, resolved_path) for root in allowed_roots):
+        raise HTTPException(status_code=403, detail="仅允许打开输出目录中的审计结果文件夹")
+
+    return resolved_path
 
 
 def _has_valid_disk_cache(output_dir: Optional[str] = None) -> bool:
@@ -264,6 +336,47 @@ def _ensure_completed_state_consistent():
         f"检测到内存结果与磁盘不一致（缓存缺失），重置状态。output={output_dir}"
     )
     analysis_state.reset("缓存已清空，请重新开始分析")
+
+
+def _get_primary_targets_service() -> PrimaryTargetsService:
+    """基于当前活动输入/输出目录构造归集配置服务。"""
+    return PrimaryTargetsService(
+        data_dir=_get_active_input_dir(),
+        output_dir=_get_active_output_dir(),
+    )
+
+
+def _raise_if_analysis_stopped(phase: str = "分析已停止"):
+    """在分析流程关键节点检查是否收到停止请求。"""
+    if analysis_state.is_stop_requested():
+        raise AnalysisStoppedError(phase)
+
+
+def _load_json_dict_or_default(
+    filepath: str, logger: logging.Logger, label: str, default: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """读取 JSON 对象，缺失或损坏时回退到默认值。"""
+    fallback = dict(default or {})
+
+    if not os.path.exists(filepath):
+        logger.warning(f"[{label}] 文件不存在，使用默认空对象: {filepath}")
+        return fallback
+
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as exc:
+        logger.warning(f"[{label}] JSON损坏，使用默认空对象: {filepath}, error={exc}")
+        return fallback
+    except Exception as exc:
+        logger.warning(f"[{label}] 读取失败，使用默认空对象: {filepath}, error={exc}")
+        return fallback
+
+    if isinstance(data, dict):
+        return data
+
+    logger.warning(f"[{label}] 内容不是对象，使用默认空对象: {filepath}")
+    return fallback
 
 
 class WebSocketLogHandler(logging.Handler):
@@ -329,6 +442,7 @@ class AnalysisConfig(BaseModel):
     inputDirectory: str
     outputDirectory: Optional[str] = None
     cashThreshold: Optional[float] = 50000
+    timeWindow: Optional[float] = 48
     modules: Optional[Dict[str, bool]] = None
 
 
@@ -515,6 +629,22 @@ def serialize_profiles(profiles: Dict) -> Dict:
                 # 【2026-03-01 修复】添加公司特有分析数据，供报告生成使用
                 "company_specific": profile_dict.get("company_specific", {}),
                 "transactions": profile_dict.get("transactions", []),
+                # 企业登记信息（报告生成使用）
+                "registered_companies": profile_dict.get("registered_companies", []),
+                "company_registration": profile_dict.get("company_registration", []),
+                "tax_records": profile_dict.get("tax_records", []),
+                # 增强分析器输出
+                "salary_enhanced_analysis": profile_dict.get(
+                    "salary_enhanced_analysis", {}
+                ),
+                "real_salary_analysis": profile_dict.get("real_salary_analysis", {}),
+                "finance_risk_analysis": profile_dict.get("finance_risk_analysis", {}),
+                "income_expense_match_analysis": profile_dict.get(
+                    "income_expense_match_analysis", {}
+                ),
+                "personal_fund_feature_analysis": profile_dict.get(
+                    "personal_fund_feature_analysis", {}
+                ),
             }
 
             result[name] = frontend_profile
@@ -535,6 +665,367 @@ def serialize_profiles(profiles: Dict) -> Dict:
                 "_error": str(e),
             }
     return result
+
+
+def _pick_first_existing_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    """从候选列中返回第一个存在的列名"""
+    for col in candidates:
+        if col in df.columns:
+            return col
+    return None
+
+
+def _prepare_person_transactions_for_advanced_analyzers(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    为工资/理财/收支匹配/资金特征分析器准备统一字段。
+
+    输出字段：
+    - date
+    - income
+    - expense
+    - direction (income/expense)
+    - amount
+    - counterparty
+    - description
+    - account_number
+    - account
+    - transaction_type
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(
+            columns=[
+                "date",
+                "income",
+                "expense",
+                "direction",
+                "amount",
+                "counterparty",
+                "description",
+                "account_number",
+                "account",
+                "transaction_type",
+            ]
+        )
+
+    tx_df = df.copy()
+
+    date_col = _pick_first_existing_column(
+        tx_df, ["date", "交易时间", "交易日期", "日期", "time"]
+    )
+    income_col = _pick_first_existing_column(tx_df, ["income", "收入(元)", "收入"])
+    expense_col = _pick_first_existing_column(tx_df, ["expense", "支出(元)", "支出"])
+    direction_col = _pick_first_existing_column(tx_df, ["direction", "收支方向"])
+    amount_col = _pick_first_existing_column(tx_df, ["amount", "交易金额", "金额"])
+    counterparty_col = _pick_first_existing_column(tx_df, ["counterparty", "交易对手"])
+    description_col = _pick_first_existing_column(tx_df, ["description", "交易摘要", "摘要"])
+    account_col = _pick_first_existing_column(tx_df, ["account_number", "本方账号", "账号"])
+    category_col = _pick_first_existing_column(
+        tx_df, ["transaction_type", "交易分类", "交易类型"]
+    )
+
+    normalized = pd.DataFrame(index=tx_df.index)
+
+    if date_col:
+        normalized["date"] = pd.to_datetime(tx_df[date_col], errors="coerce")
+    else:
+        normalized["date"] = pd.NaT
+
+    if income_col:
+        normalized["income"] = pd.to_numeric(tx_df[income_col], errors="coerce").fillna(0.0)
+    else:
+        normalized["income"] = 0.0
+
+    if expense_col:
+        normalized["expense"] = pd.to_numeric(tx_df[expense_col], errors="coerce").fillna(0.0)
+    else:
+        normalized["expense"] = 0.0
+
+    if amount_col:
+        normalized["amount"] = pd.to_numeric(tx_df[amount_col], errors="coerce").fillna(0.0)
+    else:
+        normalized["amount"] = normalized["income"].where(
+            normalized["income"] > 0, normalized["expense"]
+        )
+
+    if direction_col:
+        normalized["direction"] = tx_df[direction_col].astype(str).str.lower().replace(
+            {"in": "income", "out": "expense", "收入": "income", "支出": "expense"}
+        )
+    else:
+        normalized["direction"] = "other"
+        normalized.loc[normalized["income"] > 0, "direction"] = "income"
+        normalized.loc[
+            (normalized["income"] <= 0) & (normalized["expense"] > 0), "direction"
+        ] = "expense"
+
+    if counterparty_col:
+        normalized["counterparty"] = tx_df[counterparty_col].fillna("").astype(str)
+    else:
+        normalized["counterparty"] = ""
+
+    if description_col:
+        normalized["description"] = tx_df[description_col].fillna("").astype(str)
+    else:
+        normalized["description"] = ""
+
+    if account_col:
+        normalized["account_number"] = tx_df[account_col].fillna("").astype(str)
+    else:
+        normalized["account_number"] = ""
+    normalized["account"] = normalized["account_number"]
+
+    category_series = (
+        tx_df[category_col].fillna("").astype(str)
+        if category_col
+        else pd.Series("", index=tx_df.index)
+    )
+
+    def _map_transaction_type(
+        raw_category: str, direction: str, description: str
+    ) -> str:
+        category_text = str(raw_category or "")
+        direction_text = str(direction or "").lower()
+        desc_text = str(description or "")
+
+        if "工资" in category_text:
+            return "工资"
+        if "生活消费" in category_text or category_text == "消费":
+            return "消费"
+        if "网贷" in category_text or "信贷" in category_text or "贷款" in category_text:
+            return "借款" if direction_text == "income" else "还款"
+        if "转账" in category_text:
+            return "转账" if direction_text == "income" else "转账支出"
+        if "现金" in category_text:
+            return "存现" if direction_text == "income" else "取现"
+        if "投资理财" in category_text or "理财" in desc_text or "基金" in desc_text:
+            if direction_text == "income" and any(
+                kw in desc_text for kw in ["收益", "分红", "利息"]
+            ):
+                return "投资收益"
+            return "投资理财"
+
+        if direction_text == "income":
+            if any(kw in desc_text for kw in ["借款", "贷款"]):
+                return "借款"
+            return "转账收入"
+        if direction_text == "expense":
+            if any(kw in desc_text for kw in ["还款", "还贷"]):
+                return "还款"
+            return "其他支出"
+        return "其他"
+
+    normalized["transaction_type"] = [
+        _map_transaction_type(cat, d, desc)
+        for cat, d, desc in zip(
+            category_series, normalized["direction"], normalized["description"]
+        )
+    ]
+
+    normalized = normalized.dropna(subset=["date"])
+    return normalized.reset_index(drop=True)
+
+
+def _summarize_salary_enhanced_analysis(result: Dict[str, Any]) -> Dict[str, Any]:
+    """提取工资增强分析中的可序列化关键结果，避免写入 DataFrame 对象"""
+    if not isinstance(result, dict):
+        return {}
+
+    summary = {
+        "total_income": float(result.get("total_income", 0) or 0),
+        "salary_income": float(result.get("salary_income", 0) or 0),
+        "wealth_income": float(result.get("wealth_income", 0) or 0),
+        "interest_income": float(result.get("interest_income", 0) or 0),
+        "other_income": float(result.get("other_income", 0) or 0),
+        "salary_ratio": float(result.get("salary_ratio", 0) or 0),
+        "salary_stats": result.get("salary_stats", {}) or {},
+        "salary_details": result.get("salary_details", [])[:200],
+    }
+    return serialize_for_json(summary)
+
+
+def _summarize_personal_fund_feature_analysis(result: Dict[str, Any]) -> Dict[str, Any]:
+    """提取个人资金特征分析可序列化摘要，控制缓存体积。"""
+    if not isinstance(result, dict):
+        return {}
+
+    dimensions = result.get("dimensions", {})
+    dimension_summary = {}
+    if isinstance(dimensions, dict):
+        for dim_name, dim_data in dimensions.items():
+            if not isinstance(dim_data, dict):
+                continue
+            metrics = dim_data.get("metrics", {})
+            if not isinstance(metrics, dict):
+                metrics = {}
+            dimension_summary[dim_name] = {
+                "score": float(dim_data.get("score", 0) or 0),
+                "description": str(dim_data.get("description", "") or ""),
+                "metrics": {
+                    "coverage_ratio": float(metrics.get("coverage_ratio", 0) or 0),
+                    "gap": float(metrics.get("gap", 0) or 0),
+                    "borrow_total": float(metrics.get("borrow_total", 0) or 0),
+                    "transfer_total": float(metrics.get("transfer_total", 0) or 0),
+                    "cash_total": float(metrics.get("cash_total", 0) or 0),
+                },
+            }
+
+    summary = {
+        "overall_feature": str(result.get("overall_feature", "") or ""),
+        "risk_level": str(result.get("risk_level", "") or ""),
+        "evidence_score": float(result.get("evidence_score", 0) or 0),
+        "audit_description": (
+            result.get("audit_description", [])[:5]
+            if isinstance(result.get("audit_description", []), list)
+            else []
+        ),
+        "risk_exclusions": (
+            result.get("risk_exclusions", [])[:5]
+            if isinstance(result.get("risk_exclusions", []), list)
+            else []
+        ),
+        "red_flags": (
+            result.get("red_flags", [])[:10]
+            if isinstance(result.get("red_flags", []), list)
+            else []
+        ),
+        "dimension_summary": dimension_summary,
+    }
+    return serialize_for_json(summary)
+
+
+def _extract_income_yearly_for_finance(
+    real_salary_analysis: Dict[str, Any], profile: Dict[str, Any]
+) -> Dict[int, float]:
+    """
+    提取理财分析所需的年度收入口径（万元）。
+
+    优先使用真实工资分析器输出；若缺失则回退到 profile.yearly_salary。
+    """
+    income_yearly: Dict[int, float] = {}
+
+    if isinstance(real_salary_analysis, dict):
+        yearly = real_salary_analysis.get("yearly_salary", {})
+        if isinstance(yearly, dict):
+            for year, amount in yearly.items():
+                try:
+                    income_yearly[int(year)] = float(amount or 0)
+                except (TypeError, ValueError):
+                    continue
+
+    if income_yearly:
+        return income_yearly
+
+    yearly_salary = profile.get("yearly_salary", {}) or {}
+    yearly_data = yearly_salary.get("yearly", {}) if isinstance(yearly_salary, dict) else {}
+    if isinstance(yearly_data, dict):
+        for year, year_stats in yearly_data.items():
+            if not isinstance(year_stats, dict):
+                continue
+            try:
+                year_total_yuan = float(year_stats.get("total", 0) or 0)
+                income_yearly[int(year)] = year_total_yuan / 10000.0
+            except (TypeError, ValueError):
+                continue
+
+    return income_yearly
+
+
+def _extract_real_extra_income_types(profile: Dict[str, Any]) -> List[str]:
+    """基于真实收入分类提取非工资收入类型。"""
+    income_classification = (
+        profile.get("income_classification", {})
+        if isinstance(profile.get("income_classification", {}), dict)
+        else {}
+    )
+    extra_income_types: List[str] = []
+
+    legitimate_income = float(income_classification.get("legitimate_income", 0) or 0)
+    unknown_income = float(income_classification.get("unknown_income", 0) or 0)
+    suspicious_income = float(income_classification.get("suspicious_income", 0) or 0)
+
+    if legitimate_income > 0:
+        extra_income_types.append("可核实合法收入")
+    if unknown_income > 0:
+        extra_income_types.append("来源待核实收入")
+    if suspicious_income > 0:
+        extra_income_types.append("可疑收入")
+
+    return extra_income_types
+
+
+def _build_income_expense_match_summary(
+    analyzer: IncomeExpenseMatchAnalyzer, profile: Dict[str, Any]
+) -> Dict[str, Any]:
+    """统一以真实收入/真实支出和年度工资口径生成收支匹配分析。"""
+    summary_obj = (
+        profile.get("summary", {})
+        if isinstance(profile.get("summary", {}), dict)
+        else {}
+    )
+    yearly_salary = (
+        profile.get("yearly_salary", {})
+        if isinstance(profile.get("yearly_salary", {}), dict)
+        else {}
+    )
+    salary_summary = (
+        yearly_salary.get("summary", {})
+        if isinstance(yearly_salary.get("summary", {}), dict)
+        else {}
+    )
+
+    real_income_wan = float(summary_obj.get("real_income", 0) or 0) / 10000.0
+    real_expense_wan = float(summary_obj.get("real_expense", 0) or 0) / 10000.0
+    salary_total_wan = float(salary_summary.get("total", 0) or 0) / 10000.0
+    extra_income_wan = max(0.0, real_income_wan - salary_total_wan)
+    extra_income_types = _extract_real_extra_income_types(profile)
+
+    return analyzer.analyze(
+        real_salary=salary_total_wan,
+        effective_expense=real_expense_wan,
+        extra_income=extra_income_wan,
+        extra_income_types=extra_income_types,
+        data_quality_note="",
+    )
+
+
+def _refresh_profile_real_metrics(
+    profile: Dict[str, Any],
+    df: pd.DataFrame,
+    person_name: str,
+    family_members: List[str],
+    income_expense_match_analyzer: IncomeExpenseMatchAnalyzer,
+) -> None:
+    """在家庭关系补齐后，统一刷新真实收入相关口径。"""
+    metrics = financial_profiler.recalculate_income_metrics(
+        df,
+        person_name,
+        profile.get("income_structure", {}) if isinstance(profile.get("income_structure", {}), dict) else {},
+        profile.get("wealth_management", {}) if isinstance(profile.get("wealth_management", {}), dict) else {},
+        profile.get("fund_flow", {}) if isinstance(profile.get("fund_flow", {}), dict) else {},
+        family_members=family_members,
+    )
+
+    summary = profile.setdefault("summary", {})
+    summary["real_income"] = metrics["real_income"]
+    summary["real_expense"] = metrics["real_expense"]
+    summary["offset_detail"] = metrics["offset_detail"]
+
+    salary_income = 0.0
+    income_structure = profile.get("income_structure", {})
+    if isinstance(income_structure, dict):
+        salary_income = float(income_structure.get("salary_income", 0) or 0)
+    summary["salary_ratio"] = (
+        salary_income / metrics["real_income"] if metrics["real_income"] > 0 else 0
+    )
+
+    profile["real_income"] = metrics["real_income"]
+    profile["real_expense"] = metrics["real_expense"]
+    profile["income_classification"] = metrics["income_classification"]
+    profile["income_expense_match_analysis"] = serialize_for_json(
+        _build_income_expense_match_summary(income_expense_match_analyzer, profile)
+    )
 
 
 def serialize_suspicions(suspicions: Dict) -> Dict:
@@ -821,8 +1312,13 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
     """
     logger = logging.getLogger(__name__)
 
+    analysis_state.clear_stop_request()
     analysis_state.start_time = datetime.now()
-    analysis_state.update(status="running", progress=0, phase="初始化分析引擎...")
+    analysis_state.end_time = None
+    analysis_state.results = None
+    analysis_state.update(
+        status="running", progress=0, phase="初始化分析引擎...", error=None
+    )
 
     try:
         data_dir = analysis_config.inputDirectory
@@ -855,6 +1351,8 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         _current_config["inputDirectory"] = data_dir
         _current_config["outputDirectory"] = output_dir
         config.LARGE_CASH_THRESHOLD = analysis_config.cashThreshold
+        if analysis_config.timeWindow is not None:
+            config.CASH_TIME_WINDOW_HOURS = analysis_config.timeWindow
 
         # ========================================================================
         # 清除旧缓存（点击"开始分析"时自动清除）
@@ -883,6 +1381,8 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         except Exception as e:
             logger.warning(f"  ⚠ 清除缓存失败: {e}，继续分析...")
 
+        _raise_if_analysis_stopped("分析已停止")
+
         # ========================================================================
         # Phase 1: 文件扫描 (5%)
         # ========================================================================
@@ -908,6 +1408,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         broadcast_log(
             "INFO", f"  ✓ 发现 {len(persons)} 个个人, {len(companies)} 个企业"
         )
+        _raise_if_analysis_stopped("文件扫描后收到停止请求")
 
         # ========================================================================
         # Phase 2: 数据清洗 (15%)
@@ -929,6 +1430,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
 
         # 清洗个人数据
         for i, p in enumerate(persons):
+            _raise_if_analysis_stopped(f"清洗 {p} 时收到停止请求")
             p_files = categorized_files["persons"].get(p, [])
             if p_files:
                 df, _ = data_cleaner.clean_and_merge_files(p_files, p)
@@ -950,6 +1452,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
 
         # 清洗公司数据
         for i, c in enumerate(companies):
+            _raise_if_analysis_stopped(f"清洗 {c} 时收到停止请求")
             c_files = categorized_files["companies"].get(c, [])
             if c_files:
                 df, _ = data_cleaner.clean_and_merge_files(c_files, c)
@@ -973,6 +1476,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         )
         logger.info(f"清洗完成，共 {len(cleaned_data)} 个实体数据")
         broadcast_log("INFO", f"  ✓ 数据清洗完成: {len(cleaned_data)} 个实体")
+        _raise_if_analysis_stopped("数据清洗后收到停止请求")
 
         # ========================================================================
         # Phase 3: 线索提取 (30%)
@@ -1001,6 +1505,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             "INFO",
             f"  ↻ 待分析实体总数: {len(all_persons)} 个人, {len(all_companies)} 企业",
         )
+        _raise_if_analysis_stopped("线索提取后收到停止请求")
 
         # ========================================================================
         # Phase 4: 外部数据提取 (40%) ← 🔄 关键改进: 全部提取器提前执行!
@@ -1193,6 +1698,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
 
         logger.info("🔄 [重构] 外部数据提取完成")
         broadcast_log("INFO", f"  ✓ 外部数据提取完成 (P0/P1/P2 共 18 个提取器)")
+        _raise_if_analysis_stopped("外部数据提取后收到停止请求")
 
         # ========================================================================
         # Phase 5: 融合数据画像 (50%) ← 🔄 结合外部数据生成完整画像
@@ -1205,6 +1711,20 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
 
         profiles = {}
         id_to_name_map = {}
+        real_salary_income_analyzer = RealSalaryIncomeAnalyzer()
+        income_expense_match_analyzer = IncomeExpenseMatchAnalyzer()
+        personal_fund_feature_analyzer = PersonalFundFeatureAnalyzer()
+        try:
+            finance_product_analyzer = FinancialProductAnalyzer()
+        except Exception as e:
+            logger.warning(f"理财分析器初始化失败，使用回退阈值: {e}")
+
+            class _FallbackFinanceThresholds:
+                risk_score_high = 70
+
+            finance_product_analyzer = FinancialProductAnalyzer(
+                thresholds=_FallbackFinanceThresholds()
+            )
 
         # 🔄 构建身份证号到人名的映射（递归扫描 data_dir 下所有文件名）
         import glob
@@ -1223,7 +1743,35 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
 
         logger.info(f"身份证号映射表构建完成: {len(id_to_name_map)} 个人员")
 
+        # 企业登记信息按人员聚合（company_info 以 uscc 为 key，需要转换为按姓名索引）
+        person_company_map = {}
+        company_info_map = external_data["p0"].get("company_info", {})
+        if isinstance(company_info_map, dict):
+            for company in company_info_map.values():
+                if not isinstance(company, dict):
+                    continue
+                related_to = str(company.get("related_to", "") or "").strip()
+                if not related_to:
+                    continue
+                company_name = company.get("company_name") or company.get("name") or ""
+                person_company_map.setdefault(related_to, []).append(
+                    {
+                        "name": company_name,
+                        "company_name": company_name,
+                        "uscc": company.get("uscc", ""),
+                        "legal_representative": company.get(
+                            "legal_representative", ""
+                        ),
+                        "registration_status": company.get("registration_status", ""),
+                        "company_type": company.get("company_type", ""),
+                        "industry": company.get("industry", ""),
+                        "source_file": company.get("source_file", ""),
+                        "related_to": related_to,
+                    }
+                )
+
         for entity, df in cleaned_data.items():
+            _raise_if_analysis_stopped(f"生成 {entity} 画像时收到停止请求")
             try:
                 # 1. 生成基础画像（区分个人和公司）
                 if entity in all_companies:
@@ -1263,10 +1811,14 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                     profile["aml_info"] = external_data["p0"]["aml_data"][entity]
 
                 # P0.3: 企业信息
-                if entity in external_data["p0"].get("company_info", {}):
-                    profile["company_registration"] = external_data["p0"][
-                        "company_info"
-                    ][entity]
+                related_companies = person_company_map.get(entity, [])
+                if related_companies:
+                    profile["registered_companies"] = related_companies
+                    profile["company_registration"] = related_companies
+                elif entity in external_data["p0"].get("company_info", {}):
+                    profile["company_registration"] = external_data["p0"]["company_info"][
+                        entity
+                    ]
 
                 # P0.4: 征信信息
                 if entity in external_data["p0"].get("credit_data", {}):
@@ -1343,6 +1895,121 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                         entity
                     ]
 
+                # 7. 增强分析器（工资/真实工资/理财）
+                if entity in all_persons:
+                    analyzer_tx_df = _prepare_person_transactions_for_advanced_analyzers(df)
+
+                    if not analyzer_tx_df.empty:
+                        # 7.1 工资结构增强分析
+                        try:
+                            salary_enhanced = salary_analyzer.analyze_income_structure(
+                                analyzer_tx_df, entity
+                            )
+                            profile["salary_enhanced_analysis"] = (
+                                _summarize_salary_enhanced_analysis(salary_enhanced)
+                            )
+                        except Exception as e:
+                            logger.warning(f"{entity} 工资增强分析失败: {e}")
+
+                        # 7.2 真实工资分析
+                        try:
+                            real_salary_result = real_salary_income_analyzer.analyze(
+                                analyzer_tx_df, entity
+                            )
+                            profile["real_salary_analysis"] = serialize_for_json(
+                                real_salary_result
+                            )
+                        except Exception as e:
+                            logger.warning(f"{entity} 真实工资分析失败: {e}")
+
+                        # 7.3 理财风险分析
+                        try:
+                            income_yearly_for_finance = _extract_income_yearly_for_finance(
+                                profile.get("real_salary_analysis", {}), profile
+                            )
+                            finance_risk_result = finance_product_analyzer.analyze(
+                                person_profile=profile,
+                                person_transactions=analyzer_tx_df,
+                                income_yearly=income_yearly_for_finance,
+                                property_data=profile.get("properties_precise", [])
+                                or profile.get("properties", []),
+                                vehicle_data=profile.get("vehicles", []),
+                            )
+                            profile["finance_risk_analysis"] = serialize_for_json(
+                                finance_risk_result
+                            )
+                        except Exception as e:
+                            logger.warning(f"{entity} 理财风险分析失败: {e}")
+
+                        # 7.4 收支匹配度分析（未接入分析器补齐）
+                        try:
+                            income_expense_match_result = _build_income_expense_match_summary(
+                                income_expense_match_analyzer, profile
+                            )
+                            profile["income_expense_match_analysis"] = serialize_for_json(
+                                income_expense_match_result
+                            )
+                        except Exception as e:
+                            logger.warning(f"{entity} 收支匹配分析失败: {e}")
+
+                        # 7.5 个人资金特征分析（未接入分析器补齐）
+                        try:
+                            summary_obj = (
+                                profile.get("summary", {})
+                                if isinstance(profile.get("summary", {}), dict)
+                                else {}
+                            )
+                            total_income_wan = float(
+                                summary_obj.get("total_income", 0)
+                                or profile.get("totalIncome", 0)
+                                or 0
+                            ) / 10000.0
+                            real_salary_obj = (
+                                profile.get("real_salary_analysis", {})
+                                if isinstance(profile.get("real_salary_analysis", {}), dict)
+                                else {}
+                            )
+                            salary_enhanced_obj = (
+                                profile.get("salary_enhanced_analysis", {})
+                                if isinstance(profile.get("salary_enhanced_analysis", {}), dict)
+                                else {}
+                            )
+                            wage_income_wan = float(
+                                real_salary_obj.get("total_salary", 0) or 0
+                            )
+                            if wage_income_wan <= 0:
+                                wage_income_wan = float(
+                                    salary_enhanced_obj.get("salary_income", 0) or 0
+                                ) / 10000.0
+
+                            feature_tx_df = analyzer_tx_df.copy()
+                            # 该分析器按“分”处理金额，这里将元口径转换为分。
+                            feature_tx_df["amount"] = (
+                                pd.to_numeric(feature_tx_df["amount"], errors="coerce")
+                                .fillna(0.0)
+                                .astype(float)
+                                * 100.0
+                            )
+
+                            personal_feature_result = personal_fund_feature_analyzer.analyze(
+                                person_profile={
+                                    "name": entity,
+                                    "id": entity_id,
+                                    "wage_income": wage_income_wan,
+                                    "total_income": total_income_wan,
+                                },
+                                person_transactions=feature_tx_df,
+                                family_members=[],
+                                suspicions=None,
+                            )
+                            profile["personal_fund_feature_analysis"] = (
+                                _summarize_personal_fund_feature_analysis(
+                                    personal_feature_result
+                                )
+                            )
+                        except Exception as e:
+                            logger.warning(f"{entity} 个人资金特征分析失败: {e}")
+
                 profiles[entity] = profile
 
             except Exception as e:
@@ -1354,6 +2021,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         )
         logger.info(f"🔄 [重构] 融合画像生成完成: {len(profiles)} 个实体")
         broadcast_log("INFO", f"  ✓ 融合画像生成完成: {len(profiles)} 个实体")
+        _raise_if_analysis_stopped("画像生成后收到停止请求")
 
         # ========================================================================
         # Phase 6: 全面分析 (70%) ← 🔄 有完整上下文后执行
@@ -1586,18 +2254,20 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                 analysis_results["family_summary"] = family_summary_result
                 logger.info(f"  ✓ 家庭汇总完成(fallback): {len(all_persons)} 人")
 
-                        # 【2026-03-04 优化】使用向量化函数更新家庭收入
-            if family_units_list and USE_OPTIMIZED_FAMILY_INCOME:
+            optimized_family_income_enabled = USE_OPTIMIZED_FAMILY_INCOME
+
+            # 【2026-03-04 优化】使用向量化函数更新家庭收入
+            if family_units_list and optimized_family_income_enabled:
                 try:
                     profiles = batch_update_family_income(
                         profiles, cleaned_data, family_units_list, logger
                     )
                 except Exception as e:
                     logger.warning(f"【优化版】更新真实收入失败: {e}，回退到原始实现")
-                    USE_OPTIMIZED_FAMILY_INCOME = False
+                    optimized_family_income_enabled = False
             
             # 【回退】如果优化版失败，使用原始实现
-            if family_units_list and not USE_OPTIMIZED_FAMILY_INCOME:
+            if family_units_list and not optimized_family_income_enabled:
                 try:
                     logger.info("  ▶ [旧版] 根据家庭信息更新真实收入...")
                     # 构建人员到家庭成员的映射
@@ -1619,30 +2289,17 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                         if df is not None and family_members:
                             # 重新计算真实收入/支出
                             try:
-                                income_structure = profile.get("income_structure", {})
-                                wealth_management = profile.get("wealth_management", {})
-                                fund_flow = profile.get("fund_flow", {})
-                                
-                                new_real_income, new_real_expense, new_offset_detail = (
-                                    financial_profiler._calculate_real_income_expense(
-                                        income_structure, wealth_management, fund_flow,
-                                        df, family_members, person_name
-                                    )
+                                _refresh_profile_real_metrics(
+                                    profile,
+                                    df,
+                                    person_name,
+                                    family_members,
+                                    income_expense_match_analyzer,
                                 )
-                                
-                                # 更新 profile
-                                profile["summary"]["real_income"] = new_real_income
-                                profile["summary"]["real_expense"] = new_real_expense
-                                profile["summary"]["offset_detail"] = new_offset_detail
-                                
-                                # 更新顶层字段（兼容旧代码）
-                                profile["real_income"] = new_real_income
-                                profile["real_expense"] = new_real_expense
-                                
                                 logger.info(
                                     f"  ✓ 更新 {person_name} 真实收入: "
-                                    f"    原始: {income_structure.get('total_income', 0)/10000:.2f}万, "
-                                    f"    更新后: {new_real_income/10000:.2f}万 (剔除家庭转账)"
+                                    f"    原始: {profile.get('income_structure', {}).get('total_income', 0)/10000:.2f}万, "
+                                    f"    更新后: {profile.get('summary', {}).get('real_income', 0)/10000:.2f}万 (剔除家庭转账)"
                                 )
                             except Exception as e:
                                 logger.warning(f"更新 {person_name} 真实收入失败: {e}")
@@ -1671,30 +2328,17 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                         if df is not None and family_members:
                             # 重新计算真实收入/支出
                             try:
-                                income_structure = profile.get("income_structure", {})
-                                wealth_management = profile.get("wealth_management", {})
-                                fund_flow = profile.get("fund_flow", {})
-                                
-                                new_real_income, new_real_expense, new_offset_detail = (
-                                    financial_profiler._calculate_real_income_expense(
-                                        income_structure, wealth_management, fund_flow,
-                                        df, family_members, person_name
-                                    )
+                                _refresh_profile_real_metrics(
+                                    profile,
+                                    df,
+                                    person_name,
+                                    family_members,
+                                    income_expense_match_analyzer,
                                 )
-                                
-                                # 更新 profile
-                                profile["summary"]["real_income"] = new_real_income
-                                profile["summary"]["real_expense"] = new_real_expense
-                                profile["summary"]["offset_detail"] = new_offset_detail
-                                
-                                # 更新顶层字段（兼容旧代码）
-                                profile["real_income"] = new_real_income
-                                profile["real_expense"] = new_real_expense
-                                
                                 logger.info(
                                     f"  ✓ 更新 {person_name} 真实收入: "
-                                    f"    原始: {income_structure.get('total_income', 0)/10000:.2f}万, "
-                                    f"    更新后: {new_real_income/10000:.2f}万 (剔除家庭转账)"
+                                    f"    原始: {profile.get('income_structure', {}).get('total_income', 0)/10000:.2f}万, "
+                                    f"    更新后: {profile.get('summary', {}).get('real_income', 0)/10000:.2f}万 (剔除家庭转账)"
                                 )
                             except Exception as e:
                                 logger.warning(f"更新 {person_name} 真实收入失败: {e}")
@@ -1729,6 +2373,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             module_count=len(analysis_results),
         )
         broadcast_log("INFO", f"  ✓ 全面分析完成: {len(analysis_results)} 个模块")
+        _raise_if_analysis_stopped("综合分析后收到停止请求")
 
         # ========================================================================
         # Phase 7: 疑点检测 (85%) ← 🔄 有完整上下文后执行
@@ -1814,6 +2459,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             len(v) if isinstance(v, list) else 1 for v in suspicions.values()
         )
         broadcast_log("INFO", f"  ✓ 疑点检测完成: 发现 {suspicion_total} 个可疑点")
+        _raise_if_analysis_stopped("疑点检测后收到停止请求")
 
         # ========================================================================
         # 【修复】在 Phase 8 之前保存基础缓存
@@ -2117,10 +2763,25 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
 
         return analysis_state.results
 
+    except AnalysisStoppedError as e:
+        stop_message = str(e) or "分析已停止"
+        logger.info(stop_message)
+        analysis_state.end_time = datetime.now()
+        analysis_state.results = None
+        analysis_state.update(
+            status="idle",
+            progress=0,
+            phase="已停止，可重新开始",
+            error=None,
+        )
+        broadcast_log("WARN", f"■ {stop_message}")
+        return None
     except Exception as e:
         logger.exception(f"分析失败: {e}")
         analysis_state.update(status="failed", error=str(e))
         raise
+    finally:
+        analysis_state.clear_stop_request()
 
 
 def _detect_hidden_assets_with_context(
@@ -2255,8 +2916,24 @@ async def start_analysis(config: AnalysisConfig, background_tasks: BackgroundTas
     if analysis_state.status == "running":
         raise HTTPException(status_code=400, detail="分析任务正在运行")
 
+    analysis_state.clear_stop_request()
     background_tasks.add_task(run_analysis_refactored, config)
     return {"message": "分析任务已启动 (重构版)", "version": "3.2.0"}
+
+
+@app.post("/api/analysis/stop")
+async def stop_analysis():
+    """请求安全停止当前分析任务。"""
+    if analysis_state.status != "running":
+        return {
+            "message": "当前没有运行中的分析任务",
+            "status": analysis_state.status,
+        }
+
+    analysis_state.request_stop()
+    analysis_state.update(phase="正在停止分析...")
+    broadcast_log("WARN", "■ 已收到停止请求，正在安全终止当前分析...")
+    return {"message": "已发送停止请求", "status": "stopping"}
 
 
 @app.get("/api/results")
@@ -2313,7 +2990,7 @@ async def get_results():
 async def get_reports():
     """获取报告列表（递归扫描所有子目录）"""
     reports = []
-    reports_dir = os.path.join(str(OUTPUT_DIR), "analysis_results")
+    reports_dir = _get_active_results_dir()
 
     def scan_directory(directory, prefix=""):
         """递归扫描目录"""
@@ -2668,9 +3345,7 @@ async def get_primary_targets_config():
     logger.info("[归集配置] 获取配置")
 
     try:
-        service = PrimaryTargetsService(
-            data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR)
-        )
+        service = _get_primary_targets_service()
         config, msg, is_new = service.get_or_create_config()
 
         if config is None:
@@ -2704,9 +3379,7 @@ async def get_primary_targets_entities():
     logger.info("[归集配置] 获取实体列表")
 
     try:
-        service = PrimaryTargetsService(
-            data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR)
-        )
+        service = _get_primary_targets_service()
         result = service.get_entities_with_data_status()
 
         logger.info(
@@ -2743,9 +3416,7 @@ async def save_primary_targets_config(request: Request):
         config = PrimaryTargetsConfig.from_dict(config_dict)
 
         # 保存配置
-        service = PrimaryTargetsService(
-            data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR)
-        )
+        service = _get_primary_targets_service()
         success, msg = service.save_config(config)
 
         if success:
@@ -2771,9 +3442,7 @@ async def generate_default_primary_targets():
     logger.info("[归集配置] 重新生成默认配置")
 
     try:
-        service = PrimaryTargetsService(
-            data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR)
-        )
+        service = _get_primary_targets_service()
         config, msg = service.generate_default_config()
 
         if config is None:
@@ -2800,7 +3469,7 @@ async def get_report_files():
     返回 output/analysis_results 目录下的所有报告文件（包括子目录）
     """
     logger = logging.getLogger(__name__)
-    results_dir = os.path.join(str(OUTPUT_DIR), "analysis_results")
+    results_dir = _get_active_results_dir()
 
     if not os.path.exists(results_dir):
         return {"success": True, "reports": [], "message": "报告目录不存在"}
@@ -2915,10 +3584,9 @@ async def preview_report_file(filename: str):
         )
 
     # 构建完整路径
-    base_dir = os.path.abspath(os.path.join(str(OUTPUT_DIR), "analysis_results"))
-    filepath = os.path.abspath(
-        os.path.join(str(OUTPUT_DIR), "analysis_results", normalized_path)
-    )
+    results_dir = _get_active_results_dir()
+    base_dir = os.path.abspath(results_dir)
+    filepath = os.path.abspath(os.path.join(results_dir, normalized_path))
 
     # 确保路径在允许的目录内
     if not (filepath == base_dir or filepath.startswith(base_dir + os.sep)):
@@ -3002,10 +3670,9 @@ async def download_report_file(filename: str):
         )
 
     # 构建完整路径
-    base_dir = os.path.abspath(os.path.join(str(OUTPUT_DIR), "analysis_results"))
-    filepath = os.path.abspath(
-        os.path.join(str(OUTPUT_DIR), "analysis_results", normalized_path)
-    )
+    results_dir = _get_active_results_dir()
+    base_dir = os.path.abspath(results_dir)
+    filepath = os.path.abspath(os.path.join(results_dir, normalized_path))
 
     # 确保路径在允许的目录内
     if not (filepath == base_dir or filepath.startswith(base_dir + os.sep)):
@@ -3164,9 +3831,12 @@ async def generate_investigation_report_with_config(
     data_scope = request.data_scope if request else None
 
     try:
+        active_input_dir = _get_active_input_dir()
+        active_output_dir = _get_active_output_dir()
+
         # 1. 加载归集配置服务
         service = PrimaryTargetsService(
-            data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR)
+            data_dir=active_input_dir, output_dir=active_output_dir
         )
 
         # 2. 获取或创建归集配置
@@ -3184,7 +3854,7 @@ async def generate_investigation_report_with_config(
         config = _apply_report_generation_overrides(config, request)
 
         # 3. 加载报告构建器
-        builder = load_investigation_report_builder(str(OUTPUT_DIR))
+        builder = load_investigation_report_builder(active_output_dir)
         if builder is None:
             logger.warning("[报告生成] 缓存数据不存在，请先运行分析")
             return JSONResponse(
@@ -3203,7 +3873,7 @@ async def generate_investigation_report_with_config(
         logger.info("[报告生成] 检测到用户配置，重新计算家庭汇总...")
 
         # 4.1. 加载 profiles.json 和外部数据
-        cache_dir = os.path.join(str(OUTPUT_DIR), "analysis_cache")
+        cache_dir = os.path.join(active_output_dir, "analysis_cache")
         with open(os.path.join(cache_dir, "profiles.json"), "r", encoding="utf-8") as f:
             profiles = json.load(f)
 
@@ -3285,33 +3955,34 @@ async def generate_investigation_report_with_config(
         # 4.3. 更新 derived_data.json
         # 【P1修复】使用缓存并发锁保护文件写入
         if updated_family_summaries:
+            derived_data_path = os.path.join(cache_dir, "derived_data.json")
             with _cache_lock:
-                with open(
-                    os.path.join(cache_dir, "derived_data.json"), "r+", encoding="utf-8"
-                ) as f:
-                    derived_data = json.load(f)
+                derived_data = _load_json_dict_or_default(
+                    derived_data_path,
+                    logger,
+                    "家庭汇总缓存",
+                )
 
-                    # 保留原有数据
-                    derived_data["all_family_summaries"] = updated_family_summaries
+                # 保留原有数据
+                derived_data["all_family_summaries"] = updated_family_summaries
 
-                    # 【修复 2026-03-07】不要覆盖整个 family_summary，保留 family_units 字段
-                    existing_family_summary = derived_data.get("family_summary", {})
-                    first_householder = list(updated_family_summaries.keys())[0]
-                    derived_data["family_summary"] = {
-                        **existing_family_summary,  # 保留 family_units 等字段
-                        "all_family_summaries": updated_family_summaries,
-                        "first_family": updated_family_summaries[first_householder],
-                    }
+                # 【修复 2026-03-07】不要覆盖整个 family_summary，保留 family_units 字段
+                existing_family_summary = derived_data.get("family_summary", {})
+                first_householder = list(updated_family_summaries.keys())[0]
+                derived_data["family_summary"] = {
+                    **existing_family_summary,  # 保留 family_units 等字段
+                    "all_family_summaries": updated_family_summaries,
+                    "first_family": updated_family_summaries[first_householder],
+                }
 
-                    f.seek(0)
-                    f.truncate()  # 截断文件，避免旧数据残留
+                with open(derived_data_path, "w", encoding="utf-8") as f:
                     json.dump(derived_data, f, ensure_ascii=False, indent=2)
 
             logger.info(f"[家庭汇总] 已更新: {len(updated_family_summaries)} 个家庭")
 
         # 【v4.1 修复】重新加载 builder，确保使用更新后的缓存数据
         logger.info("[报告生成] 重新加载 builder（使用更新后的缓存数据）")
-        builder = load_investigation_report_builder(str(OUTPUT_DIR))
+        builder = load_investigation_report_builder(active_output_dir)
 
         if builder is None:
             logger.warning("[报告生成] 缓存数据不存在，请先运行分析")
@@ -3389,9 +4060,12 @@ async def generate_investigation_report_v5(
     data_scope = request.data_scope if request else None
 
     try:
+        active_input_dir = _get_active_input_dir()
+        active_output_dir = _get_active_output_dir()
+
         # 1. 加载归集配置服务
         service = PrimaryTargetsService(
-            data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR)
+            data_dir=active_input_dir, output_dir=active_output_dir
         )
 
         # 2. 获取或创建归集配置
@@ -3409,7 +4083,7 @@ async def generate_investigation_report_v5(
         config = _apply_report_generation_overrides(config, request)
 
         # 3. 加载报告构建器
-        builder = load_investigation_report_builder(str(OUTPUT_DIR))
+        builder = load_investigation_report_builder(active_output_dir)
         if builder is None:
             logger.warning("[报告生成v5] 缓存数据不存在，请先运行分析")
             return JSONResponse(
@@ -3484,9 +4158,8 @@ async def generate_investigation_report_html(
     data_scope = request.data_scope if request else None
 
     try:
-        # 使用 paths 模块获取绝对路径
-        data_dir = str(DATA_DIR)
-        output_dir = str(OUTPUT_DIR)
+        data_dir = _get_active_input_dir()
+        output_dir = _get_active_output_dir()
 
         # 1. 加载归集配置服务
         service = PrimaryTargetsService(data_dir=data_dir, output_dir=output_dir)
@@ -3582,7 +4255,7 @@ async def save_html_report(request: dict):
             )
 
         # 保存到输出目录
-        reports_dir = os.path.join(str(OUTPUT_DIR), "analysis_results")
+        reports_dir = _get_active_results_dir()
         os.makedirs(reports_dir, exist_ok=True)
 
         # 路径安全校验：仅允许保存到 analysis_results 根目录
@@ -3653,9 +4326,12 @@ async def regenerate_txt_report():
     logger.info("[txt报告] 开始根据用户配置重新生成")
 
     try:
+        active_input_dir = _get_active_input_dir()
+        active_output_dir = _get_active_output_dir()
+
         # 1. 加载归集配置
         service = PrimaryTargetsService(
-            data_dir=str(DATA_DIR), output_dir=str(OUTPUT_DIR)
+            data_dir=active_input_dir, output_dir=active_output_dir
         )
         config, msg = service.load_config()
 
@@ -3664,7 +4340,7 @@ async def regenerate_txt_report():
             config, msg, _ = service.get_or_create_config()
 
         # 2. 加载报告构建器
-        builder = load_investigation_report_builder(str(OUTPUT_DIR))
+        builder = load_investigation_report_builder(active_output_dir)
         if builder is None:
             logger.warning("[txt报告] 缓存数据不存在")
             return JSONResponse(
@@ -3679,7 +4355,7 @@ async def regenerate_txt_report():
         )
 
         # 4. 重新生成txt报告（会使用用户配置的家庭单元）
-        output_dirs = create_output_directories(str(OUTPUT_DIR))
+        output_dirs = create_output_directories(active_output_dir)
         txt_report_path = os.path.join(
             output_dirs["analysis_results"], "核查结果分析报告.txt"
         )
@@ -3731,18 +4407,7 @@ async def open_folder(request: OpenFolderRequest):
     import subprocess
     import platform
 
-    # 构建绝对路径
-    folder_path = os.path.abspath(request.relativePath)
-
-    # 检查路径是否存在
-    if not os.path.exists(folder_path):
-        raise HTTPException(
-            status_code=404, detail=f"路径不存在: {request.relativePath}"
-        )
-
-    # 如果是文件，获取其父目录
-    if os.path.isfile(folder_path):
-        folder_path = os.path.dirname(folder_path)
+    folder_path = _resolve_open_folder_path(request.relativePath)
 
     try:
         system = platform.system()
@@ -3832,8 +4497,7 @@ async def get_audit_navigation():
     persons = results.get("persons", [])
     companies = results.get("companies", [])
 
-    # 定义输出目录路径（相对路径，与 config.py 一致）
-    output_dir = "output"
+    output_dir = _get_active_output_dir()
     cleaned_data_person_dir = os.path.join(output_dir, "cleaned_data", "个人")
     cleaned_data_company_dir = os.path.join(output_dir, "cleaned_data", "公司")
     analysis_results_dir = os.path.join(output_dir, "analysis_results")

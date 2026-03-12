@@ -7,8 +7,9 @@
 
 import pandas as pd
 import re
+from collections import Counter
 from dateutil.relativedelta import relativedelta
-from typing import Dict, List
+from typing import Any, Dict, List, Set
 import config
 import utils
 
@@ -89,6 +90,73 @@ def safe_get_column(df: pd.DataFrame, column_names: list, default=None):
 
 
 logger = utils.setup_logger(__name__)
+
+
+AMBIGUOUS_SURNAME_MAP = {
+    "侯": {"侯", "候"},
+    "候": {"侯", "候"},
+}
+
+
+def _normalize_name_token(value: Any) -> str:
+    """标准化姓名/对手方文本，用于别名与家庭成员匹配。"""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "null", "-", "--"}:
+        return ""
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[（(【\[].*?[】\])）]", "", text)
+    return text
+
+
+def _name_variants(value: Any) -> Set[str]:
+    """生成姓名候选集合，兼容账号后缀、括号附注与常见同音姓。"""
+    normalized = _normalize_name_token(value)
+    if not normalized:
+        return set()
+
+    variants = {normalized}
+    chinese_parts = re.findall(r"[\u4e00-\u9fa5]{2,8}", normalized)
+    variants.update(part for part in chinese_parts if part)
+
+    for part in list(variants):
+        if len(part) < 2:
+            continue
+        surname = part[0]
+        if surname in AMBIGUOUS_SURNAME_MAP:
+            for alt in AMBIGUOUS_SURNAME_MAP[surname]:
+                variants.add(f"{alt}{part[1:]}")
+
+    trimmed = set()
+    for part in variants:
+        if len(part) > 4:
+            trimmed.update(
+                token for token in re.findall(r"[\u4e00-\u9fa5]{2,4}", part) if token
+            )
+        else:
+            trimmed.add(part)
+    return {item for item in trimmed if item}
+
+
+def _matches_name(value: Any, person_name: Any) -> bool:
+    """判断文本是否可视为同一人。"""
+    if not value or not person_name:
+        return False
+    value_variants = _name_variants(value)
+    name_variants = _name_variants(person_name)
+    return bool(value_variants and name_variants and value_variants & name_variants)
+
+
+def _build_name_alias_set(names: List[Any]) -> Set[str]:
+    aliases: Set[str] = set()
+    for name in names or []:
+        aliases.update(_name_variants(name))
+    return aliases
+
+
+def _matches_alias_set(value: Any, aliases: Set[str]) -> bool:
+    return bool(aliases and _name_variants(value) & aliases)
 
 
 def _find_expenses_near_date(
@@ -257,7 +325,187 @@ def _identify_reimbursements(income_df: pd.DataFrame) -> pd.DataFrame:
     # 批量赋值
     income_df.loc[reimbursement_mask, "is_reimbursement"] = True
 
+    # 进一步识别“单位报销/业务往来款”，避免被工资或理财赎回误判
+    income_df = _identify_business_reimbursement_income(income_df)
+    if "is_business_reimbursement" in income_df.columns:
+        income_df.loc[
+            income_df["is_business_reimbursement"].fillna(False), "is_reimbursement"
+        ] = True
+
     return income_df
+
+
+def _identify_business_reimbursement_income(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    识别单位报销/业务往来款（高精度规则）。
+
+    设计目标：
+    1. 识别项目交流、差旅、技术沟通、用餐、交通等看起来像单位报销的收入
+    2. 避免把这类资金误识别为工资或理财赎回
+    3. 输出单独标记，供真实收入剔除和报告分类统计使用
+    """
+    if df.empty:
+        if "is_business_reimbursement" not in df.columns:
+            df["is_business_reimbursement"] = False
+        if "business_reimbursement_reason" not in df.columns:
+            df["business_reimbursement_reason"] = ""
+        return df
+
+    work_df = df.copy()
+    if "is_business_reimbursement" not in work_df.columns:
+        work_df["is_business_reimbursement"] = False
+    if "business_reimbursement_reason" not in work_df.columns:
+        work_df["business_reimbursement_reason"] = ""
+
+    description = (
+        work_df["description"].astype(str).fillna("").str.strip()
+        if "description" in work_df.columns
+        else pd.Series("", index=work_df.index)
+    )
+    counterparty = (
+        work_df["counterparty"].astype(str).fillna("").str.strip()
+        if "counterparty" in work_df.columns
+        else pd.Series("", index=work_df.index)
+    )
+    combined = counterparty + " " + description
+    self_mask = (
+        ~work_df["is_self_transfer"].fillna(False)
+        if "is_self_transfer" in work_df.columns
+        else pd.Series(True, index=work_df.index, dtype=bool)
+    )
+
+    strong_keywords = [
+        "报销",
+        "费用报销",
+        "差旅报销",
+        "报账",
+        "垫付款",
+        "垫付返还",
+        "商务报销",
+        "招待费",
+        "会务费",
+        "餐费",
+        "交通费",
+        "住宿费",
+        "油费",
+        "打车费",
+    ]
+    business_scene_keywords = [
+        "项目交流",
+        "技术交流",
+        "项目开发",
+        "项目支持",
+        "出差",
+        "差旅",
+        "住宿",
+        "用餐",
+        "会议",
+        "会务",
+        "培训",
+        "商务",
+        "考察",
+        "招待",
+        "交通",
+        "车费",
+        "机票",
+        "高铁",
+        "滴滴",
+        "打车",
+        "过路费",
+        "停车费",
+        "油费",
+    ]
+    immunity_keywords = [
+        "工资",
+        "薪资",
+        "绩效",
+        "奖金",
+        "年终奖",
+        "补贴",
+        "补助",
+        "福利",
+        "劳务",
+        "稿费",
+        "讲课费",
+        "专家费",
+    ]
+
+    wealth_keywords = []
+    for attr in [
+        "WEALTH_REDEMPTION_KEYWORDS",
+        "KNOWN_WEALTH_PRODUCTS",
+        "WEALTH_PRODUCT_COUNTERPARTY_KEYWORDS",
+    ]:
+        wealth_keywords.extend(getattr(config, attr, []) or [])
+    salary_keywords = (getattr(config, "SALARY_STRONG_KEYWORDS", []) or []) + (
+        getattr(config, "SALARY_KEYWORDS", []) or []
+    )
+
+    def _build_pattern(keywords: List[str]) -> str:
+        cleaned = [re.escape(str(kw).strip()) for kw in keywords if str(kw).strip()]
+        return "|".join(dict.fromkeys(cleaned))
+
+    strong_pattern = _build_pattern(strong_keywords)
+    business_scene_pattern = _build_pattern(business_scene_keywords)
+    immunity_pattern = _build_pattern(immunity_keywords)
+    wealth_pattern = _build_pattern(wealth_keywords)
+    salary_pattern = _build_pattern(salary_keywords)
+
+    institution_pattern = (
+        r"(?:公司|有限|股份|集团|中心|研究|医院|学校|大学|学院|研究所|研究院|银行|科技|汽车|工业|贸易|服务|委员会|管理局)"
+    )
+
+    has_strong_kw = (
+        combined.str.contains(strong_pattern, regex=True, na=False)
+        if strong_pattern
+        else pd.Series(False, index=work_df.index)
+    )
+    has_business_scene_kw = (
+        description.str.contains(business_scene_pattern, regex=True, na=False)
+        if business_scene_pattern
+        else pd.Series(False, index=work_df.index)
+    )
+    has_immunity = (
+        combined.str.contains(immunity_pattern, regex=True, na=False)
+        if immunity_pattern
+        else pd.Series(False, index=work_df.index)
+    )
+    has_wealth_hint = (
+        combined.str.contains(wealth_pattern, regex=True, na=False)
+        if wealth_pattern
+        else pd.Series(False, index=work_df.index)
+    )
+    has_salary_hint = (
+        combined.str.contains(salary_pattern, regex=True, na=False)
+        if salary_pattern
+        else pd.Series(False, index=work_df.index)
+    )
+    has_institution = counterparty.str.contains(
+        institution_pattern, regex=True, na=False
+    )
+
+    strong_reimbursement_mask = self_mask & has_strong_kw & ~has_immunity & ~has_wealth_hint
+    business_reimbursement_mask = (
+        self_mask
+        & has_business_scene_kw
+        & has_institution
+        & ~has_immunity
+        & ~has_wealth_hint
+        & ~has_salary_hint
+    )
+
+    work_df.loc[strong_reimbursement_mask, "is_business_reimbursement"] = True
+    work_df.loc[
+        strong_reimbursement_mask, "business_reimbursement_reason"
+    ] = "单位报销/费用报销"
+
+    pure_business_mask = business_reimbursement_mask & ~strong_reimbursement_mask
+    work_df.loc[pure_business_mask, "is_business_reimbursement"] = True
+    work_df.loc[
+        pure_business_mask, "business_reimbursement_reason"
+    ] = "单位业务往来款(项目/差旅)"
+
+    return work_df
 
 
 def _check_payday_pattern(dates: List, min_concentration: float = 0.6) -> Tuple[bool, float, Optional[int]]:
@@ -911,8 +1159,15 @@ BALANCE_COLUMN_VARIANTS = [
     "结余",
 ]
 
-# 账号列名候选
-ACCOUNT_COLUMN_CANDIDATES = ["account_number", "本方账号", "账号", "卡号"]
+# 账号列名候选（包含清洗后英文列与原始中文列）
+ACCOUNT_COLUMN_CANDIDATES = [
+    "account",
+    "account_number",
+    "account_id",
+    "本方账号",
+    "账号",
+    "卡号",
+]
 
 # 银行名称列名候选
 BANK_NAME_CANDIDATES = ["银行来源", "bank_source", "所属银行"]
@@ -2065,6 +2320,9 @@ def _empty_wealth_result() -> Dict:
         "wealth_redemption": 0.0,
         "wealth_redemption_count": 0,
         "wealth_redemption_transactions": [],
+        "business_reimbursement_income": 0.0,
+        "business_reimbursement_count": 0,
+        "business_reimbursement_transactions": [],
         "wealth_income": 0.0,
         "wealth_income_count": 0,
         "wealth_income_transactions": [],
@@ -2130,6 +2388,17 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
     # 【2026-03-08 新增】使用WealthAccountAnalyzer进行账户分类
     try:
         from wealth_account_analyzer import WealthAccountAnalyzer
+        df = df.copy()
+
+        # 兼容多种账号列名，避免直接使用 df['account'] 触发 KeyError
+        account_col = _detect_account_column(df)
+        if "account" not in df.columns and account_col:
+            df["account"] = df[account_col]
+        if "account_number" not in df.columns and "account" in df.columns:
+            df["account_number"] = df["account"]
+        if "account_id" not in df.columns and "account" in df.columns:
+            df["account_id"] = df["account"]
+
         analyzer = WealthAccountAnalyzer(df, entity_name)
         account_classification = analyzer.classify_accounts()
         fund_flow_result = analyzer.analyze_fund_flow()
@@ -2144,10 +2413,12 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
                    f'{len(wealth_accounts)}个理财账户, {len(securities_accounts)}个证券账户')
         
         # 将分类结果添加到df中
-        df = df.copy()
-        df['_account_type'] = df['account'].map(
-            lambda x: account_classification.get(str(x), {}).get('type', 'unknown')
-        )
+        if "account" in df.columns:
+            df["_account_type"] = df["account"].map(
+                lambda x: account_classification.get(str(x), {}).get("type", "unknown")
+            )
+        else:
+            df["_account_type"] = "unknown"
     except Exception as e:
         logger.warning(f'[WealthAccountAnalyzer] 账户分类失败: {e}')
         df['_account_type'] = 'unknown'
@@ -2201,7 +2472,7 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
     loan_keywords = ["放款", "贷款发放", "个贷发放"]
     loan_pattern = "|".join(loan_keywords)
     loan_mask = income_mask & df_work["description"].str.contains(
-        loan_pattern, na=False, regex=False
+        loan_pattern, na=False, regex=True
     )
     loan_df = df_work[loan_mask].copy()
     # 【P1修复】中英文列名去重，避免重复统计
@@ -2216,7 +2487,7 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
     refund_keywords = ["退款", "冲正", "退回", "撤销"]
     refund_pattern = "|".join(refund_keywords)
     refund_mask = income_mask & df_work["description"].str.contains(
-        refund_pattern, na=False, regex=False
+        refund_pattern, na=False, regex=True
     )
     refund_df = df_work[refund_mask].copy()
     refund_inflow = refund_df["income"].sum()
@@ -2235,7 +2506,7 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
         self_transfer_df = df_remaining[self_transfer_mask].copy()
         df_remaining = df_remaining[~self_transfer_mask].copy()
     else:
-        self_transfer_df = pd.DataFrame()
+        self_transfer_df = df_remaining.iloc[0:0].copy()
 
     # 向量化统计自我转账
     self_transfer_out_df = self_transfer_df[self_transfer_df["expense"] > 0]
@@ -2311,7 +2582,7 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
         # 筛选理财交易
         df_wealth = df_remaining[df_remaining["is_wealth"]].copy()
     else:
-        df_wealth = pd.DataFrame()
+        df_wealth = df_remaining.iloc[0:0].copy()
 
     # ========== 【优化5】向量化细化类型和分类统计 ==========
     if not df_wealth.empty:
@@ -2336,10 +2607,20 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
         df_yield = df_income[df_income["is_yield"]].copy()
         df_redeem = df_income[~df_income["is_yield"]].copy()
 
+        # 从“理财赎回”中剥离单位报销/业务往来款，避免误计入本金回流
+        if not df_redeem.empty:
+            df_redeem = _identify_business_reimbursement_income(df_redeem)
+            reimbursement_mask = df_redeem["is_business_reimbursement"].fillna(False)
+            df_business_reimbursement = df_redeem[reimbursement_mask].copy()
+            df_redeem = df_redeem[~reimbursement_mask].copy()
+        else:
+            df_business_reimbursement = pd.DataFrame()
+
         # 向量化统计（使用sum聚合）
         wealth_purchase = df_purchase["expense"].sum()
         wealth_redemption = df_redeem["income"].sum()
         wealth_income = df_yield["income"].sum()
+        business_reimbursement_income = df_business_reimbursement["income"].sum()
 
         # 使用列表推导式构建交易记录
         wealth_purchase_transactions = (
@@ -2391,6 +2672,24 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
             else []
         )
 
+        business_reimbursement_transactions = (
+            [
+                {
+                    "日期": row["date"],
+                    "金额": row["income"],
+                    "摘要": row["description"],
+                    "对手方": row["counterparty"],
+                    "类型": "单位报销/业务往来款",
+                    "判断依据": row.get(
+                        "business_reimbursement_reason", "单位报销/业务往来款"
+                    ),
+                }
+                for _, row in df_business_reimbursement.iterrows()
+            ]
+            if not df_business_reimbursement.empty
+            else []
+        )
+
         # 【优化6】使用groupby按类型聚合统计（替代逐行累加）
         if not df_purchase.empty:
             purchase_stats = df_purchase.groupby("wealth_type").agg(
@@ -2415,9 +2714,11 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
         wealth_purchase = 0.0
         wealth_redemption = 0.0
         wealth_income = 0.0
+        business_reimbursement_income = 0.0
         wealth_purchase_transactions = []
         wealth_income_transactions = []
         wealth_redemption_transactions = []
+        business_reimbursement_transactions = []
 
     # ========== 【优化7】年度统计使用groupby聚合 ==========
     yearly_stats = {}
@@ -2461,6 +2762,9 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
         "wealth_redemption": wealth_redemption,
         "wealth_redemption_count": len(wealth_redemption_transactions),
         "wealth_redemption_transactions": wealth_redemption_transactions,
+        "business_reimbursement_income": business_reimbursement_income,
+        "business_reimbursement_count": len(business_reimbursement_transactions),
+        "business_reimbursement_transactions": business_reimbursement_transactions,
         "wealth_income": wealth_income,
         "wealth_income_count": len(wealth_income_transactions),
         "wealth_income_transactions": wealth_income_transactions,
@@ -2471,7 +2775,9 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
         "self_transfer_count": len(self_transfer_transactions),
         "self_transfer_transactions": self_transfer_transactions,
         "loan_inflow": loan_inflow,
+        "loan_transactions": loan_transactions,
         "refund_inflow": refund_inflow,
+        "refund_transactions": refund_transactions,
         "category_stats": category_stats,
         "yearly_stats": yearly_stats,
         "total_transactions": len(wealth_purchase_transactions)
@@ -2486,6 +2792,10 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
         logger.info(
             f"理财产品: 购买{utils.format_currency(wealth_purchase)}, 赎回{utils.format_currency(wealth_redemption)}"
         )
+        if business_reimbursement_income > 0:
+            logger.info(
+                f"单位报销/业务往来款: {utils.format_currency(business_reimbursement_income)}"
+            )
         logger.info(
             f"隐性剔除: 自我转账{utils.format_currency(self_transfer_income)}, 贷款{utils.format_currency(loan_inflow)}, 退款{utils.format_currency(refund_inflow)}"
         )
@@ -2505,8 +2815,8 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
 
 
 def _calculate_real_income_expense(
-    income_structure: Dict, 
-    wealth_management: Dict, 
+    income_structure: Dict,
+    wealth_management: Dict,
     fund_flow: Dict,
     df: pd.DataFrame = None,
     family_members: List[str] = None,
@@ -2554,6 +2864,9 @@ def _calculate_real_income_expense(
     wealth_buy = _safe_num(wealth_management.get("wealth_purchase", 0))
     wealth_redeem = _safe_num(wealth_management.get("wealth_redemption", 0))
     wealth_yield = _safe_num(wealth_management.get("wealth_income", 0))
+    business_reimbursement_in = _safe_num(
+        wealth_management.get("business_reimbursement_income", 0)
+    )
     loan_in = _safe_num(wealth_management.get("loan_inflow", 0))
     refund_in = _safe_num(wealth_management.get("refund_inflow", 0))
 
@@ -2561,22 +2874,30 @@ def _calculate_real_income_expense(
     deposit_buy = wealth_management.get("deposit_purchase", 0)
     deposit_redeem = wealth_management.get("deposit_redemption", 0)
 
-    # 自我转账对冲：取min值对冲
-    self_transfer_offset = min(self_in, self_out)
+    # 已识别为本人互转的收支不属于真实收入/真实支出，均应剔除
+    self_transfer_income_offset = self_in
+    self_transfer_expense_offset = self_out
 
-    # 理财本金对冲：买入和赎回中较小的部分是完整闭环
-    wealth_principal_offset = min(wealth_buy, wealth_redeem)
+    # 定期存款单独处理，避免与综合理财本金对冲重复计算
+    non_deposit_wealth_buy = max(0.0, wealth_buy - deposit_buy)
+    non_deposit_wealth_redeem = max(0.0, wealth_redeem - deposit_redeem)
 
-    # 【2026-02-23 关键修复】恢复剔除理财历史存量赎回
-    # 原因：历史存量赎回的本金是早年工资积蓄的回流，不是当期收入
-    # 必须剔除，否则收入虚高
-    wealth_historical_redeem = max(0, wealth_redeem - wealth_buy)
+    # 非定存理财本金对冲：买入和赎回中较小的部分是完整闭环
+    wealth_principal_offset = min(non_deposit_wealth_buy, non_deposit_wealth_redeem)
+
+    # 历史存量赎回（仅针对非定存理财）
+    wealth_historical_redeem = max(
+        0.0, non_deposit_wealth_redeem - non_deposit_wealth_buy
+    )
 
     # 【2026-02-12 关键修复】定期存款到期完全剔除（本金不是收入）
 
     # 【2026-03-02 新增】计算家庭转账（如果有家庭成员信息）
     family_transfer_in = 0.0  # 家庭成员转入
     family_transfer_out = 0.0  # 转给家庭成员
+    family_transfer_in_count = 0
+    family_transfer_out_count = 0
+    family_member_aliases = _build_name_alias_set(family_members or [])
     
     if df is not None and family_members and len(family_members) > 0 and entity_name:
         try:
@@ -2587,16 +2908,25 @@ def _calculate_real_income_expense(
                     counterparty_col = col
                     break
             
-            if counterparty_col:
+            if counterparty_col and family_member_aliases:
+                family_match_mask = df[counterparty_col].apply(
+                    lambda value: _matches_alias_set(value, family_member_aliases)
+                )
                 # 计算家庭成员转入（收入）
-                family_in_mask = df[counterparty_col].isin(family_members) & (df['income'] > 0 if 'income' in df.columns else False)
+                family_in_mask = family_match_mask & (
+                    df["income"] > 0 if "income" in df.columns else False
+                )
                 if family_in_mask.any():
-                    family_transfer_in = df.loc[family_in_mask, 'income'].sum()
+                    family_transfer_in = df.loc[family_in_mask, "income"].sum()
+                    family_transfer_in_count = int(family_in_mask.sum())
                 
                 # 计算转给家庭成员（支出）
-                family_out_mask = df[counterparty_col].isin(family_members) & (df['expense'] > 0 if 'expense' in df.columns else False)
+                family_out_mask = family_match_mask & (
+                    df["expense"] > 0 if "expense" in df.columns else False
+                )
                 if family_out_mask.any():
-                    family_transfer_out = df.loc[family_out_mask, 'expense'].sum()
+                    family_transfer_out = df.loc[family_out_mask, "expense"].sum()
+                    family_transfer_out_count = int(family_out_mask.sum())
                     
                 logger.info(f"  - 家庭转入: {family_transfer_in / 10000:.2f}万 (需从收入剔除)")
                 logger.info(f"  - 家庭转出: {family_transfer_out / 10000:.2f}万 (需从支出剔除)")
@@ -2615,10 +2945,11 @@ def _calculate_real_income_expense(
     # 【2026-03-02 新增】剔除家庭转入
     real_income = (
         total_income
-        - self_transfer_offset  # 自我转入对冲
+        - self_transfer_income_offset  # 本人互转转入
         - wealth_principal_offset  # 理财本金对冲（当期闭环）
         - wealth_historical_redeem  # 【恢复】理财历史存量赎回
         - deposit_offset  # 定存到期本金
+        - business_reimbursement_in  # 单位报销/业务往来款（非个人真实收入）
         - loan_in  # 贷款发放
         - refund_in  # 退款
         - family_transfer_in  # 【新增】家庭成员转入
@@ -2629,7 +2960,7 @@ def _calculate_real_income_expense(
     # 【2026-03-02 新增】剔除家庭转出
     real_expense = (
         total_expense
-        - self_transfer_offset  # 自我转出对冲
+        - self_transfer_expense_offset  # 本人互转转出
         - wealth_principal_offset  # 理财购买对冲
         - deposit_buy  # 定存购买（投资支出）
         - family_transfer_out  # 【新增】转给家庭成员
@@ -2641,30 +2972,89 @@ def _calculate_real_income_expense(
 
     # 构建剔除详情（用于报告展示）
     offset_detail = {
-        "self_transfer": self_transfer_offset,
+        "self_transfer": self_transfer_income_offset,
+        "self_transfer_expense": self_transfer_expense_offset,
         "wealth_principal": wealth_principal_offset,
         "wealth_historical": wealth_historical_redeem,  # 【恢复】
         "deposit_redemption": deposit_offset,
+        "business_reimbursement": business_reimbursement_in,
         "loan": loan_in,
         "refund": refund_in,
         "family_transfer_in": family_transfer_in,  # 【2026-03-02 新增】家庭转入
         "family_transfer_out": family_transfer_out,  # 【2026-03-02 新增】家庭转出
+        "family_transfer_in_count": family_transfer_in_count,
+        "family_transfer_out_count": family_transfer_out_count,
         "total_offset": (
-            self_transfer_offset
+            self_transfer_income_offset
             + wealth_principal_offset
             + wealth_historical_redeem
             + deposit_offset
+            + business_reimbursement_in
             + loan_in
             + refund_in
             + family_transfer_in  # 【新增】
         ),
+        "offset_meta": {
+            "self_transfer": {
+                "bucket": "self_transfer",
+                "label": "本人账户互转",
+                "income_amount": self_transfer_income_offset,
+                "expense_amount": self_transfer_expense_offset,
+                "confidence": "high",
+            },
+            "wealth_principal": {
+                "bucket": "wealth_principal",
+                "label": "理财/定存本金回流",
+                "income_amount": wealth_principal_offset + deposit_offset + wealth_historical_redeem,
+                "expense_amount": wealth_principal_offset + deposit_buy,
+                "confidence": "medium",
+            },
+            "business_reimbursement": {
+                "bucket": "business_reimbursement",
+                "label": "单位报销/业务往来款",
+                "income_amount": business_reimbursement_in,
+                "expense_amount": 0.0,
+                "confidence": "high",
+            },
+            "loan": {
+                "bucket": "loan",
+                "label": "贷款发放",
+                "income_amount": loan_in,
+                "expense_amount": 0.0,
+                "confidence": "high",
+            },
+            "refund": {
+                "bucket": "refund",
+                "label": "退款/冲正",
+                "income_amount": refund_in,
+                "expense_amount": 0.0,
+                "confidence": "high",
+            },
+            "family_transfer": {
+                "bucket": "family_transfer",
+                "label": "家庭成员互转",
+                "income_amount": family_transfer_in,
+                "expense_amount": family_transfer_out,
+                "income_count": family_transfer_in_count,
+                "expense_count": family_transfer_out_count,
+                "confidence": "medium",
+                "matching_mode": "alias_match" if family_member_aliases else "disabled",
+            },
+        },
     }
 
     # 日志输出
     logger.info(f"【2026-03-02修复】资金对冲详情（含家庭转账剔除）:")
-    logger.info(f"  - 自我转账: {self_transfer_offset / 10000:.2f}万")
+    logger.info(
+        f"  - 自我转账转入: {self_transfer_income_offset / 10000:.2f}万, "
+        f"转出: {self_transfer_expense_offset / 10000:.2f}万"
+    )
     logger.info(f"  - 理财本金: {wealth_principal_offset / 10000:.2f}万")
     logger.info(f"  - 定存到期: {deposit_offset / 10000:.2f}万")
+    if business_reimbursement_in > 0:
+        logger.info(
+            f"  - 单位报销/业务往来款: {business_reimbursement_in / 10000:.2f}万"
+        )
     if family_transfer_in > 0 or family_transfer_out > 0:
         logger.info(f"  - 家庭转入: {family_transfer_in / 10000:.2f}万 (已从收入剔除)")
         logger.info(f"  - 家庭转出: {family_transfer_out / 10000:.2f}万 (已从支出剔除)")
@@ -2673,6 +3063,140 @@ def _calculate_real_income_expense(
     )
 
     return real_income, real_expense, offset_detail
+
+
+def _attach_salary_reference_to_income_classification(
+    income_classification: Dict,
+    yearly_salary: Dict = None,
+) -> Dict:
+    """给收入分类结果补充严格工资口径参考值，避免报告层混用两套工资口径。"""
+    if not isinstance(income_classification, dict):
+        return income_classification
+
+    salary_summary = yearly_salary.get("summary", {}) if isinstance(yearly_salary, dict) else {}
+    try:
+        official_salary_total = float(salary_summary.get("total", 0) or 0)
+    except (TypeError, ValueError):
+        official_salary_total = 0.0
+
+    reason_breakdown = income_classification.get("reason_breakdown", {})
+    if not isinstance(reason_breakdown, dict):
+        reason_breakdown = {}
+    legitimate_map = reason_breakdown.get("legitimate", {})
+    if not isinstance(legitimate_map, dict):
+        legitimate_map = {}
+
+    salary_like_prefixes = (
+        "工资性收入",
+        "已知发薪单位",
+        "用户定义发薪单位",
+        "人力资源公司",
+    )
+    salary_like_reasons = {}
+    salary_like_total = 0.0
+    for reason, amount in legitimate_map.items():
+        reason_text = str(reason or "").strip()
+        if not reason_text:
+            continue
+        if any(reason_text.startswith(prefix) for prefix in salary_like_prefixes):
+            try:
+                current_amount = float(amount or 0)
+            except (TypeError, ValueError):
+                current_amount = 0.0
+            salary_like_reasons[reason_text] = current_amount
+            salary_like_total += current_amount
+
+    income_classification["salary_reference_income"] = float(official_salary_total)
+    income_classification["salary_classified_income"] = float(salary_like_total)
+    income_classification["salary_reference_delta"] = float(
+        official_salary_total - salary_like_total
+    )
+    income_classification["salary_reference_basis"] = "yearly_salary_summary_total"
+    income_classification["salary_like_reasons"] = salary_like_reasons
+
+    return income_classification
+
+
+def recalculate_income_metrics(
+    df: pd.DataFrame,
+    entity_name: str,
+    income_structure: Dict,
+    wealth_management: Dict,
+    fund_flow: Dict,
+    yearly_salary: Dict = None,
+    family_members: List[str] = None,
+) -> Dict:
+    """统一重算真实收入/支出与真实收入分类。"""
+    real_income, real_expense, offset_detail = _calculate_real_income_expense(
+        income_structure,
+        wealth_management,
+        fund_flow,
+        df,
+        family_members,
+        entity_name,
+    )
+
+    income_df = df[df["income"] > 0].copy()
+    income_classification = classify_income_sources(
+        income_df,
+        entity_name=entity_name,
+        wealth_result=wealth_management,
+        family_members=family_members,
+    )
+    income_classification = _attach_salary_reference_to_income_classification(
+        income_classification,
+        yearly_salary,
+    )
+
+    # 统一口径：真实收入剔除桶与分类剔除明细保持一致，避免同一笔交易在两条链路中各说各话。
+    offset_bucket_map = {
+        "self_transfer": "self_transfer",
+        "wealth_redemption": ("wealth_principal", "wealth_historical", "deposit_redemption"),
+        "business_reimbursement": "business_reimbursement",
+        "loan": "loan",
+        "refund": "refund",
+        "family_transfer": "family_transfer_in",
+    }
+    excluded_breakdown = income_classification.get("excluded_breakdown", {}) or {}
+
+    for bucket, target_keys in offset_bucket_map.items():
+        classified_amount = float(excluded_breakdown.get(bucket, 0) or 0)
+        if not classified_amount:
+            continue
+        if isinstance(target_keys, tuple):
+            current_amount = sum(float(offset_detail.get(key, 0) or 0) for key in target_keys)
+        else:
+            current_amount = float(offset_detail.get(target_keys, 0) or 0)
+        if classified_amount <= current_amount:
+            continue
+
+        adjustment = classified_amount - current_amount
+        real_income = max(0.0, real_income - adjustment)
+        if isinstance(target_keys, tuple):
+            primary_key = target_keys[0]
+            offset_detail[primary_key] = float(offset_detail.get(primary_key, 0) or 0) + adjustment
+        else:
+            offset_detail[target_keys] = classified_amount
+        offset_detail["total_offset"] = float(
+            (offset_detail.get("total_offset", 0) or 0) + adjustment
+        )
+        offset_meta = offset_detail.get("offset_meta", {})
+        if bucket in offset_meta:
+            offset_meta[bucket]["income_amount"] = classified_amount
+            offset_meta[bucket]["aligned_with_classification"] = True
+        logger.info(
+            "真实收入口径对齐: %s 补充剔除 %s %.2f 元",
+            entity_name,
+            bucket,
+            adjustment,
+        )
+
+    return {
+        "real_income": real_income,
+        "real_expense": real_expense,
+        "offset_detail": offset_detail,
+        "income_classification": income_classification,
+    }
 
 
 def _build_profile_summary(
@@ -2801,18 +3325,19 @@ def generate_profile_report(df: pd.DataFrame, entity_name: str, family_members: 
     # 【Phase 2 新增】年度工资统计
     yearly_salary = calculate_yearly_salary(df, entity_name=entity_name)
 
-    # 【Phase 4 新增】收入来源分类
-    # 【2026-02-20 修改】传入wealth_management结果，避免重复分类已识别的理财/自我转账
-    income_df = df[df["income"] > 0].copy()
-    income_classification = classify_income_sources(
-        income_df, entity_name=entity_name, wealth_result=wealth_management
+    metrics = recalculate_income_metrics(
+        df,
+        entity_name,
+        income_structure,
+        wealth_management,
+        fund_flow,
+        yearly_salary=yearly_salary,
+        family_members=family_members,
     )
-
-    # 计算真实收入/支出（【2026-02-12修复】现在返回剔除详情）
-    # 【2026-03-02 修复】传入 df 和 family_members
-    real_income, real_expense, offset_detail = _calculate_real_income_expense(
-        income_structure, wealth_management, fund_flow, df, family_members, entity_name
-    )
+    income_classification = metrics["income_classification"]
+    real_income = metrics["real_income"]
+    real_expense = metrics["real_expense"]
+    offset_detail = metrics["offset_detail"]
 
     # 构建画像摘要
     summary = _build_profile_summary(
@@ -2988,62 +3513,6 @@ def build_company_profile(df: pd.DataFrame, entity_name: str) -> Dict:
     """
     构建公司资金画像
 
-    【2026-03-01 通用修复】支持多种列名格式
-    """
-    logger.info(f"正在为公司 {entity_name} 生成资金画像...")
-
-    if df.empty:
-        logger.warning(f"{entity_name} 无交易数据")
-        return {"entity_name": entity_name, "entity_type": "company", "has_data": False}
-
-    # 【关键修复】标准化列名
-    try:
-        df = standardize_columns(df)
-        logger.info(f"✓ 列名标准化完成: {list(df.columns)}")
-    except Exception as e:
-        logger.warning(f"列名标准化失败: {str(e)}，使用原始列名")
-
-    # 【容错处理】如果还是没有'date'列，尝试其他方式
-    if "date" not in df.columns:
-        logger.warning(f"未找到'date'列，尝试其他日期列名")
-        # 尝试其他日期列名
-        for col in ["交易时间", "交易日期", "日期"]:
-            if col in df.columns:
-                df = df.rename(columns={col: "date"})
-                logger.info(f"✓ 使用'{col}'作为日期列")
-                break
-
-    """
-    构建公司资金画像
-
-    【2026-03-01 通用修复】支持多种列名格式
-    """
-    logger.info(f"正在为公司 {entity_name} 生成资金画像...")
-
-    if df.empty:
-        logger.warning(f"{entity_name} 无交易数据")
-        return {"entity_name": entity_name, "entity_type": "company", "has_data": False}
-
-    # 【关键修复】标准化列名
-    try:
-        df = standardize_columns(df)
-        logger.info(f"✓ 列名标准化完成: {list(df.columns)}")
-    except Exception as e:
-        logger.warning(f"列名标准化失败: {str(e)}，使用原始列名")
-
-    # 【容错处理】如果还是没有'date'列，尝试其他方式
-    if "date" not in df.columns:
-        logger.warning(f"未找到'date'列，尝试其他日期列名")
-        # 尝试其他日期列名
-        for col in ["交易时间", "交易日期", "日期"]:
-            if col in df.columns:
-                df = df.rename(columns={col: "date"})
-                logger.info(f"✓ 使用'{col}'作为日期列")
-                break
-
-    """
-    构建公司资金画像
-
     【Phase 2 - 2026-01-20】
     功能:
     1. 复用现有的画像生成逻辑
@@ -3064,7 +3533,27 @@ def build_company_profile(df: pd.DataFrame, entity_name: str) -> Dict:
 
     if df.empty:
         logger.warning(f"{entity_name} 无交易数据")
-        return {"entity_name": entity_name, "entity_type": "company", "has_data": False}
+        return {
+            "entity_name": entity_name,
+            "entity_type": "company",
+            "has_data": False,
+        }
+
+    # 【关键修复】标准化列名
+    try:
+        df = standardize_columns(df)
+        logger.info(f"✓ 列名标准化完成: {list(df.columns)}")
+    except Exception as e:
+        logger.warning(f"列名标准化失败: {str(e)}，使用原始列名")
+
+    # 【容错处理】如果还是没有'date'列，尝试其他方式
+    if "date" not in df.columns:
+        logger.warning("未找到'date'列，尝试其他日期列名")
+        for col in ["交易时间", "交易日期", "日期"]:
+            if col in df.columns:
+                df = df.rename(columns={col: "date"})
+                logger.info(f"✓ 使用'{col}'作为日期列")
+                break
 
     # 复用现有的画像生成逻辑
     # 注意: 不传入entity_name参数,因为公司不需要工资识别
@@ -3285,8 +3774,84 @@ def _analyze_cash_withdrawal_pattern(df: pd.DataFrame) -> Dict:
 # ========== Phase 4: 收入来源分类 (2026-01-20 新增) ==========
 
 
+def _make_income_tx_signature(
+    date_value,
+    amount_value,
+    counterparty_value="",
+    description_value="",
+):
+    """构建收入交易签名，用于跨模块定位同一笔收入。"""
+    try:
+        if pd.notna(date_value):
+            date_str = pd.to_datetime(date_value).strftime("%Y-%m-%d")
+        else:
+            date_str = "未知"
+    except Exception:
+        date_str = str(date_value)[:10] if date_value else "未知"
+
+    try:
+        amount = round(float(amount_value or 0), 2)
+    except (TypeError, ValueError):
+        amount = 0.0
+
+    return (
+        date_str,
+        amount,
+        str(counterparty_value or "").strip(),
+        str(description_value or "").strip(),
+    )
+
+
+def _build_income_tx_counter(
+    transactions: List[Dict],
+    amount_keys: List[str],
+    date_keys: List[str] = None,
+    counterparty_keys: List[str] = None,
+    description_keys: List[str] = None,
+) -> Counter:
+    """根据交易列表构建签名计数器，避免同日同额交易被误合并。"""
+    counter: Counter = Counter()
+    if not isinstance(transactions, list):
+        return counter
+
+    date_keys = date_keys or ["日期", "date"]
+    counterparty_keys = counterparty_keys or ["对手方", "counterparty"]
+    description_keys = description_keys or ["摘要", "description"]
+
+    for tx in transactions:
+        if not isinstance(tx, dict):
+            continue
+
+        amount = None
+        for key in amount_keys:
+            value = tx.get(key)
+            if value not in (None, ""):
+                amount = value
+                break
+        if amount is None:
+            continue
+
+        date_value = next((tx.get(key) for key in date_keys if tx.get(key) is not None), None)
+        counterparty_value = next(
+            (tx.get(key) for key in counterparty_keys if tx.get(key) is not None), ""
+        )
+        description_value = next(
+            (tx.get(key) for key in description_keys if tx.get(key) is not None), ""
+        )
+        counter[
+            _make_income_tx_signature(
+                date_value, amount, counterparty_value, description_value
+            )
+        ] += 1
+
+    return counter
+
+
 def classify_income_sources(
-    income_df: pd.DataFrame, entity_name: str = None, wealth_result: Dict = None
+    income_df: pd.DataFrame,
+    entity_name: str = None,
+    wealth_result: Dict = None,
+    family_members: List[str] = None,
 ) -> Dict:
     """
     对收入来源进行分类（增强版 - 2026-01-25）【向量化优化】
@@ -3323,52 +3888,393 @@ def classify_income_sources(
     if income_df.empty:
         logger.warning("无收入数据,无法分类")
         return {
+            "classification_basis": "real_income_basis",
             "legitimate_income": 0.0,
             "unknown_income": 0.0,
             "suspicious_income": 0.0,
+            "business_reimbursement_income": 0.0,
+            "excluded_income": 0.0,
             "legitimate_ratio": 0.0,
             "unknown_ratio": 0.0,
             "suspicious_ratio": 0.0,
+            "business_reimbursement_ratio": 0.0,
+            "excluded_ratio": 0.0,
             "legitimate_details": [],
             "unknown_details": [],
             "suspicious_details": [],
+            "business_reimbursement_details": [],
+            "excluded_details": [],
+            "excluded_breakdown": {},
+            "reason_breakdown": {},
             "legitimate_count": 0,
             "unknown_count": 0,
             "suspicious_count": 0,
+            "business_reimbursement_count": 0,
+            "excluded_count": 0,
         }
-
-    total_income = income_df["income"].sum()
-
-    # 构建已识别交易集合(用于去重)
-    identified_txs = set()
-    if wealth_result:
-        for tx in wealth_result.get("wealth_redemption_transactions", []):
-            date = str(tx.get("日期", ""))[:10]
-            amount = tx.get("金额", 0) or tx.get("收入", 0) or 0
-            if amount > 0:
-                identified_txs.add((date, float(amount)))
-        for tx in wealth_result.get("self_transfer_transactions", []):
-            income = tx.get("收入", 0)
-            if income > 0:
-                date = str(tx.get("日期", ""))[:10]
-                identified_txs.add((date, float(income)))
 
     # 向量化:准备数据列
     df = income_df.copy()
+    for column in ("description", "counterparty", "category", "account_type", "account_category"):
+        if column not in df.columns:
+            df[column] = ""
     df["desc_str"] = df["description"].astype(str).fillna("").str.strip()
     df["cp_str"] = df["counterparty"].astype(str).fillna("").str.strip()
+    df["category_str"] = df["category"].astype(str).fillna("").str.strip()
+    df["account_type_str"] = df["account_type"].astype(str).fillna("").str.strip()
+    df["account_category_str"] = df["account_category"].astype(str).fillna("").str.strip()
+    df["text_str"] = (
+        df["cp_str"]
+        + " "
+        + df["desc_str"]
+        + " "
+        + df["category_str"]
+        + " "
+        + df["account_type_str"]
+        + " "
+        + df["account_category_str"]
+    ).str.strip()
     df["amount"] = df["income"]
     df["date_str"] = df["date"].apply(
         lambda x: x.strftime("%Y-%m-%d") if pd.notna(x) else "未知"
     )
+    empty_markers = {"", "-", "nan", "None", "\\N"}
+    df["is_blank_counterparty"] = df["cp_str"].isin(empty_markers)
+    df["is_blank_description"] = df["desc_str"].isin(empty_markers)
+    df = _identify_business_reimbursement_income(df)
+    df["excluded_reason"] = ""
+    df["excluded_bucket"] = ""
+    df["excluded_confidence"] = ""
+    df["tx_signature"] = df.apply(
+        lambda row: _make_income_tx_signature(
+            row.get("date"),
+            row.get("amount"),
+            row.get("cp_str"),
+            row.get("desc_str"),
+        ),
+        axis=1,
+    )
+
+    def _consume_counter_match(counter: Counter, signature) -> bool:
+        if counter[signature] > 0:
+            counter[signature] -= 1
+            return True
+        return False
 
     # 向量化:时间模式识别(空摘要定期收入)
     time_pattern_mask = _vectorized_time_pattern_detection(df)
     df["is_time_pattern"] = df.index.isin(time_pattern_mask)
 
-    # 向量化:已识别交易去重
-    df["tx_key"] = df.apply(lambda row: (row["date_str"], float(row["amount"])), axis=1)
-    df["is_identified"] = df["tx_key"].isin(identified_txs)
+    family_member_aliases = _build_name_alias_set(family_members or [])
+    entity_aliases = _build_name_alias_set([entity_name] if entity_name else [])
+    redemption_counter = _build_income_tx_counter(
+        wealth_result.get("wealth_redemption_transactions", []) if wealth_result else [],
+        amount_keys=["金额", "收入", "amount"],
+    )
+    self_transfer_counter = _build_income_tx_counter(
+        wealth_result.get("self_transfer_transactions", []) if wealth_result else [],
+        amount_keys=["收入", "金额", "amount"],
+    )
+    reimbursement_counter = _build_income_tx_counter(
+        wealth_result.get("business_reimbursement_transactions", []) if wealth_result else [],
+        amount_keys=["金额", "收入", "amount"],
+    )
+    loan_counter = _build_income_tx_counter(
+        wealth_result.get("loan_transactions", []) if wealth_result else [],
+        amount_keys=["income", "收入", "金额", "amount"],
+        date_keys=["date", "日期"],
+    )
+    refund_counter = _build_income_tx_counter(
+        wealth_result.get("refund_transactions", []) if wealth_result else [],
+        amount_keys=["income", "收入", "金额", "amount"],
+        date_keys=["date", "日期"],
+    )
+
+    loan_issue_keywords = ["放款", "贷款发放", "个贷发放"]
+    refund_keywords = ["退款", "冲正", "退回", "撤销", "退货退款"]
+    wealth_redemption_keywords = [
+        "理财赎回",
+        "基金赎回",
+        "赎回",
+        "定期到期",
+        "大额存单到期",
+        "结构性存款到期",
+        "定期存款到期",
+    ]
+    insurance_keywords = [
+        "保险理赔",
+        "保险金",
+        "赔款",
+        "理赔款",
+        "退保",
+        "退保金",
+        "保险返还",
+        "返还",
+        "分红",
+        "保单红利",
+        "满期金",
+        "生存金",
+        "年金给付",
+    ]
+    insurance_entity_keywords = [
+        "财产保险",
+        "人寿保险",
+        "保险股份",
+        "保险有限公司",
+        "保险代理",
+        "中国人寿",
+        "中国平安财产",
+        "中国平安人寿",
+        "中国人民人寿",
+        "中国太平洋财产",
+        "中国太平洋人寿",
+        "国任财产保险",
+        "中宏人寿",
+        "泰康人寿",
+        "新华保险",
+        "阳光保险",
+        "携程保险代理",
+        "人保财险",
+    ]
+    wealth_signal_keywords = [
+        "理财",
+        "添利",
+        "恒享",
+        "稳享",
+        "增强",
+        "定开",
+        "现金添利",
+        "薪金理财",
+        "债券",
+        "稳添",
+        "沃德",
+        "证券",
+        "基金",
+        "托管专户",
+        "第三方存管",
+        "存管保证金",
+        "快赎业务清算款",
+        "快赎",
+        "结构性存款",
+        "大额存单",
+        "定期存款",
+    ]
+    cash_deposit_keywords = [
+        "现金",
+        "取现",
+        "提现",
+        "支取",
+        "ATM存款",
+        "CRS存款",
+        "现金尾箱",
+        "尾箱帐户",
+        "尾箱账户",
+        "续存",
+        "现存",
+        "自助存款",
+    ]
+
+    insurance_pattern = "|".join(re.escape(kw) for kw in insurance_keywords)
+    insurance_entity_pattern = "|".join(
+        re.escape(kw) for kw in insurance_entity_keywords
+    )
+    wealth_signal_pattern = "|".join(re.escape(kw) for kw in wealth_signal_keywords)
+    cash_deposit_pattern = "|".join(re.escape(kw) for kw in cash_deposit_keywords)
+
+    exclusion_conditions = [
+        (
+            df["tx_signature"].apply(
+                lambda sig: _consume_counter_match(self_transfer_counter, sig)
+            )
+            | (
+                df["cp_str"].apply(lambda value: _matches_alias_set(value, entity_aliases))
+                & (df["amount"] > 0)
+            ),
+            "本人账户互转（已剔除）",
+            "self_transfer",
+            "high",
+        ),
+        (
+            df["tx_signature"].apply(
+                lambda sig: _consume_counter_match(redemption_counter, sig)
+            ),
+            "理财/定存本金回流（已剔除）",
+            "wealth_redemption",
+            "high" if wealth_result else "medium",
+        ),
+        (
+            df["tx_signature"].apply(
+                lambda sig: _consume_counter_match(reimbursement_counter, sig)
+            )
+            | df["is_business_reimbursement"].fillna(False),
+            "单位报销/业务往来款（已剔除）",
+            "business_reimbursement",
+            "high",
+        ),
+        (
+            df["tx_signature"].apply(lambda sig: _consume_counter_match(loan_counter, sig))
+            | df["desc_str"].apply(lambda x: any(kw in x for kw in loan_issue_keywords)),
+            "贷款发放（已剔除）",
+            "loan",
+            "high" if wealth_result else "medium",
+        ),
+        (
+            df["tx_signature"].apply(lambda sig: _consume_counter_match(refund_counter, sig))
+            | df["desc_str"].apply(lambda x: any(kw in x for kw in refund_keywords)),
+            "退款/冲正（已剔除）",
+            "refund",
+            "high" if wealth_result else "medium",
+        ),
+        (
+            df["cp_str"].apply(
+                lambda value: _matches_alias_set(value, family_member_aliases)
+            )
+            if family_member_aliases
+            else pd.Series(False, index=df.index),
+            "家庭成员转入（已剔除）",
+            "family_transfer",
+            "medium",
+        ),
+    ]
+
+    df["has_product_code"] = df["desc_str"].str.contains(
+        r"(?:^|[^A-Za-z0-9])[A-Z]*\d{8,}[A-Z]*(?:[^A-Za-z0-9]|$)",
+        case=False,
+        na=False,
+        regex=True,
+    )
+    df["has_wealth_signal"] = df["text_str"].str.contains(
+        wealth_signal_pattern, case=False, na=False, regex=True
+    )
+    df["has_wealth_category"] = df["category_str"].str.contains(
+        r"投资理财|证券", case=False, na=False, regex=True
+    ) | df["account_type_str"].isin(["理财账户", "证券账户"])
+    df["has_insurance_entity"] = df["text_str"].str.contains(
+        insurance_entity_pattern, case=False, na=False, regex=True
+    )
+    df["has_insurance_signal"] = (
+        df["text_str"].str.contains(insurance_pattern, case=False, na=False, regex=True)
+        | df["has_insurance_entity"]
+    )
+    df["has_cash_deposit_marker"] = df["text_str"].str.contains(
+        cash_deposit_pattern, case=False, na=False, regex=True
+    )
+    df["has_securities_transfer_kw"] = df["text_str"].str.contains(
+        r"证转银|第三方存管保证金转活期|快赎业务清算款|网商基金快赎|银证转账",
+        case=False,
+        na=False,
+        regex=True,
+    )
+    fallback_wealth_redemption_mask = (
+        (
+            df["has_securities_transfer_kw"]
+            | (
+                (df["has_wealth_category"] | df["has_product_code"])
+                & df["has_wealth_signal"]
+            )
+        )
+        & ~df["has_insurance_signal"]
+        & ~df["desc_str"].str.contains(r"利息|收益|分红|股息|红利", na=False, regex=True)
+        & (df["amount"] >= 1000)
+    )
+    exclusion_conditions.append(
+        (
+            fallback_wealth_redemption_mask,
+            "理财/定存/证券回款待拆分（已剔除）",
+            "wealth_redemption",
+            "medium",
+        )
+    )
+
+    exclusion_conditions.append(
+        (
+            df["desc_str"].apply(
+                lambda x: any(kw in x for kw in wealth_redemption_keywords)
+            ),
+            "理财/定存本金回流（已剔除）",
+            "wealth_redemption",
+            "medium" if wealth_result is None else "low",
+        )
+    )
+
+    for mask, reason, bucket, confidence in exclusion_conditions:
+        update_mask = mask & (df["excluded_reason"] == "")
+        df.loc[update_mask, "excluded_reason"] = reason
+        df.loc[update_mask, "excluded_bucket"] = bucket
+        df.loc[update_mask, "excluded_confidence"] = confidence
+
+    excluded_df = df[df["excluded_reason"] != ""].copy()
+    df = df[df["excluded_reason"] == ""].copy()
+    total_income = df["amount"].sum()
+    business_reimbursement_df = excluded_df[
+        excluded_df["excluded_reason"] == "单位报销/业务往来款（已剔除）"
+    ].copy()
+    excluded_income = excluded_df["amount"].sum() if not excluded_df.empty else 0.0
+
+    def build_records(sub_df):
+        if sub_df.empty:
+            return []
+        records = sub_df.apply(
+            lambda row: {
+                "date": row["date_str"],
+                "amount": float(row["amount"]),
+                "counterparty": row["cp_str"],
+                "description": row["desc_str"],
+                "reason": row.get("reason", row.get("excluded_reason", "")),
+                "rule_bucket": row.get("excluded_bucket")
+                or row.get("rule_bucket")
+                or row.get("category", ""),
+                "confidence": row.get("excluded_confidence")
+                or row.get("confidence", ""),
+            },
+            axis=1,
+        ).tolist()
+        records.sort(key=lambda x: x["amount"], reverse=True)
+        return records[:50]
+
+    business_reimbursement_details = build_records(business_reimbursement_df)
+    excluded_details = build_records(
+        excluded_df.rename(columns={"excluded_reason": "reason"})
+    )
+
+    if df.empty:
+        logger.info(
+            f"收入分类完成: 合法¥0.00(0.0%), 不明¥0.00(0.0%), 可疑¥0.00(0.0%), "
+            f"其中单位报销/业务往来款{utils.format_currency(business_reimbursement_df['amount'].sum() if not business_reimbursement_df.empty else 0)}"
+        )
+        return {
+            "classification_basis": "real_income_basis",
+            "legitimate_income": 0.0,
+            "unknown_income": 0.0,
+            "suspicious_income": 0.0,
+            "business_reimbursement_income": float(
+                business_reimbursement_df["amount"].sum()
+                if not business_reimbursement_df.empty
+                else 0.0
+            ),
+            "excluded_income": float(excluded_income),
+            "legitimate_ratio": 0.0,
+            "unknown_ratio": 0.0,
+            "suspicious_ratio": 0.0,
+            "business_reimbursement_ratio": 0.0,
+            "excluded_ratio": 1.0 if excluded_income > 0 else 0.0,
+            "legitimate_details": [],
+            "unknown_details": [],
+            "suspicious_details": [],
+            "business_reimbursement_details": business_reimbursement_details,
+            "excluded_details": excluded_details,
+            "excluded_breakdown": {
+                key: float(group["amount"].sum())
+                for key, group in excluded_df.groupby("excluded_bucket")
+                if key
+            },
+            "reason_breakdown": {},
+            "legitimate_count": 0,
+            "unknown_count": 0,
+            "suspicious_count": 0,
+            "business_reimbursement_count": len(business_reimbursement_details),
+            "excluded_count": len(excluded_details),
+        }
 
     # 向量化:关键词匹配
     # 合法收入关键词
@@ -3404,8 +4310,6 @@ def classify_income_sources(
     ]
     pension_keywords = ["职业年金", "养老金", "退休金", "退休费", "离休费"]
     invest_keywords = [
-        "理财赎回",
-        "基金赎回",
         "利息",
         "收益",
         "分红",
@@ -3414,8 +4318,6 @@ def classify_income_sources(
         "利息收入",
         "存款利息",
     ]
-    refund_keywords = ["退款", "冲正", "退回", "撤销", "退货退款"]
-    insurance_keywords = ["保险理赔", "保险金", "赔款", "理赔款"]
     welfare_keywords = ["补贴", "补助", "抚恤金", "救济金", "低保", "困难补助"]
 
     # 可疑收入关键词
@@ -3430,7 +4332,6 @@ def classify_income_sources(
         "马上金融",
     ]
     third_party_keywords = ["支付宝", "财付通", "微信支付", "微信", "零钱"]
-    cash_keywords = ["现金", "取现", "提现", "支取"]
 
     # 向量化:关键词匹配掩码
     df["has_salary_kw"] = df.apply(
@@ -3448,22 +4349,20 @@ def classify_income_sources(
     df["has_pension_kw"] = df["desc_str"].apply(
         lambda x: any(kw in x for kw in pension_keywords)
     )
-    df["has_invest_kw"] = df["desc_str"].apply(
+    df["has_invest_kw"] = df["text_str"].apply(
         lambda x: any(kw in x for kw in invest_keywords)
     )
     df["has_refund_kw"] = df["desc_str"].apply(
         lambda x: any(kw in x for kw in refund_keywords)
     )
-    df["has_insurance_kw"] = df["desc_str"].apply(
-        lambda x: any(kw in x for kw in insurance_keywords)
-    )
+    df["has_insurance_kw"] = df["has_insurance_signal"]
     df["has_welfare_kw"] = df["desc_str"].apply(
         lambda x: any(kw in x for kw in welfare_keywords)
     )
 
     # 机构特征词
-    institution_pattern = r"(研究所|局|院|中心|部|集团|公司)"
-    bank_payroll_pattern = r"(代发工资|内部户|代发)"
+    institution_pattern = r"(?:研究所|局|院|中心|部|集团|公司)"
+    bank_payroll_pattern = r"(?:代发工资|内部户|代发)"
     df["has_institution"] = df["cp_str"].str.contains(
         institution_pattern, case=False, na=False, regex=True
     )
@@ -3473,19 +4372,19 @@ def classify_income_sources(
 
     # 向量化:合法收入分类
     legitimate_conditions = [
-        (df["is_identified"], "理财/定存/自我转账(已识别)"),
-        (df["is_time_pattern"], "定期收入(时间模式识别)"),
+        (df["has_salary_kw"], "工资性收入", "salary", "high"),
+        (df["has_pension_kw"], "养老金/职业年金", "pension", "high"),
+        (df["has_invest_kw"], "投资收益", "investment_income", "medium"),
+        (df["has_insurance_kw"], "保险赔付/返还", "insurance_income", "high"),
+        (df["has_welfare_kw"], "福利补贴", "welfare", "medium"),
+        (df["has_gov_kw"], "政府机关转账(社保/公积金)", "government_income", "high"),
+        (df["is_time_pattern"], "定期收入(时间模式识别)", "time_pattern_income", "medium"),
         (
             (df["has_institution"] | df["has_payroll_pattern"]) & (df["amount"] > 0),
             "工资性收入(机构/代发单位)",
+            "salary_institution",
+            "high",
         ),
-        (df["has_salary_kw"], "工资性收入"),
-        (df["has_gov_kw"], "政府机关转账(社保/公积金)"),
-        (df["has_pension_kw"], "养老金/职业年金"),
-        (df["has_invest_kw"], "投资收益"),
-        (df["has_refund_kw"], "退款/冲正"),
-        (df["has_insurance_kw"], "保险理赔"),
-        (df["has_welfare_kw"], "福利补贴"),
     ]
 
     # 已知发薪单位(从config)
@@ -3494,7 +4393,9 @@ def classify_income_sources(
             lambda row: any(kw in row["cp_str"] for kw in config.KNOWN_SALARY_PAYERS),
             axis=1,
         )
-        legitimate_conditions.append((df["has_known_payer"], "已知发薪单位"))
+        legitimate_conditions.append(
+            (df["has_known_payer"], "已知发薪单位", "known_salary_payer", "high")
+        )
 
     if (
         hasattr(config, "USER_DEFINED_SALARY_PAYERS")
@@ -3506,7 +4407,9 @@ def classify_income_sources(
             ),
             axis=1,
         )
-        legitimate_conditions.append((df["has_user_payer"], "用户定义发薪单位"))
+        legitimate_conditions.append(
+            (df["has_user_payer"], "用户定义发薪单位", "user_salary_payer", "high")
+        )
 
     # 人力资源公司
     if hasattr(config, "HR_COMPANY_KEYWORDS") and config.HR_COMPANY_KEYWORDS:
@@ -3514,17 +4417,24 @@ def classify_income_sources(
             lambda row: any(kw in row["cp_str"] for kw in config.HR_COMPANY_KEYWORDS),
             axis=1,
         )
-        legitimate_conditions.append((df["has_hr"], "人力资源公司"))
+        legitimate_conditions.append((df["has_hr"], "人力资源公司", "hr_company", "high"))
 
     # 理财赎回关键词
     if (
         hasattr(config, "WEALTH_REDEMPTION_KEYWORDS")
         and config.WEALTH_REDEMPTION_KEYWORDS
     ):
-        df["has_wealth_kw"] = df["desc_str"].apply(
+        df["has_wealth_kw"] = df["text_str"].apply(
             lambda x: any(kw in x for kw in config.WEALTH_REDEMPTION_KEYWORDS)
         )
-        legitimate_conditions.append((df["has_wealth_kw"], "理财赎回/收益"))
+        legitimate_conditions.append(
+            (
+                df["has_wealth_kw"] & ~df["desc_str"].str.contains("赎回", na=False),
+                "理财收益",
+                "wealth_income",
+                "medium",
+            )
+        )
 
     # 向量化:可疑收入分类
     df["has_loan_kw"] = df.apply(
@@ -3536,38 +4446,49 @@ def classify_income_sources(
     df["has_third_party"] = df["cp_str"].apply(
         lambda x: any(kw in x for kw in third_party_keywords)
     )
-    df["has_cash_kw"] = df["desc_str"].apply(
-        lambda x: any(kw in x for kw in cash_keywords)
-    )
+    df["has_cash_kw"] = df["has_cash_deposit_marker"]
 
     # 大额阈值
     high_risk_min = getattr(config, "INCOME_HIGH_RISK_MIN", 50000)
     large_cash_threshold = getattr(config, "LARGE_CASH_THRESHOLD", 50000)
 
     suspicious_conditions = [
-        (df["has_loan_kw"], "借贷平台"),
+        (df["has_loan_kw"], "借贷平台", "loan_platform", "high"),
         (
             (df["has_third_party"]) & (df["amount"] >= high_risk_min),
             "第三方支付大额转入",
+            "third_party_large",
+            "high",
         ),
-        ((df["has_cash_kw"]) & (df["amount"] >= large_cash_threshold), "大额现金存入"),
+        (
+            (df["has_cash_kw"]) & (df["amount"] >= large_cash_threshold),
+            "大额现金存入",
+            "cash_large",
+            "high",
+        ),
     ]
 
     # 向量化:应用分类
     df["category"] = "unknown"  # 默认不明收入
     df["reason"] = "来源不明"
+    df["rule_bucket"] = "unknown"
+    df["confidence"] = "low"
 
     # 应用合法收入分类
-    for mask, reason in legitimate_conditions:
+    for mask, reason, bucket, confidence in legitimate_conditions:
         update_mask = mask & (df["category"] == "unknown")
         df.loc[update_mask, "category"] = "legitimate"
         df.loc[update_mask, "reason"] = reason
+        df.loc[update_mask, "rule_bucket"] = bucket
+        df.loc[update_mask, "confidence"] = confidence
 
     # 应用可疑收入分类
-    for mask, reason in suspicious_conditions:
+    for mask, reason, bucket, confidence in suspicious_conditions:
         update_mask = mask & (df["category"] == "unknown")
         df.loc[update_mask, "category"] = "suspicious"
         df.loc[update_mask, "reason"] = reason
+        df.loc[update_mask, "rule_bucket"] = bucket
+        df.loc[update_mask, "confidence"] = confidence
 
     # 第三方支付小额、现金小额分类为不明收入
     third_party_small_mask = (
@@ -3576,6 +4497,8 @@ def classify_income_sources(
         & (df["category"] == "unknown")
     )
     df.loc[third_party_small_mask, "reason"] = "第三方支付小额转入"
+    df.loc[third_party_small_mask, "rule_bucket"] = "third_party_small"
+    df.loc[third_party_small_mask, "confidence"] = "medium"
 
     cash_small_mask = (
         (df["has_cash_kw"])
@@ -3583,36 +4506,45 @@ def classify_income_sources(
         & (df["category"] == "unknown")
     )
     df.loc[cash_small_mask, "reason"] = "小额现金存入"
+    df.loc[cash_small_mask, "rule_bucket"] = "cash_small"
+    df.loc[cash_small_mask, "confidence"] = "medium"
+
+    blank_structured_mask = (
+        df["is_blank_counterparty"] & df["is_blank_description"] & (df["category"] == "unknown")
+    )
+    blank_amount_repeat = (
+        df.loc[blank_structured_mask, "amount"].round(2).value_counts().to_dict()
+    )
+    df["blank_amount_repeat"] = df["amount"].round(2).map(blank_amount_repeat).fillna(0)
+    blank_large_mask = blank_structured_mask & (df["amount"] >= 10000)
+    df.loc[blank_large_mask, "reason"] = "空白字段大额入账"
+    df.loc[blank_large_mask, "rule_bucket"] = "blank_large"
+    df.loc[blank_large_mask, "confidence"] = "medium"
+
+    blank_frequent_mask = (
+        blank_structured_mask
+        & ~blank_large_mask
+        & (df["blank_amount_repeat"] >= 3)
+    )
+    df.loc[blank_frequent_mask, "reason"] = "空白字段高频入账"
+    df.loc[blank_frequent_mask, "rule_bucket"] = "blank_frequent"
+    df.loc[blank_frequent_mask, "confidence"] = "low"
 
     # 个人转账识别(2-4个汉字)
     df["is_individual"] = df["cp_str"].str.match(r"^[\u4e00-\u9fa5]{2,4}$", na=False)
     individual_mask = df["is_individual"] & (df["category"] == "unknown")
     df.loc[individual_mask, "reason"] = "个人转账"
+    df.loc[individual_mask, "rule_bucket"] = "individual_transfer"
+    df.loc[individual_mask, "confidence"] = "medium"
 
     # 向量化:统计计算
     legitimate_df = df[df["category"] == "legitimate"].copy()
     suspicious_df = df[df["category"] == "suspicious"].copy()
     unknown_df = df[df["category"] == "unknown"].copy()
-
     legitimate_income = legitimate_df["amount"].sum()
     suspicious_income = suspicious_df["amount"].sum()
     unknown_income = unknown_df["amount"].sum()
-
-    # 构建明细记录
-    def build_records(sub_df):
-        records = sub_df.apply(
-            lambda row: {
-                "date": row["date_str"],
-                "amount": float(row["amount"]),
-                "counterparty": row["cp_str"],
-                "description": row["desc_str"],
-                "reason": row["reason"],
-            },
-            axis=1,
-        ).tolist()
-        # 按金额降序排序
-        records.sort(key=lambda x: x["amount"], reverse=True)
-        return records[:50]  # 只保留前50笔
+    business_reimbursement_income = business_reimbursement_df["amount"].sum()
 
     legitimate_details = build_records(legitimate_df)
     suspicious_details = build_records(suspicious_df)
@@ -3622,31 +4554,71 @@ def classify_income_sources(
     legitimate_ratio = legitimate_income / total_income if total_income > 0 else 0
     unknown_ratio = unknown_income / total_income if total_income > 0 else 0
     suspicious_ratio = suspicious_income / total_income if total_income > 0 else 0
+    business_reimbursement_ratio = (
+        business_reimbursement_income / total_income if total_income > 0 else 0
+    )
+    excluded_ratio = (
+        excluded_income / (total_income + excluded_income)
+        if (total_income + excluded_income) > 0
+        else 0
+    )
 
     # 按金额降序排序
     legitimate_details.sort(key=lambda x: x["amount"], reverse=True)
     unknown_details.sort(key=lambda x: x["amount"], reverse=True)
     suspicious_details.sort(key=lambda x: x["amount"], reverse=True)
+    business_reimbursement_details.sort(key=lambda x: x["amount"], reverse=True)
+    excluded_breakdown = {
+        key: float(group["amount"].sum())
+        for key, group in excluded_df.groupby("excluded_bucket")
+        if key
+    }
+    reason_breakdown = {}
+    for category_name, category_df in (
+        ("legitimate", legitimate_df),
+        ("unknown", unknown_df),
+        ("suspicious", suspicious_df),
+    ):
+        if category_df.empty:
+            continue
+        reason_breakdown[category_name] = {
+            reason: float(group["amount"].sum())
+            for reason, group in category_df.groupby("reason")
+            if reason
+        }
 
     logger.info(
         f"收入分类完成: 合法{utils.format_currency(legitimate_income)}({legitimate_ratio:.1%}), "
         f"不明{utils.format_currency(unknown_income)}({unknown_ratio:.1%}), "
-        f"可疑{utils.format_currency(suspicious_income)}({suspicious_ratio:.1%})"
+        f"可疑{utils.format_currency(suspicious_income)}({suspicious_ratio:.1%}), "
+        f"其中单位报销/业务往来款{utils.format_currency(business_reimbursement_income)}({business_reimbursement_ratio:.1%}), "
+        f"已剔除非真实收入{utils.format_currency(excluded_income)}"
     )
 
     return {
+        "classification_basis": "real_income_basis",
         "legitimate_income": float(legitimate_income),
         "unknown_income": float(unknown_income),
         "suspicious_income": float(suspicious_income),
+        "business_reimbursement_income": float(business_reimbursement_income),
+        "excluded_income": float(excluded_income),
         "legitimate_ratio": float(legitimate_ratio),
         "unknown_ratio": float(unknown_ratio),
         "suspicious_ratio": float(suspicious_ratio),
+        "business_reimbursement_ratio": float(business_reimbursement_ratio),
+        "excluded_ratio": float(excluded_ratio),
         "legitimate_count": len(legitimate_details),
         "unknown_count": len(unknown_details),
         "suspicious_count": len(suspicious_details),
+        "business_reimbursement_count": len(business_reimbursement_details),
+        "excluded_count": len(excluded_details),
         "legitimate_details": legitimate_details[:50],  # 只保留前50笔
         "unknown_details": unknown_details[:50],
         "suspicious_details": suspicious_details[:50],
+        "business_reimbursement_details": business_reimbursement_details[:50],
+        "excluded_details": excluded_details[:50],
+        "excluded_breakdown": excluded_breakdown,
+        "reason_breakdown": reason_breakdown,
     }
 
 

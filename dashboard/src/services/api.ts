@@ -307,6 +307,18 @@ class ApiService {
             throw new Error(`预览失败: ${response.status}`);
         }
 
+        const contentType = response.headers.get('content-type') || '';
+
+        if (contentType.includes('text/html')) {
+            const content = await response.text();
+            return {
+                success: true,
+                filename,
+                type: 'html',
+                content,
+            };
+        }
+
         return response.json();
     }
 
@@ -314,20 +326,18 @@ class ApiService {
      * 获取缓存信息
      */
     async getCacheInfo(): Promise<{
-        hasCachedData: boolean;
-        isValid: boolean;
-        reason: string;
-        source: 'memory' | 'disk' | null;
-        meta: {
-            version?: string;
-            inputDirectory?: string;
-            outputDirectory?: string;
-            analysisTime?: string;
-            sourceFingerprint?: {
-                fileCount: number;
-                totalSize: number;
-            };
-        } | null;
+        success: boolean;
+        data?: {
+            cacheDir: string;
+            cacheVersion: string;
+            files: Record<string, {
+                exists: boolean;
+                size?: number;
+                modified?: string;
+                valid?: boolean;
+            }>;
+        };
+        error?: string;
     }> {
         return this.request('/api/cache/info');
     }

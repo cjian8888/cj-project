@@ -40,8 +40,8 @@ class AnalysisThresholds:
     cash_single_large: float = 3.0  # 单笔大额现金操作阈值（万元）
 
     # 风险等级阈值
-    risk_score_low: int = 30  # 低风险分数上限
-    risk_score_high: int = 70  # 高风险分数下限
+    risk_score_low: int = 30  # 关注级分数下限
+    risk_score_high: int = 42  # 高风险分数下限
 
 
 class PersonalFundFeatureAnalyzer:
@@ -80,6 +80,59 @@ class PersonalFundFeatureAnalyzer:
             return amount  # 万元 → 万元
         else:
             raise ValueError(f"不支持的单位: {unit}")
+
+    def _normalize_transactions(self, transactions: pd.DataFrame) -> pd.DataFrame:
+        """规范化交易字段，避免因列名缺失导致分析失败。"""
+        if transactions is None or not isinstance(transactions, pd.DataFrame):
+            return pd.DataFrame(
+                columns=[
+                    "date",
+                    "transaction_type",
+                    "amount",
+                    "counterparty",
+                    "description",
+                    "account",
+                    "account_number",
+                    "direction",
+                ]
+            )
+
+        tx = transactions.copy()
+
+        if "amount" not in tx.columns:
+            tx["amount"] = 0
+        tx["amount"] = pd.to_numeric(tx["amount"], errors="coerce").fillna(0.0)
+
+        if "counterparty" not in tx.columns:
+            tx["counterparty"] = ""
+        tx["counterparty"] = tx["counterparty"].fillna("").astype(str)
+
+        if "description" not in tx.columns:
+            tx["description"] = ""
+        tx["description"] = tx["description"].fillna("").astype(str)
+
+        if "direction" not in tx.columns:
+            tx["direction"] = "other"
+        tx["direction"] = tx["direction"].fillna("other").astype(str)
+
+        if "transaction_type" not in tx.columns:
+            tx["transaction_type"] = tx["direction"].map(
+                {"income": "转账收入", "expense": "转账支出"}
+            ).fillna("其他")
+        tx["transaction_type"] = tx["transaction_type"].fillna("其他").astype(str)
+
+        if "account" not in tx.columns and "account_number" in tx.columns:
+            tx["account"] = tx["account_number"]
+        if "account_number" not in tx.columns and "account" in tx.columns:
+            tx["account_number"] = tx["account"]
+        if "account" not in tx.columns:
+            tx["account"] = ""
+        if "account_number" not in tx.columns:
+            tx["account_number"] = ""
+
+        tx["account"] = tx["account"].fillna("").astype(str)
+        tx["account_number"] = tx["account_number"].fillna("").astype(str)
+        return tx
 
     def __init__(self, thresholds: Optional[AnalysisThresholds] = None):
         """初始化分析器"""
@@ -141,6 +194,7 @@ class PersonalFundFeatureAnalyzer:
             分析结果字典
         """
         family_members = family_members or []
+        person_transactions = self._normalize_transactions(person_transactions)
 
         # 执行各维度分析
         dimensions = {
@@ -215,22 +269,33 @@ class PersonalFundFeatureAnalyzer:
         coverage_ratio = (wage_income / total_expense * 100) if total_expense > 0 else 100
         extra_ratio = (extra_income / total_income * 100) if total_income > 0 else 0
 
-        # 评分
-        score = 0
-        if coverage_ratio < self.thresholds.income_coverage_ratio_low:
-            score = 20
-        elif coverage_ratio < self.thresholds.income_coverage_ratio_high:
-            score = 10
-        else:
-            score = 5
+        # 评分（连续评分，提升区分度）
+        score = 0.0
+        low_threshold_pct = self.thresholds.income_coverage_ratio_low * 100
+        high_threshold_pct = self.thresholds.income_coverage_ratio_high * 100
+
+        if coverage_ratio < low_threshold_pct:
+            score += 12.0 + min(6.0, (low_threshold_pct - coverage_ratio) / 5.0)
+        elif coverage_ratio < high_threshold_pct:
+            score += 6.0 + min(6.0, (high_threshold_pct - coverage_ratio) / 8.0)
+
+        if gap > 0 and total_expense > 0:
+            gap_ratio = gap / total_expense
+            score += min(6.0, gap_ratio * 12.0)
+
+        high_extra_ratio_pct = self.thresholds.extra_income_ratio_high * 100
+        if extra_ratio > high_extra_ratio_pct:
+            score += min(4.0, (extra_ratio - high_extra_ratio_pct) / 10.0)
+
+        score = round(min(20.0, max(0.0, score)), 1)
 
         # 识别额外收入类型
         extra_income_types = self._identify_extra_income_types(transactions)
 
         # 生成描述
-        if coverage_ratio < self.thresholds.income_coverage_ratio_low:
+        if coverage_ratio < low_threshold_pct:
             description = f"收支严重不匹配，工资收入仅能覆盖{coverage_ratio:.1f}%的消费支出，存在{gap:.2f}万元资金缺口。"
-        elif coverage_ratio < self.thresholds.income_coverage_ratio_high:
+        elif coverage_ratio < high_threshold_pct:
             description = f"收支匹配度偏低，工资收入覆盖{coverage_ratio:.1f}%的消费支出，存在{gap:.2f}万元资金缺口。"
         else:
             description = f"收支基本匹配，工资收入能够覆盖消费支出。"
@@ -289,24 +354,55 @@ class PersonalFundFeatureAnalyzer:
             borrow_txns, family_members
         )
 
-        # 计算评分
-        score = 0
+        # 计算评分（连续评分，提升区分度）
+        score = 0.0
         if borrow_count >= self.thresholds.borrowing_freq_high:
-            score = 20
+            score += 12.0 + min(
+                4.0, (borrow_count - self.thresholds.borrowing_freq_high) / 5.0
+            )
         elif borrow_count >= 5:
-            score = 10
-        else:
-            score = 0
+            score += 6.0 + min(4.0, (borrow_count - 5) / 5.0)
+        elif borrow_count > 0:
+            score += min(5.0, borrow_count * 1.2)
 
         # 单笔大额借贷加分
         if not borrow_txns.empty:
             max_borrow = self.to_wan_yuan(borrow_txns["amount"].max(), 'fen')
             if max_borrow >= self.thresholds.borrowing_amount_large:
-                score = min(20, score + 5)
+                score += min(
+                    5.0,
+                    2.0
+                    + (max_borrow - self.thresholds.borrowing_amount_large)
+                    / max(self.thresholds.borrowing_amount_large, 1.0)
+                    * 2.0,
+                )
+        else:
+            max_borrow = 0.0
+
+        # 借还比加分（借多还少风险更高）
+        borrow_repay_ratio = 0.0
+        if borrow_total > 0:
+            if repay_total > 0:
+                borrow_repay_ratio = borrow_total / repay_total
+            else:
+                borrow_repay_ratio = float("inf")
+
+            if borrow_repay_ratio >= self.thresholds.borrowing_repayment_ratio_high:
+                if borrow_repay_ratio == float("inf"):
+                    score += 4.0
+                else:
+                    score += min(
+                        4.0,
+                        1.0
+                        + (borrow_repay_ratio - self.thresholds.borrowing_repayment_ratio_high)
+                        * 2.0,
+                    )
 
         # 敏感对手方加分
         if len(sensitive_counterparties) > 0:
-            score = min(20, score + 5)
+            score += min(4.0, 1.0 + len(sensitive_counterparties) * 1.2)
+
+        score = round(min(20.0, max(0.0, score)), 1)
 
         # 生成描述
         if borrow_count >= self.thresholds.borrowing_freq_high:
@@ -380,22 +476,36 @@ class PersonalFundFeatureAnalyzer:
         total_income = person_profile.get("total_income", 0)
 
         # 识别大额消费（threshold 使用万元单位，需要转换）
-        large_consume_mask = consume_txns["amount"] >= self.thresholds.consumption_amount_large * 10000
+        large_consume_mask = consume_txns["amount"] >= self.thresholds.consumption_amount_large * 100000
         large_consumes = consume_txns[large_consume_mask]
 
         # 计算消费收入比
         consumption_income_ratio = (total_consumption / total_income) if total_income > 0 else 0
 
-        # 计算评分
-        score = 0
+        # 计算评分（连续评分，提升区分度）
+        score = 0.0
         if consumption_income_ratio >= self.thresholds.consumption_income_ratio_high:
-            score = 20
+            score += 12.0 + min(
+                6.0,
+                (consumption_income_ratio - self.thresholds.consumption_income_ratio_high)
+                * 8.0,
+            )
         elif consumption_income_ratio >= 0.8:
-            score = 10
-        elif len(large_consumes) >= self.thresholds.consumption_freq_high:
-            score = 10
-        else:
-            score = 0
+            score += 7.0 + min(5.0, (consumption_income_ratio - 0.8) * 10.0)
+        elif consumption_income_ratio >= 0.5:
+            score += 3.0 + min(3.0, (consumption_income_ratio - 0.5) * 6.0)
+
+        if len(large_consumes) >= self.thresholds.consumption_freq_high:
+            score += 4.0
+        elif len(large_consumes) > 0:
+            score += min(3.0, len(large_consumes) * 0.6)
+
+        if not large_consumes.empty:
+            max_large_consume = self.to_wan_yuan(large_consumes["amount"].max(), 'fen')
+            if max_large_consume >= self.thresholds.consumption_amount_large * 2:
+                score += 2.0
+
+        score = round(min(20.0, max(0.0, score)), 1)
 
         # 生成描述
         if consumption_income_ratio >= self.thresholds.consumption_income_ratio_high:
@@ -411,7 +521,7 @@ class PersonalFundFeatureAnalyzer:
         evidence = [
             {"type": "消费总额", "value": f"{total_consumption:.2f}万元", "description": "累计消费金额"},
             {"type": "消费笔数", "value": str(len(consume_txns)), "description": "消费交易次数"},
-            {"type": "消费收入比", "value": f"{consumption_income_ratio:.1f}%", "description": "消费占收入比例"},
+            {"type": "消费收入比", "value": f"{consumption_income_ratio * 100:.1f}%", "description": "消费占收入比例"},
             {"type": "大额消费笔数", "value": str(len(large_consumes)), "description": f"单笔超过{self.thresholds.consumption_amount_large}万元的消费次数"}
         ]
 
@@ -455,10 +565,11 @@ class PersonalFundFeatureAnalyzer:
         注意：所有金额统一使用"万元"单位
         """
         # 识别转账交易
-        transfer_mask = transactions["transaction_type"].isin(["转账", "转账支出"])
+        transfer_mask = transactions["transaction_type"].isin(["转账", "转账支出", "转账收入"])
+        transfer_txns = transactions[transfer_mask].copy()
 
         # 【修复】识别并排除家庭内部转账
-        if family_members:
+        if family_members and not transfer_txns.empty:
             family_mask = transfer_txns["counterparty"].isin(family_members)
             external_transfer_txns = transfer_txns[~family_mask]
             family_internal_total = self.to_wan_yuan(
@@ -469,40 +580,55 @@ class PersonalFundFeatureAnalyzer:
             family_internal_total = 0
 
         # 使用外部转账计算风险和统计
-        transfer_total = self.to_wan_yuan(external_transfer_txns["amount"].sum(), 'fen')
+        transfer_total = self.to_wan_yuan(external_transfer_txns["amount"].sum(), 'fen') if not external_transfer_txns.empty else 0
         transfer_count = len(external_transfer_txns)
 
-        transfer_txns = transactions[transfer_mask]
-
-        # 计算转账数据（交易数据是分，需要转换为万元）
-        transfer_total = self.to_wan_yuan(transfer_txns["amount"].sum(), 'fen') if not transfer_txns.empty else 0
-        transfer_count = len(transfer_txns)
-
         # 识别涉及账户
-        accounts = transactions["account_number"].unique()
+        account_col = "account_number" if "account_number" in transactions.columns else "account"
+        accounts = transactions[account_col].unique()
         account_count = len(accounts)
 
         # 识别跨账户流转
-        unique_counterparties = transfer_txns["counterparty"].nunique() if not transfer_txns.empty else 0
+        unique_counterparties = external_transfer_txns["counterparty"].nunique() if not external_transfer_txns.empty else 0
 
-        # 计算评分
-        score = 0
+        # 计算评分（连续评分，提升区分度）
+        score = 0.0
         if transfer_count >= self.thresholds.transfer_freq_high:
-            score = 20
-        elif transfer_count >= 20:  # 降低阈值，使更多人进入"关注级"
-            score = 15
+            score += 11.0 + min(
+                4.0, (transfer_count - self.thresholds.transfer_freq_high) / 10.0
+            )
         elif transfer_count >= 10:
-            score = 10
-        elif account_count >= self.thresholds.account_diversity_high:
-            score = 10
-        else:
-            score = 0
+            score += 6.0 + min(4.0, (transfer_count - 10) / 10.0)
+        elif transfer_count > 0:
+            score += min(4.0, transfer_count / 3.0)
+
+        if account_count >= self.thresholds.account_diversity_high:
+            score += min(
+                4.0, 2.0 + (account_count - self.thresholds.account_diversity_high) * 0.5
+            )
+        elif account_count >= 3:
+            score += 1.5
+
+        if unique_counterparties >= 10:
+            score += 2.5
+        elif unique_counterparties >= 5:
+            score += 1.5
 
         # 大额转账加分
-        if not transfer_txns.empty:
-            max_transfer = self.to_wan_yuan(transfer_txns["amount"].max(), 'fen')
+        if not external_transfer_txns.empty:
+            max_transfer = self.to_wan_yuan(external_transfer_txns["amount"].max(), 'fen')
             if max_transfer >= self.thresholds.transfer_amount_large:
-                score = min(20, score + 5)
+                score += min(
+                    4.0,
+                    2.0
+                    + (max_transfer - self.thresholds.transfer_amount_large)
+                    / max(self.thresholds.transfer_amount_large, 1.0)
+                    * 2.0,
+                )
+        else:
+            max_transfer = 0.0
+
+        score = round(min(20.0, max(0.0, score)), 1)
 
         # 生成描述
         if transfer_count >= self.thresholds.transfer_freq_high:
@@ -522,8 +648,8 @@ class PersonalFundFeatureAnalyzer:
             {"type": "交易对手方数", "value": str(unique_counterparties), "description": "转账涉及的对手方数量"}
         ]
 
-        if not transfer_txns.empty:
-            max_transfer = self.to_wan_yuan(transfer_txns["amount"].max(), 'fen')
+        if not external_transfer_txns.empty:
+            max_transfer = self.to_wan_yuan(external_transfer_txns["amount"].max(), 'fen')
             evidence.append({
                 "type": "最大单笔转账",
                 "value": f"{max_transfer:.2f}万元",
@@ -531,13 +657,21 @@ class PersonalFundFeatureAnalyzer:
             })
 
         # 分析资金主要流向
-        fund_flow_directions = self._analyze_fund_flow_direction(transfer_txns, person_profile)
+        fund_flow_directions = self._analyze_fund_flow_direction(external_transfer_txns, person_profile)
         if fund_flow_directions:
             evidence.append({
                 "type": "资金主要流向",
                 "value": "、".join(fund_flow_directions[:3]),
                 "description": "资金主要流向领域"
             })
+        if family_internal_total > 0:
+            evidence.append(
+                {
+                    "type": "家庭内部转账",
+                    "value": f"{family_internal_total:.2f}万元",
+                    "description": "已从外部资金流向风险统计中排除",
+                }
+            )
 
         return {
             "score": score,
@@ -548,6 +682,7 @@ class PersonalFundFeatureAnalyzer:
                 "transfer_count": transfer_count,
                 "account_count": account_count,
                 "unique_counterparties": unique_counterparties,
+                "family_internal_total": family_internal_total,
                 "fund_flow_directions": fund_flow_directions
             }
         }
@@ -568,23 +703,40 @@ class PersonalFundFeatureAnalyzer:
         cash_count = len(cash_txns)
 
         # 识别大额现金操作（threshold 使用万元单位，需要转换）
-        large_cash_mask = cash_txns["amount"] >= self.thresholds.cash_amount_large * 10000
+        large_cash_mask = cash_txns["amount"] >= self.thresholds.cash_amount_large * 100000
         large_cash_txns = cash_txns[large_cash_mask]
 
-        # 计算评分
-        score = 0
+        # 计算评分（连续评分，提升区分度）
+        score = 0.0
         if cash_count >= self.thresholds.cash_freq_high:
-            score = 20
+            score += 10.0 + min(4.0, (cash_count - self.thresholds.cash_freq_high) * 0.6)
         elif cash_count >= 3:
-            score = 10
-        else:
-            score = 0
+            score += 6.0 + min(3.0, (cash_count - 3) * 0.7)
+        elif cash_count > 0:
+            score += min(4.0, cash_count * 1.2)
 
         # 大额现金操作加分
         if not cash_txns.empty:
             max_single_cash = self.to_wan_yuan(cash_txns["amount"].max(), 'fen')
             if max_single_cash >= self.thresholds.cash_single_large:
-                score = min(20, score + 5)
+                score += min(
+                    4.0,
+                    1.0
+                    + (max_single_cash - self.thresholds.cash_single_large)
+                    / max(self.thresholds.cash_single_large, 1.0)
+                    * 3.0,
+                )
+        else:
+            max_single_cash = 0.0
+
+        if cash_total >= self.thresholds.cash_amount_large:
+            score += min(
+                4.0,
+                1.5
+                + (cash_total - self.thresholds.cash_amount_large)
+                / max(self.thresholds.cash_amount_large, 1.0)
+                * 2.0,
+            )
 
         # 生成描述
         if cash_count >= self.thresholds.cash_freq_high:
@@ -612,13 +764,17 @@ class PersonalFundFeatureAnalyzer:
             })
 
         # 分析现金账户分散情况
-        cash_accounts = cash_txns["account"].nunique() if not cash_txns.empty else 0
+        account_col = "account" if "account" in cash_txns.columns else "account_number"
+        cash_accounts = cash_txns[account_col].nunique() if (not cash_txns.empty and account_col in cash_txns.columns) else 0
         if cash_accounts > 1:
+            score += min(2.0, (cash_accounts - 1) * 0.7)
             evidence.append({
                 "type": "涉及现金账户数",
                 "value": str(cash_accounts),
                 "description": "涉及现金操作的账户数量"
             })
+
+        score = round(min(20.0, max(0.0, score)), 1)
 
         return {
             "score": score,
@@ -735,13 +891,11 @@ class PersonalFundFeatureAnalyzer:
 
         return list(set(flows))
 
-    def _calculate_risk_level(self, evidence_score: int) -> str:
+    def _calculate_risk_level(self, evidence_score: float) -> str:
         """计算风险等级"""
         if evidence_score >= self.thresholds.risk_score_high:
             return "高风险"
-        elif evidence_score >= 35:  # 降低阈值（从30改为35），使更多人进入"关注级"
-            return "关注级"
-        elif evidence_score >= 15:  # 降低阈值（从0改为15），使更多人离开"低风险"
+        elif evidence_score >= self.thresholds.risk_score_low:
             return "关注级"
         else:
             return "低风险"

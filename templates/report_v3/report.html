@@ -7,9 +7,9 @@
 {% set show_summary = enabled_sections|length == 0 or 'summary' in enabled_sections %}
 {% set show_assets = enabled_sections|length == 0 or 'assets' in enabled_sections %}
 {% set show_risks = enabled_sections|length == 0 or 'risks' in enabled_sections %}
+{% set title_subject = report.get('_title_subject', '相关人员') %}
 {# 报告标题 #}
-<div class="report-title">关于{{ report.preface.persons_queried[0] if report.preface.persons_queried else '相关人员'
-    }}等信息查询结果分析报告</div>
+<div class="report-title">关于{{ title_subject }}等信息查询结果分析报告</div>
 
 {# 报告开头说明 #}
 {% if show_summary %}
@@ -66,6 +66,14 @@
                 {{ member.name }}（{{ member.relation }}）{% if not loop.last %}、{% endif %}
                 {% endfor %}
             </p>
+            {% if family.pending_members %}
+            <p><strong>待补数据成员：</strong>
+                {% for member in family.pending_members %}
+                {{ member.name }}（{{ member.relation }}）{% if not loop.last %}、{% endif %}
+                {% endfor %}
+                。上述成员已纳入家庭关系识别，但当前未见可展开的银行流水画像。
+            </p>
+            {% endif %}
         </div>
         {% endif %}
 

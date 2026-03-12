@@ -2053,9 +2053,9 @@ function AuditReportTab() {
 
     // P2-3: 预览报告
     const handlePreview = async (filename: string) => {
-        // 只支持 txt/html 文件预览
+        // 只支持 txt/html/markdown 文件预览
         const ext = filename.toLowerCase().split('.').pop();
-        if (!['txt', 'html', 'htm'].includes(ext || '')) {
+        if (!['txt', 'html', 'htm', 'md'].includes(ext || '')) {
             // 不支持的文件类型直接下载
             handleDownload(filename);
             return;

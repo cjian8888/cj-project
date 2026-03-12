@@ -32,16 +32,11 @@ const defaultConfig: AppConfig = {
         timeWindow: 48,
     },
     analysisModules: {
-        profileAnalysis: true,
-        suspicionDetection: true,
-        assetAnalysis: true,
-        dataValidation: true,
         fundPenetration: true,
         relatedParty: true,
         multiSourceCorrelation: true,
         loanAnalysis: true,
         incomeAnalysis: true,
-        flowVisualization: true,
         mlAnalysis: true,
         timeSeriesAnalysis: true,
         clueAggregation: true,
@@ -267,6 +262,7 @@ export function AppProvider({ children }: AppProviderProps) {
                 const phaseText = (status as any).currentPhase ?? (status as any).phase ?? '';
                 setAnalysis(prev => ({
                     ...prev,
+                    isRunning: status.status === 'running',
                     progress: status.progress,
                     currentPhase: phaseText,
                     status: status.status as AnalysisState['status'],
@@ -391,19 +387,23 @@ export function AppProvider({ children }: AppProviderProps) {
 
         try {
             // 调用后端停止分析
-            await api.stopAnalysis();
-            addLog({ time: timeStr, level: 'WARN', msg: '■ 分析已被用户终止' });
-        } catch (error) {
-            addLog({ time: timeStr, level: 'WARN', msg: '■ 分析终止（后端可能已停止）' });
-        }
+            const result = await api.stopAnalysis();
+            const isStopping = result.status === 'stopping';
+            addLog({
+                time: timeStr,
+                level: 'WARN',
+                msg: isStopping ? '■ 已发送停止请求，等待当前步骤安全退出' : result.message,
+            });
 
-        setAnalysis(prev => ({
-            ...prev,
-            isRunning: false,
-            status: 'idle',
-            progress: 0,
-            currentPhase: '已就绪，可重新开始'
-        }));
+            setAnalysis(prev => ({
+                ...prev,
+                isRunning: isStopping,
+                status: (isStopping ? 'running' : 'idle') as AnalysisState['status'],
+                currentPhase: isStopping ? '正在停止分析...' : '已就绪，可重新开始',
+            }));
+        } catch (error) {
+            addLog({ time: timeStr, level: 'WARN', msg: '■ 停止请求失败，后端可能已停止或不可达' });
+        }
     }, [addLog]);
 
     const updateAnalysisProgress = useCallback((progress: number, phase: string) => {

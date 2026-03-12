@@ -80,14 +80,14 @@ income_analysis:
       
       - level: "high_risk"  # 20% - 40%
         phrases:
-          summary: "{name}工资收入占比偏低，非工资收入占主导地位，存在资金来源不明风险"
-          detail: "工资收入仅{salary_ratio}%，远低于正常水平。非工资收入{other_income_wan}万元来源需重点核实"
+          summary: "{name}工资收入占比偏低，非工资收入占主导地位"
+          detail: "工资收入仅{salary_ratio}%，远低于正常水平。非工资收入{other_income_wan}万元，建议结合收入分类结果核实构成"
           suggestion: "【重点关注】建议立即核查其他收入来源，包括但不限于：投资收益、兼职收入、家庭成员资助、借贷资金等"
       
       - level: "critical"  # < 20%
         phrases:
-          summary: "⚠️ {name}工资收入占比极低，存在重大资金来源不明嫌疑"
-          detail: "工资收入仅占{salary_ratio}%，异常偏低。真实收入{real_income_wan}万元中{other_income_wan}万元来源不明，需彻查"
+          summary: "⚠️ {name}工资收入占比极低，非工资收入异常偏高"
+          detail: "工资收入仅占{salary_ratio}%，异常偏低。真实收入{real_income_wan}万元中非工资收入{other_income_wan}万元，需结合收入分类结果进一步核实"
           suggestion: "【高度可疑】建议：1)立即约谈本人核实资金来源；2)调取相关合同、发票等证明材料；3)核查是否存在权钱交易、利益输送等违法违纪行为"
  
   # 历史存量赎回分析（针对有理财赎回行为的人群）
@@ -253,12 +253,12 @@ fund_flow_analysis:
       - level: "warning"
         phrases:
           summary: "存在需关注资金流向"
-          detail: "{name}存在资金流向疑点：来源不明收入{unknown_income_wan}万元，并与可疑对手方存在{suspicious_count}笔资金往来"
+          detail: "{name}存在资金流向疑点：来源待核实收入{unknown_income_wan}万元（其中狭义来源不明{source_unknown_wan}万元），并与可疑对手方存在{suspicious_count}笔资金往来"
           suggestion: "建议核实不明收入来源及交易对手背景"
       - level: "high_risk"
         phrases:
           summary: "⚠️ 资金流向风险较高"
-          detail: "{name}存在较大规模来源不明收入{unknown_income_wan}万元，且与可疑对手方往来{suspicious_count}笔，资金来源合法性存疑"
+          detail: "{name}存在较大规模来源待核实收入{unknown_income_wan}万元（其中狭义来源不明{source_unknown_wan}万元），且与可疑对手方往来{suspicious_count}笔，资金来源合法性存疑"
           suggestion: "【重点关注】建议立即开展资金来源穿透核查"
 
 overall_assessment:

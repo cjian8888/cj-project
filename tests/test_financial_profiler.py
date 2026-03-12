@@ -19,7 +19,7 @@ from financial_profiler import (
     generate_profile_report, extract_large_cash,
     categorize_transactions, analyze_wealth_holdings,
     extract_bank_accounts, calculate_yearly_salary,  # Phase 1.2/2.1 新增
-    build_company_profile  # Phase 2.3 新增
+    build_company_profile, _calculate_real_income_expense  # Phase 2.3 新增
 )
 
 
@@ -269,7 +269,22 @@ class TestAnalyzeWealthManagement:
         result = analyze_wealth_management(df, '张伟')
         assert 'category_stats' in result
         assert 'yearly_stats' in result
-    
+
+    def test_analyze_wealth_separates_business_reimbursement(self):
+        """测试将单位报销/业务往来款从理财赎回中剥离"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03']),
+            'income': [0, 10500, 4210],
+            'expense': [10000, 0, 0],
+            'counterparty': ['银行', '银行', '上海爱斯达克汽车空调系统有限公司'],
+            'description': ['理财购买', '理财赎回', '2024032902783448>>理想汽车新项目交流及用餐']
+        })
+        result = analyze_wealth_management(df, '张伟')
+        assert result['wealth_purchase'] == 10000
+        assert result['wealth_redemption'] == 10500
+        assert result['business_reimbursement_income'] == 4210
+        assert result['business_reimbursement_count'] == 1
+
     def test_analyze_wealth_result_structure(self):
         """测试结果结构"""
         df = pd.DataFrame({
@@ -283,6 +298,8 @@ class TestAnalyzeWealthManagement:
         expected_keys = [
             'wealth_purchase', 'wealth_purchase_count', 'wealth_purchase_transactions',
             'wealth_redemption', 'wealth_redemption_count', 'wealth_redemption_transactions',
+            'business_reimbursement_income', 'business_reimbursement_count',
+            'business_reimbursement_transactions',
             'wealth_income', 'wealth_income_count', 'wealth_income_transactions',
             'net_wealth_flow', 'real_wealth_profit', 'self_transfer_income',
             'self_transfer_expense', 'self_transfer_count', 'self_transfer_transactions',
@@ -291,6 +308,35 @@ class TestAnalyzeWealthManagement:
         ]
         for key in expected_keys:
             assert key in result
+
+    def test_real_income_formula_does_not_double_subtract_deposit_redemption(self):
+        """测试定期存款不再被重复剔除"""
+        income_structure = {
+            "total_income": 1_000_000,
+            "total_expense": 900_000,
+        }
+        wealth_management = {
+            "self_transfer_income": 0,
+            "self_transfer_expense": 0,
+            "wealth_purchase": 300_000,
+            "wealth_redemption": 280_000,
+            "wealth_income": 0,
+            "business_reimbursement_income": 0,
+            "loan_inflow": 0,
+            "refund_inflow": 0,
+            "deposit_purchase": 100_000,
+            "deposit_redemption": 80_000,
+        }
+        fund_flow = {}
+
+        real_income, real_expense, offset_detail = _calculate_real_income_expense(
+            income_structure, wealth_management, fund_flow
+        )
+
+        assert real_income == 720000
+        assert real_expense == 600000
+        assert offset_detail["wealth_principal"] == 200000
+        assert offset_detail["deposit_redemption"] == 80000
 
 
 class TestAnalyzeWealthHoldings:
@@ -357,11 +403,11 @@ class TestGenerateProfileReport:
     def test_generate_profile_summary(self):
         """测试汇总信息"""
         df = pd.DataFrame({
-            'date': pd.to_datetime(['2024-01-01', '2024-01-02']),
-            'income': [10000, 5000],
-            'expense': [0, 2000],
-            'counterparty': ['公司', '超市'],
-            'description': ['工资', '购物']
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03']),
+            'income': [10000, 5000, 4210],
+            'expense': [0, 2000, 0],
+            'counterparty': ['公司', '超市', '上海爱斯达克汽车空调系统有限公司'],
+            'description': ['工资', '购物', '2024032902783448>>理想汽车新项目交流及用餐']
         })
         result = generate_profile_report(df, '张伟')
         summary = result['summary']
@@ -372,6 +418,86 @@ class TestGenerateProfileReport:
         assert 'real_expense' in summary
         assert 'salary_ratio' in summary
         assert 'third_party_ratio' in summary
+        assert 'business_reimbursement' in summary['offset_detail']
+
+    def test_generate_profile_income_classification_matches_real_income_basis(self):
+        """测试收入分类合计与真实收入主口径一致"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03']),
+            'income': [10000, 5000, 3000],
+            'expense': [0, 0, 0],
+            'counterparty': ['某公司', '张伟', '某商户'],
+            'description': ['工资', '本人转入', '退款']
+        })
+        result = generate_profile_report(df, '张伟')
+        income_classification = result['income_classification']
+        classified_total = (
+            income_classification['legitimate_income']
+            + income_classification['unknown_income']
+            + income_classification['suspicious_income']
+        )
+
+        assert round(result['summary']['real_income'], 2) == 10000
+        assert round(classified_total, 2) == 10000
+        assert income_classification['excluded_income'] == 8000
+
+    def test_generate_profile_business_reimbursement_aligns_with_real_income(self):
+        """测试单位报销/业务往来款剔除与真实收入主口径一致"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-03-29', '2024-03-30']),
+            'income': [4210, 10000],
+            'expense': [0, 0],
+            'counterparty': ['上海爱斯达克汽车空调系统有限公司', '某公司'],
+            'description': ['2024032902783448>>理想汽车新项目交流及用餐', '代发工资']
+        })
+        result = generate_profile_report(df, '张伟')
+        income_classification = result['income_classification']
+        classified_total = (
+            income_classification['legitimate_income']
+            + income_classification['unknown_income']
+            + income_classification['suspicious_income']
+        )
+
+        assert round(result['summary']['real_income'], 2) == 10000
+        assert round(classified_total, 2) == 10000
+        assert round(result['summary']['offset_detail']['business_reimbursement'], 2) == 4210
+
+    def test_generate_profile_family_transfer_alias_aligns_with_real_income(self):
+        """测试家庭成员别名互转会同步影响真实收入与剔除明细"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02']),
+            'income': [15000, 8000],
+            'expense': [0, 0],
+            'counterparty': ['候海焱6222', '某公司'],
+            'description': ['家庭转账', '工资']
+        })
+        result = generate_profile_report(df, '测试人员', family_members=['侯海焱'])
+        summary = result['summary']
+        income_classification = result['income_classification']
+
+        assert round(summary['real_income'], 2) == 8000
+        assert round(summary['offset_detail']['family_transfer_in'], 2) == 15000
+        assert summary['offset_detail']['family_transfer_in_count'] == 1
+        assert summary['offset_detail']['offset_meta']['family_transfer']['matching_mode'] == 'alias_match'
+        assert income_classification['excluded_breakdown']['family_transfer'] == 15000
+        assert income_classification['classification_basis'] == 'real_income_basis'
+
+    def test_generate_profile_attaches_salary_reference_metadata(self):
+        """测试收入分类结果补充严格工资口径参考值"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02']),
+            'income': [10000, 15000],
+            'expense': [0, 0],
+            'counterparty': ['某公司', '某公司'],
+            'description': ['工资', '代发工资'],
+        })
+        result = generate_profile_report(df, '张伟')
+        income_classification = result['income_classification']
+
+        assert income_classification['salary_reference_income'] == result['yearly_salary']['summary']['total']
+        assert income_classification['salary_classified_income'] > 0
+        assert '工资性收入' in income_classification['salary_like_reasons']
+        assert 'salary_reference_basis' in income_classification
 
 
 class TestExtractLargeCash:

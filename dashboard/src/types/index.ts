@@ -23,16 +23,11 @@ export interface ThresholdConfig {
 }
 
 export interface AnalysisModules {
-    profileAnalysis: boolean;
-    suspicionDetection: boolean;
-    assetAnalysis: boolean;
-    dataValidation: boolean;
     fundPenetration: boolean;
     relatedParty: boolean;
     multiSourceCorrelation: boolean;
     loanAnalysis: boolean;
     incomeAnalysis: boolean;
-    flowVisualization: boolean;
     mlAnalysis: boolean;
     timeSeriesAnalysis: boolean;
     clueAggregation: boolean;

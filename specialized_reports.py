@@ -36,6 +36,43 @@ logger = utils.setup_logger(__name__)
 class SpecializedReportGenerator:
     """专项报告生成器"""
 
+    PERIODIC_INCOME_MIN_TOTAL = 10_000.0
+    PERIODIC_INCOME_MIN_AVG = 1_000.0
+    CASH_COLLISION_MIN_AMOUNT = 10_000.0
+    DETAIL_DISPLAY_MIN_AMOUNT = 1_000.0
+    PLATFORM_SUMMARY_MIN_AMOUNT = 1_000.0
+    CYCLE_ESTIMATE_MIN_AMOUNT = 10_000.0
+    INSTITUTION_KEYWORDS = (
+        "银行",
+        "公司",
+        "有限公司",
+        "集团",
+        "平台",
+        "支付",
+        "金融",
+        "专户",
+        "系统",
+        "证券",
+        "基金",
+    )
+    BENIGN_LARGE_INCOME_KEYWORDS = (
+        "公积金贷款",
+        "贷款总额核算",
+        "放款专户",
+        "个贷系统",
+        "住房委托个贷",
+        "住房贷款",
+        "平账专户",
+    )
+    BENIGN_PERIODIC_COUNTERPARTY_KEYWORDS = (
+        "利息",
+        "医保",
+        "社保",
+        "公积金",
+        "医保费",
+        "存款利息",
+    )
+
     def __init__(
         self, analysis_results: Dict, profiles: Dict, suspicions: Dict, output_dir: str
     ):
@@ -162,6 +199,173 @@ class SpecializedReportGenerator:
             if os.path.exists(path):
                 return path
         return ""
+
+    def _get_cache_dir(self) -> str:
+        """定位 analysis_cache 目录。"""
+        if os.path.basename(self.output_dir) == "output":
+            return os.path.join(self.output_dir, "analysis_cache")
+        return os.path.join(os.path.dirname(self.output_dir), "analysis_cache")
+
+    def _load_primary_analysis_units(self) -> List[Dict[str, Any]]:
+        """优先加载归一后的归集配置快照，回退到原始 family_units_v2。"""
+        def _dedupe_units(units: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            deduped: List[Dict[str, Any]] = []
+            seen_keys = set()
+            for unit in units:
+                if not isinstance(unit, dict):
+                    continue
+                anchor = self._clean_text(unit.get("anchor"), default="")
+                members = unit.get("members", []) or []
+                members = [self._clean_text(member, default="") for member in members]
+                members = [member for member in members if member]
+                key = (
+                    anchor,
+                    tuple(sorted(set(members))),
+                )
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                deduped.append(
+                    {
+                        "anchor": anchor,
+                        "householder": self._clean_text(
+                            unit.get("householder"), default=anchor
+                        ),
+                        "members": members,
+                        "member_details": unit.get("member_details", []) or [],
+                    }
+                )
+            return deduped
+
+        cache_dir = self._get_cache_dir()
+        config_candidates = [
+            os.path.join(cache_dir, "primary_targets.auto.json"),
+            os.path.join(os.getcwd(), "data", "primary_targets.json"),
+        ]
+        for path in config_candidates:
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                units = payload.get("analysis_units", [])
+                if isinstance(units, list) and units:
+                    normalized = _dedupe_units(units)
+                    if normalized:
+                        return normalized
+            except Exception as exc:
+                logger.warning(f"[专项报告] 加载归集配置失败 {path}: {exc}")
+
+        fallback_units = self.analysis_results.get("family_units_v2", [])
+        if not isinstance(fallback_units, list):
+            return []
+        return _dedupe_units(fallback_units)
+
+    def _format_property_area(self, value: Any) -> str:
+        """统一房产面积显示，避免“平方米㎡”重复单位。"""
+        text = self._clean_text(value, default="")
+        if not text:
+            return "暂无数据"
+        for suffix in ("平方米", "㎡"):
+            text = text.replace(suffix, "")
+        text = text.strip()
+        return f"{text}平方米" if text else "暂无数据"
+
+    def _is_material_periodic_income(self, item: Dict[str, Any]) -> bool:
+        """过滤明显无审计价值的周期性小额入账。"""
+        total_amount = self._safe_float(item.get("total_amount", item.get("total", 0)))
+        avg_amount = self._safe_float(item.get("avg_amount", item.get("amount", 0)))
+        counterparty = self._clean_text(item.get("counterparty"), default="")
+        if (
+            counterparty
+            and any(keyword in counterparty for keyword in self.BENIGN_PERIODIC_COUNTERPARTY_KEYWORDS)
+        ):
+            return False
+        return (
+            total_amount >= self.PERIODIC_INCOME_MIN_TOTAL
+            or avg_amount >= self.PERIODIC_INCOME_MIN_AVG
+        )
+
+    def _is_material_cash_collision(self, item: Dict[str, Any]) -> bool:
+        """过滤极低金额的现金碰撞噪音。"""
+        withdrawal_amount = self._safe_float(
+            item.get("withdrawal_amount", item.get("amount1", 0))
+        )
+        deposit_amount = self._safe_float(
+            item.get("deposit_amount", item.get("amount2", 0))
+        )
+        return max(withdrawal_amount, deposit_amount) >= self.CASH_COLLISION_MIN_AMOUNT
+
+    def _has_positive_amount(self, item: Dict[str, Any], *keys: str) -> bool:
+        """判断记录是否携带有效正金额。"""
+        for key in keys:
+            if self._safe_float(item.get(key, 0)) > 0:
+                return True
+        return False
+
+    def _has_material_amount(self, item: Dict[str, Any], *keys: str) -> bool:
+        """判断记录是否达到展示阈值。"""
+        for key in keys:
+            if self._safe_float(item.get(key, 0)) >= self.DETAIL_DISPLAY_MIN_AMOUNT:
+                return True
+        return False
+
+    def _is_institutional_name(self, value: Any) -> bool:
+        text = self._clean_text(value, default="")
+        return bool(text) and any(keyword in text for keyword in self.INSTITUTION_KEYWORDS)
+
+    def _is_benign_large_income(self, item: Dict[str, Any]) -> bool:
+        counterparty = self._clean_text(item.get("counterparty"), default="")
+        description = self._clean_text(item.get("description", item.get("income_type")), default="")
+        combined = f"{counterparty} {description}"
+        return any(keyword in combined for keyword in self.BENIGN_LARGE_INCOME_KEYWORDS)
+
+    def _load_graph_edge_map(self) -> Dict[tuple, float]:
+        """加载图谱边权，返回 (from, to) -> 金额（元）。"""
+        if hasattr(self, "_graph_edge_map"):
+            return self._graph_edge_map
+        edge_map: Dict[tuple, float] = {}
+        graph_path = os.path.join(self._get_cache_dir(), "graph_data.json")
+        if os.path.exists(graph_path):
+            try:
+                with open(graph_path, "r", encoding="utf-8") as f:
+                    graph_data = json.load(f)
+                for edge in graph_data.get("edges", []):
+                    if not isinstance(edge, dict):
+                        continue
+                    src = self._clean_text(edge.get("from"), default="")
+                    dst = self._clean_text(edge.get("to"), default="")
+                    if not src or not dst:
+                        continue
+                    # graph_data edge.value 当前单位为“万元”，这里统一转换为“元”
+                    amount_yuan = self._safe_float(edge.get("value", 0)) * 10000
+                    if amount_yuan > 0:
+                        edge_map[(src, dst)] = amount_yuan
+            except Exception as exc:
+                logger.warning(f"[专项报告] 加载 graph_data.json 失败: {exc}")
+        self._graph_edge_map = edge_map
+        return edge_map
+
+    def _estimate_cycle_amount(self, path: str) -> float:
+        """根据图谱边权估算闭环金额，取路径边权最小值。"""
+        edge_map = self._load_graph_edge_map()
+        if not path or not edge_map:
+            return 0.0
+        nodes = [segment.strip() for segment in path.split("→") if segment.strip()]
+        if len(nodes) < 2:
+            return 0.0
+        amounts = []
+        for src, dst in zip(nodes, nodes[1:]):
+            amount = edge_map.get((src, dst), 0.0)
+            if amount <= 0:
+                return 0.0
+            amounts.append(amount)
+        estimated_amount = min(amounts) if amounts else 0.0
+        return (
+            estimated_amount
+            if estimated_amount >= self.CYCLE_ESTIMATE_MIN_AMOUNT
+            else 0.0
+        )
     
     def _classify_transaction(self, counterparty: str, description: str, amount: float, person_name: str, category: str = '') -> Dict[str, Any]:
         """
@@ -413,6 +617,33 @@ class SpecializedReportGenerator:
         if not abnormal_interest and loan_pairs:
             abnormal_interest = [d for d in loan_pairs if d.get("abnormal_type")]
 
+        no_repayment_loans = [
+            item
+            for item in no_repayment_loans
+            if self._has_material_amount(item, "income_amount", "loan_amount")
+        ]
+        loan_pairs = [
+            item
+            for item in loan_pairs
+            if self._has_material_amount(item, "loan_amount", "repay_amount")
+        ]
+        abnormal_interest = [
+            item
+            for item in abnormal_interest
+            if self._has_material_amount(item, "loan_amount", "repay_amount")
+        ]
+        regular_repayments = [
+            item
+            for item in regular_repayments
+            if self._has_material_amount(item, "avg_amount", "amount")
+        ]
+        bidirectional_flows = [
+            item
+            for item in bidirectional_flows
+            if not self._is_institutional_name(item.get("person", item.get("person1")))
+            and not self._is_institutional_name(item.get("counterparty", item.get("person2")))
+        ]
+
         # ==================== 一、双向往来关系 ====================
         lines.append("一、双向往来关系分析")
         lines.append("-" * 70)
@@ -604,9 +835,14 @@ class SpecializedReportGenerator:
                 if person:
                     platform_summary[platform]["persons"].add(person)
 
-            lines.append(f"发现 {len(platform_summary)} 个网贷平台相关交易:")
+            material_platform_summary = {
+                platform: stats
+                for platform, stats in platform_summary.items()
+                if stats["amount"] >= self.PLATFORM_SUMMARY_MIN_AMOUNT
+            }
+            lines.append(f"发现 {len(material_platform_summary)} 个网贷平台相关交易:")
             lines.append("")
-            for platform, stats in platform_summary.items():
+            for platform, stats in material_platform_summary.items():
                 lines.append(f"  平台: {platform}")
                 lines.append(f"  交易笔数: {stats['count']} 笔")
                 lines.append(f"  涉及人数: {len(stats['persons'])} 人")
@@ -615,12 +851,17 @@ class SpecializedReportGenerator:
                 lines.append(f"  偿还金额: {utils.format_currency(stats['expense_amount'])} 元")
                 lines.append("")
 
-            lines.append("  【审计提示】: 网贷平台交易可能涉及:")
-            lines.append("            1. 高利率网络贷款")
-            lines.append("            2. 消费分期付款")
-            lines.append("            3. 借贷资金来源不明")
-            lines.append("            建议核对借款合同、利率、还款情况，")
-            lines.append("            评估是否存在过度负债和资金用途不当。")
+            if material_platform_summary:
+                lines.append("  【审计提示】: 网贷平台交易可能涉及:")
+                lines.append("            1. 高利率网络贷款")
+                lines.append("            2. 消费分期付款")
+                lines.append("            3. 借贷资金来源不明")
+                lines.append("            建议核对借款合同、利率、还款情况，")
+                lines.append("            评估是否存在过度负债和资金用途不当。")
+            else:
+                lines.append(
+                    f"  未发现达到展示阈值的网贷平台交易（已过滤总额低于{self.PLATFORM_SUMMARY_MIN_AMOUNT:.0f}元的平台噪音）"
+                )
         else:
             lines.append("  未发现网贷平台交易")
 
@@ -686,8 +927,8 @@ class SpecializedReportGenerator:
         lines.append("   识别个人之间的大额资金往来。")
         lines.append("")
         lines.append("3. 来源不明收入：")
-        lines.append("   对手方为空/nan且金额≥1万元，")
-        lines.append("   排除理财到账，识别无法追溯的资金。")
+        lines.append("   本专项仅识别对手方为空/nan且金额≥1万元的大额入账，")
+        lines.append("   排除理财到账；该口径仅用于线索筛查，不等同于正式报告中的“来源待核实收入”。")
         lines.append("")
         lines.append("4. 同源多次收入：")
         lines.append("   同一对手方≥5次转入且累计≥1万元，")
@@ -727,6 +968,35 @@ class SpecializedReportGenerator:
         bribe_installments = _load_list(
             "potential_bribe_installment", "potential_bribe_installment"
         )
+        large_single = [
+            item
+            for item in large_single
+            if self._has_positive_amount(item, "amount")
+            and not self._is_benign_large_income(item)
+        ]
+        regular_non_salary = [
+            item
+            for item in regular_non_salary
+            if self._is_material_periodic_income(item)
+            and not self._is_benign_large_income(item)
+        ]
+        large_individual = [
+            item for item in large_individual if self._has_positive_amount(item, "amount")
+        ]
+        unknown_source = [
+            item for item in unknown_source if self._has_positive_amount(item, "amount")
+        ]
+        same_source = [
+            item
+            for item in same_source
+            if self._has_material_amount(item, "total", "total_amount", "avg_amount")
+            and not self._is_benign_large_income(item)
+        ]
+        bribe_installments = [
+            item
+            for item in bribe_installments
+            if self._has_positive_amount(item, "total_amount", "total", "avg_amount")
+        ]
 
         max_items = 80
 
@@ -827,8 +1097,10 @@ class SpecializedReportGenerator:
         lines.append("")
 
         # ==================== 四、来源不明收入 ====================
-        lines.append("四、来源不明收入分析")
+        lines.append("四、对手方缺失的大额入账分析（专项口径）")
         lines.append("-" * 70)
+        lines.append("  【口径说明】: 本节仅统计“对手方缺失且金额达到阈值”的专项线索，不直接对应正式报告中的真实收入分类总桶。")
+        lines.append("")
 
         if unknown_source:
             sorted_items = sorted(
@@ -848,9 +1120,9 @@ class SpecializedReportGenerator:
                 lines.append(f"  判定原因: {self._clean_text(item.get('reason', '来源待核实'))}")
                 self._add_traceability(lines, item)
                 lines.append("")
-            lines.append("  【审计提示】: 来源不明收入需重点开展资金来源穿透，补充凭证链条。")
+            lines.append("  【审计提示】: 对手方缺失的大额入账需重点开展资金来源穿透，补充凭证链条。")
         else:
-            lines.append("  未发现来源不明收入")
+            lines.append("  未发现符合本专项口径的对手方缺失大额入账")
         lines.append("")
 
         # ==================== 五、同源多次收入 ====================
@@ -987,8 +1259,12 @@ class SpecializedReportGenerator:
         lines.append("一、周期性收入分析（疑似养廉资金）")
         lines.append("-" * 70)
 
-        if periodic_income:
-            for i, income in enumerate(periodic_income, 1):
+        material_periodic_income = [
+            income for income in periodic_income if self._is_material_periodic_income(income)
+        ]
+
+        if material_periodic_income:
+            for i, income in enumerate(material_periodic_income, 1):
                 lines.append(f"【发现 {i}】")
                 person = self._clean_text(income.get("person", income.get("name")))
                 lines.append(f"  收款人: {person}")
@@ -1028,7 +1304,9 @@ class SpecializedReportGenerator:
             lines.append("            查阅相关合同或证明文件。")
             lines.append("")
         else:
-            lines.append("  未发现周期性收入")
+            lines.append(
+                f"  未发现达到展示阈值的周期性收入（已过滤总额<{self.PERIODIC_INCOME_MIN_TOTAL:.0f}元且平均金额<{self.PERIODIC_INCOME_MIN_AVG:.0f}元的噪音记录）"
+            )
 
         lines.append("")
 
@@ -1099,19 +1377,31 @@ class SpecializedReportGenerator:
                 day_transactions = self._get_day_transactions(person, target_date)
 
                 if day_transactions:
-                    shown = day_transactions[:8]
-                    lines.append(f"  📋 该日收入交易明细（共{len(day_transactions)}笔，展示前{len(shown)}笔）:")
-                    for tx in shown:
-                        amount_str = utils.format_currency(tx['amount'])
-                        type_info = tx['type_info']
-                        cp = tx['counterparty'] if tx['counterparty'] else '对手方不明'
-                        cat = tx.get('category', '')
-                        cat_str = f" [{cat}]" if cat else ""
-                        lines.append(f"    {tx['time']} {type_info['icon']} {amount_str:>12}元{cat_str} | {cp}")
-                        if type_info['type'] != '正常交易':
-                            lines.append(f"           └─ {type_info['type']}: {type_info['detail']}")
-                    if len(day_transactions) > len(shown):
-                        lines.append(f"    ... 其余 {len(day_transactions) - len(shown)} 笔未展示")
+                    material_transactions = [
+                        tx
+                        for tx in day_transactions
+                        if abs(self._safe_float(tx.get("amount", 0))) >= self.DETAIL_DISPLAY_MIN_AMOUNT
+                    ]
+                    if material_transactions:
+                        shown = material_transactions[:8]
+                        lines.append(
+                            f"  📋 该日收入交易明细（共{len(material_transactions)}笔达到展示阈值，展示前{len(shown)}笔）:"
+                        )
+                        for tx in shown:
+                            amount_str = utils.format_currency(tx['amount'])
+                            type_info = tx['type_info']
+                            cp = tx['counterparty'] if tx['counterparty'] else '对手方不明'
+                            cat = tx.get('category', '')
+                            cat_str = f" [{cat}]" if cat else ""
+                            lines.append(f"    {tx['time']} {type_info['icon']} {amount_str:>12}元{cat_str} | {cp}")
+                            if type_info['type'] != '正常交易':
+                                lines.append(f"           └─ {type_info['type']}: {type_info['detail']}")
+                        if len(material_transactions) > len(shown):
+                            lines.append(f"    ... 其余 {len(material_transactions) - len(shown)} 笔未展示")
+                    else:
+                        lines.append(
+                            f"  📋 该日收入交易明细未发现达到展示阈值的交易（已过滤低于{self.DETAIL_DISPLAY_MIN_AMOUNT:.0f}元的小额噪音）。"
+                        )
                 else:
                     if self._resolve_cleaned_person_flow_path(person):
                         lines.append("  ⚠️ 该日期未检索到收入交易明细（可能为支出突变或原始日期格式异常）")
@@ -1190,6 +1480,7 @@ class SpecializedReportGenerator:
         cycles = related_party.get("fund_loops") or penetration.get("fund_cycles") or []
         if cycles:
             for i, cycle in enumerate(cycles, 1):
+                total_amount = None
                 if isinstance(cycle, dict):
                     path = cycle.get("path")
                     if not path:
@@ -1199,23 +1490,29 @@ class SpecializedReportGenerator:
                         cycle.get("nodes") or cycle.get("participants") or []
                     )
                     risk_level = str(cycle.get("risk_level", "medium")).upper()
-                    total_amount = _to_float(cycle.get("total_amount"))
+                    if cycle.get("total_amount") is not None:
+                        total_amount = _to_float(cycle.get("total_amount"))
+                    if not total_amount:
+                        total_amount = self._estimate_cycle_amount(path)
                 elif isinstance(cycle, list):
                     path = " → ".join(cycle)
                     length = len(cycle)
                     risk_level = "HIGH" if length >= 3 else "MEDIUM"
-                    total_amount = 0.0
+                    total_amount = self._estimate_cycle_amount(path)
                 else:
                     path = str(cycle)
                     length = 0
                     risk_level = "MEDIUM"
-                    total_amount = 0.0
 
                 lines.append(f"【资金闭环 {i}】")
                 lines.append(f"  闭环路径: {path}")
                 lines.append(f"  闭环长度: {length} 个节点")
                 lines.append(f"  风险等级: {risk_level}")
-                lines.append(f"  总资金: {utils.format_currency(total_amount)}")
+                if total_amount is None or total_amount <= 0:
+                    lines.append("  总资金: 未提供（当前闭环结果仅包含路径与风险等级）")
+                else:
+                    lines.append(f"  估算闭环金额: {utils.format_currency(total_amount)} 元")
+                    lines.append("  金额口径: 基于 graph_data 边权的最小边额估算，仅作路径强度参考")
                 lines.append("")
                 lines.append("  【审计提示】: 资金闭环可能是:")
                 lines.append("            1. 资金回流洗钱（通过多层转账回到原点）")
@@ -1342,9 +1639,12 @@ class SpecializedReportGenerator:
         
         # 加载现金碰撞数据（支持两种键名）
         cash_collisions = self.suspicions.get('cashCollisions', []) or self.suspicions.get('cash_collisions', [])
-        
-        if cash_collisions:
-            for i, collision in enumerate(cash_collisions, 1):
+        material_cash_collisions = [
+            collision for collision in cash_collisions if self._is_material_cash_collision(collision)
+        ]
+
+        if material_cash_collisions:
+            for i, collision in enumerate(material_cash_collisions, 1):
                 lines.append(f"【现金伴随 {i}】")
                 # 支持 camelCase 和 snake_case 两种格式
                 withdrawal_entity = collision.get('withdrawal_entity') or collision.get('person1', '未知')
@@ -1383,7 +1683,9 @@ class SpecializedReportGenerator:
             lines.append("            排查是否存在隐匿资产或贿赂资金。")
             lines.append("")
         else:
-            lines.append("  未发现现金时空伴随")
+            lines.append(
+                f"  未发现达到展示阈值的现金时空伴随（已过滤单笔低于{self.CASH_COLLISION_MIN_AMOUNT / 10000:.2f}万元的噪音记录）"
+            )
         lines.append("")
 
         # ==================== 二、直接资金往来 ====================
@@ -1716,7 +2018,7 @@ class SpecializedReportGenerator:
         lines.append("【算法说明】")
         lines.append("-" * 50)
         lines.append("1. 读取 precisePropertyData.json（精准房产数据）")
-        lines.append("2. 读取 family_units_v2 获取家庭单元结构")
+        lines.append("2. 优先读取归一后的归集配置快照，回退到 family_units_v2")
         lines.append("3. 按地址去重（地址前缀+面积作为唯一键）")
         lines.append("4. 按家庭单元归集，显示共同共有情况")
         lines.append("")
@@ -1745,8 +2047,8 @@ class SpecializedReportGenerator:
         except Exception as e:
             logger.warning(f"[资产报告] 加载 precisePropertyData.json 失败: {e}")
         
-        # 2. 加载家庭单元
-        family_units = self.analysis_results.get('family_units_v2', [])
+        # 2. 加载家庭单元（优先使用归一后的临时/正式归集配置）
+        family_units = self._load_primary_analysis_units()
         
         # 3. 构建身份证→姓名映射
         id_to_name = {}
@@ -1789,7 +2091,7 @@ class SpecializedReportGenerator:
                         'is_mortgaged': prop.get('is_mortgaged', False),
                         'is_sealed': prop.get('is_sealed', False),
                         'source': prop.get('source_file', ''),
-                        'value': prop.get('transaction_amount', 0) or (area_num * 30000)
+                        'transaction_amount': self._safe_float(prop.get('transaction_amount', 0)),
                     }
                 
                 if owner_name and owner_id:
@@ -1802,7 +2104,8 @@ class SpecializedReportGenerator:
                         dedup_properties[dedup_key]['owners'].append((owner_name, owner_id))
         
         unique_properties = list(dedup_properties.values())
-        total_value = sum(p['value'] for p in unique_properties)
+        total_value = sum(p['transaction_amount'] for p in unique_properties if p['transaction_amount'] > 0)
+        priced_property_count = sum(1 for p in unique_properties if p['transaction_amount'] > 0)
         
         # ==================== 按家庭单元归集 ====================
         def find_family_for_owner(owner_name: str, family_units: list) -> tuple:
@@ -1820,7 +2123,7 @@ class SpecializedReportGenerator:
                 'householder': fu.get('householder', anchor),
                 'members': fu.get('members', []),
                 'properties': [],
-                'total_value': 0
+                'priced_total_value': 0.0
             }
         
         for prop in unique_properties:
@@ -1829,7 +2132,8 @@ class SpecializedReportGenerator:
                 anchor, householder = find_family_for_owner(owner_name, family_units)
                 if anchor:
                     family_assets[anchor]['properties'].append(prop)
-                    family_assets[anchor]['total_value'] += prop['value']
+                    if prop['transaction_amount'] > 0:
+                        family_assets[anchor]['priced_total_value'] += prop['transaction_amount']
                     assigned = True
                     break
             
@@ -1839,17 +2143,23 @@ class SpecializedReportGenerator:
                         'householder': '-',
                         'members': [],
                         'properties': [],
-                        'total_value': 0
+                        'priced_total_value': 0.0
                     }
                 family_assets['未归属']['properties'].append(prop)
-                family_assets['未归属']['total_value'] += prop['value']
+                if prop['transaction_amount'] > 0:
+                    family_assets['未归属']['priced_total_value'] += prop['transaction_amount']
         
         # ==================== 生成报告 ====================
         lines.append("【资产总览】")
         lines.append("-" * 50)
         lines.append(f"  家庭单元数: {len(family_units)} 个")
         lines.append(f"  房产总数: {len(unique_properties)} 套（去重后）")
-        lines.append(f"  房产总价值: {total_value/10000:.2f} 万元")
+        if priced_property_count > 0:
+            lines.append(
+                f"  房产总成交价: {total_value/10000:.2f} 万元（已获取{priced_property_count}套成交价）"
+            )
+        else:
+            lines.append("  房产总成交价: 信息缺失")
         lines.append("")
         
         lines.append("【家庭资产明细】")
@@ -1864,7 +2174,15 @@ class SpecializedReportGenerator:
             lines.append(f"  户主: {data['householder']}")
             lines.append(f"  成员: {', '.join(data['members'])}")
             lines.append(f"  房产数: {len(data['properties'])} 套")
-            lines.append(f"  总价值: {data['total_value']/10000:.2f} 万元")
+            priced_count = sum(
+                1 for prop in data["properties"] if prop.get("transaction_amount", 0) > 0
+            )
+            if priced_count > 0:
+                lines.append(
+                    f"  已知成交总价: {data['priced_total_value']/10000:.2f} 万元（{priced_count}套）"
+                )
+            else:
+                lines.append("  已知成交总价: 信息缺失")
             lines.append("")
             lines.append("  房产明细:")
             
@@ -1876,10 +2194,15 @@ class SpecializedReportGenerator:
                 lines.append(f"       产权人: {', '.join(owner_names)}")
                 if is_coowned:
                     lines.append(f"       共有情况: 共同共有")
-                lines.append(f"       面积: {prop['area']}㎡")
+                lines.append(f"       面积: {self._format_property_area(prop['area'])}")
                 lines.append(f"       用途: {prop['usage']}")
                 lines.append(f"       登记时间: {prop['register_date']}")
-                lines.append(f"       估值: {prop['value']/10000:.2f} 万元")
+                if prop.get("transaction_amount", 0) > 0:
+                    lines.append(
+                        f"       成交价: {prop['transaction_amount']/10000:.2f} 万元"
+                    )
+                else:
+                    lines.append("       成交价: 未获取")
                 if prop['is_mortgaged']:
                     lines.append(f"       ⚠️ 状态: 已抵押")
                 if prop['is_sealed']:
@@ -1893,10 +2216,15 @@ class SpecializedReportGenerator:
         lines.append("【统计汇总】")
         lines.append(f"  • 家庭单元: {len(family_units)} 个")
         lines.append(f"  • 房产总数: {len(unique_properties)} 套")
-        lines.append(f"  • 房产总价值: {total_value/10000:.2f} 万元")
-        if family_units:
-            avg_per_family = total_value / len(family_units)
-            lines.append(f"  • 户均资产: {avg_per_family/10000:.2f} 万元")
+        if priced_property_count > 0:
+            lines.append(
+                f"  • 已知房产总成交价: {total_value/10000:.2f} 万元（仅统计{priced_property_count}套）"
+            )
+            if family_units:
+                avg_per_family = total_value / len(family_units)
+                lines.append(f"  • 户均已知成交价: {avg_per_family/10000:.2f} 万元")
+        else:
+            lines.append("  • 已知房产总成交价: 信息缺失")
         
         lines.append("")
         lines.append("=" * 70)

@@ -211,9 +211,23 @@ class WealthAccountAnalyzer:
             if col not in self.df.columns:
                 self.df[col] = 0 if col in ['income', 'expense'] else ''
         
-        # 确保account_id列存在
+        # 兼容清洗后账号列命名，确保 account_id 可用
+        if 'account_id' not in self.df.columns:
+            for candidate in ['account', 'account_number', '账号', '卡号']:
+                if candidate in self.df.columns:
+                    self.df['account_id'] = self.df[candidate]
+                    break
+
+        # 兜底：仍不存在时创建空列
         if 'account_id' not in self.df.columns:
             self.df['account_id'] = ''
+
+        # 若 account_id 列存在但为空，尝试用候选列回填
+        if self.df['account_id'].astype(str).str.strip().eq('').all():
+            for candidate in ['account', 'account_number', '账号', '卡号']:
+                if candidate in self.df.columns:
+                    self.df['account_id'] = self.df[candidate]
+                    break
     
     def _preprocess_data(self):
         """【新增】数据预处理"""

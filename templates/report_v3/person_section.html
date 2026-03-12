@@ -33,6 +33,8 @@ tax_analysis, travel_analysis
     {# ========== 六维一体资金分析概览 ========== #}
     {% if unit.unified_analysis %}
     {% set ua = unit.unified_analysis %}
+    {% set ua_salary = ua.overview.salary|float %}
+    {% set ua_salary_ratio = ua.overview.salary_ratio|float %}
     <h3 class="part-title">资金分析概览（六维一体）</h3>
     
     {# 1. 概览卡片 #}
@@ -48,7 +50,7 @@ tax_analysis, travel_analysis
             </div>
             <div style="flex: 1; min-width: 120px; text-align: center; padding: 10px; background: #fff; border-radius: 4px;">
                 <div style="font-size: 12px; color: #666;">工资收入</div>
-                <div style="font-size: 16px; font-weight: bold;">{{ ua.overview.salary }}万元</div>
+                <div style="font-size: 16px; font-weight: bold;">{{ (ua_salary|round(2) ~ '万元') if ua_salary > 0 else '—' }}</div>
             </div>
             <div style="flex: 1; min-width: 120px; text-align: center; padding: 10px; background: #fff; border-radius: 4px;">
                 <div style="font-size: 12px; color: #666;">真实收入</div>
@@ -56,7 +58,7 @@ tax_analysis, travel_analysis
             </div>
             <div style="flex: 1; min-width: 120px; text-align: center; padding: 10px; background: #fff; border-radius: 4px;">
                 <div style="font-size: 12px; color: #666;">工资占比</div>
-                <div style="font-size: 16px; font-weight: bold;">{{ ua.overview.salary_ratio }}%</div>
+                <div style="font-size: 16px; font-weight: bold;">{{ (ua_salary_ratio|round(1) ~ '%') if ua_salary_ratio > 0 else '—' }}</div>
             </div>
             <div style="flex: 1; min-width: 120px; text-align: center; padding: 10px; background: #fff; border-radius: 4px;">
                 <div style="font-size: 12px; color: #666;">风险等级</div>
@@ -199,10 +201,11 @@ tax_analysis, travel_analysis
     {% if prop.has_data and prop.properties and prop.properties|length > 0 %}
     <p>家庭成员名下房产{{ prop.count }}处：
         {% for estate in prop.properties %}
+        {% set estate_amount = estate.交易金额 or estate.transaction_amount %}
         第{{ loop.index }}处位于{{ estate.房地坐落 or estate.location or estate.坐落 }}，房屋面积{{ estate.建筑面积 or estate.area or
         estate.面积 }}平方米，
-        于{{ estate.登记时间 or estate.registration_date or estate.register_date }}登记{% if estate.交易金额 or
-        estate.transaction_amount %}，交易金额{{ estate.交易金额 or estate.transaction_amount }}万{% endif %}{% if estate.共有人名称 or
+        于{{ estate.登记时间 or estate.registration_date or estate.register_date }}登记{% if estate_amount and
+        estate_amount not in ['暂无数据', '—'] %}，交易金额{{ estate_amount }}万{% endif %}{% if estate.共有人名称 or
         estate.co_owners or estate.共有人 %}，与{{ estate.共有人名称 or estate.co_owners or estate.共有人 }}共有{% endif %}。
         {% endfor %}
     </p>
@@ -365,9 +368,6 @@ tax_analysis, travel_analysis
     <h3 class="item-title">{{ ns.idx }}、购房数据分析</h3>
     <p>
         {{ prop_analysis.narrative or '家庭名下房产信息与常用邮政快递中信息相符，未查见其他常用邮寄地址，未发现可疑房产。' }}
-        {% if not prop_analysis.has_payment_record %}
-        房屋购置价{{ prop_analysis.total_value or '—' }}万元，从{{ unit.name }}银行流水中未查见购房款支付记录，需进一步确认其配偶的银行流水支付情况。
-        {% endif %}
     </p>
     {% endif %}
 
@@ -376,84 +376,137 @@ tax_analysis, travel_analysis
     {% set income_match = analysis.income_match_analysis %}
     <h3 class="item-title">{{ ns.idx }}、家庭存款与家庭收入匹配分析</h3>
     <p>
-        查询{{ unit.name }}名下银行卡流水，{{ income_match.period or '查询期间' }}总资金流入{{ income_match.total_inflow_wan|round(2) if
+        查询{{ unit.name }}名下银行卡流水，{{ income_match.period or '查询期间' }}原始资金流入{{ income_match.total_inflow_wan|round(2) if
         income_match.total_inflow_wan else (income_match.total_inflow or 0)/10000|round(2) }}万元，
-        流出{{ income_match.total_outflow_wan|round(2) if income_match.total_outflow_wan else (income_match.total_outflow
+        原始流出{{ income_match.total_outflow_wan|round(2) if income_match.total_outflow_wan else (income_match.total_outflow
         or
-        0)/10000|round(2) }}万元，{{ income_match.balance_narrative or '收支基本相抵' }}。
+        0)/10000|round(2) }}万元；剔除理财/定存本金回流、账户内部划转等非真实项目后，
+        真实收入{{ income_match.real_income_wan|round(2) if income_match.real_income_wan is not none else (income_match.real_income or 0)/10000|round(2) }}万元，
+        真实支出{{ income_match.real_expense_wan|round(2) if income_match.real_expense_wan is not none else (income_match.real_expense or 0)/10000|round(2) }}万元，
+        {{ income_match.balance_narrative or '收支基本相抵' }}{{ income_match.net_balance_wan|round(2) if income_match.net_balance_wan is not none else (income_match.net_balance or 0)/10000|round(2) }}万元。
         {% if income_match.salary_ratio and income_match.salary_ratio < 50 %} 资金流入中仅{{
             income_match.salary_ratio|round(1) }}%为正常工资收入，其正常工资收入金额不足以支撑月度消费。 {% endif %} 
     </p>
-    
-    {# 【新增】收入来源结构分析 #}
-    {% set counterparty = analysis.counterparty_analysis %}
-    {% if counterparty and counterparty.inflow %}
-    <p><strong>收入来源结构分析：</strong></p>
+    {% if income_match.offset_rule_rows and income_match.offset_rule_rows|length > 0 %}
+    <p><strong>真实收入剔除依据：</strong></p>
     <table>
         <tr>
             <th class="seq-col">序号</th>
-            <th>收入类型</th>
-            <th>原始流水 (万元)</th>
+            <th>剔除类别</th>
             <th>剔除金额 (万元)</th>
-            <th>真实收入 (万元)</th>
-            <th>占比</th>
+            <th>规则置信度</th>
+            <th>识别依据</th>
         </tr>
-        {% set inflow = counterparty.inflow %}
-        {% set total_inflow = inflow.total or income_match.total_inflow or 1 %}
-        {% if inflow.salary and inflow.salary > 0 %}
+        {% for item in income_match.offset_rule_rows %}
+        <tr>
+            <td class="seq-col">{{ loop.index }}</td>
+            <td>{{ item.name }}</td>
+            <td class="money-col">{{ item.amount_wan|round(2) }}</td>
+            <td class="text-center">{{ item.confidence_text }}</td>
+            <td>{{ item.rule_text }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% endif %}
+    
+    {# 资金收支概览与真实收入构成 #}
+    {% set counterparty = analysis.counterparty_analysis %}
+    {% if counterparty and counterparty.inflow %}
+    <p><strong>资金收支概览：</strong></p>
+    <table>
+        <tr>
+            <th class="seq-col">序号</th>
+            <th>指标</th>
+            <th>金额 (万元)</th>
+            <th>说明</th>
+        </tr>
         <tr>
             <td class="seq-col">1</td>
-            <td>工资性收入</td>
-            <td class="money-col">{{ ((inflow.raw_values.salary if inflow.raw_values else inflow.salary) / 10000)|round(2) }}</td>
-            <td class="money-col">{{ ((inflow.deduct_values.salary if inflow.deduct_values else 0) / 10000)|round(2) }}</td>
-            <td class="money-col">{{ (inflow.salary / 10000)|round(2) }}</td>
-            <td class="text-center">{{ ((inflow.salary / total_inflow * 100)|round(1)) }}%</td>
+            <td>原始资金流入</td>
+            <td class="money-col">{{ income_match.total_inflow_wan|round(2) }}</td>
+            <td>清洗后流水原始收入合计。</td>
         </tr>
-        {% endif %}
-        {% if inflow.personal_transfers and inflow.personal_transfers > 0 %}
         <tr>
             <td class="seq-col">2</td>
-            <td>个人转账流入</td>
-            <td class="money-col">{{ ((inflow.raw_values.personal_transfers if inflow.raw_values else inflow.personal_transfers) / 10000)|round(2) }}</td>
-            <td class="money-col">{{ ((inflow.deduct_values.personal_transfers if inflow.deduct_values else inflow.personal_transfers) / 10000)|round(2) }}</td>
-            <td class="money-col">0.00</td>
-            <td class="text-center">{{ ((inflow.personal_transfers / total_inflow * 100)|round(1)) }}%</td>
+            <td>原始资金流出</td>
+            <td class="money-col">{{ income_match.total_outflow_wan|round(2) }}</td>
+            <td>清洗后流水原始支出合计。</td>
         </tr>
-        {% endif %}
-        {% if inflow.cash and inflow.cash > 0 %}
         <tr>
             <td class="seq-col">3</td>
-            <td>现金存入</td>
-            <td class="money-col">{{ ((inflow.raw_values.cash if inflow.raw_values else inflow.cash) / 10000)|round(2) }}</td>
-            <td class="money-col">{{ ((inflow.deduct_values.cash if inflow.deduct_values else inflow.cash) / 10000)|round(2) }}</td>
-            <td class="money-col">0.00</td>
-            <td class="text-center">{{ ((inflow.cash / total_inflow * 100)|round(1)) }}%</td>
+            <td>非真实收入剔除合计</td>
+            <td class="money-col">{{ income_match.total_offset_wan|round(2) }}</td>
+            <td>包含本金回流、内部互转、报销等不计入真实收入的项目。</td>
         </tr>
-        {% endif %}
-        {% set known_income = (inflow.salary or 0) + (inflow.personal_transfers or 0) + (inflow.cash or 0) %}
-        {% set other_income = total_inflow - known_income %}
-        {% if other_income > 0 %}
         <tr>
             <td class="seq-col">4</td>
-            <td>其他收入<small>（已剔除理财/定存本金、内部互转）</small></td>
-            <td class="money-col">{{ ((inflow.raw_values.other if inflow.raw_values else other_income) / 10000)|round(2) }}</td>
-            <td class="money-col">{{ ((inflow.deduct_values.other if inflow.deduct_values else other_income) / 10000)|round(2) }}</td>
-            <td class="money-col">0.00</td>
-            <td class="text-center">{{ ((other_income / total_inflow * 100)|round(1)) }}%</td>
+            <td>真实收入</td>
+            <td class="money-col">{{ income_match.real_income_wan|round(2) }}</td>
+            <td>原始流入扣除非真实收入后的个人可支配收入。</td>
         </tr>
-        {% endif %}
+        <tr>
+            <td class="seq-col">5</td>
+            <td>真实支出</td>
+            <td class="money-col">{{ income_match.real_expense_wan|round(2) }}</td>
+            <td>剔除内部互转等干扰项后的有效支出。</td>
+        </tr>
+        <tr>
+            <td class="seq-col">6</td>
+            <td>工资收入</td>
+            <td class="money-col">{{ income_match.salary_total_wan|round(2) }}</td>
+            <td>严格工资口径，来自年度工资识别结果。</td>
+        </tr>
+        <tr>
+            <td class="seq-col">7</td>
+            <td>工资占真实收入比例</td>
+            <td class="money-col">{{ income_match.salary_ratio|round(1) }}%</td>
+            <td>用于判断工资是否足以解释真实支出。</td>
+        </tr>
+        <tr>
+            <td class="seq-col">8</td>
+            <td>{{ income_match.balance_narrative }}</td>
+            <td class="money-col">{{ income_match.net_balance_wan|round(2) }}</td>
+            <td>真实收入与真实支出的差额。</td>
+        </tr>
+    </table>
+    {% if counterparty.real_income_composition and counterparty.real_income_composition.rows %}
+    <p><strong>真实收入构成分析：</strong></p>
+    <table>
+        <tr>
+            <th class="seq-col">序号</th>
+            <th>收入构成</th>
+            <th>金额 (万元)</th>
+            <th>占真实收入比例</th>
+            <th>数据依据</th>
+        </tr>
+        {% for item in counterparty.real_income_composition.rows %}
+        <tr>
+            <td class="seq-col">{{ loop.index }}</td>
+            <td>{{ item.name }}</td>
+            <td class="money-col">{{ item.amount_wan|round(2) }}</td>
+            <td class="text-center">{{ item.ratio|round(1) }}%</td>
+            <td>{{ item.note }}</td>
+        </tr>
+        {% endfor %}
         <tr style="font-weight: bold; background-color: #f0f0f0;">
             <td class="text-center" colspan="2">合计</td>
-            <td class="money-col">{{ (total_inflow / 10000)|round(2) }}万元</td>
-            <td class="money-col">-</td>
-            <td class="money-col">-</td>
+            <td class="money-col">{{ counterparty.real_income_composition.real_income_wan|round(2) }}万元</td>
             <td class="text-center">100%</td>
+            <td>合计应与真实收入一致。</td>
         </tr>
     </table>
     <p class="note" style="font-size: 12px; color: #666; margin-top: 5px;">
-        <strong>注：</strong>以上收入统计为银行流水原始数据，其中"其他收入"已剔除理财/定期存款本金赎回、家庭成员内部转账等非真实收入项目。
-        真实收入计算请参考"家庭存款与家庭收入匹配分析"章节。
+        <strong>注：</strong>{{ counterparty.real_income_composition.note }}
     </p>
+    {% endif %}
+    {% if counterparty.supplementary_notes and counterparty.supplementary_notes|length > 0 %}
+    <p class="note" style="font-size: 12px; color: #666; margin-top: 5px;">
+        <strong>分析器补充：</strong>
+        {% for note in counterparty.supplementary_notes %}
+            {{ note }}{% if not loop.last %}<br>{% endif %}
+        {% endfor %}
+    </p>
+    {% endif %}
     {% endif %}
 
             {# 3. 银行流水交易对象分析 #}
@@ -474,12 +527,27 @@ tax_analysis, travel_analysis
             {% set ns.idx = ns.idx + 1 %}
             {% set cash = analysis.large_cash_analysis %}
             <h3 class="item-title">{{ ns.idx }}、大额存取现分析</h3>
+            {% set cash_has_activity = cash.has_cash_activity if cash.has_cash_activity is not none else ((cash.total or 0) > 0 or (cash.transaction_count or 0) > 0) %}
+            {% set cash_total_wan = cash.total_wan|round(2) if cash.total_wan else (cash.total or 0)/10000|round(2) %}
+            {% set cash_income_wan = cash.income_wan|round(2) if cash.income_wan else (cash.income or 0)/10000|round(2) %}
+            {% set cash_expense_wan = cash.expense_wan|round(2) if cash.expense_wan else (cash.expense or 0)/10000|round(2) %}
+            {% if cash_has_activity %}
             <p>
-                累计发生现金类收支{{ cash.total_wan|round(2) if cash.total_wan else (cash.total or 0)/10000|round(2) }}万元，
-                其中收款{{ cash.income_wan|round(2) if cash.income_wan else (cash.income or 0)/10000|round(2) }}万元，
-                支出{{ cash.expense_wan|round(2) if cash.expense_wan else (cash.expense or 0)/10000|round(2) }}万元。
+                累计发生现金类收支{{ cash_total_wan }}万元，
+                {% if cash_income_wan > 0 and cash_expense_wan > 0 %}
+                其中收款{{ cash_income_wan }}万元，支出{{ cash_expense_wan }}万元。
+                {% elif cash_income_wan > 0 %}
+                其中仅见现金收款{{ cash_income_wan }}万元，未见现金支出。
+                {% elif cash_expense_wan > 0 %}
+                其中仅见现金支出{{ cash_expense_wan }}万元，未见现金收款。
+                {% else %}
+                未形成可量化现金收支规模。
+                {% endif %}
                 {{ cash.relation_narrative or '未查见与相关涉案公司存在关联。' }}
             </p>
+            {% else %}
+            <p>{{ cash.narrative or '未识别到现金类收支交易，未查见与相关涉案公司存在关联。' }}</p>
+            {% endif %}
             
             {# 【2026-02-13 新增】大额现金交易明细 #}
             {% if cash.transactions and cash.transactions|length > 0 %}
@@ -538,24 +606,32 @@ tax_analysis, travel_analysis
             {# 5. 大额转账记录分析 #}
             {% set ns.idx = ns.idx + 1 %}
             {% set transfer = analysis.large_transfer_analysis %}
+            {% set transfer_threshold_wan = ((transfer.threshold or 10000) / 10000)|round(2) %}
+            {% set inflow_count = transfer.inflow.count if transfer.inflow else (transfer.inflow_count or 0) %}
+            {% set inflow_total_wan = (transfer.inflow.total/10000)|round(2) if transfer.inflow and transfer.inflow.total else (
+                transfer.inflow_amount_wan|round(2) if transfer.inflow_amount_wan else (transfer.inflow_amount or 0)/10000|round(2)
+            ) %}
+            {% set outflow_count = transfer.outflow.count if transfer.outflow else (transfer.outflow_count or 0) %}
+            {% set outflow_total_wan = (transfer.outflow.total/10000)|round(2) if transfer.outflow and transfer.outflow.total else (
+                transfer.outflow_amount_wan|round(2) if transfer.outflow_amount_wan else (transfer.outflow_amount or 0)/10000|round(2)
+            ) %}
             <h3 class="item-title">{{ ns.idx }}、大额转账记录分析</h3>
+            {% if inflow_count > 0 or inflow_total_wan > 0 %}
             <p>
-                查看单笔{{ ((transfer.threshold or 10000) / 10000)|round(2) }}万元以上银行流入流水，共{{ transfer.inflow.count if transfer.inflow else (transfer.inflow_count or 0) }}笔共计金额{{
-                (transfer.inflow.total/10000)|round(2) if transfer.inflow and transfer.inflow.total else (
-                transfer.inflow_amount_wan|round(2) if transfer.inflow_amount_wan else (transfer.inflow_amount or
-                0)/10000|round(2)
-                ) }}万元，
+                查看单笔{{ transfer_threshold_wan }}万元以上银行流入流水，共{{ inflow_count }}笔共计金额{{ inflow_total_wan }}万元，
                 {{ transfer.inflow_breakdown or '主要是工资收入、个人转账等' }}，{{ transfer.inflow_relation or '未查见与涉案公司存在关联。' }}
             </p>
+            {% else %}
+            <p>按单笔{{ transfer_threshold_wan }}万元标准，未发现大额流入转账记录。</p>
+            {% endif %}
+            {% if outflow_count > 0 or outflow_total_wan > 0 %}
             <p>
-                查看单笔{{ ((transfer.threshold or 10000) / 10000)|round(2) }}万元以上银行支出流水，共{{ transfer.outflow.count if transfer.outflow else (transfer.outflow_count or 0)
-                }}笔共计金额{{
-                (transfer.outflow.total/10000)|round(2) if transfer.outflow and transfer.outflow.total else (
-                transfer.outflow_amount_wan|round(2) if transfer.outflow_amount_wan else (transfer.outflow_amount or
-                0)/10000|round(2)
-                ) }}万元，
+                查看单笔{{ transfer_threshold_wan }}万元以上银行支出流水，共{{ outflow_count }}笔共计金额{{ outflow_total_wan }}万元，
                 {{ transfer.outflow_breakdown or '主要是消费支出、个人转账等' }}，{{ transfer.outflow_relation or '未查见与涉案公司存在关联。' }}
             </p>
+            {% else %}
+            <p>按单笔{{ transfer_threshold_wan }}万元标准，未发现大额流出转账记录。</p>
+            {% endif %}
             {% if transfer.detail_narrative %}
             <p>{{ transfer.detail_narrative }}</p>
             {% endif %}
@@ -916,13 +992,27 @@ tax_analysis, travel_analysis
             {# 8. 反洗钱数据分析 #}
             {% set ns.idx = ns.idx + 1 %}
             {% set aml = analysis.aml_analysis %}
+            {% set aml_count = aml.count or 0 %}
+            {% set aml_amount_wan = aml.amount_wan|round(2) if aml.amount_wan else (aml.amount or 0)/10000|round(2) %}
             <h3 class="item-title">{{ ns.idx }}、反洗钱数据分析</h3>
+            {% if aml_count > 0 and aml_amount_wan > 0 %}
             <p>
-                涉及数据共{{ aml.count or 0 }}条{{ aml.amount_wan|round(2) if aml.amount_wan else (aml.amount or
-                0)/10000|round(2)
-                }}万元，
+                涉及数据共{{ aml_count }}条{{ aml_amount_wan }}万元，
                 {{ aml.narrative or '主要是单位发放工资和报销款，未查见可疑大额转账记录。' }}
             </p>
+            {% elif aml_count > 0 %}
+            <p>
+                涉及数据共{{ aml_count }}条，
+                {{ aml.narrative or '建议结合原始证据附件进一步核验。' }}
+            </p>
+            {% elif aml_amount_wan > 0 %}
+            <p>
+                涉及金额{{ aml_amount_wan }}万元，
+                {{ aml.narrative or '建议结合交易背景进一步核验。' }}
+            </p>
+            {% else %}
+            <p>{{ aml.narrative or '未检出反洗钱预警记录。' }}</p>
+            {% endif %}
 
             {# 9. 同行人分析 #}
             {% set ns.idx = ns.idx + 1 %}

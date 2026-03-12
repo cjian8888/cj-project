@@ -53,7 +53,17 @@ class FinancialProductAnalyzer:
 
     def __init__(self, thresholds: Optional[Any] = None):
         """初始化分析器"""
-        self.thresholds = thresholds or utils.RiskThresholds()
+        if thresholds is not None:
+            self.thresholds = thresholds
+        else:
+            # 兼容不同运行环境：utils 可能未导出 RiskThresholds
+            try:
+                self.thresholds = utils.RiskThresholds()
+            except AttributeError:
+                class _FallbackThresholds:
+                    risk_score_high = 70
+
+                self.thresholds = _FallbackThresholds()
         self.description_templates = self._init_description_templates()
 
     def _init_description_templates(self) -> Dict[str, List[str]]:
@@ -397,8 +407,10 @@ class FinancialProductAnalyzer:
             avg_holding_days = 365  # 假设平均持有期1年
             if short_term_count > total_finance * 0.5:
                 avg_holding_days = 90  # 短期占多数，平均90天
+            short_term_ratio = short_term_count / total_finance
         else:
             avg_holding_days = 0
+            short_term_ratio = 0.0
 
         # 计算评分
         score = 0
@@ -413,11 +425,14 @@ class FinancialProductAnalyzer:
 
         # 生成描述
         if short_term_count > total_finance * 0.7:
-            description = f"该人员理财产品持有期普遍较短，短期产品占比{short_term_count / total_finance:.1%}，存在资金快进快出特征，需关注其资金用途和背景。"
+            description = f"该人员理财产品持有期普遍较短，短期产品占比{short_term_ratio:.1%}，存在资金快进快出特征，需关注其资金用途和背景。"
         elif short_term_count > total_finance * 0.5:
-            description = f"该人员短期理财产品占比较高，占比{short_term_count / total_finance:.1%}，存在一定的资金周转需求。"
+            description = f"该人员短期理财产品占比较高，占比{short_term_ratio:.1%}，存在一定的资金周转需求。"
         else:
-            description = f"该人员理财产品持有期较为合理，短期产品占比{short_term_count / total_finance:.1%}，投资期限适中。"
+            if total_finance == 0:
+                description = "未识别到理财交易，暂不具备持有期评估条件。"
+            else:
+                description = f"该人员理财产品持有期较为合理，短期产品占比{short_term_ratio:.1%}，投资期限适中。"
 
         return {
             "score": max(0, score),
