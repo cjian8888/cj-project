@@ -174,9 +174,12 @@ class CacheManager:
         """
         cache_path = self.get_cache_path(cache_name)
 
-        # 【修复】验证数据不为空再保存
-        if data is None or (isinstance(data, (dict, list)) and len(data) == 0):
-            self.logger.warning(f"[缓存保存] {cache_name} 数据为空，跳过保存")
+        if data is None:
+            if cache_path.exists():
+                os.remove(cache_path)
+                self.logger.info(f"[缓存保存] {cache_name} 数据为空，已删除旧缓存")
+            else:
+                self.logger.warning(f"[缓存保存] {cache_name} 数据为空，跳过保存")
             return
 
         # 使用自定义编码器处理特殊类型

@@ -73,6 +73,72 @@ def test_income_match_analysis_separates_raw_and_real_metrics():
     assert result["offset_rule_rows"][1]["name"] == "单位报销/业务往来款"
 
 
+def test_income_match_low_severity_does_not_trigger_report_escalation():
+    profile = {
+        "summary": {
+            "real_income": 1_000_000,
+            "real_expense": 1_050_000,
+        },
+        "yearly_salary": {
+            "summary": {
+                "total": 600_000,
+            }
+        },
+    }
+
+    builder = _make_builder(profile)
+    result = builder._build_income_match_analysis_v4("张三", profile)
+
+    assert result["review_severity"] == "low"
+    assert result["need_further_verification"] is False
+
+
+def test_conclusion_and_next_steps_skip_low_severity_income_match_items():
+    builder = _make_builder({"summary": {}})
+    person_sections = [
+        {
+            "name": "低风险人员",
+            "data_analysis_section": {
+                "income_match_analysis": {
+                    "salary_ratio": 60.0,
+                    "expense_income_ratio": 1.05,
+                    "need_further_verification": False,
+                },
+                "counterparty_analysis": {
+                    "inflow": {"third_party": 0, "total": 1}
+                },
+                "property_analysis": {"has_data": False, "has_payment_record": True},
+            },
+            "asset_income_section": {},
+        },
+        {
+            "name": "高风险人员",
+            "data_analysis_section": {
+                "income_match_analysis": {
+                    "salary_ratio": 10.0,
+                    "expense_income_ratio": 1.6,
+                    "need_further_verification": True,
+                    "other_income_wan": 90.0,
+                    "real_income_wan": 100.0,
+                },
+                "counterparty_analysis": {
+                    "inflow": {"third_party": 0, "total": 1}
+                },
+                "property_analysis": {"has_data": False, "has_payment_record": True},
+            },
+            "asset_income_section": {},
+        },
+    ]
+
+    conclusion = builder._build_v4_conclusion(person_sections, [])
+    next_steps = builder._build_v4_next_steps(person_sections, [])
+
+    assert conclusion["issue_count"] == 1
+    assert conclusion["issues"][0]["person"] == "高风险人员"
+    assert all("低风险人员" not in item["action_text"] for item in next_steps)
+    assert any("高风险人员工资收入占比仅10.0%" in item["action_text"] for item in next_steps)
+
+
 def test_counterparty_analysis_uses_classification_for_personal_transfer_income():
     profile = {
         "summary": {
@@ -196,6 +262,82 @@ def test_report_title_subject_prefers_first_family_anchor():
         builder._derive_report_title_subject(family_sections, person_sections, preface)
         == "彭水生"
     )
+
+
+def test_build_personal_background_filters_invalid_employer_and_falls_back():
+    profile = {"id_info": {"employer": "上海交大"}}
+    derived_data = {
+        "family_tree": {
+            "张三": [
+                {
+                    "姓名": "张三",
+                    "出生日期": "19900101",
+                    "籍贯": "上海市",
+                    "从业单位": "待业",
+                    "职业": "无业",
+                }
+            ]
+        }
+    }
+
+    builder = _make_builder(profile, derived_data=derived_data)
+    result = builder._build_personal_background("张三", profile)
+
+    assert result["employer"] == "上海交大"
+
+
+def test_build_personal_background_suppresses_non_employer_text():
+    profile = {"id_info": {}}
+    derived_data = {
+        "family_tree": {
+            "张三": [
+                {
+                    "姓名": "张三",
+                    "出生日期": "19900101",
+                    "籍贯": "上海市",
+                    "从业单位": "机械工程及自动化",
+                    "职业": "无业",
+                }
+            ]
+        }
+    }
+
+    builder = _make_builder(profile, derived_data=derived_data)
+    result = builder._build_personal_background("张三", profile)
+
+    assert result["employer"] == "信息待补充"
+
+
+def test_build_salary_income_uses_actual_salary_year_span():
+    profile = {
+        "yearly_salary": {
+            "yearly": {
+                "2024": {"total": 100_000},
+                "2025": {"total": 200_000},
+            },
+            "summary": {
+                "total": 300_000,
+                "avg_monthly": 12_500,
+            },
+        }
+    }
+    builder = InvestigationReportBuilder(
+        {
+            "profiles": {"张三": profile},
+            "derived_data": {},
+            "suspicions": {},
+            "graph_data": {},
+            "metadata": {"date_range": {"start": "2020-01-01", "end": "2026-12-31"}},
+        },
+        output_dir="output",
+    )
+
+    result = builder._build_salary_income_v4("张三", profile)
+
+    assert result["start_year"] == "2024"
+    assert result["end_year"] == "2025"
+    assert "张三2024年至2025年共取得工资收入30.00万元" in result["narrative"]
+    assert "2026年" not in result["narrative"]
 
 
 def test_build_report_v4_prefers_injected_primary_config_over_disk_fallback():

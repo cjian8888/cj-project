@@ -101,14 +101,6 @@ import flight_extractor
 import family_assets_helper
 import family_finance
 
-# 【2026-03-04 优化】导入家庭收入优化模块
-try:
-    from family_income_optimizer import batch_update_family_income
-    USE_OPTIMIZED_FAMILY_INCOME = True
-except ImportError:
-    USE_OPTIMIZED_FAMILY_INCOME = False
-    logger = logging.getLogger(__name__)
-    logger.warning("家庭收入优化模块未加载，使用原始实现")
 from specialized_reports import SpecializedReportGenerator
 import family_assets_helper
 import family_finance
@@ -344,6 +336,177 @@ def _get_primary_targets_service() -> PrimaryTargetsService:
         data_dir=_get_active_input_dir(),
         output_dir=_get_active_output_dir(),
     )
+
+
+def _load_saved_primary_targets_config(
+    data_dir: str, output_dir: str
+) -> Optional[Any]:
+    """加载用户已保存的归集配置，仅在显式存在时返回。"""
+    try:
+        service = PrimaryTargetsService(data_dir=data_dir, output_dir=output_dir)
+        config_obj, msg = service.load_config()
+        if config_obj and getattr(config_obj, "analysis_units", None):
+            return config_obj
+        if msg != "配置文件不存在":
+            logging.getLogger(__name__).warning(f"加载归集配置失败: {msg}")
+    except Exception as exc:
+        logging.getLogger(__name__).warning(f"加载归集配置异常: {exc}")
+    return None
+
+
+def _analysis_unit_to_family_unit_dict(
+    unit: Any, profiles: Dict[str, Any]
+) -> Dict[str, Any]:
+    """将用户归集单元转换为分析阶段通用的家庭单元字典。"""
+    anchor = str(getattr(unit, "anchor", "") or "").strip()
+    members_raw = getattr(unit, "members", []) or []
+    members: List[str] = []
+    for raw_member in members_raw:
+        member_name = str(raw_member or "").strip()
+        if member_name and member_name not in members:
+            members.append(member_name)
+
+    if anchor and anchor not in members:
+        members.insert(0, anchor)
+    if not members:
+        return {}
+
+    normalized_anchor = anchor if anchor in members else members[0]
+    unit_type = str(getattr(unit, "unit_type", "family") or "family").strip() or "family"
+
+    member_details = []
+    for detail in getattr(unit, "member_details", []) or []:
+        name = str(getattr(detail, "name", "") or "").strip()
+        if not name:
+            continue
+        has_data = getattr(detail, "has_data", None)
+        member_details.append(
+            {
+                "name": name,
+                "relation": str(getattr(detail, "relation", "") or "家庭成员").strip()
+                or "家庭成员",
+                "has_data": bool(name in profiles) if has_data is None else bool(has_data),
+                "id_number": str(getattr(detail, "id_number", "") or "").strip(),
+            }
+        )
+
+    if not member_details:
+        for member_name in members:
+            member_details.append(
+                {
+                    "name": member_name,
+                    "relation": "本人" if member_name == normalized_anchor else "家庭成员",
+                    "has_data": member_name in profiles,
+                    "id_number": "",
+                }
+            )
+
+    return {
+        "anchor": normalized_anchor,
+        "householder": normalized_anchor,
+        "members": members,
+        "member_details": member_details,
+        "unit_type": unit_type,
+        "source": "primary_targets",
+    }
+
+
+def _get_effective_family_units_for_analysis(
+    inferred_units: List[Dict[str, Any]],
+    data_dir: str,
+    output_dir: str,
+    profiles: Dict[str, Any],
+) -> tuple[List[Dict[str, Any]], Optional[Any]]:
+    """
+    为分析阶段选择生效的家庭归集单元。
+
+    规则：
+    - 若存在用户保存的 primary_targets.json，则以其 analysis_units 为准
+    - 否则回退到程序自动推断的 family_units_v2
+    """
+    config_obj = _load_saved_primary_targets_config(data_dir, output_dir)
+    if not config_obj:
+        return inferred_units, None
+
+    configured_units = []
+    for unit in getattr(config_obj, "analysis_units", []) or []:
+        family_unit = _analysis_unit_to_family_unit_dict(unit, profiles)
+        if family_unit:
+            configured_units.append(family_unit)
+
+    if configured_units:
+        return configured_units, config_obj
+
+    return inferred_units, None
+
+
+def _build_person_to_family_map(
+    family_units_list: List[Dict[str, Any]]
+) -> Dict[str, List[str]]:
+    """根据家庭单元构建人员到其他家庭成员的映射。"""
+    person_to_family: Dict[str, List[str]] = {}
+    for unit in family_units_list:
+        members = unit.get("members", []) or []
+        for member in members:
+            other_members = [name for name in members if name and name != member]
+            if other_members:
+                person_to_family[member] = other_members
+    return person_to_family
+
+
+def _refresh_profiles_with_family_units(
+    profiles: Dict[str, Any],
+    cleaned_data: Dict[str, pd.DataFrame],
+    family_units_list: List[Dict[str, Any]],
+    income_expense_match_analyzer: IncomeExpenseMatchAnalyzer,
+    logger: logging.Logger,
+) -> int:
+    """按当前生效的家庭归集单元刷新真实收入相关口径。"""
+    person_to_family = _build_person_to_family_map(family_units_list)
+    updated_count = 0
+
+    for person_name, profile in profiles.items():
+        family_members = person_to_family.get(person_name, [])
+        df = cleaned_data.get(person_name)
+        if df is None or df.empty or not family_members:
+            continue
+
+        try:
+            _refresh_profile_real_metrics(
+                profile,
+                df,
+                person_name,
+                family_members,
+                income_expense_match_analyzer,
+            )
+            updated_count += 1
+            logger.info(
+                f"  ✓ 更新 {person_name} 真实收入: "
+                f"    原始: {profile.get('income_structure', {}).get('total_income', 0)/10000:.2f}万, "
+                f"    更新后: {profile.get('summary', {}).get('real_income', 0)/10000:.2f}万 (剔除家庭转账)"
+            )
+        except Exception as exc:
+            logger.warning(f"更新 {person_name} 真实收入失败: {exc}")
+
+    return updated_count
+
+
+def _save_external_report_caches(
+    cache_mgr: CacheManager, external_data: Dict[str, Any], logger: logging.Logger
+) -> None:
+    """为报告生成预先保存外部数据缓存，空结果也要覆盖旧文件。"""
+    external_cache_mapping = {
+        "precisePropertyData": external_data.get("p1", {}).get("precise_property_data", {}),
+        "vehicleData": external_data.get("p1", {}).get("vehicle_data", {}),
+        "wealthProductData": external_data.get("p1", {}).get("wealth_product_data", {}),
+        "securitiesData": external_data.get("p1", {}).get("securities_data", {}),
+        "creditData": external_data.get("p0", {}).get("credit_data", {}),
+        "amlData": external_data.get("p0", {}).get("aml_data", {}),
+    }
+
+    for key, data in external_cache_mapping.items():
+        cache_mgr.save_cache(key, data if data is not None else {})
+        logger.info(f"  ✓ 已保存 {key}")
 
 
 def _raise_if_analysis_stopped(phase: str = "分析已停止"):
@@ -1354,6 +1517,8 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         if analysis_config.timeWindow is not None:
             config.CASH_TIME_WINDOW_HOURS = analysis_config.timeWindow
 
+        saved_primary_config = _load_saved_primary_targets_config(data_dir, output_dir)
+
         # ========================================================================
         # 清除旧缓存（点击"开始分析"时自动清除）
         # ========================================================================
@@ -2203,7 +2368,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         try:
             # 使用V2版本：传入内存中的external_data进行家庭推断
             logger.info("  ▶ 家庭关系分析开始...")
-            family_units_list, inference_details = family_analyzer.infer_family_units_v2(
+            inferred_family_units, inference_details = family_analyzer.infer_family_units_v2(
                 core_persons=all_persons,
                 external_data=external_data,
                 profiles=profiles,
@@ -2211,21 +2376,33 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                 data_directory=data_dir,
                 confidence_threshold=0.6
             )
-            logger.info(f"  ✓ 家庭单元推断完成: {len(family_units_list)} 个家庭")
+            logger.info(f"  ✓ 家庭单元推断完成: {len(inferred_family_units)} 个家庭")
             family_tree = family_analyzer.build_family_tree(all_persons, data_dir)
             family_summary = family_analyzer.get_family_summary(family_tree)
+
+            effective_family_units, applied_primary_config = (
+                _get_effective_family_units_for_analysis(
+                    inferred_family_units, data_dir, output_dir, profiles
+                )
+            )
+            if applied_primary_config:
+                logger.info(
+                    "  ✓ 已应用用户保存的归集配置参与家庭分析: "
+                    f"{len(applied_primary_config.analysis_units)} 个分析单元"
+                )
+            else:
+                logger.info("  ✓ 当前未发现用户保存归集配置，使用自动推断家庭单元")
 
             analysis_results["family_tree"] = family_tree
             analysis_results["family_units"] = family_summary
             analysis_results["family_relations"] = family_tree
-            analysis_results["family_units_v2"] = family_units_list
+            analysis_results["family_units_v2"] = inferred_family_units
 
             # 计算家庭财务汇总
             logger.info("  ▶ 计算家庭财务汇总...")
             all_family_summaries = {}
-            all_family_summaries = {}
-            for unit in family_units_list:
-                householder = unit.get("householder", "")
+            for unit in effective_family_units:
+                householder = unit.get("householder", "") or unit.get("anchor", "")
                 members = unit.get("members", [])
                 if members:
                     try:
@@ -2246,7 +2423,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                     first_householder
                 ]
                 analysis_results["all_family_summaries"] = all_family_summaries
-                logger.info(f"  ✓ 家庭分析完成: {len(family_units_list)} 个家庭")
+                logger.info(f"  ✓ 家庭分析完成: {len(effective_family_units)} 个分析单元")
             else:
                 family_summary_result = family_finance.calculate_family_summary(
                     profiles, all_persons
@@ -2254,98 +2431,16 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                 analysis_results["family_summary"] = family_summary_result
                 logger.info(f"  ✓ 家庭汇总完成(fallback): {len(all_persons)} 人")
 
-            optimized_family_income_enabled = USE_OPTIMIZED_FAMILY_INCOME
-
-            # 【2026-03-04 优化】使用向量化函数更新家庭收入
-            if family_units_list and optimized_family_income_enabled:
-                try:
-                    profiles = batch_update_family_income(
-                        profiles, cleaned_data, family_units_list, logger
-                    )
-                except Exception as e:
-                    logger.warning(f"【优化版】更新真实收入失败: {e}，回退到原始实现")
-                    optimized_family_income_enabled = False
-            
-            # 【回退】如果优化版失败，使用原始实现
-            if family_units_list and not optimized_family_income_enabled:
-                try:
-                    logger.info("  ▶ [旧版] 根据家庭信息更新真实收入...")
-                    # 构建人员到家庭成员的映射
-                    person_to_family = {}
-                    for unit in family_units_list:
-                        members = unit.get("members", [])
-                        for member in members:
-                            # 其他成员（不包含自己）
-                            other_members = [m for m in members if m != member]
-                            if other_members:
-                                person_to_family[member] = other_members
-                    
-                    # 更新每个 profile 的真实收入
-                    for person_name in profiles:
-                        family_members = person_to_family.get(person_name, [])
-                        profile = profiles[person_name]
-                        df = cleaned_data.get(person_name)
-                        
-                        if df is not None and family_members:
-                            # 重新计算真实收入/支出
-                            try:
-                                _refresh_profile_real_metrics(
-                                    profile,
-                                    df,
-                                    person_name,
-                                    family_members,
-                                    income_expense_match_analyzer,
-                                )
-                                logger.info(
-                                    f"  ✓ 更新 {person_name} 真实收入: "
-                                    f"    原始: {profile.get('income_structure', {}).get('total_income', 0)/10000:.2f}万, "
-                                    f"    更新后: {profile.get('summary', {}).get('real_income', 0)/10000:.2f}万 (剔除家庭转账)"
-                                )
-                            except Exception as e:
-                                logger.warning(f"更新 {person_name} 真实收入失败: {e}")
-                    
-                    logger.info(f"  ✓ [旧版] 已根据家庭关系更新 {len(person_to_family)} 人的真实收入")
-                except Exception as e:
-                    logger.warning(f"更新真实收入失败: {e}")
-            if family_units_list:
-                try:
-                    # 构建人员到家庭成员的映射
-                    person_to_family = {}
-                    for unit in family_units_list:
-                        members = unit.get("members", [])
-                        for member in members:
-                            # 其他成员（不包含自己）
-                            other_members = [m for m in members if m != member]
-                            if other_members:
-                                person_to_family[member] = other_members
-                    
-                    # 更新每个 profile 的真实收入
-                    for person_name in profiles:
-                        family_members = person_to_family.get(person_name, [])
-                        profile = profiles[person_name]
-                        df = cleaned_data.get(person_name)
-                        
-                        if df is not None and family_members:
-                            # 重新计算真实收入/支出
-                            try:
-                                _refresh_profile_real_metrics(
-                                    profile,
-                                    df,
-                                    person_name,
-                                    family_members,
-                                    income_expense_match_analyzer,
-                                )
-                                logger.info(
-                                    f"  ✓ 更新 {person_name} 真实收入: "
-                                    f"    原始: {profile.get('income_structure', {}).get('total_income', 0)/10000:.2f}万, "
-                                    f"    更新后: {profile.get('summary', {}).get('real_income', 0)/10000:.2f}万 (剔除家庭转账)"
-                                )
-                            except Exception as e:
-                                logger.warning(f"更新 {person_name} 真实收入失败: {e}")
-                    
-                    logger.info(f"  ✓ 已根据家庭关系更新 {len(person_to_family)} 人的真实收入")
-                except Exception as e:
-                    logger.warning(f"更新真实收入失败: {e}")
+            if effective_family_units:
+                logger.info("  ▶ 根据当前生效归集单元刷新真实收入...")
+                updated_count = _refresh_profiles_with_family_units(
+                    profiles,
+                    cleaned_data,
+                    effective_family_units,
+                    income_expense_match_analyzer,
+                    logger,
+                )
+                logger.info(f"  ✓ 已根据家庭关系更新 {updated_count} 人的真实收入")
 
         except Exception as e:
             logger.warning(f"  ✗ 家庭分析失败: {e}")
@@ -2504,18 +2599,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         # 【修复】在报告生成前保存外部数据缓存，确保报告生成器能读取到
         logger.info("保存外部数据缓存（供报告生成）...")
         try:
-            external_cache_mapping = {
-                "precisePropertyData": external_data["p1"].get("precise_property_data", {}),
-                "vehicleData": external_data["p1"].get("vehicle_data", {}),
-                "wealthProductData": external_data["p1"].get("wealth_product_data", {}),
-                "securitiesData": external_data["p1"].get("securities_data", {}),
-                "creditData": external_data["p0"].get("credit_data", {}),
-                "amlData": external_data["p0"].get("aml_data", {}),
-            }
-            for key, data in external_cache_mapping.items():
-                if data:
-                    cache_mgr.save_cache(key, data)
-                    logger.info(f"  ✓ 已保存 {key}")
+            _save_external_report_caches(cache_mgr, external_data, logger)
         except Exception as e:
             logger.warning(f"  ✗ 保存外部数据缓存失败: {e}")
 
@@ -2628,6 +2712,8 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         try:
             builder = load_investigation_report_builder(output_dir)
             if builder:
+                if saved_primary_config:
+                    builder.set_primary_config(saved_primary_config)
                 txt_report_path = os.path.join(
                     output_dirs["analysis_results"],
                     config.OUTPUT_REPORT_FILE.replace(".docx", ".txt"),
@@ -3782,8 +3868,7 @@ def _apply_report_generation_overrides(config_obj, request_obj):
             )
         )
 
-    if filtered_units:
-        config_obj.analysis_units = filtered_units
+    config_obj.analysis_units = filtered_units
     if config_obj.include_companies:
         config_obj.include_companies = [
             c for c in config_obj.include_companies if c in selected
@@ -3864,134 +3949,6 @@ async def generate_investigation_report_with_config(
             )
 
         # 【v4.1 新增】设置用户配置到报告构建器
-        builder.set_primary_config(config)
-        _apply_runtime_report_options(builder, request)
-        logger.info(
-            f"[报告生成] 已设置用户配置: {len(config.analysis_units)} 个分析单元"
-        )
-
-        # 【v4.1 新增】根据用户配置重新计算家庭汇总
-        logger.info("[报告生成] 检测到用户配置，重新计算家庭汇总...")
-
-        # 4.1. 加载 profiles.json 和外部数据
-        cache_dir = os.path.join(active_output_dir, "analysis_cache")
-        with open(os.path.join(cache_dir, "profiles.json"), "r", encoding="utf-8") as f:
-            profiles = json.load(f)
-
-        # 【修复】加载外部数据（房产、车辆）
-        external_data_cache = {}
-        try:
-            with open(
-                os.path.join(cache_dir, "precisePropertyData.json"),
-                "r",
-                encoding="utf-8",
-            ) as f:
-                external_data_cache["property"] = json.load(f)
-        except Exception:
-            external_data_cache["property"] = {}
-
-        try:
-            with open(
-                os.path.join(cache_dir, "vehicleData.json"), "r", encoding="utf-8"
-            ) as f:
-                external_data_cache["vehicle"] = json.load(f)
-        except Exception:
-            external_data_cache["vehicle"] = {}
-
-        # 4.2. 重新计算每个家庭的汇总
-        from family_finance import calculate_family_summary
-
-        updated_family_summaries = {}
-        for unit in config.analysis_units:
-            if unit.unit_type == "family":
-                householder = unit.anchor
-                members = unit.members
-
-                # 【修复】聚合房产/车辆数据
-                all_properties = []
-                all_vehicles = []
-
-                for member in members:
-                    # 从 profiles 获取
-                    profile = profiles.get(member, {})
-                    if profile.get("properties"):
-                        all_properties.extend(profile["properties"])
-                    if profile.get("properties_precise"):
-                        all_properties.extend(profile["properties_precise"])
-                    if profile.get("vehicles"):
-                        all_vehicles.extend(profile["vehicles"])
-
-                    # 从外部缓存获取（通过身份证号映射）
-                    # 需要找到成员对应的身份证号
-                    for pid, props in external_data_cache.get("property", {}).items():
-                        if props and len(props) > 0:
-                            # 检查产权人姓名是否匹配
-                            owner_name = props[0].get("owner_name", "")
-                            if owner_name == member:
-                                all_properties.extend(props)
-
-                    for pid, vehicles in external_data_cache.get("vehicle", {}).items():
-                        if vehicles and len(vehicles) > 0:
-                            # 检查车主姓名是否匹配
-                            owner_name = vehicles[0].get("owner_name", "")
-                            if owner_name == member:
-                                all_vehicles.extend(vehicles)
-
-                # 重新计算家庭财务汇总
-                try:
-                    unit_summary = calculate_family_summary(
-                        profiles,
-                        members,
-                        properties=all_properties,
-                        vehicles=all_vehicles,
-                    )
-                    unit_summary["householder"] = householder
-                    updated_family_summaries[householder] = unit_summary
-                    logger.info(
-                        f"[家庭汇总] 已重新计算 {householder} 家庭汇总: 房产{len(all_properties)}套, 车辆{len(all_vehicles)}辆"
-                    )
-                except Exception as e:
-                    logger.warning(f"计算 {householder} 家庭汇总失败: {e}")
-
-        # 4.3. 更新 derived_data.json
-        # 【P1修复】使用缓存并发锁保护文件写入
-        if updated_family_summaries:
-            derived_data_path = os.path.join(cache_dir, "derived_data.json")
-            with _cache_lock:
-                derived_data = _load_json_dict_or_default(
-                    derived_data_path,
-                    logger,
-                    "家庭汇总缓存",
-                )
-
-                # 保留原有数据
-                derived_data["all_family_summaries"] = updated_family_summaries
-
-                # 【修复 2026-03-07】不要覆盖整个 family_summary，保留 family_units 字段
-                existing_family_summary = derived_data.get("family_summary", {})
-                first_householder = list(updated_family_summaries.keys())[0]
-                derived_data["family_summary"] = {
-                    **existing_family_summary,  # 保留 family_units 等字段
-                    "all_family_summaries": updated_family_summaries,
-                    "first_family": updated_family_summaries[first_householder],
-                }
-
-                with open(derived_data_path, "w", encoding="utf-8") as f:
-                    json.dump(derived_data, f, ensure_ascii=False, indent=2)
-
-            logger.info(f"[家庭汇总] 已更新: {len(updated_family_summaries)} 个家庭")
-
-        # 【v4.1 修复】重新加载 builder，确保使用更新后的缓存数据
-        logger.info("[报告生成] 重新加载 builder（使用更新后的缓存数据）")
-        builder = load_investigation_report_builder(active_output_dir)
-
-        if builder is None:
-            logger.warning("[报告生成] 缓存数据不存在，请先运行分析")
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "error": "分析缓存不存在，请先运行分析"},
-            )
-
         builder.set_primary_config(config)
         _apply_runtime_report_options(builder, request)
         logger.info(

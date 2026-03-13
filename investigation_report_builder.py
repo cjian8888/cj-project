@@ -7852,6 +7852,56 @@ class InvestigationReportBuilder:
         
         return fill_recursive(context)
 
+    def _normalize_income_expense_threshold(
+        self, raw_value: Any, default_value: float
+    ) -> float:
+        """Normalize ratio-style thresholds to percentages."""
+        try:
+            threshold = float(raw_value)
+        except (TypeError, ValueError):
+            threshold = float(default_value)
+        if threshold <= 1:
+            threshold *= 100
+        return threshold
+
+    def _classify_income_match_review(
+        self, salary_ratio: float, expense_income_ratio: float
+    ) -> Dict[str, str]:
+        """Classify whether income/expense mismatch should be escalated."""
+        thresholds = (
+            self._risk_thresholds.get("income_expense", {})
+            if isinstance(getattr(self, "_risk_thresholds", {}), dict)
+            else {}
+        )
+        high_threshold = self._normalize_income_expense_threshold(
+            thresholds.get("high", 0.3), 30.0
+        )
+        medium_threshold = self._normalize_income_expense_threshold(
+            thresholds.get("medium", 0.5), 50.0
+        )
+        low_threshold = self._normalize_income_expense_threshold(
+            thresholds.get("low", 0.7), 70.0
+        )
+
+        if salary_ratio < high_threshold or expense_income_ratio > 1.5:
+            if salary_ratio < high_threshold and expense_income_ratio > 1.5:
+                return {"risk_level": "high", "risk_desc": "严重偏低且入不敷出"}
+            if salary_ratio < high_threshold:
+                return {"risk_level": "high", "risk_desc": "严重偏低"}
+            return {"risk_level": "high", "risk_desc": "入不敷出"}
+
+        if salary_ratio < medium_threshold or expense_income_ratio > 1.2:
+            if salary_ratio < medium_threshold and expense_income_ratio > 1.2:
+                return {"risk_level": "medium", "risk_desc": "偏低且支出偏高"}
+            if salary_ratio < medium_threshold:
+                return {"risk_level": "medium", "risk_desc": "偏低"}
+            return {"risk_level": "medium", "risk_desc": "支出偏高"}
+
+        if salary_ratio >= low_threshold and expense_income_ratio <= 1.2:
+            return {"risk_level": "low", "risk_desc": "正常"}
+
+        return {"risk_level": "low", "risk_desc": "正常"}
+
     def _build_v4_conclusion(
         self, person_sections: List[Dict], company_sections: List[Dict]
     ) -> Dict:
@@ -7871,41 +7921,11 @@ class InvestigationReportBuilder:
                 # 【2026-02-21 新增】获取支出收入比
                 expense_income_ratio = income_match.get("expense_income_ratio", 0)
 
-                # 【6.1修复】判断风险等级 - 【2026-02-21 增强】增加支出收入比判断
-                # 使用统一阈值配置替代硬编码值
-                income_expense_thresholds = self._risk_thresholds.get('income_expense', {})
-                high_threshold = income_expense_thresholds.get('high', 0.3)      # 高风险：工资占比<30%
-                medium_threshold = income_expense_thresholds.get('medium', 0.5)  # 中风险：工资占比<50%
-                low_threshold = income_expense_thresholds.get('low', 0.7)        # 低风险：工资占比>=70%
-                if high_threshold <= 1:
-                    high_threshold *= 100
-                if medium_threshold <= 1:
-                    medium_threshold *= 100
-                if low_threshold <= 1:
-                    low_threshold *= 100
-
-                # 高风险：工资占比<high_threshold 或 支出收入比>1.5
-                if salary_ratio < high_threshold or expense_income_ratio > 1.5:
-                    risk_level = "high"
-                    if salary_ratio < high_threshold and expense_income_ratio > 1.5:
-                        risk_desc = "严重偏低且入不敷出"
-                    elif salary_ratio < high_threshold:
-                        risk_desc = "严重偏低"
-                    else:
-                        risk_desc = "入不敷出"
-                # 中风险：工资占比<medium_threshold 或 支出收入比>1.2
-                elif salary_ratio < medium_threshold or expense_income_ratio > 1.2:
-                    risk_level = "medium"
-                    if salary_ratio < medium_threshold and expense_income_ratio > 1.2:
-                        risk_desc = "偏低且支出偏高"
-                    elif salary_ratio < medium_threshold:
-                        risk_desc = "偏低"
-                    else:
-                        risk_desc = "支出偏高"
-                # 低风险：工资占比>=low_threshold 且 支出收入比<=1.2
-                else:
-                    risk_level = "low"
-                    risk_desc = "正常"
+                review = self._classify_income_match_review(
+                    salary_ratio, expense_income_ratio
+                )
+                risk_level = review["risk_level"]
+                risk_desc = review["risk_desc"]
 
                 risk_levels[risk_level] += 1
 
@@ -9352,12 +9372,10 @@ class InvestigationReportBuilder:
         )
 
         # 获取从业单位
-        employer = self._clean_report_value(
-            huji_info.get("从业单位", "")
-            or id_info.get("employer", "")
-            or self._person_identity_map.get(name, {}).get("employer", "")
-            or "信息待补充",
-            "信息待补充",
+        employer = self._sanitize_employer_for_report(
+            huji_info=huji_info,
+            id_info=id_info,
+            identity_info=self._person_identity_map.get(name, {}),
         )
 
         # 获取性别
@@ -9406,6 +9424,101 @@ class InvestigationReportBuilder:
             return "暂无家庭成员信息"
 
         return "；".join(members_desc)
+
+    def _sanitize_employer_value(self, value: Any, occupation: Any = None) -> str:
+        """Filter out placeholders, statuses and obvious non-employer text."""
+        employer = self._clean_report_value(value, "")
+        if not employer:
+            return ""
+
+        normalized = re.sub(r"\s+", "", employer)
+        invalid_values = {
+            "待业",
+            "无业",
+            "学生",
+            "退休",
+            "待核实",
+            "未提供",
+            "未知",
+            "暂无数据",
+            "暂未获取",
+            "信息待补充",
+            "nan",
+            "none",
+            "null",
+        }
+        if normalized.lower() in invalid_values:
+            return ""
+
+        occupation_text = str(occupation or "").strip()
+        if occupation_text in {"学生", "无业", "待业"}:
+            return ""
+
+        organization_keywords = (
+            "公司",
+            "集团",
+            "有限",
+            "股份",
+            "银行",
+            "医院",
+            "学校",
+            "大学",
+            "学院",
+            "中学",
+            "小学",
+            "幼儿园",
+            "厂",
+            "院",
+            "所",
+            "中心",
+            "局",
+            "政府",
+            "委员会",
+            "村委会",
+            "村委",
+            "社区",
+            "合作社",
+            "事务所",
+            "酒店",
+            "宾馆",
+            "商店",
+            "超市",
+            "派出所",
+            "法院",
+            "检察院",
+            "税务",
+            "海关",
+            "交大",
+        )
+        has_org_keyword = any(keyword in employer for keyword in organization_keywords)
+
+        if re.search(r"村委.*村$", employer):
+            return ""
+
+        if not has_org_keyword and re.search(r"(工程及|专业)$", employer):
+            return ""
+
+        if not has_org_keyword and re.search(
+            r"(镇|乡|村|路|街|弄|号|室|单元)$", employer
+        ):
+            return ""
+
+        return employer
+
+    def _sanitize_employer_for_report(
+        self, huji_info: Dict, id_info: Dict, identity_info: Dict
+    ) -> str:
+        """Prefer the first employer candidate that passes basic semantic checks."""
+        candidates = [
+            (huji_info.get("从业单位", ""), huji_info.get("职业", "")),
+            (id_info.get("employer", ""), id_info.get("occupation", "")),
+            (identity_info.get("employer", ""), identity_info.get("work_identity", "")),
+        ]
+        for employer_value, occupation in candidates:
+            cleaned = self._sanitize_employer_value(employer_value, occupation)
+            if cleaned:
+                return cleaned
+        return "信息待补充"
 
     def _build_salary_income_v4(self, name: str, profile: Dict) -> Dict:
         """
@@ -9462,19 +9575,19 @@ class InvestigationReportBuilder:
 
         start_year = min(years_with_data) if years_with_data else ""
         end_year = max(years_with_data) if years_with_data else ""
-        period_start = (
+        period_start = start_year or (
             start_date[:4]
             if start_date and len(start_date) >= 4
             else profile_start[:4]
             if profile_start and len(profile_start) >= 4
-            else start_year
+            else ""
         )
-        period_end = (
+        period_end = end_year or (
             end_date[:4]
             if end_date and len(end_date) >= 4
             else profile_end[:4]
             if profile_end and len(profile_end) >= 4
-            else end_year
+            else ""
         )
         period_desc = (
             f"{period_start}年至{period_end}年"
@@ -10309,6 +10422,12 @@ class InvestigationReportBuilder:
                 }
             )
 
+        review = self._classify_income_match_review(
+            salary_ratio=salary_ratio,
+            expense_income_ratio=expense_income_ratio,
+        )
+        review_severity = review["risk_level"]
+
         return {
             "total_inflow": raw_income,
             "total_inflow_wan": round(raw_income / 10000, 2),
@@ -10332,7 +10451,8 @@ class InvestigationReportBuilder:
             "income_sufficient": income_sufficient,
             "balance_narrative": "资金净结余" if net_balance >= 0 else "资金净流出",
             "narrative": "".join(narrative_parts),
-            "need_further_verification": not income_sufficient or salary_ratio < 30,
+            "review_severity": review_severity,
+            "need_further_verification": review_severity in {"medium", "high"},
             "offset_rule_rows": offset_rule_rows,
         }
 

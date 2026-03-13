@@ -152,7 +152,7 @@ def test_penetration_report_marks_missing_amount_instead_of_zero(tmp_path):
 
     report = generator._generate_penetration_report()
 
-    assert "总资金: 未提供" in report
+    assert "闭环金额: 当前闭环结果仅输出路径与风险等级" in report
     assert "总资金: ¥0.00" not in report
 
 
@@ -444,4 +444,4 @@ def test_penetration_report_suppresses_tiny_estimated_cycle_amounts(tmp_path):
     report = generator._generate_penetration_report()
 
     assert "估算闭环金额" not in report
-    assert "总资金: 未提供" in report
+    assert "闭环金额: 当前闭环结果仅输出路径与风险等级" in report
