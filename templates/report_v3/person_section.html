@@ -181,13 +181,13 @@ tax_analysis, travel_analysis
         {% else %}
         籍贯暂未获取。
         {% endif %}
-        {% if bg.employer and bg.employer != '暂无数据' %}
+        {% if bg.employer and bg.employer not in ['暂无数据', '暂未获取', '信息待补充', '未提供', '未知', 'nan', 'None', 'null'] %}
         从业单位为{{ bg.employer }}。
         {% endif %}
-        {% if bg.current_position and bg.current_position != '暂无数据' %}
+        {% if bg.current_position and bg.current_position not in ['暂无数据', '暂未获取', '信息待补充', '未提供', '未知', 'nan', 'None', 'null'] %}
         现任职务为{{ bg.current_position }}。
         {% endif %}
-        {% if bg.entry_date and bg.entry_date != '暂无数据' %}
+        {% if bg.entry_date and bg.entry_date not in ['暂无数据', '暂未获取', '信息待补充', '未提供', '未知', 'nan', 'None', 'null'] %}
         于{{ bg.entry_date }}进入现单位工作。
         {% endif %}
         {% if bg.family_members_desc and bg.family_members_desc != '暂无家庭成员信息' %}
@@ -340,8 +340,13 @@ tax_analysis, travel_analysis
     {% if vehicle.has_data and vehicle.count and vehicle.count > 0 %}
     <p>
         {{ unit.name }}本人名下{% for v in vehicle.vehicles %}
-        有一辆{{ v.color or v.颜色 or '' }}{{ v.brand or v.品牌 or '' }}汽车，车牌号{{ v.plate_number or v.车牌号 or '' }}，于{{
-        v.registration_date or v.登记时间 or '' }}登记购入{% if not loop.last %}；{% else %}。{% endif %}
+        {% set reg_date = v.registration_date or v.登记时间 or '' %}
+        有一辆{{ v.color or v.颜色 or '' }}{{ v.brand or v.品牌 or '' }}汽车，车牌号{{ v.plate_number or v.车牌号 or '' }}，
+        {% if reg_date and reg_date not in ['暂无数据', '暂未获取', '信息待补充', '未提供', '未知', '【待补充】', 'nan', 'None', 'null'] %}
+        于{{ reg_date }}登记购入{% if not loop.last %}；{% else %}。{% endif %}
+        {% else %}
+        登记时间待补充{% if not loop.last %}；{% else %}。{% endif %}
+        {% endif %}
         {% endfor %}
         {% if vehicle.violations %}
         {{ vehicle.violations }}

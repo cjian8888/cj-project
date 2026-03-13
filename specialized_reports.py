@@ -1516,7 +1516,7 @@ class SpecializedReportGenerator:
                 lines.append(f"  闭环长度: {length} 个节点")
                 lines.append(f"  风险等级: {risk_level}")
                 if total_amount is None or total_amount <= 0:
-                    lines.append("  总资金: 未提供（当前闭环结果仅包含路径与风险等级）")
+                    lines.append("  闭环金额: 当前闭环结果仅输出路径与风险等级")
                 else:
                     lines.append(f"  估算闭环金额: {utils.format_currency(total_amount)} 元")
                     lines.append("  金额口径: 基于 graph_data 边权的最小边额估算，仅作路径强度参考")

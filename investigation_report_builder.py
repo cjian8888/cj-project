@@ -848,6 +848,40 @@ class InvestigationReportBuilder:
             return default
         return str_val
 
+    def _is_placeholder_value(
+        self, value: Any, extra_placeholders: Optional[List[str]] = None
+    ) -> bool:
+        """判断值是否属于正式报告中不应直出的占位文本。"""
+        if value is None:
+            return True
+
+        str_val = str(value).strip()
+        if not str_val:
+            return True
+
+        placeholders = {
+            "nan",
+            "none",
+            "null",
+            "暂无数据",
+            "暂未获取",
+            "信息待补充",
+            "【待补充】",
+            "【待调取】",
+            "未提供",
+            "未知",
+        }
+        if extra_placeholders:
+            placeholders.update(str(item).strip() for item in extra_placeholders if item)
+
+        return str_val.lower() in {item.lower() for item in placeholders}
+
+    def _clean_report_value(self, value: Any, default: str = "") -> str:
+        """清理正式报告中的占位值，缺失时返回指定默认值。"""
+        if self._is_placeholder_value(value):
+            return default
+        return str(value).strip()
+
     def _clean_transaction(self, trans: Dict) -> Dict:
         """清理交易记录中的nan值"""
         cleaned = {}
@@ -6481,6 +6515,12 @@ class InvestigationReportBuilder:
                     f"关系数={len(member_details_list)}"
                 )
 
+            if families:
+                logger.info(
+                    f"[配置优先] 已生成 {len(families)} 个分析单元，跳过 family_units_v2/family_units 自动补齐"
+                )
+                return families
+
         # ========== 优先级2: 未分配人员使用 family_units_v2 / family_units ==========
         family_units_v2 = self.derived_data.get("family_units_v2", [])
         family_units = self.derived_data.get("family_units", [])
@@ -6625,14 +6665,39 @@ class InvestigationReportBuilder:
             rel for rel in family_summary.get("member_relations", []) if not rel.get("has_data")
         ]
 
+        anchor_has_data = anchor in self.profiles
+        if isinstance(member_details, list):
+            for detail in member_details:
+                if (
+                    isinstance(detail, dict)
+                    and str(detail.get("name", "") or "").strip() == anchor
+                ):
+                    anchor_has_data = bool(detail.get("has_data")) or anchor_has_data
+                    break
+
+        current_analysis_members = [m for m in detailed_members if m]
+        family_name = f"{anchor}家庭" if len(sorted_members) > 1 else anchor
+        if (
+            len(sorted_members) > 1
+            and not anchor_has_data
+            and current_analysis_members
+            and anchor not in current_analysis_members
+        ):
+            preview_names = "、".join(current_analysis_members[:2])
+            if len(current_analysis_members) > 2:
+                preview_names += "等"
+            family_name = f"{family_name}（当前分析成员：{preview_names}）"
+
         return {
-            "family_name": f"{anchor}家庭" if len(sorted_members) > 1 else anchor,
+            "family_name": family_name,
             "anchor": anchor,
+            "anchor_has_data": anchor_has_data,
             "members": sorted_members,  # 使用排序后的成员列表
             "member_count": len(sorted_members),
             "unit_type": unit_type,
             "family_summary": family_summary,
             "pending_members": pending_members,
+            "current_analysis_members": current_analysis_members,
             "member_sections": member_sections,
         }
 
@@ -7147,8 +7212,12 @@ class InvestigationReportBuilder:
             first_family = family_sections[0] or {}
             family_name = str(first_family.get("family_name", "") or "").strip()
             if family_name:
-                return family_name[:-2] if family_name.endswith("家庭") else family_name
-            anchor_name = str(first_family.get("anchor_name", "") or "").strip()
+                family_subject = family_name.split("家庭", 1)[0].strip()
+                if family_subject:
+                    return family_subject
+            anchor_name = str(
+                first_family.get("anchor_name", "") or first_family.get("anchor", "") or ""
+            ).strip()
             if anchor_name:
                 return anchor_name
 
@@ -8199,13 +8268,17 @@ class InvestigationReportBuilder:
         # Initialize with placeholders
         basic_info = {
             "name": name,
-            "id_number": "暂无数据",
-            "gender": "暂无数据",
-            "birth_date": "暂无数据",
-            "work_unit": identity_info.get("employer", "暂无数据"),
-            "position": identity_info.get("position", "暂无数据"),
-            "political_status": identity_info.get("political_status", "暂无数据"),
-            "work_identity": identity_info.get("work_identity", "暂无数据"),
+            "id_number": self._clean_report_value(identity_info.get("id_number"), "暂无数据"),
+            "gender": self._clean_report_value(identity_info.get("gender"), "暂无数据"),
+            "birth_date": self._clean_report_value(identity_info.get("birth_date"), "暂无数据"),
+            "work_unit": self._clean_report_value(identity_info.get("employer"), "信息待补充"),
+            "position": self._clean_report_value(identity_info.get("position"), "信息待补充"),
+            "political_status": self._clean_report_value(
+                identity_info.get("political_status"), "暂无数据"
+            ),
+            "work_identity": self._clean_report_value(
+                identity_info.get("work_identity"), "暂无数据"
+            ),
         }
         
         # 【修复】优先级1: 尝试从同户人/户籍数据（family_tree）提取 - 最完整
@@ -8231,17 +8304,17 @@ class InvestigationReportBuilder:
                     )
                     id_num = info.get("身份证号") or info.get("id_number") or ""
                     position = info.get("职位") or info.get("position") or ""
-                    if gender:
-                        basic_info["gender"] = str(gender)
-                    if birth_date:
-                        basic_info["birth_date"] = str(birth_date)
-                    if work_unit:
-                        basic_info["work_unit"] = str(work_unit)
-                    if id_num:
-                        basic_info["id_number"] = str(id_num)
+                    if not self._is_placeholder_value(gender):
+                        basic_info["gender"] = str(gender).strip()
+                    if not self._is_placeholder_value(birth_date):
+                        basic_info["birth_date"] = str(birth_date).strip()
+                    if not self._is_placeholder_value(work_unit):
+                        basic_info["work_unit"] = str(work_unit).strip()
+                    if not self._is_placeholder_value(id_num):
+                        basic_info["id_number"] = str(id_num).strip()
                         family_data_found = True
-                    if position:
-                        basic_info["position"] = str(position)
+                    if not self._is_placeholder_value(position):
+                        basic_info["position"] = str(position).strip()
         except Exception:
             pass
         
@@ -8251,6 +8324,7 @@ class InvestigationReportBuilder:
                 profile = self.profiles[name]
                 # 尝试从profile获取身份证号（我们修复后添加的entity_id字段）
                 entity_id = profile.get("entity_id", "") or profile.get("id_number", "")
+                entity_id = self._clean_report_value(entity_id)
                 if entity_id:
                     basic_info["id_number"] = entity_id
                     logger.info(f"[个人信息] {name} 从profiles读取身份证号: {entity_id}")
@@ -9268,28 +9342,31 @@ class InvestigationReportBuilder:
                 birth_date = raw_str
 
         # 获取籍贯/出生地
-        birth_place = (
+        birth_place = self._clean_report_value(
             huji_info.get("籍贯", "")
             or huji_info.get("出生地", "")
             or id_info.get("native_place", "")
             or id_info.get("birth_place", "")
-            or "暂未获取"
+            or "暂未获取",
+            "暂未获取",
         )
 
         # 获取从业单位
-        employer = (
+        employer = self._clean_report_value(
             huji_info.get("从业单位", "")
             or id_info.get("employer", "")
             or self._person_identity_map.get(name, {}).get("employer", "")
-            or "信息待补充"
+            or "信息待补充",
+            "信息待补充",
         )
 
         # 获取性别
-        gender = (
+        gender = self._clean_report_value(
             huji_info.get("性别", "")
             or id_info.get("gender", "")
             or decoded.get("gender", "")
-            or "暂未获取"
+            or "暂未获取",
+            "暂未获取",
         )
 
         return {
@@ -9297,7 +9374,9 @@ class InvestigationReportBuilder:
             "gender": gender,
             "birth_date": birth_date,
             "birth_place": birth_place,
-            "id_number": person_id or id_info.get("id_number", "暂未获取"),
+            "id_number": self._clean_report_value(
+                person_id or id_info.get("id_number", "暂未获取"), "暂未获取"
+            ),
             "entry_date": "暂无数据",  # 入职日期需要人事档案
             "current_position": "暂无数据",  # 职务需要人事档案
             "employer": employer,
@@ -9864,26 +9943,29 @@ class InvestigationReportBuilder:
         vehicle_list = []
         for v in vehicles:
             # 【C-04/M-04修复】支持多种字段名格式
-            color = v.get("color", "") or v.get("颜色", "") or ""
-            brand = (
+            color = self._clean_report_value(v.get("color", "") or v.get("颜色", ""), "")
+            brand = self._clean_report_value(
                 v.get("brand", "") or v.get("品牌", "") or v.get("车辆品牌", "") or ""
             )
-            plate = (
+            plate = self._clean_report_value(
                 v.get("plate_number", "")
                 or v.get("车牌号", "")
                 or v.get("号牌号码", "")
                 or ""
             )
-            # 【1.2修复】购入日期支持多种字段名，添加默认值处理
-            reg_date = (
+            # 【1.2修复】购入日期支持多种字段名，清理占位值
+            reg_date = self._clean_report_value(
                 v.get("registration_date", "")
                 or v.get("登记时间", "")
                 or v.get("初次登记日期", "")
                 or v.get("purchase_date", "")
                 or v.get("购入日期", "")
-                or "暂无数据"  # 添加默认占位符
+                or "",
+                "",
             )
-            vehicle_type = v.get("vehicle_type", "") or v.get("车辆类型", "") or ""
+            vehicle_type = self._clean_report_value(
+                v.get("vehicle_type", "") or v.get("车辆类型", "") or "", ""
+            )
 
             desc = f"{color} {brand}".strip() or "未知品牌"
 
@@ -9906,7 +9988,7 @@ class InvestigationReportBuilder:
         for v in vehicle_list:
             if v["plate_number"]:
                 date_str = v["registration_date"]
-                if date_str and date_str != "【待补充】":
+                if date_str:
                     descs.append(
                         f"一辆{v['description']}，车牌号{v['plate_number']}，于{date_str}登记购入"
                     )
@@ -12041,15 +12123,16 @@ class InvestigationReportBuilder:
         lines.append(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
         metadata = self.metadata if isinstance(self.metadata, dict) else {}
-        cache_version = metadata.get("version", "未提供")
-        cache_generated_at = metadata.get("generatedAt", "未提供")
-        cache_manager_version = metadata.get("cacheManagerVersion", "未提供")
-        data_flow = metadata.get("dataFlow", "未提供")
-        analysis_run_id = (
+        cache_version = self._clean_report_value(metadata.get("version"), "")
+        cache_generated_at = self._clean_report_value(metadata.get("generatedAt"), "")
+        cache_manager_version = self._clean_report_value(
+            metadata.get("cacheManagerVersion"), ""
+        )
+        data_flow = self._clean_report_value(metadata.get("dataFlow"), "")
+        analysis_run_id = self._clean_report_value(
             metadata.get("analysis_run_id")
             or metadata.get("run_id")
             or metadata.get("runId")
-            or "未提供"
         )
         cache_fingerprint = self._build_cache_fingerprint()
         cache_dir = os.path.join(self.output_dir, "analysis_cache")
@@ -12057,11 +12140,16 @@ class InvestigationReportBuilder:
         lines.append("")
         lines.append("【溯源元信息】")
         lines.append(f"  • 缓存目录: {cache_dir}")
-        lines.append(f"  • 缓存版本: {cache_version}")
-        lines.append(f"  • 缓存生成时间: {cache_generated_at}")
-        lines.append(f"  • 缓存管理器版本: {cache_manager_version}")
-        lines.append(f"  • 数据流策略: {data_flow}")
-        lines.append(f"  • 分析运行ID: {analysis_run_id}")
+        if cache_version:
+            lines.append(f"  • 缓存版本: {cache_version}")
+        if cache_generated_at:
+            lines.append(f"  • 缓存生成时间: {cache_generated_at}")
+        if cache_manager_version:
+            lines.append(f"  • 缓存管理器版本: {cache_manager_version}")
+        if data_flow:
+            lines.append(f"  • 数据流策略: {data_flow}")
+        if analysis_run_id:
+            lines.append(f"  • 分析运行ID: {analysis_run_id}")
         lines.append(f"  • 缓存指纹: {cache_fingerprint}")
 
         # 【新增】数据来源及完整性声明
@@ -12194,7 +12282,11 @@ class InvestigationReportBuilder:
                 if not members:
                     continue
 
-                lines.append(f"【{anchor}家庭】")
+                family_display_name = (
+                    str(family_unit.get("family_name", "") or "").strip()
+                    or f"{anchor}家庭"
+                )
+                lines.append(f"【{family_display_name}】")
                 lines.append("")
 
                 # 家庭整体分析
@@ -12272,6 +12364,10 @@ class InvestigationReportBuilder:
                 lines.append(
                     f"    • 家庭成员数: {member_count} 人（其中{len(members_with_profiles)}人已获取流水画像，{len(pending_members)}人待补数据）"
                 )
+                if anchor and anchor not in members_with_profiles and members_with_profiles:
+                    lines.append(
+                        f"    • 当前可展开分析成员: {'、'.join(members_with_profiles)}"
+                    )
                 lines.append(
                     f"    • 家庭真实收入: {total_family_income / 10000:,.2f} 万元"
                 )

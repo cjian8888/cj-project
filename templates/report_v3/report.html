@@ -66,6 +66,9 @@
                 {{ member.name }}（{{ member.relation }}）{% if not loop.last %}、{% endif %}
                 {% endfor %}
             </p>
+            {% if family.current_analysis_members and family.anchor and family.anchor not in family.current_analysis_members %}
+            <p><strong>当前可展开分析成员：</strong>{{ family.current_analysis_members | join('、') }}。</p>
+            {% endif %}
             {% if family.pending_members %}
             <p><strong>待补数据成员：</strong>
                 {% for member in family.pending_members %}
