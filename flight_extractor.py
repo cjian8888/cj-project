@@ -19,6 +19,7 @@ import utils
 from utils.safe_types import (
     safe_str,
     safe_float,
+    safe_amount,
     safe_int,
     safe_date,
     safe_datetime,
@@ -168,7 +169,7 @@ def _parse_flight_row(row: pd.Series, source_file: str, is_completed: bool) -> O
             "ffp_number": safe_str(row.get("常客卡号", "")),
             "baggage_count": safe_int(row.get("行李件数")),
             "baggage_weight": safe_float(row.get("行李重量(kg)")),
-            "ticket_price": safe_float(row.get("票面总价")),
+            "ticket_price": safe_amount(row.get("票面总价")),
             "payment_method": safe_str(row.get("付款方式", "")),
             "currency": safe_str(row.get("票价货币类型", "")),
             "ticket_office": safe_str(row.get("出票处office", "")),

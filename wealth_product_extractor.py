@@ -22,6 +22,7 @@ import utils
 from utils.safe_types import (
     safe_str,
     safe_float,
+    safe_amount,
     safe_int,
     safe_date,
     safe_datetime,
@@ -35,6 +36,11 @@ WEALTH_DIR_NAMES = [
     "银行业金融机构金融理财（定向查询）",
     "理财产品（定向查询）"
 ]
+
+
+def _safe_money(value) -> Optional[float]:
+    """理财金额统一按元解析，兼容万元/亿元和脏字符串。"""
+    return safe_amount(value, source_unit="yuan", target_unit="yuan")
 
 
 def extract_wealth_product_data(data_dir: str, person_id: str = None) -> Dict[str, Dict]:
@@ -245,8 +251,8 @@ def _parse_products_sheet(df: pd.DataFrame, source_file: str, holdings_data: Lis
                     "product_name": safe_str(row.get("金融理财名称", "")),
                     "product_type": safe_str(row.get("金融理财类型", "")),
                     "product_code": safe_str(row.get("金融产品编号", "")),
-                    "amount": safe_float(row.get("资产总数额", 0)),
-                    "available_amount": safe_float(row.get("可控资产总数额", 0)),
+                    "amount": _safe_money(row.get("资产总数额", 0)),
+                    "available_amount": _safe_money(row.get("可控资产总数额", 0)),
                     "shares": safe_float(row.get("数量/份额/金额", 0)),
                     "unit_price": safe_float(row.get("资产单位价格", 0)),
                     "currency": safe_str(row.get("币种", "人民币")),
@@ -317,10 +323,10 @@ def _parse_accounts_sheet(df: pd.DataFrame, source_file: str) -> List[Dict]:
                 "account_status": safe_str(row.get("账户状态", "")),
                 "open_date": safe_date(row.get("开户日期")),
                 "open_branch": safe_str(row.get("开户网点", "")),
-                "balance": safe_float(row.get("账户余额", 0)),
-                "available_balance": safe_float(row.get("可用余额", 0)),
+                "balance": _safe_money(row.get("账户余额", 0)),
+                "available_balance": _safe_money(row.get("可用余额", 0)),
                 "currency": safe_str(row.get("币种", "人民币")),
-                "last_transaction_time": safe_str(row.get("最后交易时间", "")),
+                "last_transaction_time": safe_datetime(row.get("最后交易时间")),
                 "source_file": source_file
             }
             
@@ -346,7 +352,7 @@ def _parse_holdings_sheet(df: pd.DataFrame, source_file: str) -> List[Dict]:
                 "product_code": safe_str(row.get("产品登记编码", "")),
                 "holding_date": safe_date(row.get("持有日期")),
                 "currency": safe_str(row.get("币种", "人民币")),
-                "amount": safe_float(row.get("持有金额", 0)),
+                "amount": _safe_money(row.get("持有金额", 0)),
                 "yield_rate": safe_float(row.get("理财收益率（%）", 0)),
                 "source_file": source_file
             }

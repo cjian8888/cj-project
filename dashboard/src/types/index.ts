@@ -194,6 +194,66 @@ export interface PenetrationResult {
         中间节点数: number;
     };
     chains: any[];
+    fund_cycles?: FundCycle[];
+    analysis_metadata?: {
+        fund_cycles?: AnalysisMetadata;
+        pass_through_channels?: Record<string, unknown>;
+    };
+}
+
+export interface FundCycle {
+    path?: string;
+    nodes?: string[];
+    participants?: string[];
+    length?: number;
+    total_amount?: number;
+    risk_score?: number;
+    risk_level?: string;
+    confidence?: number;
+    evidence?: string[];
+}
+
+export interface DiscoveredNode {
+    name: string;
+    node_type?: string;
+    occurrences?: number;
+    relation_types?: string[];
+    linked_cores?: string[];
+    total_amount?: number;
+    risk_score?: number;
+    risk_level?: string;
+    confidence?: number;
+    evidence?: string[];
+}
+
+export interface RelationshipCluster {
+    cluster_id: string;
+    core_members: string[];
+    external_members: string[];
+    all_nodes?: string[];
+    relation_types?: string[];
+    direct_flow_count?: number;
+    relay_count?: number;
+    loop_count?: number;
+    total_amount?: number;
+    risk_score?: number;
+    risk_level?: string;
+    confidence?: number;
+    evidence?: string[];
+}
+
+export interface AnalysisMetadata {
+    timed_out?: boolean;
+    search_node_truncated?: boolean;
+    cycle_limit_hit?: boolean;
+    truncated?: boolean;
+    truncated_reasons?: string[];
+    requested_start_nodes?: number;
+    searched_start_nodes?: number;
+    returned_count?: number;
+    raw_count?: number;
+    timeout_seconds?: number;
+    max_cycles?: number;
 }
 
 export interface RelatedPartyResult {
@@ -201,8 +261,19 @@ export interface RelatedPartyResult {
         直接往来笔数: number;
         第三方中转链数: number;
         资金闭环数: number;
+        外围节点数?: number;
+        关系簇数?: number;
     };
     details: any[];
+    direct_flows?: any[];
+    third_party_relays?: any[];
+    fund_loops?: FundCycle[];
+    discovered_nodes?: DiscoveredNode[];
+    relationship_clusters?: RelationshipCluster[];
+    analysis_metadata?: {
+        fund_loops?: AnalysisMetadata;
+        third_party_relays?: Record<string, unknown>;
+    };
 }
 
 export interface CorrelationResult {
@@ -224,7 +295,12 @@ export interface AggregationResult {
     summary: {
         极高风险实体数: number;
         高风险实体数: number;
+        中风险实体数?: number;
+        风险实体总数?: number;
+        高优先线索实体数?: number;
     };
+    evidencePacks?: Record<string, AggregationEvidencePack>;
+    analysisMetadata?: Record<string, unknown>;
 }
 
 export interface RankedEntity {
@@ -232,6 +308,39 @@ export interface RankedEntity {
     riskLevel: 'critical' | 'high' | 'medium' | 'low';
     riskScore: number;
     reasons: string[];
+    entity?: string;
+    entityType?: 'person' | 'company';
+    summary?: string;
+    evidenceCount?: number;
+    riskConfidence?: number;
+    topEvidenceScore?: number;
+    highPriorityClueCount?: number;
+    aggregationExplainability?: {
+        model_confidence?: number;
+        average_evidence_confidence?: number;
+        max_evidence_confidence?: number;
+        scored_clue_count?: number;
+        evidence_bucket_counts?: Record<string, number>;
+        top_clues?: Array<{
+            bucket?: string;
+            risk_score?: number;
+            confidence?: number;
+            description?: string;
+            evidence?: string[];
+        }>;
+    };
+}
+
+export interface AggregationEvidencePack {
+    risk_score: number;
+    risk_level: 'critical' | 'high' | 'medium' | 'low';
+    risk_confidence?: number;
+    top_evidence_score?: number;
+    high_priority_clue_count?: number;
+    summary?: string;
+    evidence: Record<string, any[]>;
+    statistics?: Record<string, number>;
+    aggregation_explainability?: Record<string, unknown>;
 }
 
 // ==================== Data Types ====================

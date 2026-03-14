@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 
 from detectors.base_detector import BaseDetector
+import utils
 
 
 class CashCollisionDetector(BaseDetector):
@@ -144,7 +145,7 @@ class CashCollisionDetector(BaseDetector):
         """提取记录用于跨实体检测。"""
         records = []
         for _, row in df.iterrows():
-            parsed_date = pd.to_datetime(row.get("date"), errors="coerce")
+            parsed_date = utils.parse_date(row.get("date"))
             if pd.isna(parsed_date):
                 continue
             bank_val = row.get("银行来源", row.get("bank", ""))
@@ -185,8 +186,8 @@ class CashCollisionDetector(BaseDetector):
         dp = deposits.copy()
 
         # 确保日期列为datetime类型
-        wd["date"] = pd.to_datetime(wd["date"])
-        dp["date"] = pd.to_datetime(dp["date"])
+        wd["date"] = utils.normalize_datetime_series(wd["date"])
+        dp["date"] = utils.normalize_datetime_series(dp["date"])
 
         # 填充金额NaN
         wd["amount"] = wd["amount"].fillna(0)

@@ -419,11 +419,8 @@ def normalize_dataframe(df: pd.DataFrame, bank_format: str = None) -> pd.DataFra
         # 保存原始日期列用于降级
         original_dates = result_df["date"].copy()
         try:
-            result_df["date"] = pd.to_datetime(
-                result_df["date"],
-                format=config["date_format"],
-                errors="coerce",  # 无效日期转为NaT
-            )
+            parsed_dates = original_dates.apply(utils.parse_date)
+            result_df["date"] = pd.to_datetime(parsed_dates, errors="coerce")
             # 记录日期解析失败的行数
             date_parse_failures = result_df["date"].isna().sum()
             if date_parse_failures > 0:
@@ -434,11 +431,10 @@ def normalize_dataframe(df: pd.DataFrame, bank_format: str = None) -> pd.DataFra
                 failed_mask = result_df["date"].isna()
                 if failed_mask.any():
                     try:
-                        # 对失败的日期使用智能解析
+                        # 对失败的日期使用统一日期解析
                         parsed_dates = pd.to_datetime(
-                            original_dates[failed_mask],
+                            original_dates[failed_mask].apply(utils.parse_date),
                             errors="coerce",
-                            infer_datetime_format=True,
                         )
                         # 将智能解析成功的日期填充回去
                         success_mask = parsed_dates.notna()
@@ -472,11 +468,12 @@ def normalize_dataframe(df: pd.DataFrame, bank_format: str = None) -> pd.DataFra
     for col in ["income", "expense", "balance"]:
         if col in result_df.columns:
             try:
-                result_df[col] = pd.to_numeric(result_df[col], errors="coerce").fillna(
-                    0
-                )
+                converted = result_df[col].apply(utils.format_amount)
+                conversion_failures = (
+                    result_df[col].notna() & converted.eq(0.0) & ~result_df[col].astype(str).str.strip().isin(["", "0", "0.0"])
+                ).sum()
+                result_df[col] = converted.fillna(0.0)
                 # 记录转换失败的行数
-                conversion_failures = result_df[col].isna().sum()
                 if conversion_failures > 0:
                     logger.warning(
                         f"{col}列转换失败 {conversion_failures} 条，已填充为0"

@@ -138,7 +138,9 @@ class IncrementalAnalyzer:
         
         if last_date:
             try:
-                last_date = pd.to_datetime(last_date)
+                last_date = utils.parse_date(last_date)
+                if last_date is None:
+                    raise ValueError("invalid last_date")
                 # 返回比上次分析日期更新的记录
                 new_df = df[df[date_column] > last_date]
                 logger.info(f"{entity_name}: 发现 {len(new_df)} 条新记录 (上次分析至 {last_date.strftime('%Y-%m-%d')})")

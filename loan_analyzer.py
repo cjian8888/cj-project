@@ -490,6 +490,118 @@ def _create_loan_pair_entry(person: str, cp_str: str, income_row, expense_row,
     }
 
 
+def _build_loan_repayment_states(
+    cp_df: pd.DataFrame,
+    income_threshold: float,
+    expense_threshold: float,
+    time_window_days: int = None,
+    ratio_min: float = 1.0,
+    ratio_max: float = 1.5,
+) -> List[Dict]:
+    """构建借贷核销状态，支持分期还款并尽量保留整笔还款语义。"""
+    ordered = utils.sort_transactions_strict(cp_df, date_col='date', dropna_date=True)
+    if ordered.empty:
+        return []
+
+    loan_states: List[Dict] = []
+    active_loans: List[Dict] = []
+
+    for _, row in ordered.iterrows():
+        income_amt = float(row.get('income', 0) or 0)
+        expense_amt = float(row.get('expense', 0) or 0)
+
+        if income_amt > income_threshold:
+            state = {
+                'income_row': row,
+                'income_date': row['date'],
+                'income_amount': income_amt,
+                'remaining_principal': income_amt,
+                'matched_principal': 0.0,
+                'reported_repay_amount': 0.0,
+                'last_repay_row': None,
+                'last_repay_date': None,
+                'repayment_count': 0,
+                'allocations': [],
+            }
+            loan_states.append(state)
+            active_loans.append(state)
+
+        if expense_amt <= expense_threshold or not active_loans:
+            continue
+
+        expense_date = row['date']
+        repay_left = expense_amt
+        eligible_loans = []
+
+        for loan_state in active_loans:
+            if loan_state['remaining_principal'] <= 0.01:
+                continue
+            if expense_date <= loan_state['income_date']:
+                continue
+            if time_window_days is not None:
+                days_diff = (expense_date - loan_state['income_date']).days
+                if days_diff > time_window_days:
+                    continue
+            eligible_loans.append(loan_state)
+
+        if not eligible_loans:
+            continue
+
+        if len(eligible_loans) == 1:
+            loan_state = eligible_loans[0]
+            remaining_principal = loan_state['remaining_principal']
+            ratio = repay_left / remaining_principal if remaining_principal > 0 else 0
+
+            # 单一候选场景优先保留整笔还款语义，兼容原有利率和报告展示。
+            if ratio_min <= ratio <= ratio_max:
+                principal_matched = remaining_principal
+                reported_amount = repay_left
+                loan_state['remaining_principal'] = 0.0
+                loan_state['matched_principal'] += principal_matched
+                loan_state['reported_repay_amount'] += reported_amount
+                loan_state['last_repay_row'] = row
+                loan_state['last_repay_date'] = expense_date
+                loan_state['repayment_count'] += 1
+                loan_state['allocations'].append(
+                    {
+                        'expense_row': row,
+                        'principal_matched': principal_matched,
+                        'reported_amount': reported_amount,
+                    }
+                )
+                active_loans = [state for state in active_loans if state['remaining_principal'] > 0.01]
+                continue
+
+        for loan_state in eligible_loans:
+            if repay_left <= 0:
+                break
+            if loan_state['remaining_principal'] <= 0.01:
+                continue
+
+            principal_matched = min(repay_left, loan_state['remaining_principal'])
+            if principal_matched <= 0:
+                continue
+
+            loan_state['remaining_principal'] -= principal_matched
+            loan_state['matched_principal'] += principal_matched
+            loan_state['reported_repay_amount'] += principal_matched
+            loan_state['last_repay_row'] = row
+            loan_state['last_repay_date'] = expense_date
+            loan_state['repayment_count'] += 1
+            loan_state['allocations'].append(
+                {
+                    'expense_row': row,
+                    'principal_matched': principal_matched,
+                    'reported_amount': principal_matched,
+                }
+            )
+            repay_left -= principal_matched
+
+        active_loans = [state for state in active_loans if state['remaining_principal'] > 0.01]
+
+    return loan_states
+
+
 def _detect_loan_pairs(
     all_transactions: Dict[str, pd.DataFrame],
     core_persons: List[str],
@@ -538,64 +650,54 @@ def _detect_loan_pairs(
                     continue
                 
                 cp_df = df[df['counterparty'] == cp].copy()
-                
-                # 分离收入和支出
-                incomes = cp_df[cp_df['income'] > config.LOAN_MIN_MATCH_AMOUNT].copy()
-                expenses = cp_df[cp_df['expense'] > config.LOAN_MIN_MATCH_AMOUNT].copy()
-                
-                if incomes.empty or expenses.empty:
+                if cp_df.empty:
                     continue
-                
-                # 按时间排序并执行一对一配对，避免同一笔还款重复匹配
-                incomes = incomes.sort_values('date')
-                expenses = expenses.sort_values('date')
-                used_expense_indices = set()
 
-                for _, income_row in incomes.iterrows():
-                    income_date = income_row['date']
-                    income_amt = income_row['income']
+                loan_states = _build_loan_repayment_states(
+                    cp_df,
+                    income_threshold=config.LOAN_MIN_MATCH_AMOUNT,
+                    expense_threshold=config.LOAN_MIN_MATCH_AMOUNT,
+                    time_window_days=time_window_days,
+                    ratio_min=ratio_min,
+                    ratio_max=ratio_max,
+                )
 
-                    best_match_idx = None
-                    best_match_row = None
-                    best_days_diff = None
-                    best_score = None
+                for state in loan_states:
+                    if state['remaining_principal'] > 0.01:
+                        continue
+                    if state['last_repay_row'] is None or state['last_repay_date'] is None:
+                        continue
 
-                    # 在时间窗口内查找最优还款候选
-                    for expense_idx, expense_row in expenses.iterrows():
-                        if expense_idx in used_expense_indices:
-                            continue
+                    income_row = state['income_row']
+                    income_amt = state['income_amount']
+                    repay_amt = state['reported_repay_amount']
+                    if income_amt <= 0 or repay_amt <= 0:
+                        continue
 
-                        expense_date = expense_row['date']
-                        expense_amt = expense_row['expense']
-                        
-                        # 还款应在借入之后
-                        if expense_date <= income_date:
-                            continue
-                        
-                        # 时间窗口检查
-                        days_diff = (expense_date - income_date).days
-                        if days_diff > time_window_days:
-                            continue
-                        
-                        # 金额匹配检查（允许利息）
-                        ratio = expense_amt / income_amt if income_amt > 0 else 0
-                        
-                        # 只接受还款≥借入的配对（真正的借贷）
-                        if ratio_min <= ratio <= ratio_max:
-                            # 优先金额最接近（ratio≈1），其次时间更近
-                            match_score = (abs(ratio - 1.0), days_diff)
-                            if best_score is None or match_score < best_score:
-                                best_score = match_score
-                                best_match_idx = expense_idx
-                                best_match_row = expense_row
-                                best_days_diff = days_diff
+                    ratio = repay_amt / income_amt
+                    if not (ratio_min <= ratio <= ratio_max):
+                        continue
 
-                    if best_match_row is not None:
-                        used_expense_indices.add(best_match_idx)
-                        loan_pairs.append(_create_loan_pair_entry(
-                            person, cp_str, income_row, best_match_row,
-                            best_days_diff, income_amt, best_match_row['expense']
-                        ))
+                    days_diff = (state['last_repay_date'] - state['income_date']).days
+                    if days_diff <= 0 or days_diff > time_window_days:
+                        continue
+
+                    pair_entry = _create_loan_pair_entry(
+                        person,
+                        cp_str,
+                        income_row,
+                        state['last_repay_row'],
+                        days_diff,
+                        income_amt,
+                        repay_amt,
+                    )
+                    pair_entry['repayment_count'] = state['repayment_count']
+                    pair_entry['allocation_mode'] = (
+                        'serial_allocation'
+                        if state['repayment_count'] > 1
+                        else 'single_repayment'
+                    )
+                    loan_pairs.append(pair_entry)
     
     # 按借贷金额排序
     loan_pairs.sort(key=lambda x: -x['loan_amount'])
@@ -645,6 +747,31 @@ def _create_no_repayment_entry(person: str, cp_str: str, income_row,
     }
 
 
+def _allocate_future_repayments(cp_df: pd.DataFrame, min_amount: float) -> List[Dict]:
+    """按时间顺序核销未来支出，避免同一笔还款重复用于多笔历史借入。"""
+    loan_states = _build_loan_repayment_states(
+        cp_df,
+        income_threshold=min_amount,
+        expense_threshold=0.0,
+        time_window_days=None,
+        ratio_min=0.0,
+        ratio_max=float("inf"),
+    )
+
+    normalized_states = []
+    for state in loan_states:
+        normalized_states.append(
+            {
+                'income_row': state['income_row'],
+                'income_date': state['income_date'],
+                'income_amount': state['income_amount'],
+                'remaining_amount': state['remaining_principal'],
+                'total_repaid': state['reported_repay_amount'],
+            }
+        )
+    return normalized_states
+
+
 def _detect_no_repayment_loans(
     all_transactions: Dict[str, pd.DataFrame],
     core_persons: List[str],
@@ -688,32 +815,25 @@ def _detect_no_repayment_loans(
                 
                 cp_df = df[df['counterparty'] == cp].copy()
                 
-                # 查找大额收入
-                large_incomes = cp_df[cp_df['income'] >= min_amount].copy()
-                
-                if large_incomes.empty:
+                loan_states = _allocate_future_repayments(cp_df, min_amount)
+
+                if not loan_states:
                     continue
-                
-                # 检查每笔大额收入
-                for _, income_row in large_incomes.iterrows():
-                    income_date = income_row['date']
-                    income_amt = income_row['income']
-                    
+
+                for state in loan_states:
+                    income_row = state['income_row']
+                    income_date = state['income_date']
+                    income_amt = state['income_amount']
+
                     # 计算距今天数
                     days_since = (current_date - income_date).days
-                    
+
                     if days_since < min_days:
                         continue
-                    
-                    # 查找该日期之后的还款
-                    future_expenses = cp_df[
-                        (cp_df['date'] > income_date) &
-                        (cp_df['expense'] > 0)
-                    ]
-                    
-                    total_repaid = future_expenses['expense'].sum()
+
+                    total_repaid = state['total_repaid']
                     repay_ratio = total_repaid / income_amt if income_amt > 0 else 0
-                    
+
                     # 如果还款比例低于50%，视为无还款
                     if repay_ratio < 0.5:
                         no_repayment.append(_create_no_repayment_entry(

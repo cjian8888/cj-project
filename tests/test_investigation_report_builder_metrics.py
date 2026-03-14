@@ -139,6 +139,56 @@ def test_conclusion_and_next_steps_skip_low_severity_income_match_items():
     assert any("高风险人员工资收入占比仅10.0%" in item["action_text"] for item in next_steps)
 
 
+def test_v4_conclusion_prefers_aggregation_highlights_for_summary():
+    builder = _make_builder(
+        {"summary": {}},
+        derived_data={
+            "aggregation": {
+                "summary": {
+                    "极高风险实体数": 1,
+                    "高风险实体数": 0,
+                    "高优先线索实体数": 1,
+                },
+                "rankedEntities": [
+                    {
+                        "name": "张三",
+                        "riskScore": 88,
+                        "riskConfidence": 0.91,
+                        "riskLevel": "critical",
+                        "highPriorityClueCount": 3,
+                        "summary": "存在闭环和中转",
+                        "aggregationExplainability": {
+                            "top_clues": [
+                                {"description": "资金闭环: 张三 → 外围账户B → 张三"}
+                            ]
+                        },
+                    }
+                ],
+                "evidencePacks": {
+                    "张三": {
+                        "risk_score": 88,
+                        "risk_confidence": 0.91,
+                        "risk_level": "critical",
+                        "summary": "存在闭环和中转",
+                        "high_priority_clue_count": 3,
+                        "aggregation_explainability": {
+                            "top_clues": [
+                                {"description": "资金闭环: 张三 → 外围账户B → 张三"}
+                            ]
+                        },
+                    }
+                },
+            }
+        },
+    )
+
+    conclusion = builder._build_v4_conclusion([{"name": "张三", "data_analysis_section": {}}], [])
+
+    assert conclusion["aggregation_highlights"][0]["entity"] == "张三"
+    assert any(issue["issue_type"] == "聚合高风险排序" for issue in conclusion["issues"])
+    assert "张三(88.0分/置信度0.91)" in conclusion["summary_narrative"]
+
+
 def test_counterparty_analysis_uses_classification_for_personal_transfer_income():
     profile = {
         "summary": {
@@ -797,6 +847,38 @@ def test_generate_complete_txt_report_prefers_provided_report_object(tmp_path):
     assert "测试发现（影响：需持续关注）" in text
     assert "这是正式报告综合研判" in text
     assert "测试建议（优先级高，期限7日内）" in text
+
+
+def test_generate_complete_txt_report_includes_aggregation_highlights(tmp_path):
+    builder = _make_builder({"summary": {}})
+    report = {
+        "meta": {"doc_number": "测试", "generated_at": "2026-03-14T12:00:00"},
+        "preface": {"persons_queried": ["张三"], "companies_queried": []},
+        "family_sections": [],
+        "person_sections": [],
+        "company_sections": [],
+        "conclusion": {
+            "summary_narrative": "聚合排序识别出重点对象",
+            "issues": [],
+            "aggregation_summary": {
+                "极高风险实体数": 1,
+                "高风险实体数": 1,
+                "高优先线索实体数": 2,
+            },
+            "aggregation_highlights": [
+                {"entity": "张三", "risk_score": 88.0},
+                {"entity": "李四", "risk_score": 72.0},
+            ],
+        },
+        "next_steps": [],
+    }
+
+    report_path = tmp_path / "aggregation_report.txt"
+    builder.generate_complete_txt_report(str(report_path), report=report)
+    text = report_path.read_text(encoding="utf-8")
+
+    assert "【聚合排序】: 极高风险1个，高风险1个，高优先线索实体2个" in text
+    assert "聚合排序识别重点对象: 张三(88.0分)、李四(72.0分)" in text
 
 
 def test_income_expense_match_uses_non_salary_wording_not_unknown_income():

@@ -144,6 +144,33 @@ WEIGHTED_SCORE_CEILING = _get_weighted_score_ceiling()
 # 辅助函数
 # ============================================================
 
+def normalize_risk_score(score: float) -> float:
+    """统一裁剪风险分到 0-100。"""
+    try:
+        return round(max(0.0, min(100.0, float(score))), 1)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def score_to_risk_level(score: float) -> str:
+    """统一风险分到风险等级的映射。"""
+    normalized = normalize_risk_score(score)
+    if normalized >= 70:
+        return "critical"
+    if normalized >= 50:
+        return "high"
+    if normalized >= 30:
+        return "medium"
+    return "low"
+
+
+def normalize_confidence(confidence: float) -> float:
+    """统一裁剪置信度到 0.05-0.99。"""
+    try:
+        return round(max(0.05, min(0.99, float(confidence))), 2)
+    except (TypeError, ValueError):
+        return 0.05
+
 def _is_cash_transaction(row: pd.Series) -> bool:
     """
     【铁律实现】判断交易是否为现金交易
@@ -168,15 +195,8 @@ def _normalize_transaction_datetime(value) -> Optional[datetime]:
     """统一解析交易时间字段。"""
     if value is None:
         return None
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, pd.Timestamp):
-        return value.to_pydatetime()
-
-    parsed = pd.to_datetime(value, errors='coerce')
-    if pd.isna(parsed):
-        return None
-    return parsed.to_pydatetime()
+    parsed = utils.parse_date(value)
+    return parsed if isinstance(parsed, datetime) else None
 
 
 def _is_off_hours(dt: datetime) -> bool:

@@ -499,6 +499,19 @@ class TestGenerateProfileReport:
         assert '工资性收入' in income_classification['salary_like_reasons']
         assert 'salary_reference_basis' in income_classification
 
+    def test_generate_profile_supports_wan_unit_columns_and_invalid_dates(self):
+        """万元列头和脏日期不应导致画像流程崩溃"""
+        df = pd.DataFrame({
+            '交易时间': ['2024-01-01', '坏日期'],
+            '收入(万元)': ['1.5', '0'],
+            '支出(万元)': ['0', '0'],
+            '交易对手': ['某公司', '某公司'],
+            '交易摘要': ['工资', '工资']
+        })
+        result = generate_profile_report(df, '张伟')
+        assert result['has_data'] is True
+        assert round(result['summary']['total_income'], 2) == 15000.0
+
 
 class TestExtractLargeCash:
     """测试大额现金提取函数"""
@@ -698,6 +711,20 @@ class TestExtractBankAccounts:
         assert result[0]['first_transaction_date'].year == 2024
         assert result[0]['first_transaction_date'].month == 1
         assert result[0]['last_transaction_date'].month == 12
+
+    def test_extract_bank_accounts_parses_string_amounts_and_balance(self):
+        """字符串金额和余额应按元口径安全提取"""
+        df = pd.DataFrame({
+            'date': ['2024-01-01'],
+            'income': ['100万'],
+            'expense': ['0'],
+            'balance': ['1.5万'],
+            'account_number': ['6222021234567890']
+        })
+        result = extract_bank_accounts(df)
+        assert len(result) == 1
+        assert result[0]['total_income'] == 1000000.0
+        assert result[0]['last_balance'] == 15000.0
 
 
 class TestCalculateYearlySalary:

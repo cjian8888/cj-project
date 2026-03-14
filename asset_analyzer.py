@@ -30,7 +30,7 @@ def clean_property_amount(amount) -> float:
         return 0.0
     
     try:
-        amount_float = float(amount)
+        amount_float = utils.format_amount_to_wan(amount, unit_hint_multiplier=10000.0)
         
         # 如果金额超过50000万元（5亿），很可能是单位错误，除以10000
         if amount_float > config.ASSET_LARGE_AMOUNT_THRESHOLD:
@@ -128,7 +128,7 @@ def extract_properties(data_directory: str, persons: List[str]) -> List[Dict]:
                     quality_issues = []
                     if pd.isna(raw_amount) or raw_amount == 0:
                         quality_issues.append('金额缺失')
-                    elif float(raw_amount) > config.ASSET_LARGE_AMOUNT_THRESHOLD:
+                    elif clean_property_amount(raw_amount) > config.ASSET_LARGE_AMOUNT_THRESHOLD:
                         quality_issues.append('金额异常已修正')
                     
                     # 检查日期异常（1899/1900年是Excel默认值）

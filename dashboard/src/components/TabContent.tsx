@@ -134,6 +134,7 @@ function OverviewTab() {
 
     // Modal 状态
     const [selectedMetric, setSelectedMetric] = useState<AuditMetric | null>(null);
+    const [selectedRiskInsight, setSelectedRiskInsight] = useState<any | null>(null);
 
     // 实体选择器状态
     const [selectedEntity, setSelectedEntity] = useState<string>('all');
@@ -505,9 +506,13 @@ function OverviewTab() {
     const loanDetails = loanDetailsData;
     const incomeDetails = incomeDetailsData;
 
+    const isRiskMetricKey = (key?: string | null) =>
+        key === 'risk_critical' || key === 'risk_high' || key === 'risk_all';
+
     // 从 analysisResults 提取其他审计关键指标
     const aggregationSummary = data.analysisResults?.aggregation?.summary || {};
     const rankedEntities = data.analysisResults?.aggregation?.rankedEntities || [];
+    const aggregationEvidencePacks = data.analysisResults?.aggregation?.evidencePacks || {};
 
     // 直接从 suspicions 计算实际数据条数
     const directTransfersCount = (data.suspicions.directTransfers || []).length;
@@ -956,45 +961,21 @@ function OverviewTab() {
             case 'risk_critical':
                 // 极高风险实体
                 if (criticalRiskEntities.length > 0) {
-                    return criticalRiskEntities.map((e: any) => ({
-                        name: e.name || e.entity || '未知',
-                        counterparty: '',
-                        amount: 0,
-                        date: '',
-                        description: `风险评分: ${e.riskScore || e.score || 'N/A'}`,
-                        riskScore: e.riskScore || e.score,
-                        reasons: e.reasons || []
-                    }));
+                    return criticalRiskEntities.map((e: any) => buildRiskEntityDetail(e));
                 }
                 return [{ name: '暂无数据', description: '未发现极高风险实体' }];
 
             case 'risk_high':
                 // 高风险实体
                 if (highRiskEntities.length > 0) {
-                    return highRiskEntities.map((e: any) => ({
-                        name: e.name || e.entity || '未知',
-                        counterparty: '',
-                        amount: 0,
-                        date: '',
-                        description: `风险评分: ${e.riskScore || e.score || 'N/A'}`,
-                        riskScore: e.riskScore || e.score,
-                        reasons: e.reasons || []
-                    }));
+                    return highRiskEntities.map((e: any) => buildRiskEntityDetail(e));
                 }
                 return [{ name: '暂无数据', description: '未发现高风险实体' }];
 
             case 'risk_all':
                 // 全部风险实体
                 if (rankedEntities.length > 0) {
-                    return rankedEntities.map((e: any) => ({
-                        name: e.name || e.entity || '未知',
-                        counterparty: '',
-                        amount: 0,
-                        date: '',
-                        description: `风险评分: ${e.riskScore || e.score || 'N/A'} (${e.riskLevel || '未分级'})`,
-                        riskScore: e.riskScore || e.score,
-                        reasons: e.reasons || []
-                    }));
+                    return rankedEntities.map((e: any) => buildRiskEntityDetail(e));
                 }
                 return [{ name: '暂无数据', description: '未发现风险实体' }];
 
@@ -1012,15 +993,108 @@ function OverviewTab() {
         return metric.key === 'loan_analysis' || metric.key === 'income_analysis' || metric.key === 'cash_transactions';
     };
 
+    useEffect(() => {
+        if (!selectedMetric || !isRiskMetricKey(selectedMetric.key) || selectedSubCategory) {
+            setSelectedRiskInsight(null);
+            return;
+        }
+
+        const details = getMetricDetails(selectedMetric);
+        const materialDetails = details.filter((item: any) => item && item.name && item.name !== '暂无数据');
+        if (materialDetails.length === 0) {
+            setSelectedRiskInsight(null);
+            return;
+        }
+
+        setSelectedRiskInsight((prev: any) => {
+            if (prev && materialDetails.some((item: any) => item.name === prev.name)) {
+                return prev;
+            }
+            return materialDetails[0];
+        });
+    }, [selectedMetric, selectedSubCategory, rankedEntities, aggregationEvidencePacks]);
+
     // 关闭弹窗时重置子分类
     const handleCloseModal = () => {
         setSelectedMetric(null);
         setSelectedSubCategory(null);
+        setSelectedRiskInsight(null);
     };
 
     // 返回上一级（从明细返回分类汇总）
     const handleBackToSummary = () => {
         setSelectedSubCategory(null);
+        setSelectedRiskInsight(null);
+    };
+
+    const buildRiskEntityDetail = (entity: any) => {
+        const entityName = entity.name || entity.entity || '未知';
+        const pack = aggregationEvidencePacks[entityName] || {};
+        const explainability = entity.aggregationExplainability || pack.aggregation_explainability || {};
+        const topClues = Array.isArray(explainability.top_clues) ? explainability.top_clues : [];
+        const bucketCounts = explainability.evidence_bucket_counts || {};
+        const bucketSummary = Object.entries(bucketCounts)
+            .filter(([, count]) => Number(count) > 0)
+            .slice(0, 3)
+            .map(([bucket, count]) => `${bucket}:${count}`)
+            .join(' | ');
+
+        return {
+            name: entityName,
+            entity: entityName,
+            entityType: entity.entityType || entity.entity_type || 'person',
+            counterparty: entity.entityType === 'company' ? '公司对象' : '个人对象',
+            amount: 0,
+            date: '',
+            description: (
+                entity.summary
+                || pack.summary
+                || `风险评分: ${entity.riskScore || entity.score || 'N/A'}`
+            ),
+            riskScore: entity.riskScore || entity.score,
+            riskLevel: entity.riskLevel || entity.risk_level || pack.risk_level || 'low',
+            riskConfidence: entity.riskConfidence ?? pack.risk_confidence ?? 0,
+            topEvidenceScore: entity.topEvidenceScore ?? pack.top_evidence_score ?? 0,
+            highPriorityClueCount: entity.highPriorityClueCount ?? pack.high_priority_clue_count ?? 0,
+            aggregationExplainability: explainability,
+            summary: entity.summary || pack.summary || '',
+            reasons: [
+                `风险评分: ${entity.riskScore || entity.score || 'N/A'} (${entity.riskLevel || '未分级'})`,
+                `置信度: ${entity.riskConfidence ?? pack.risk_confidence ?? 'N/A'}`,
+                `高优先线索: ${entity.highPriorityClueCount ?? pack.high_priority_clue_count ?? 0}`,
+                entity.topEvidenceScore || pack.top_evidence_score
+                    ? `最强证据分: ${entity.topEvidenceScore ?? pack.top_evidence_score}`
+                    : null,
+                bucketSummary ? `证据分布: ${bucketSummary}` : null,
+                ...topClues
+                    .slice(0, 3)
+                    .map((clue: any) => sanitizeValue(clue.description || '')),
+            ].filter(Boolean)
+        };
+    };
+
+    const getRiskExplainabilityPanel = (item: any) => {
+        const entityName = item?.name || item?.entity || '未知';
+        const pack = aggregationEvidencePacks[entityName] || {};
+        const explainability = item?.aggregationExplainability || pack.aggregation_explainability || {};
+        const topClues = Array.isArray(explainability.top_clues) ? explainability.top_clues : [];
+        const bucketCounts = explainability.evidence_bucket_counts || {};
+
+        return {
+            entityName,
+            entityType: item?.entityType || pack.entityType || 'person',
+            riskLevel: item?.riskLevel || pack.risk_level || 'low',
+            riskScore: item?.riskScore ?? pack.risk_score ?? 0,
+            riskConfidence: item?.riskConfidence ?? pack.risk_confidence ?? 0,
+            topEvidenceScore: item?.topEvidenceScore ?? pack.top_evidence_score ?? 0,
+            highPriorityClueCount: item?.highPriorityClueCount ?? pack.high_priority_clue_count ?? 0,
+            summary: item?.summary || pack.summary || item?.description || '暂无摘要',
+            topClues,
+            bucketCounts: Object.entries(bucketCounts)
+                .filter(([, count]) => Number(count) > 0)
+                .map(([bucket, count]) => ({ bucket, count: Number(count) })),
+            reasons: Array.isArray(item?.reasons) ? item.reasons : [],
+        };
     };
 
     return (
@@ -1131,83 +1205,194 @@ function OverviewTab() {
                                     const details = selectedSubCategory
                                         ? getCategoryDetails(selectedMetric, selectedSubCategory)
                                         : getMetricDetails(selectedMetric);
+                                    const isRiskExplainabilityView = isRiskMetricKey(selectedMetric.key) && !selectedSubCategory;
+                                    const activeRiskInsight = isRiskExplainabilityView
+                                        ? (selectedRiskInsight && details.find((item: any) => item.name === selectedRiskInsight.name))
+                                            || details.find((item: any) => item.name && item.name !== '暂无数据')
+                                        : null;
 
                                     if (details.length === 0) {
                                         return <div className="text-center py-8 theme-text-dim">暂无详细数据</div>;
                                     }
 
                                     return (
-                                        <div className="overflow-x-auto rounded-lg border theme-border">
-                                            <table className="w-full text-sm">
-                                                <thead className="theme-bg-muted sticky top-0">
-                                                    <tr className="text-left theme-text-secondary text-xs">
-                                                        <th className="px-4 py-3 font-medium w-12">#</th>
-                                                        <th className="px-4 py-3 font-medium">对象/来源</th>
-                                                        <th className="px-4 py-3 font-medium">交易对手</th>
-                                                        <th className="px-4 py-3 font-medium text-right">金额</th>
-                                                        <th className="px-4 py-3 font-medium">交易时间</th>
-                                                        <th className="px-4 py-3 font-medium">风险说明</th>
-                                                        <th className="px-4 py-3 font-medium theme-text-dim">来源文件</th>
-                                                        <th className="px-4 py-3 font-medium theme-text-dim w-20 text-right">行号</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    {details.map((item: any, idx: number) => (
-                                                        <tr key={idx} className={`border-t theme-border-muted ${idx % 2 === 0 ? 'theme-bg-surface/30' : 'theme-bg-surface/60'} theme-hover transition-colors`}>
-                                                            <td className="px-4 py-3 theme-text-dim font-mono text-xs">{idx + 1}</td>
-                                                            <td className="px-4 py-3">
-                                                                <div className="theme-text font-medium">
-                                                                    {sanitizeValue(item.name || item.entity || item.from || item.person || item.platform)}
-                                                                </div>
-                                                            </td>
-                                                            <td className="px-4 py-3 theme-text-secondary">
-                                                                {sanitizeValue(item.counterparty || item.to || item.lender)}
-                                                            </td>
-                                                            <td className="px-4 py-3 text-right">
-                                                                <span className="font-mono text-orange-400 font-semibold">
-                                                                    {item.amount ? formatCurrency(item.amount) : (
-                                                                        item.income_total ? formatCurrency(item.income_total) : '--'
-                                                                    )}
-                                                                </span>
-                                                                {(item.expense_total && item.expense_total > 0) && (
-                                                                    <div className="font-mono text-green-400 text-xs mt-0.5">
-                                                                        还款: {formatCurrency(item.expense_total)}
-                                                                    </div>
-                                                                )}
-                                                            </td>
-                                                            <td className="px-4 py-3 theme-text-muted font-mono text-xs whitespace-nowrap">
-                                                                {formatAuditDateTime(item.date || item.first_income_date || item.loan_date || null)}
-                                                            </td>
-                                                            <td className="px-4 py-3">
-                                                                <div className="theme-text-secondary text-xs" title={sanitizeValue(item.description || item.loan_type || item.risk_reason)}>
-                                                                    {sanitizeValue(item.description || item.loan_type || item.risk_reason)}
-                                                                </div>
-                                                                {item.reasons && item.reasons.length > 0 && (
-                                                                    <div className="text-[10px] theme-text-dim mt-1">
-                                                                        {item.reasons.slice(0, 2).map((r: string) => sanitizeValue(r)).join(' | ')}
-                                                                    </div>
-                                                                )}
-                                                            </td>
-                                                            {/* 【溯源铁律】来源文件 */}
-                                                            <td className="px-4 py-3 theme-text-dim text-xs font-mono max-w-[150px] truncate" title={sanitizeValue(item.source_file)}>
-                                                                {item.source_file ? (
-                                                                    <span className="text-blue-400/70">
-                                                                        {String(item.source_file).split('/').pop()?.split('\\').pop() || sanitizeValue(item.source_file)}
-                                                                    </span>
-                                                                ) : '--'}
-                                                            </td>
-                                                            {/* 【溯源铁律】原始行号 */}
-                                                            <td className="px-4 py-3 theme-text-dim text-xs font-mono text-right w-20">
-                                                                {item.source_row_index || item.source_row ? (
-                                                                    <span className="text-blue-400/70">
-                                                                        {item.source_row_index || item.source_row}
-                                                                    </span>
-                                                                ) : '--'}
-                                                            </td>
+                                        <div className={isRiskExplainabilityView ? 'grid grid-cols-1 xl:grid-cols-[minmax(0,1.45fr)_360px] gap-4' : ''}>
+                                            <div className="overflow-x-auto rounded-lg border theme-border">
+                                                <table className="w-full text-sm">
+                                                    <thead className="theme-bg-muted sticky top-0">
+                                                        <tr className="text-left theme-text-secondary text-xs">
+                                                            <th className="px-4 py-3 font-medium w-12">#</th>
+                                                            <th className="px-4 py-3 font-medium">对象/来源</th>
+                                                            <th className="px-4 py-3 font-medium">交易对手</th>
+                                                            <th className="px-4 py-3 font-medium text-right">金额</th>
+                                                            <th className="px-4 py-3 font-medium">交易时间</th>
+                                                            <th className="px-4 py-3 font-medium">风险说明</th>
+                                                            <th className="px-4 py-3 font-medium theme-text-dim">来源文件</th>
+                                                            <th className="px-4 py-3 font-medium theme-text-dim w-20 text-right">行号</th>
                                                         </tr>
-                                                    ))}
-                                                </tbody>
-                                            </table>
+                                                    </thead>
+                                                    <tbody>
+                                                        {details.map((item: any, idx: number) => {
+                                                            const isActiveRiskItem = isRiskExplainabilityView && activeRiskInsight && item.name === activeRiskInsight.name;
+                                                            return (
+                                                                <tr
+                                                                    key={idx}
+                                                                    className={`border-t theme-border-muted ${idx % 2 === 0 ? 'theme-bg-surface/30' : 'theme-bg-surface/60'} theme-hover transition-colors ${isActiveRiskItem ? 'bg-blue-500/10' : ''} ${isRiskExplainabilityView ? 'cursor-pointer' : ''}`}
+                                                                    onClick={() => {
+                                                                        if (isRiskExplainabilityView && item.name && item.name !== '暂无数据') {
+                                                                            setSelectedRiskInsight(item);
+                                                                        }
+                                                                    }}
+                                                                >
+                                                                    <td className="px-4 py-3 theme-text-dim font-mono text-xs">{idx + 1}</td>
+                                                                    <td className="px-4 py-3">
+                                                                        <div className="theme-text font-medium">
+                                                                            {sanitizeValue(item.name || item.entity || item.from || item.person || item.platform)}
+                                                                        </div>
+                                                                    </td>
+                                                                    <td className="px-4 py-3 theme-text-secondary">
+                                                                        {sanitizeValue(item.counterparty || item.to || item.lender)}
+                                                                    </td>
+                                                                    <td className="px-4 py-3 text-right">
+                                                                        <span className="font-mono text-orange-400 font-semibold">
+                                                                            {item.amount ? formatCurrency(item.amount) : (
+                                                                                item.income_total ? formatCurrency(item.income_total) : '--'
+                                                                            )}
+                                                                        </span>
+                                                                        {(item.expense_total && item.expense_total > 0) && (
+                                                                            <div className="font-mono text-green-400 text-xs mt-0.5">
+                                                                                还款: {formatCurrency(item.expense_total)}
+                                                                            </div>
+                                                                        )}
+                                                                    </td>
+                                                                    <td className="px-4 py-3 theme-text-muted font-mono text-xs whitespace-nowrap">
+                                                                        {formatAuditDateTime(item.date || item.first_income_date || item.loan_date || null)}
+                                                                    </td>
+                                                                    <td className="px-4 py-3">
+                                                                        <div className="theme-text-secondary text-xs" title={sanitizeValue(item.description || item.loan_type || item.risk_reason)}>
+                                                                            {sanitizeValue(item.description || item.loan_type || item.risk_reason)}
+                                                                        </div>
+                                                                        {item.reasons && item.reasons.length > 0 && (
+                                                                            <div className="text-[10px] theme-text-dim mt-1">
+                                                                                {item.reasons.slice(0, 2).map((r: string) => sanitizeValue(r)).join(' | ')}
+                                                                            </div>
+                                                                        )}
+                                                                    </td>
+                                                                    {/* 【溯源铁律】来源文件 */}
+                                                                    <td className="px-4 py-3 theme-text-dim text-xs font-mono max-w-[150px] truncate" title={sanitizeValue(item.source_file)}>
+                                                                        {item.source_file ? (
+                                                                            <span className="text-blue-400/70">
+                                                                                {String(item.source_file).split('/').pop()?.split('\\').pop() || sanitizeValue(item.source_file)}
+                                                                            </span>
+                                                                        ) : '--'}
+                                                                    </td>
+                                                                    {/* 【溯源铁律】原始行号 */}
+                                                                    <td className="px-4 py-3 theme-text-dim text-xs font-mono text-right w-20">
+                                                                        {item.source_row_index || item.source_row ? (
+                                                                            <span className="text-blue-400/70">
+                                                                                {item.source_row_index || item.source_row}
+                                                                            </span>
+                                                                        ) : '--'}
+                                                                    </td>
+                                                                </tr>
+                                                            );
+                                                        })}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+
+                                            {isRiskExplainabilityView && activeRiskInsight && (
+                                                <div className="rounded-lg border theme-border theme-bg-surface/60 p-4 space-y-4">
+                                                    {(() => {
+                                                        const panel = getRiskExplainabilityPanel(activeRiskInsight);
+                                                        return (
+                                                            <>
+                                                                <div>
+                                                                    <div className="text-xs uppercase tracking-[0.2em] theme-text-dim mb-2">Explainability</div>
+                                                                    <div className="theme-text text-lg font-semibold">{panel.entityName}</div>
+                                                                    <div className="theme-text-muted text-xs mt-1">
+                                                                        {panel.entityType === 'company' ? '公司对象' : '个人对象'} | 风险等级 {formatRiskLevel(panel.riskLevel)}
+                                                                    </div>
+                                                                </div>
+
+                                                                <div className="grid grid-cols-2 gap-3">
+                                                                    <div className="rounded-lg border theme-border-muted p-3">
+                                                                        <div className="text-[10px] theme-text-dim mb-1">风险评分</div>
+                                                                        <div className="font-mono text-red-400 text-xl font-bold">{panel.riskScore}</div>
+                                                                    </div>
+                                                                    <div className="rounded-lg border theme-border-muted p-3">
+                                                                        <div className="text-[10px] theme-text-dim mb-1">风险置信度</div>
+                                                                        <div className="font-mono text-cyan-400 text-xl font-bold">{panel.riskConfidence}</div>
+                                                                    </div>
+                                                                    <div className="rounded-lg border theme-border-muted p-3">
+                                                                        <div className="text-[10px] theme-text-dim mb-1">最强证据分</div>
+                                                                        <div className="font-mono text-orange-400 text-xl font-bold">{panel.topEvidenceScore}</div>
+                                                                    </div>
+                                                                    <div className="rounded-lg border theme-border-muted p-3">
+                                                                        <div className="text-[10px] theme-text-dim mb-1">高优先线索</div>
+                                                                        <div className="font-mono text-blue-400 text-xl font-bold">{panel.highPriorityClueCount}</div>
+                                                                    </div>
+                                                                </div>
+
+                                                                <div>
+                                                                    <div className="text-xs theme-text-dim mb-2">综合摘要</div>
+                                                                    <div className="text-sm theme-text-secondary leading-6">
+                                                                        {sanitizeValue(panel.summary)}
+                                                                    </div>
+                                                                </div>
+
+                                                                {panel.topClues.length > 0 && (
+                                                                    <div>
+                                                                        <div className="text-xs theme-text-dim mb-2">Top Clues</div>
+                                                                        <div className="space-y-2">
+                                                                            {panel.topClues.slice(0, 3).map((clue: any, idx: number) => (
+                                                                                <div key={idx} className="rounded-lg border theme-border-muted p-3">
+                                                                                    <div className="text-sm theme-text">{sanitizeValue(clue.description || '')}</div>
+                                                                                    <div className="text-[10px] theme-text-dim mt-1">
+                                                                                        证据分 {clue.risk_score ?? '--'} | 置信度 {clue.confidence ?? '--'}
+                                                                                    </div>
+                                                                                    {Array.isArray(clue.evidence) && clue.evidence.length > 0 && (
+                                                                                        <div className="text-[10px] theme-text-dim mt-2">
+                                                                                            {clue.evidence.slice(0, 2).map((e: string) => sanitizeValue(e)).join(' | ')}
+                                                                                        </div>
+                                                                                    )}
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+
+                                                                {panel.bucketCounts.length > 0 && (
+                                                                    <div>
+                                                                        <div className="text-xs theme-text-dim mb-2">证据分布</div>
+                                                                        <div className="space-y-2">
+                                                                            {panel.bucketCounts.slice(0, 6).map((row: any) => (
+                                                                                <div key={row.bucket} className="flex items-center justify-between text-xs rounded-lg border theme-border-muted px-3 py-2">
+                                                                                    <span className="theme-text-secondary">{sanitizeValue(row.bucket)}</span>
+                                                                                    <span className="font-mono text-blue-400">{row.count}</span>
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+
+                                                                {panel.reasons.length > 0 && (
+                                                                    <div>
+                                                                        <div className="text-xs theme-text-dim mb-2">审计提示</div>
+                                                                        <div className="space-y-2">
+                                                                            {panel.reasons.slice(0, 4).map((reason: string, idx: number) => (
+                                                                                <div key={idx} className="text-xs theme-text-secondary rounded-lg border theme-border-muted px-3 py-2">
+                                                                                    {sanitizeValue(reason)}
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+                                                            </>
+                                                        );
+                                                    })()}
+                                                </div>
+                                            )}
                                         </div>
                                     );
                                 })()

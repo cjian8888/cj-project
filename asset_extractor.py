@@ -204,10 +204,12 @@ def extract_vehicle_info(pdf_path: str) -> Dict:
                 match = re.search(pattern, full_text)
                 if match:
                     try:
-                        price_str = match.group(1).replace(',', '')
-                        vehicle_info['price'] = float(price_str)
-                        if '万元' in match.group(0):
-                            vehicle_info['price'] *= 10000
+                        price_str = match.group(1)
+                        unit_hint = 10000.0 if '万' in match.group(0) else 1.0
+                        vehicle_info['price'] = utils.format_amount(
+                            price_str,
+                            unit_hint_multiplier=unit_hint,
+                        )
                         break
                     except (ValueError, TypeError):
                         pass
@@ -552,4 +554,3 @@ def get_precise_property_summary(data_dir: str) -> Dict:
         "mortgaged_count": mortgaged_count,
         "sealed_count": sealed_count
     }
-

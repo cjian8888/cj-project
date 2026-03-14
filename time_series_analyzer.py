@@ -32,6 +32,28 @@ import utils
 logger = utils.setup_logger(__name__)
 
 
+def _normalize_time_series_df(df: pd.DataFrame) -> pd.DataFrame:
+    """统一标准化时序分析所依赖的日期和金额字段。"""
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    normalized = df.copy()
+    if 'date' in normalized.columns:
+        normalized['date'] = utils.normalize_datetime_series(normalized['date'])
+        normalized = normalized[normalized['date'].notna()].copy()
+    for amount_col in ('income', 'expense', 'amount'):
+        if amount_col in normalized.columns:
+            normalized[amount_col] = utils.normalize_amount_series(
+                normalized[amount_col], amount_col
+            )
+    normalized = utils.sort_transactions_strict(
+        normalized,
+        date_col='date',
+        dropna_date=True,
+    )
+    return normalized
+
+
 # ============================================================
 # 周期性检测
 # ============================================================
@@ -65,7 +87,7 @@ def detect_periodic_income(
     periodic_patterns = []
     
     for person in core_persons:
-        df = all_transactions.get(person)
+        df = _normalize_time_series_df(all_transactions.get(person))
         if df is None or df.empty:
             continue
         
@@ -89,8 +111,8 @@ def detect_periodic_income(
                 continue
             
             # 分析时间间隔
-            group = group.sort_values('date')
-            dates = pd.to_datetime(group['date'])
+            group = utils.sort_transactions_strict(group, date_col='date', dropna_date=True)
+            dates = group['date']
             amounts = group['income'].values
             
             # 向量化计算日期间隔
@@ -228,13 +250,12 @@ def detect_sudden_changes(
     sudden_changes = []
     
     for person in core_persons:
-        df = all_transactions.get(person)
+        df = _normalize_time_series_df(all_transactions.get(person))
         if df is None or df.empty:
             continue
         
         # 按日汇总
         df = df.copy()
-        df['date'] = pd.to_datetime(df['date'])
         daily = df.groupby(df['date'].dt.date).agg({
             'income': 'sum',
             'expense': 'sum'
@@ -308,43 +329,74 @@ def detect_delayed_transfers(
     delayed_patterns = []
     
     for person in core_persons:
-        df = all_transactions.get(person)
+        df = _normalize_time_series_df(all_transactions.get(person))
         if df is None or df.empty:
             continue
         
         df = df.copy()
-        df['date'] = pd.to_datetime(df['date'])
         
         # 获取收入和支出
-        incomes = df[df['income'] > 10000][['date', 'income', 'counterparty']].copy()
-        expenses = df[df['expense'] > 10000][['date', 'expense', 'counterparty']].copy()
-        
+        incomes = df[df['income'] > 10000][['date', 'income', 'counterparty', 'source_row_index', '_strict_source_row', '_strict_transaction_id']].copy()
+        expenses = df[df['expense'] > 10000][['date', 'expense', 'counterparty', 'source_row_index', '_strict_source_row', '_strict_transaction_id']].copy()
+
         if incomes.empty or expenses.empty:
             continue
-        
-        # 查找延迟配对
+
         delay_pairs = defaultdict(list)
-        
+        used_expense_indices = set()
+        expense_dates_ns = expenses['date'].astype('int64').to_numpy()
+
         for _, inc_row in incomes.iterrows():
             inc_date = inc_row['date']
             inc_amount = inc_row['income']
-            
-            # 在延迟范围内查找相近金额的支出
-            for _, exp_row in expenses.iterrows():
-                exp_date = exp_row['date']
-                exp_amount = exp_row['expense']
-                
-                delay = (exp_date - inc_date).days
-                if delay_range[0] <= delay <= delay_range[1]:
-                    # 金额相近（允许10%差异）
-                    if abs(inc_amount - exp_amount) / max(inc_amount, exp_amount) < 0.1:
-                        key = (inc_row['counterparty'], exp_row['counterparty'], delay)
-                        delay_pairs[key].append({
-                            'inc_date': inc_date,
-                            'exp_date': exp_date,
-                            'amount': inc_amount
-                        })
-        
+            min_ts = inc_date + pd.Timedelta(days=delay_range[0])
+            max_ts = inc_date + pd.Timedelta(days=delay_range[1] + 1)
+
+            left_idx = np.searchsorted(expense_dates_ns, min_ts.value, side='left')
+            right_idx = np.searchsorted(expense_dates_ns, max_ts.value, side='left')
+            if left_idx >= right_idx:
+                continue
+
+            candidates = expenses.iloc[left_idx:right_idx].copy()
+            if used_expense_indices:
+                candidates = candidates[~candidates.index.isin(used_expense_indices)]
+            if candidates.empty:
+                continue
+
+            candidates['delay'] = (
+                (candidates['date'] - inc_date).dt.total_seconds() // 86400
+            ).astype(int)
+            candidates = candidates[
+                (candidates['delay'] >= delay_range[0]) &
+                (candidates['delay'] <= delay_range[1])
+            ]
+            if candidates.empty:
+                continue
+
+            candidates['amount_gap_ratio'] = (
+                (candidates['expense'] - inc_amount).abs() /
+                np.maximum(candidates['expense'], inc_amount)
+            )
+            candidates = candidates[candidates['amount_gap_ratio'] < 0.1]
+            if candidates.empty:
+                continue
+
+            best_match = candidates.sort_values(
+                ['amount_gap_ratio', 'delay', '_strict_source_row', '_strict_transaction_id'],
+                kind='mergesort',
+            ).iloc[0]
+            used_expense_indices.add(int(best_match.name))
+
+            delay = int(best_match['delay'])
+            key = (inc_row['counterparty'], best_match['counterparty'], delay)
+            delay_pairs[key].append({
+                'inc_date': inc_date,
+                'exp_date': best_match['date'],
+                'amount': inc_amount,
+                'income_row_index': inc_row.get('source_row_index'),
+                'expense_row_index': best_match.get('source_row_index'),
+            })
+
         # 筛选符合条件的模式
         for (inc_cp, exp_cp, delay), pairs in delay_pairs.items():
             if len(pairs) >= min_pairs:
@@ -354,16 +406,19 @@ def detect_delayed_transfers(
                 delayed_patterns.append({
                     'person': person,
                     'income_from': str(inc_cp),
+                    'income_counterparty': str(inc_cp),
                     'expense_to': str(exp_cp),
+                    'expense_counterparty': str(exp_cp),
                     'delay_days': delay,
                     'occurrences': len(pairs),
+                    'count': len(pairs),
                     'total_amount': sum(p['amount'] for p in pairs),
                     'avg_amount': sum(p['amount'] for p in pairs) / len(pairs),
                     'risk_level': 'high' if len(pairs) >= 5 else 'medium',
                     # 【审计溯源】原始文件和首次收入日期
                     'source_file': f'cleaned_data/个人/{person}_合并流水.xlsx',
                     'first_income_date': first_pair['inc_date'],
-                    'source_row_index': None  # 模式分析无法精确到行号
+                    'source_row_index': first_pair.get('income_row_index'),
                 })
     
     delayed_patterns.sort(key=lambda x: -x['total_amount'])

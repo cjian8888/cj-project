@@ -5,6 +5,7 @@
 
 from typing import Dict, List, Any
 
+import utils
 from detectors.base_detector import BaseDetector
 
 
@@ -68,7 +69,7 @@ class DirectTransferDetector(BaseDetector):
                 ]
 
                 for _, row in transfers_out.iterrows():
-                    amount = float(row.get("expense", 0) or 0)
+                    amount = utils.format_amount(row.get("expense", 0))
 
                     # 风险定级
                     if amount > income_high_risk_min:
@@ -112,9 +113,9 @@ class DirectTransferDetector(BaseDetector):
                                 "transaction_id": str(row.get("transaction_id", ""))
                                 if row.get("transaction_id")
                                 else "",
-                                "balance_after": float(row.get("balance", 0))
-                                if row.get("balance")
-                                else 0.0,
+                                "balance_after": utils.format_amount(
+                                    row.get("balance", 0)
+                                ),
                                 "channel": str(row.get("transaction_channel", ""))
                                 if row.get("transaction_channel")
                                 else "",
@@ -131,7 +132,7 @@ class DirectTransferDetector(BaseDetector):
                 ]
 
                 for _, row in transfers_in.iterrows():
-                    amount = float(row.get("income", 0) or 0)
+                    amount = utils.format_amount(row.get("income", 0))
 
                     # 风险定级
                     if amount > income_high_risk_min:
@@ -175,9 +176,9 @@ class DirectTransferDetector(BaseDetector):
                                 "transaction_id": str(row.get("transaction_id", ""))
                                 if row.get("transaction_id")
                                 else "",
-                                "balance_after": float(row.get("balance", 0))
-                                if row.get("balance")
-                                else 0.0,
+                                "balance_after": utils.format_amount(
+                                    row.get("balance", 0)
+                                ),
                                 "channel": str(row.get("transaction_channel", ""))
                                 if row.get("transaction_channel")
                                 else "",

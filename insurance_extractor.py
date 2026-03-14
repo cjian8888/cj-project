@@ -19,6 +19,7 @@ import utils
 from utils.safe_types import (
     safe_str,
     safe_float,
+    safe_amount,
     safe_int,
     safe_date,
     safe_datetime,
@@ -29,6 +30,11 @@ logger = utils.setup_logger(__name__)
 
 # 数据源目录名称
 INSURANCE_DIR_NAME = "保险信息（定向查询）"
+
+
+def _safe_money(value) -> Optional[float]:
+    """保险金额统一按元解析，兼容显式单位和脏字符串。"""
+    return safe_amount(value, source_unit="yuan", target_unit="yuan")
 
 
 def extract_insurance_data(data_dir: str, person_id: str = None) -> Dict[str, Dict]:
@@ -166,7 +172,7 @@ def _parse_policy_row(row: pd.Series, source_file: str) -> Optional[Dict]:
             "product_name": safe_str(row.get("保险产品名称", "")),
             "policy_number": safe_str(row.get("保单号", "")),
             "insurance_company": safe_str(row.get("保险公司名称", "")),
-            "premium_paid": safe_float(row.get("累计缴纳保费")),
+            "premium_paid": _safe_money(row.get("累计缴纳保费")),
             "currency": safe_str(row.get("币种", "CNY")),
             "insurance_type": safe_str(row.get("险种名称", "")),
             "policy_nature": safe_str(row.get("保单团个性质", "")),
@@ -174,7 +180,7 @@ def _parse_policy_row(row: pd.Series, source_file: str) -> Optional[Dict]:
             "effective_date": safe_date(row.get("保单生效日期")),
             "termination_date": safe_date(row.get("保单终止日期")),
             "insured_subject": safe_str(row.get("保险标的名称", "")),
-            "account_value": safe_float(row.get("保险账户价值")),
+            "account_value": _safe_money(row.get("保险账户价值")),
             "data_date": safe_date(row.get("数据提取日期")),
             "source_file": source_file
         }
@@ -229,7 +235,7 @@ def _parse_claim_row(row: pd.Series, source_file: str) -> Optional[Dict]:
             "report_time": safe_datetime(row.get("报案时间")),
             "incident_reason": safe_str(row.get("出险原因", "")),
             "payment_account": safe_str(row.get("赔款支付账号", "")),
-            "payment_amount": safe_float(row.get("赔付金额")),
+            "payment_amount": _safe_money(row.get("赔付金额")),
             "payment_date": safe_date(row.get("赔付日期")),
             "source_file": source_file
         }

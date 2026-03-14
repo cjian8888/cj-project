@@ -29,6 +29,8 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional
 import config
 import utils
+from utils.aggregation_view import build_aggregation_overview
+from utils.path_explainability import get_or_build_path_evidence_template
 
 logger = utils.setup_logger(__name__)
 
@@ -162,13 +164,47 @@ class SpecializedReportGenerator:
 
     def _add_traceability(self, lines: List, item: Dict, prefix: str = "  "):
         """添加数据溯源信息"""
-        source_file = item.get("source_file", "")
+        source_file = item.get("source_file") or item.get("sourceFile", "")
         source_row = item.get("source_row_index")
+        if source_row is None:
+            source_row = item.get("sourceRowIndex")
 
         if source_file:
             lines.append(f"{prefix}📁 溯源: {source_file}")
         if source_row is not None:
             lines.append(f"{prefix}📍 行号: 第{source_row}行")
+
+    def _get_suspicion_records(self, *keys: str) -> List[Dict[str, Any]]:
+        """按候选键名读取疑点列表。"""
+        for key in keys:
+            value = self.suspicions.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+        return []
+
+    def _flatten_holiday_transactions(self) -> List[Dict[str, Any]]:
+        """将节假日交易统一展开为列表。"""
+        value = self.suspicions.get("holidayTransactions")
+        if value is None:
+            value = self.suspicions.get("holiday_transactions", {})
+
+        flattened: List[Dict[str, Any]] = []
+        if isinstance(value, dict):
+            for person, records in value.items():
+                if not isinstance(records, list):
+                    continue
+                for item in records:
+                    if not isinstance(item, dict):
+                        continue
+                    record = item.copy()
+                    record.setdefault("person", person)
+                    flattened.append(record)
+            return flattened
+
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+
+        return []
 
     @staticmethod
     def _clean_text(value: Any, default: str = "未知") -> str:
@@ -185,10 +221,7 @@ class SpecializedReportGenerator:
         """安全转换金额字段。"""
         if value is None:
             return default
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return default
+        return utils.format_amount(value)
 
     def _resolve_cleaned_person_flow_path(self, person: str) -> str:
         """定位个人合并流水文件路径（兼容 analysis_results 子目录输出场景）。"""
@@ -493,13 +526,10 @@ class SpecializedReportGenerator:
                     self._day_transaction_cache[cache_key] = []
                     return []
 
-                income_col = next(
-                    (
-                        c
-                        for c in ["收入(元)", "income", "income_amount", "in_amount"]
-                        if c in df.columns
-                    ),
-                    None,
+                income_col = utils.find_first_matching_column(
+                    df,
+                    ["收入(元)", "收入(万元)", "income", "income_amount", "in_amount"],
+                    is_amount_field=True,
                 )
                 counterparty_col = next(
                     (c for c in ["交易对手", "counterparty", "对手方"] if c in df.columns),
@@ -512,18 +542,28 @@ class SpecializedReportGenerator:
                 category_col = next((c for c in ["交易分类", "category"] if c in df.columns), None)
 
                 normalized = pd.DataFrame()
-                normalized["_tx_dt"] = pd.to_datetime(df[date_col], errors="coerce")
+                normalized["_tx_dt"] = utils.normalize_datetime_series(df[date_col])
                 normalized["_date_str"] = normalized["_tx_dt"].dt.strftime("%Y-%m-%d")
                 normalized["_amount"] = (
-                    pd.to_numeric(df[income_col], errors="coerce").fillna(0.0)
+                    utils.normalize_amount_series(df[income_col], income_col)
                     if income_col
-                    else 0.0
+                    else pd.Series(0.0, index=df.index)
                 )
                 normalized["_counterparty"] = (
-                    df[counterparty_col].fillna("") if counterparty_col else ""
+                    df[counterparty_col].fillna("")
+                    if counterparty_col
+                    else pd.Series("", index=df.index)
                 )
-                normalized["_desc"] = df[desc_col].fillna("") if desc_col else ""
-                normalized["_category"] = df[category_col].fillna("") if category_col else ""
+                normalized["_desc"] = (
+                    df[desc_col].fillna("")
+                    if desc_col
+                    else pd.Series("", index=df.index)
+                )
+                normalized["_category"] = (
+                    df[category_col].fillna("")
+                    if category_col
+                    else pd.Series("", index=df.index)
+                )
                 self._person_flow_df_cache[person] = normalized
 
             df = self._person_flow_df_cache.get(person, pd.DataFrame())
@@ -1453,6 +1493,14 @@ class SpecializedReportGenerator:
         lines.append("   识别资金停留时间短、净流量接近0的节点，")
         lines.append("   发现空壳公司或资金中介。")
         lines.append("")
+        lines.append("3. 外围节点扩展：")
+        lines.append("   从中转链与闭环路径中提取新出现的外围账户或公司，")
+        lines.append("   识别原始排查对象之外的潜在关键节点。")
+        lines.append("")
+        lines.append("4. 关系簇识别：")
+        lines.append("   基于直接往来、中转链和闭环共同构建联通组件，")
+        lines.append("   识别多名核心对象通过外围节点形成的共同关系网络。")
+        lines.append("")
         lines.append("【审计价值】")
         lines.append("-" * 50)
         lines.append("• 穿透复杂资金关系")
@@ -1469,22 +1517,236 @@ class SpecializedReportGenerator:
         # ==================== 数据加载 ====================
         related_party = self.analysis_results.get("relatedParty", {}) or {}
         penetration = self.analysis_results.get("penetration", {}) or {}
+        aggregation_scope = list(self.profiles.keys()) if isinstance(self.profiles, dict) else []
+        aggregation_overview = build_aggregation_overview(
+            analysis_results=self.analysis_results,
+            scope_entities=aggregation_scope or None,
+            limit=5,
+        )
+        penetration_meta = (penetration.get("analysis_metadata") or {}).get("fund_cycles", {})
+        related_party_meta = related_party.get("analysis_metadata", {}) or {}
 
         def _to_float(value: Any) -> float:
             """安全转换金额字段，避免 None/字符串导致格式化异常。"""
             if value is None:
                 return 0.0
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return 0.0
+            return utils.format_amount(value)
+
+        def _format_relation_types(relation_types: Any) -> str:
+            labels = {
+                "direct_flow": "直接往来",
+                "third_party_relay": "第三方中转",
+                "fund_loop": "资金闭环",
+            }
+            if not relation_types:
+                return "未标注"
+            if isinstance(relation_types, (list, tuple, set)):
+                values = [labels.get(str(item), str(item)) for item in relation_types if item]
+                return "、".join(values) if values else "未标注"
+            return labels.get(str(relation_types), str(relation_types))
+
+        def _format_evidence(evidence: Any, limit: int = 3) -> str:
+            if not evidence:
+                return ""
+            if isinstance(evidence, (list, tuple, set)):
+                values = [str(item) for item in evidence if item]
+                return "；".join(values[:limit])
+            return str(evidence)
+
+        def _format_path_summary(payload: Any) -> str:
+            if not isinstance(payload, dict):
+                return ""
+            evidence_template = get_or_build_path_evidence_template(payload)
+            summary = str(evidence_template.get("summary", "") or "").strip()
+            if summary:
+                return summary
+            return str(payload.get("summary", "") or "").strip()
+
+        def _append_path_points(lines: List[str], payload: Any, prefix: str = "  ") -> None:
+            if not isinstance(payload, dict):
+                return
+            evidence_template = get_or_build_path_evidence_template(payload)
+            key_points = evidence_template.get("key_points", []) or payload.get("inspection_points", [])
+            for point in list(key_points)[:3]:
+                point_text = str(point).strip()
+                if point_text:
+                    lines.append(f"{prefix}路径解释: {point_text}")
+
+        def _append_cycle_edges(lines: List[str], payload: Any, prefix: str = "  ") -> None:
+            if not isinstance(payload, dict):
+                return
+            segments = payload.get("edge_segments", []) or []
+            if not isinstance(segments, list) or not segments:
+                return
+            lines.append(f"{prefix}边级金额:")
+            for segment in segments[:4]:
+                if not isinstance(segment, dict):
+                    continue
+                lines.append(
+                    f"{prefix}  第{int(segment.get('index', 0) or 0)}跳 "
+                    f"{segment.get('from', '未知')} -> {segment.get('to', '未知')} "
+                    f"{utils.format_currency(float(segment.get('amount', 0) or 0))} 元"
+                )
+                refs = segment.get("transaction_refs", []) or []
+                displayed_ref_count = 0
+                for ref in refs[:2]:
+                    if not isinstance(ref, dict):
+                        continue
+                    displayed_ref_count += 1
+                    src_file = str(ref.get("source_file", "") or "").strip() or "未知文件"
+                    src_row = ref.get("source_row_index")
+                    lines.append(
+                        f"{prefix}    原始流水: {ref.get('date', '未知时间')} "
+                        f"{utils.format_currency(float(ref.get('amount', 0) or 0))} 元 "
+                        f"{src_file}"
+                        f"{f' 第{src_row}行' if src_row is not None else ''}"
+                    )
+                total_refs = int(
+                    segment.get(
+                        "transaction_refs_total",
+                        segment.get("transaction_count", len(refs)),
+                    )
+                    or 0
+                )
+                total_refs = max(total_refs, len(refs))
+                if total_refs > displayed_ref_count:
+                    lines.append(
+                        f"{prefix}    原始流水样本: 当前展示 {displayed_ref_count} 条，"
+                        f"实际共 {total_refs} 条"
+                    )
+            bottleneck = payload.get("bottleneck_edge", {})
+            if isinstance(bottleneck, dict) and bottleneck:
+                lines.append(
+                    f"{prefix}瓶颈边: {bottleneck.get('from', '未知')} -> {bottleneck.get('to', '未知')} "
+                    f"{utils.format_currency(float(bottleneck.get('amount', 0) or 0))} 元"
+                )
+
+        def _append_time_axis(lines: List[str], payload: Any, prefix: str = "  ") -> None:
+            if not isinstance(payload, dict):
+                return
+            sequence_summary = str(payload.get("sequence_summary", "") or "").strip()
+            if sequence_summary:
+                lines.append(f"{prefix}时间轴摘要: {sequence_summary}")
+            time_axis = payload.get("time_axis", []) or []
+            if not isinstance(time_axis, list) or not time_axis:
+                return
+            lines.append(f"{prefix}时间轴:")
+            displayed_event_count = 0
+            for event in time_axis[:3]:
+                if not isinstance(event, dict):
+                    continue
+                displayed_event_count += 1
+                lines.append(
+                    f"{prefix}  第{int(event.get('step', 0) or 0)}步 "
+                    f"{event.get('time', '未知时间')} "
+                    f"{event.get('label', '未知事件')} "
+                    f"{utils.format_currency(float(event.get('amount', 0) or 0))} 元"
+                )
+                src_file = str(event.get("source_file", "") or "").strip()
+                src_row = event.get("source_row_index")
+                if src_file or src_row is not None:
+                    lines.append(
+                        f"{prefix}    原始流水: "
+                        f"{src_file or '未知文件'}"
+                        f"{f' 第{src_row}行' if src_row is not None else ''}"
+                    )
+            total_events = int(payload.get("time_axis_total", len(time_axis)) or 0)
+            total_events = max(total_events, len(time_axis))
+            if total_events > displayed_event_count:
+                lines.append(
+                    f"{prefix}时间轴样本: 当前展示 {displayed_event_count} 步，"
+                    f"实际共 {total_events} 步"
+                )
+
+        def _append_representative_paths(lines: List[str], payload: Any, prefix: str = "  ") -> None:
+            if not isinstance(payload, dict):
+                return
+            representative_paths = payload.get("representative_paths", []) or []
+            if not isinstance(representative_paths, list) or not representative_paths:
+                return
+            lines.append(f"{prefix}代表路径:")
+            for index, item in enumerate(representative_paths[:3], 1):
+                if not isinstance(item, dict):
+                    continue
+                path_type = str(item.get("path_type", "") or "").strip()
+                path_label = {
+                    "fund_cycle": "资金闭环",
+                    "third_party_relay": "第三方中转",
+                    "direct_flow": "直接往来",
+                }.get(path_type, path_type or "未知路径")
+                lines.append(
+                    f"{prefix}  [{path_label}] {item.get('path', '未知路径')}"
+                )
+                if item.get("amount") is not None and float(item.get("amount", 0) or 0) > 0:
+                    lines.append(
+                        f"{prefix}    金额: {utils.format_currency(float(item.get('amount', 0) or 0))} 元"
+                    )
+                if item.get("risk_score") is not None:
+                    lines.append(
+                        f"{prefix}    评分: {float(item.get('risk_score', 0) or 0):.1f}"
+                    )
+                if item.get("priority_score") is not None:
+                    lines.append(
+                        f"{prefix}    优先级: {float(item.get('priority_score', 0) or 0):.1f}"
+                    )
+                nested_payload = item.get("path_explainability") if isinstance(item.get("path_explainability"), dict) else item
+                evidence_template = get_or_build_path_evidence_template(nested_payload)
+                nested_summary = _format_path_summary(nested_payload)
+                if nested_summary:
+                    lines.append(f"{prefix}    摘要: {nested_summary}")
+                for point in list(evidence_template.get("key_points", []) or nested_payload.get("inspection_points", []))[:2]:
+                    point_text = str(point).strip()
+                    if point_text:
+                        lines.append(f"{prefix}    解释: {point_text}")
+                support = evidence_template.get("supporting_refs", {})
+                notice = str(support.get("notice", "") or "").strip()
+                if notice:
+                    lines.append(f"{prefix}    证据: {notice}")
+
+        lines.append("【重点核查对象排序】")
+        lines.append("-" * 70)
+        if aggregation_overview.get("summary"):
+            summary = aggregation_overview["summary"]
+            lines.append(
+                f"  聚合排序识别: 极高风险{summary.get('极高风险实体数', 0)}个，"
+                f"高风险{summary.get('高风险实体数', 0)}个，"
+                f"高优先线索实体{summary.get('高优先线索实体数', 0)}个。"
+            )
+        highlights = aggregation_overview.get("highlights", [])
+        if highlights:
+            for i, item in enumerate(highlights, 1):
+                lines.append(f"【重点对象 {i}】")
+                lines.append(f"  对象名称: {item.get('entity', item.get('name', '未知'))}")
+                lines.append(f"  风险评分: {float(item.get('risk_score', 0) or 0):.1f}")
+                lines.append(f"  风险等级: {str(item.get('risk_level', 'low')).upper()}")
+                lines.append(f"  置信度: {float(item.get('risk_confidence', 0) or 0):.2f}")
+                lines.append(
+                    f"  高优先线索数: {int(item.get('high_priority_clue_count', 0) or 0)}"
+                )
+                summary_text = str(item.get("summary", "") or "").strip()
+                if summary_text:
+                    lines.append(f"  综合摘要: {summary_text}")
+                top_clues = item.get("top_clues", [])
+                if isinstance(top_clues, list) and top_clues:
+                    lines.append(f"  重点线索: {'；'.join(str(clue) for clue in top_clues[:2])}")
+                lines.append("")
+        else:
+            lines.append("  当前未形成可稳定排序的重点核查对象")
+            lines.append("")
 
         # ==================== 一、资金闭环 ====================
         lines.append("一、资金闭环检测")
         lines.append("-" * 70)
 
-        # 兼容新旧结构：优先 relatedParty.fund_loops，回退 penetration.fund_cycles
-        cycles = related_party.get("fund_loops") or penetration.get("fund_cycles") or []
+        # 兼容新旧结构：优先 penetration.fund_cycles（强版），回退 relatedParty.fund_loops
+        cycles = penetration.get("fund_cycles") or related_party.get("fund_loops") or []
+        cycle_meta = penetration_meta or related_party_meta.get("fund_loops", {})
+        if cycle_meta.get("truncated"):
+            reasons = "、".join(cycle_meta.get("truncated_reasons", [])) or "搜索截断"
+            lines.append(
+                f"  ⚠ 本次闭环搜索存在截断: {reasons}（超时阈值 {cycle_meta.get('timeout_seconds', 30)} 秒）"
+            )
+            lines.append("")
         if cycles:
             for i, cycle in enumerate(cycles, 1):
                 total_amount = None
@@ -1515,11 +1777,33 @@ class SpecializedReportGenerator:
                 lines.append(f"  闭环路径: {path}")
                 lines.append(f"  闭环长度: {length} 个节点")
                 lines.append(f"  风险等级: {risk_level}")
+                if isinstance(cycle, dict) and cycle.get("risk_score") is not None:
+                    lines.append(f"  风险评分: {float(cycle.get('risk_score', 0) or 0):.1f}")
+                if isinstance(cycle, dict) and cycle.get("confidence") is not None:
+                    lines.append(f"  置信度: {float(cycle.get('confidence', 0) or 0):.2f}")
+                path_summary = _format_path_summary(
+                    cycle.get("path_explainability") if isinstance(cycle, dict) else None
+                )
+                if path_summary:
+                    lines.append(f"  路径摘要: {path_summary}")
+                _append_path_points(
+                    lines,
+                    cycle.get("path_explainability") if isinstance(cycle, dict) else None,
+                )
+                _append_cycle_edges(
+                    lines,
+                    cycle.get("path_explainability") if isinstance(cycle, dict) else None,
+                )
                 if total_amount is None or total_amount <= 0:
                     lines.append("  闭环金额: 当前闭环结果仅输出路径与风险等级")
                 else:
                     lines.append(f"  估算闭环金额: {utils.format_currency(total_amount)} 元")
                     lines.append("  金额口径: 基于 graph_data 边权的最小边额估算，仅作路径强度参考")
+                evidence_text = _format_evidence(
+                    cycle.get("evidence") if isinstance(cycle, dict) else None
+                )
+                if evidence_text:
+                    lines.append(f"  证据摘要: {evidence_text}")
                 lines.append("")
                 lines.append("  【审计提示】: 资金闭环可能是:")
                 lines.append("            1. 资金回流洗钱（通过多层转账回到原点）")
@@ -1571,6 +1855,15 @@ class SpecializedReportGenerator:
                     lines.append(
                         f"  风险等级: {str(node.get('risk_level', 'unknown')).upper()}"
                     )
+                    if node.get("risk_score") is not None:
+                        lines.append(f"  风险评分: {float(node.get('risk_score', 0) or 0):.1f}")
+                    if node.get("confidence") is not None:
+                        lines.append(f"  置信度: {float(node.get('confidence', 0) or 0):.2f}")
+                    path_summary = _format_path_summary(node.get("path_explainability"))
+                    if path_summary:
+                        lines.append(f"  路径摘要: {path_summary}")
+                    _append_path_points(lines, node.get("path_explainability"))
+                    _append_time_axis(lines, node.get("path_explainability"))
                 else:
                     lines.append(f"  节点: {node.get('name', '未知') if isinstance(node, dict) else '未知'}")
                     if isinstance(node, dict):
@@ -1584,6 +1877,18 @@ class SpecializedReportGenerator:
                             f"  净流量: {utils.format_currency(_to_float(node.get('net_flow')))}"
                         )
                         lines.append(f"  转账频次: {node.get('transfer_count', 0)} 笔")
+                        if node.get("risk_score") is not None:
+                            lines.append(f"  风险评分: {float(node.get('risk_score', 0) or 0):.1f}")
+                        if node.get("confidence") is not None:
+                            lines.append(f"  置信度: {float(node.get('confidence', 0) or 0):.2f}")
+                        path_summary = _format_path_summary(node.get("path_explainability"))
+                        if path_summary:
+                            lines.append(f"  路径摘要: {path_summary}")
+                        _append_path_points(lines, node.get("path_explainability"))
+                        _append_time_axis(lines, node.get("path_explainability"))
+                evidence_text = _format_evidence(node.get("evidence") if isinstance(node, dict) else None, limit=2)
+                if evidence_text:
+                    lines.append(f"  证据摘要: {evidence_text}")
                 lines.append("")
                 lines.append("  【审计提示】: 过账通道特征:")
                 lines.append("            1. 大额资金快速进出（停留时间短）")
@@ -1594,6 +1899,101 @@ class SpecializedReportGenerator:
                 lines.append("")
         else:
             lines.append("  未发现过账通道")
+
+        lines.append("")
+
+        # ==================== 三、外围节点发现 ====================
+        lines.append("三、外围节点发现")
+        lines.append("-" * 70)
+
+        discovered_nodes = related_party.get("discovered_nodes") or []
+        if discovered_nodes:
+            for i, node in enumerate(discovered_nodes, 1):
+                if not isinstance(node, dict):
+                    continue
+                lines.append(f"【外围节点 {i}】")
+                lines.append(f"  节点名称: {node.get('name', '未知')}")
+                lines.append(f"  关联类型: {_format_relation_types(node.get('relation_types'))}")
+                lines.append(
+                    f"  关联核心对象: {'、'.join(node.get('linked_cores', [])) or '未标注'}"
+                )
+                lines.append(f"  出现次数: {int(node.get('occurrences', 0) or 0)} 次")
+                total_amount = _to_float(node.get("total_amount"))
+                if total_amount > 0:
+                    lines.append(f"  涉及金额: {utils.format_currency(total_amount)} 元")
+                else:
+                    lines.append("  涉及金额: 当前仅识别到关系，不单独估算金额")
+                lines.append(
+                    f"  风险等级: {str(node.get('risk_level', 'medium')).upper()}"
+                )
+                if node.get("risk_score") is not None:
+                    lines.append(f"  风险评分: {float(node.get('risk_score', 0) or 0):.1f}")
+                if node.get("confidence") is not None:
+                    lines.append(f"  置信度: {float(node.get('confidence', 0) or 0):.2f}")
+                evidence_text = _format_evidence(node.get("evidence"))
+                if evidence_text:
+                    lines.append(f"  证据摘要: {evidence_text}")
+                lines.append("")
+                lines.append("  【审计提示】: 建议补核该节点的身份属性、开户信息和实际控制关系，")
+                lines.append("            判断其是否属于壳账户、代持主体或隐匿的业务通道。")
+                lines.append("")
+        else:
+            lines.append("  未发现新增外围节点")
+
+        lines.append("")
+
+        # ==================== 四、关系簇识别 ====================
+        lines.append("四、关系簇识别")
+        lines.append("-" * 70)
+
+        relationship_clusters = related_party.get("relationship_clusters") or []
+        if relationship_clusters:
+            for i, cluster in enumerate(relationship_clusters, 1):
+                if not isinstance(cluster, dict):
+                    continue
+                lines.append(f"【关系簇 {i}】")
+                lines.append(f"  关系簇ID: {cluster.get('cluster_id', f'cluster_{i}')}")
+                lines.append(
+                    f"  核心成员: {'、'.join(cluster.get('core_members', [])) or '未标注'}"
+                )
+                lines.append(
+                    f"  外围成员: {'、'.join(cluster.get('external_members', [])) or '无'}"
+                )
+                lines.append(
+                    f"  关系类型: {_format_relation_types(cluster.get('relation_types'))}"
+                )
+                lines.append(
+                    f"  直接往来/中转/闭环: "
+                    f"{int(cluster.get('direct_flow_count', 0) or 0)}/"
+                    f"{int(cluster.get('relay_count', 0) or 0)}/"
+                    f"{int(cluster.get('loop_count', 0) or 0)}"
+                )
+                total_amount = _to_float(cluster.get("total_amount"))
+                if total_amount > 0:
+                    lines.append(f"  聚合金额: {utils.format_currency(total_amount)} 元")
+                else:
+                    lines.append("  聚合金额: 当前仅统计关系结构，未形成稳定金额口径")
+                lines.append(
+                    f"  风险等级: {str(cluster.get('risk_level', 'medium')).upper()}"
+                )
+                if cluster.get("risk_score") is not None:
+                    lines.append(f"  风险评分: {float(cluster.get('risk_score', 0) or 0):.1f}")
+                if cluster.get("confidence") is not None:
+                    lines.append(f"  置信度: {float(cluster.get('confidence', 0) or 0):.2f}")
+                path_summary = _format_path_summary(cluster.get("path_explainability"))
+                if path_summary:
+                    lines.append(f"  路径摘要: {path_summary}")
+                _append_path_points(lines, cluster.get("path_explainability"))
+                _append_representative_paths(lines, cluster.get("path_explainability"))
+                evidence_text = _format_evidence(cluster.get("evidence"))
+                if evidence_text:
+                    lines.append(f"  证据摘要: {evidence_text}")
+                lines.append("")
+                lines.append("  【审计提示】: 该关系簇表明多名排查对象已通过直接往来或外围节点形成联通网络，")
+                lines.append("            建议结合身份、任职、股权、通讯和地理信息继续交叉核验。")
+                lines.append("")
+        else:
+            lines.append("  未识别出可聚类的关系簇")
 
         lines.append("")
 
@@ -1640,29 +2040,136 @@ class SpecializedReportGenerator:
         lines.append("=" * 70)
         lines.append("")
 
-        # ==================== 一、现金时空伴随 ====================
-        lines.append("一、现金时空伴随检测")
+        # ==================== 一、现金疑点检测 ====================
+        lines.append("一、现金疑点检测")
         lines.append("-" * 70)
-        
-        # 加载现金碰撞数据（支持两种键名）
-        cash_collisions = self.suspicions.get('cashCollisions', []) or self.suspicions.get('cash_collisions', [])
+        timing_patterns = self._get_suspicion_records(
+            "cashTimingPatterns", "cash_timing_patterns"
+        )
+        material_timing_patterns = [
+            pattern
+            for pattern in timing_patterns
+            if self._is_material_cash_collision(pattern)
+        ]
+
+        lines.append("（一）同主体现金时序伴随")
+        if material_timing_patterns:
+            if len(material_timing_patterns) < len(timing_patterns):
+                lines.append(
+                    f"  共命中 {len(timing_patterns)} 条同主体现金时序伴随，以下展示达到阈值的 {len(material_timing_patterns)} 条。"
+                )
+                lines.append("")
+
+            for i, collision in enumerate(material_timing_patterns, 1):
+                lines.append(f"【时序伴随 {i}】")
+                withdrawal_entity = (
+                    collision.get("withdrawal_entity")
+                    or collision.get("person1")
+                    or "未知"
+                )
+                deposit_entity = (
+                    collision.get("deposit_entity")
+                    or collision.get("person2")
+                    or "未知"
+                )
+                withdrawal_date = collision.get("withdrawal_date") or collision.get(
+                    "time1", "未知"
+                )
+                deposit_date = collision.get("deposit_date") or collision.get(
+                    "time2", "未知"
+                )
+                withdrawal_amount = collision.get("withdrawal_amount") or collision.get(
+                    "amount1", 0
+                )
+                deposit_amount = collision.get("deposit_amount") or collision.get(
+                    "amount2", 0
+                )
+                time_diff = self._safe_float(
+                    collision.get("time_diff_hours", collision.get("timeDiff", 0))
+                )
+                risk_level = collision.get("risk_level") or collision.get(
+                    "riskLevel", "未知"
+                )
+
+                lines.append(f"  主体: {withdrawal_entity}")
+                if deposit_entity != withdrawal_entity:
+                    lines.append(f"  存现主体: {deposit_entity}")
+                lines.append(f"  取现时间: {self._format_date(withdrawal_date)}")
+                lines.append(f"  存现时间: {self._format_date(deposit_date)}")
+                lines.append(f"  时间差: {time_diff:.1f} 小时")
+                lines.append(f"  取现金额: {utils.format_currency(withdrawal_amount)} 元")
+                lines.append(f"  存现金额: {utils.format_currency(deposit_amount)} 元")
+                lines.append(f"  风险等级: {self._clean_text(risk_level)}")
+
+                source_file = collision.get(
+                    "withdrawalSource", collision.get("withdrawal_source", "")
+                )
+                if source_file:
+                    lines.append(f"  📁 取现来源: {source_file}")
+                source_file = collision.get(
+                    "depositSource", collision.get("deposit_source", "")
+                )
+                if source_file:
+                    lines.append(f"  📁 存现来源: {source_file}")
+
+                lines.append("")
+        elif timing_patterns:
+            lines.append(
+                f"  共命中 {len(timing_patterns)} 条同主体现金时序伴随，但金额均低于展示阈值 {self.CASH_COLLISION_MIN_AMOUNT / 10000:.2f} 万元，未逐条展开。"
+            )
+        else:
+            lines.append("  未发现同主体现金时序伴随")
+
+        lines.append("")
+        lines.append("（二）跨实体现金碰撞")
+
+        cash_collisions = self._get_suspicion_records(
+            "cashCollisions", "cash_collisions"
+        )
         material_cash_collisions = [
-            collision for collision in cash_collisions if self._is_material_cash_collision(collision)
+            collision
+            for collision in cash_collisions
+            if self._is_material_cash_collision(collision)
         ]
 
         if material_cash_collisions:
+            if len(material_cash_collisions) < len(cash_collisions):
+                lines.append(
+                    f"  共命中 {len(cash_collisions)} 条跨实体现金碰撞，以下展示达到阈值的 {len(material_cash_collisions)} 条。"
+                )
+                lines.append("")
+
             for i, collision in enumerate(material_cash_collisions, 1):
-                lines.append(f"【现金伴随 {i}】")
-                # 支持 camelCase 和 snake_case 两种格式
-                withdrawal_entity = collision.get('withdrawal_entity') or collision.get('person1', '未知')
-                deposit_entity = collision.get('deposit_entity') or collision.get('person2', '未知')
-                withdrawal_date = collision.get('withdrawal_date') or collision.get('time1', '未知')
-                deposit_date = collision.get('deposit_date') or collision.get('time2', '未知')
-                withdrawal_amount = collision.get('withdrawal_amount') or collision.get('amount1', 0)
-                deposit_amount = collision.get('deposit_amount') or collision.get('amount2', 0)
-                time_diff = self._safe_float(collision.get('time_diff_hours', collision.get('timeDiff', 0)))
-                risk_level = collision.get('risk_level') or collision.get('riskLevel', '未知')
-                
+                lines.append(f"【现金碰撞 {i}】")
+                withdrawal_entity = (
+                    collision.get("withdrawal_entity")
+                    or collision.get("person1")
+                    or "未知"
+                )
+                deposit_entity = (
+                    collision.get("deposit_entity")
+                    or collision.get("person2")
+                    or "未知"
+                )
+                withdrawal_date = collision.get("withdrawal_date") or collision.get(
+                    "time1", "未知"
+                )
+                deposit_date = collision.get("deposit_date") or collision.get(
+                    "time2", "未知"
+                )
+                withdrawal_amount = collision.get("withdrawal_amount") or collision.get(
+                    "amount1", 0
+                )
+                deposit_amount = collision.get("deposit_amount") or collision.get(
+                    "amount2", 0
+                )
+                time_diff = self._safe_float(
+                    collision.get("time_diff_hours", collision.get("timeDiff", 0))
+                )
+                risk_level = collision.get("risk_level") or collision.get(
+                    "riskLevel", "未知"
+                )
+
                 lines.append(f"  取现方: {withdrawal_entity}")
                 lines.append(f"  存现方: {deposit_entity}")
                 lines.append(f"  取现时间: {self._format_date(withdrawal_date)}")
@@ -1672,41 +2179,50 @@ class SpecializedReportGenerator:
                 lines.append(f"  存现金额: {utils.format_currency(deposit_amount)} 元")
                 lines.append(f"  风险等级: {self._clean_text(risk_level)}")
 
-                # 添加溯源
-                source_file = collision.get("withdrawalSource", collision.get("withdrawal_source", ""))
+                source_file = collision.get(
+                    "withdrawalSource", collision.get("withdrawal_source", "")
+                )
                 if source_file:
                     lines.append(f"  📁 取现来源: {source_file}")
-                source_file = collision.get("depositSource", collision.get("deposit_source", ""))
+                source_file = collision.get(
+                    "depositSource", collision.get("deposit_source", "")
+                )
                 if source_file:
                     lines.append(f"  📁 存现来源: {source_file}")
 
                 lines.append("")
 
-            lines.append("  【审计提示】: 现金时空伴随特征:")
-            lines.append("            1. 短时间内大额取现后存现")
+            lines.append("  【审计提示】: 现金碰撞特征:")
+            lines.append("            1. 不同主体在短时间内发生取现后存现")
             lines.append("            2. 金额接近（差异<5%）")
             lines.append("            3. 可能规避银行系统监控")
-            lines.append("            建议核实取现地点、用途，")
-            lines.append("            排查是否存在隐匿资产或贿赂资金。")
+            lines.append("            建议核实双方关系、交易背景与资金用途。")
             lines.append("")
-        else:
+        elif cash_collisions:
             lines.append(
-                f"  未发现达到展示阈值的现金时空伴随（已过滤单笔低于{self.CASH_COLLISION_MIN_AMOUNT / 10000:.2f}万元的噪音记录）"
+                f"  共命中 {len(cash_collisions)} 条跨实体现金碰撞，但金额均低于展示阈值 {self.CASH_COLLISION_MIN_AMOUNT / 10000:.2f} 万元，未逐条展开。"
             )
+        else:
+            lines.append("  未发现跨实体现金碰撞")
         lines.append("")
 
         # ==================== 二、直接资金往来 ====================
         lines.append("二、直接资金往来分析")
         lines.append("-" * 70)
 
-        direct_transfers = self.suspicions.get(
-            "direct_transfers", []
-        ) or self.suspicions.get("directTransfers", [])
+        direct_transfers = self._get_suspicion_records(
+            "directTransfers", "direct_transfers"
+        )
         if direct_transfers:
             for i, transfer in enumerate(direct_transfers, 1):
                 lines.append(f"【直接往来 {i}】")
-                lines.append(f"  交易人: {transfer.get('person', '未知')}")
-                lines.append(f"  对方: {transfer.get('company', '未知')}")
+                person = transfer.get("person") or transfer.get("from") or "未知"
+                company = transfer.get("company") or transfer.get("to") or "未知"
+                risk_level = transfer.get("risk_level") or transfer.get(
+                    "riskLevel", "未知"
+                )
+                lines.append(f"  交易人: {person}")
+                lines.append(f"  对方: {company}")
                 lines.append(
                     f"  交易时间: {self._format_date(transfer.get('date', '未知'))}"
                 )
@@ -1715,7 +2231,7 @@ class SpecializedReportGenerator:
                 )
                 lines.append(f"   方向: {transfer.get('direction', '未知')}")
                 lines.append(f"   摘要: {transfer.get('description', '未知')}")
-                lines.append(f"   风险等级: {transfer.get('risk_level', '未知')}")
+                lines.append(f"   风险等级: {risk_level}")
 
                 # 添加溯源
                 self._add_traceability(lines, transfer)
@@ -1733,17 +2249,90 @@ class SpecializedReportGenerator:
 
         lines.append("")
 
-        # ==================== 三、反洗钱预警 ====================
-        lines.append("三、反洗钱预警")
+        # ==================== 三、节假日敏感交易 ====================
+        lines.append("三、节假日敏感交易")
         lines.append("-" * 70)
 
-        aml_alerts = self.suspicions.get("amlAlerts", []) or self.suspicions.get("aml_alerts", [])
+        holiday_transactions = self._flatten_holiday_transactions()
+        material_holiday_transactions = [
+            item
+            for item in holiday_transactions
+            if self._has_material_amount(item, "amount")
+        ]
+
+        if material_holiday_transactions:
+            if len(material_holiday_transactions) < len(holiday_transactions):
+                lines.append(
+                    f"  共命中 {len(holiday_transactions)} 条节假日敏感交易，以下展示达到阈值的 {len(material_holiday_transactions)} 条。"
+                )
+                lines.append("")
+
+            for i, item in enumerate(
+                sorted(
+                    material_holiday_transactions,
+                    key=lambda row: self._safe_float(row.get("amount", 0)),
+                    reverse=True,
+                ),
+                1,
+            ):
+                lines.append(f"【节假日交易 {i}】")
+                lines.append(f"  主体: {self._clean_text(item.get('person'))}")
+                lines.append(f"  日期: {self._format_date(item.get('date', '未知'))}")
+                lines.append(f"  节点: {self._clean_text(item.get('holidayName', item.get('holiday_name')))}")
+                lines.append(f"  时段: {self._clean_text(item.get('holidayPeriod', item.get('holiday_period')))}")
+                lines.append(f"  方向: {self._clean_text(item.get('direction'))}")
+                lines.append(f"  金额: {utils.format_currency(item.get('amount', 0))} 元")
+                counterparty = self._clean_text(item.get("counterparty"), default="")
+                if counterparty:
+                    lines.append(f"  对手方: {counterparty}")
+                risk_reason = self._clean_text(
+                    item.get("riskReason", item.get("risk_reason")), default=""
+                )
+                if risk_reason:
+                    lines.append(f"  判定依据: {risk_reason}")
+                self._add_traceability(lines, item)
+                lines.append("")
+        elif holiday_transactions:
+            lines.append(
+                f"  共命中 {len(holiday_transactions)} 条节假日敏感交易，但金额均低于展示阈值 {self.DETAIL_DISPLAY_MIN_AMOUNT / 10000:.2f} 万元，未逐条展开。"
+            )
+        else:
+            lines.append("  未发现节假日敏感交易")
+
+        lines.append("")
+
+        # ==================== 四、反洗钱预警 ====================
+        lines.append("四、反洗钱预警")
+        lines.append("-" * 70)
+
+        aml_alerts = self._get_suspicion_records("amlAlerts", "aml_alerts")
         if aml_alerts:
             positive_alerts = []
             for alert in aml_alerts:
-                suspicious_count = int(self._safe_float(alert.get("suspicious_transaction_count", 0)))
-                large_count = int(self._safe_float(alert.get("large_transaction_count", 0)))
-                payment_count = int(self._safe_float(alert.get("payment_transaction_count", 0)))
+                suspicious_count = int(
+                    self._safe_float(
+                        alert.get(
+                            "suspicious_transaction_count",
+                            alert.get("suspiciousTransactionCount", 0),
+                        )
+                    )
+                )
+                large_count = int(
+                    self._safe_float(
+                        alert.get(
+                            "large_transaction_count",
+                            alert.get("largeTransactionCount", 0),
+                        )
+                    )
+                )
+                payment_count = int(
+                    self._safe_float(
+                        alert.get(
+                            "payment_transaction_count",
+                            alert.get("paymentTransactionCount", 0),
+                        )
+                    )
+                )
                 if suspicious_count > 0 or large_count > 0 or payment_count > 0:
                     positive_alerts.append(alert)
 
@@ -1751,9 +2340,30 @@ class SpecializedReportGenerator:
                 for alert in positive_alerts:
                     name = self._clean_text(alert.get("name"))
                     alert_type = self._clean_text(alert.get("alert_type"))
-                    suspicious_count = int(self._safe_float(alert.get("suspicious_transaction_count", 0)))
-                    large_count = int(self._safe_float(alert.get("large_transaction_count", 0)))
-                    payment_count = int(self._safe_float(alert.get("payment_transaction_count", 0)))
+                    suspicious_count = int(
+                        self._safe_float(
+                            alert.get(
+                                "suspicious_transaction_count",
+                                alert.get("suspiciousTransactionCount", 0),
+                            )
+                        )
+                    )
+                    large_count = int(
+                        self._safe_float(
+                            alert.get(
+                                "large_transaction_count",
+                                alert.get("largeTransactionCount", 0),
+                            )
+                        )
+                    )
+                    payment_count = int(
+                        self._safe_float(
+                            alert.get(
+                                "payment_transaction_count",
+                                alert.get("paymentTransactionCount", 0),
+                            )
+                        )
+                    )
                     lines.append(f"【预警】{name} - {alert_type}")
                     lines.append(f"  可疑交易数: {suspicious_count}")
                     lines.append(f"  大额交易数: {large_count}")
@@ -1763,7 +2373,20 @@ class SpecializedReportGenerator:
                         lines.append(f"  📁 数据来源: {source}")
                     lines.append("")
             else:
-                lines.append(f"  AML查询命中 {len(aml_alerts)} 人次，但交易指标均为0（可疑/大额/支付交易均未触发）。")
+                hit_names = "、".join(
+                    sorted(
+                        {
+                            self._clean_text(alert.get("name"), default="")
+                            for alert in aml_alerts
+                        }
+                        - {""}
+                    )
+                )
+                lines.append(
+                    f"  AML查询命中 {len(aml_alerts)} 人次，但交易指标均为0（可疑/大额/支付交易均未触发）。"
+                )
+                if hit_names:
+                    lines.append(f"  命中人员: {hit_names}")
                 lines.append("  建议保留底稿作为查询记录，不将其直接定性为资金异常。")
                 lines.append("")
         else:
@@ -1771,17 +2394,20 @@ class SpecializedReportGenerator:
 
         lines.append("")
 
-        # ==================== 四、征信预警 ====================
-        lines.append("四、征信预警")
+        # ==================== 五、征信预警 ====================
+        lines.append("五、征信预警")
         lines.append("-" * 70)
 
-        credit_alerts = self.suspicions.get("creditAlerts", []) or self.suspicions.get("credit_alerts", [])
+        credit_alerts = self._get_suspicion_records("creditAlerts", "credit_alerts")
         if credit_alerts:
             for alert in credit_alerts:
                 name = alert.get("name", "未知")
                 alert_type = alert.get("alert_type", "未知")
                 count = alert.get("count", 0)
                 lines.append(f"【预警】{name} - {alert_type} ({count} 次)")
+                source = alert.get("source", "")
+                if source:
+                    lines.append(f"  📁 数据来源: {source}")
                 lines.append("")
         else:
             lines.append("  未发现征信预警")

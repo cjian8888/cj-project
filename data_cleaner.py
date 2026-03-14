@@ -7,6 +7,7 @@
 
 import json
 import os
+import re
 import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Tuple
@@ -14,6 +15,87 @@ import config
 import utils
 
 logger = utils.setup_logger(__name__)
+
+
+def _normalize_column_token(column_name: str) -> str:
+    """标准化列名文本，便于做模糊匹配。"""
+    if not column_name:
+        return ""
+    token = str(column_name).strip().lower()
+    token = token.replace("（", "(").replace("）", ")")
+    token = re.sub(r"\s+", "", token)
+    token = re.sub(r"[(){}\[\]【】:_-]", "", token)
+    token = token.replace("人民币", "").replace("rmb", "")
+    return token
+
+
+def _strip_amount_unit_tokens(token: str) -> str:
+    normalized = token or ""
+    for unit_text in ("亿元", "万元", "亿", "万", "元"):
+        normalized = normalized.replace(unit_text, "")
+    return normalized
+
+
+def _find_first_matching_column(
+    df: pd.DataFrame, candidates: List[str], is_amount_field: bool = False
+) -> str:
+    """在原始列中查找首个匹配列，兼容 `(万元)` 等单位后缀。"""
+    if df is None or df.empty and not len(df.columns):
+        return None
+
+    for candidate in candidates:
+        if candidate in df.columns:
+            return candidate
+
+    normalized_candidates = []
+    for candidate in candidates:
+        token = _normalize_column_token(candidate)
+        if is_amount_field:
+            token = _strip_amount_unit_tokens(token)
+        normalized_candidates.append(token)
+
+    for column_name in df.columns:
+        column_token = _normalize_column_token(column_name)
+        compare_token = (
+            _strip_amount_unit_tokens(column_token) if is_amount_field else column_token
+        )
+        if compare_token in normalized_candidates:
+            return column_name
+    return None
+
+
+def _get_amount_unit_hint_multiplier(column_name: str) -> float:
+    token = _normalize_column_token(column_name)
+    if "亿元" in token or token.endswith("亿"):
+        return 100000000.0
+    if "万元" in token or token.endswith("万"):
+        return 10000.0
+    return 1.0
+
+
+def _normalize_amount_series(series: pd.Series, column_name: str) -> pd.Series:
+    """将原始金额列统一换算到元，并量化到分。"""
+    multiplier = _get_amount_unit_hint_multiplier(column_name)
+    return series.apply(
+        lambda value: utils.format_amount(value, unit_hint_multiplier=multiplier)
+    )
+
+
+def _read_transaction_file(filepath: str) -> pd.DataFrame:
+    """安全读取 Excel/CSV，避免因编码差异直接中断整个清洗流程。"""
+    extension = os.path.splitext(filepath)[1].lower()
+    if extension == ".csv":
+        last_error = None
+        for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk"):
+            try:
+                return pd.read_csv(filepath, encoding=encoding)
+            except UnicodeDecodeError as exc:
+                last_error = exc
+            except Exception as exc:
+                last_error = exc
+        if last_error:
+            raise last_error
+    return pd.read_excel(filepath)
 
 
 def _looks_like_company_entity(entity_name: str) -> bool:
@@ -45,8 +127,8 @@ def _normalize_income_expense_signs(
     - expense >= 0
     负值按方向翻转到对侧字段，避免后续汇总/规则口径混乱。
     """
-    income = pd.to_numeric(income_series, errors="coerce").fillna(0.0)
-    expense = pd.to_numeric(expense_series, errors="coerce").fillna(0.0)
+    income = pd.to_numeric(income_series, errors="coerce").fillna(0.0).round(2)
+    expense = pd.to_numeric(expense_series, errors="coerce").fillna(0.0).round(2)
 
     neg_income = income < 0
     neg_expense = expense < 0
@@ -277,7 +359,7 @@ def deduplicate_transactions(
                                 "原始行号": int(next_idx),
                                 "日期": next_row.get("date"),
                                 "方向": str(next_row.get("_direction_key", "M")),
-                                "金额": float(next_row.get("_amount_rounded", 0)),
+                                "金额": utils.format_amount(next_row.get("_amount_rounded", 0)),
                                 "对手方": str(next_row.get("counterparty", "")),
                                 "摘要": str(next_row.get("description", ""))[:30],
                                 "与行": int(current_idx),
@@ -380,10 +462,14 @@ def validate_data_quality(
     # 2. 检查金额逻辑
     # 【P1-异常3修复】添加列存在性检查，避免KeyError
     income_col = (
-        df["income"] if "income" in df.columns else pd.Series(0.0, index=df.index)
+        pd.to_numeric(df["income"], errors="coerce")
+        if "income" in df.columns
+        else pd.Series(0.0, index=df.index)
     )
     expense_col = (
-        df["expense"] if "expense" in df.columns else pd.Series(0.0, index=df.index)
+        pd.to_numeric(df["expense"], errors="coerce")
+        if "expense" in df.columns
+        else pd.Series(0.0, index=df.index)
     )
     total_amount = income_col.fillna(0) + expense_col.fillna(0)
 
@@ -459,17 +545,13 @@ def standardize_bank_fields(
 
     # 1. 日期字段 - 支持"交易时间"
     date_col = None
-    for col_name in config.BANK_FIELD_MAPPING.get("transaction_time", []):
-        if col_name in df.columns:
-            date_col = col_name
-            break
+    date_col = _find_first_matching_column(
+        df, config.BANK_FIELD_MAPPING.get("transaction_time", [])
+    )
 
     if not date_col:
         # 回退到原有逻辑
-        for col_name in config.DATE_COLUMNS:
-            if col_name in df.columns:
-                date_col = col_name
-                break
+        date_col = _find_first_matching_column(df, config.DATE_COLUMNS)
 
     if date_col:
         normalized["date"] = df[date_col].apply(utils.parse_date)
@@ -479,10 +561,7 @@ def standardize_bank_fields(
 
     # 2. 摘要字段 - 支持"交易摘要"
     desc_col = None
-    for col_name in config.BANK_FIELD_MAPPING.get("summary", []):
-        if col_name in df.columns:
-            desc_col = col_name
-            break
+    desc_col = _find_first_matching_column(df, config.BANK_FIELD_MAPPING.get("summary", []))
 
     if desc_col:
         normalized["description"] = df[desc_col].apply(utils.clean_text)
@@ -491,16 +570,14 @@ def standardize_bank_fields(
 
     # 3. 金额字段 - 重要!需要处理借贷标志
     amount_col = None
-    for col_name in config.BANK_FIELD_MAPPING.get("transaction_amount", []):
-        if col_name in df.columns:
-            amount_col = col_name
-            break
+    amount_col = _find_first_matching_column(
+        df, config.BANK_FIELD_MAPPING.get("transaction_amount", []), is_amount_field=True
+    )
 
     debit_credit_col = None
-    for col_name in config.BANK_FIELD_MAPPING.get("debit_credit_flag", []):
-        if col_name in df.columns:
-            debit_credit_col = col_name
-            break
+    debit_credit_col = _find_first_matching_column(
+        df, config.BANK_FIELD_MAPPING.get("debit_credit_flag", [])
+    )
 
     if amount_col and debit_credit_col:
         # 根据借贷标志分配收入/支出
@@ -508,7 +585,7 @@ def standardize_bank_fields(
         normalized["expense"] = 0.0
 
         # 向量化处理金额和借贷标志
-        amounts = df[amount_col].apply(utils.format_amount).abs()
+        amounts = _normalize_amount_series(df[amount_col], amount_col).abs()
         flags = df[debit_credit_col].astype(str).str.strip().str.upper()
 
         # 定义收入/支出标志
@@ -549,24 +626,22 @@ def standardize_bank_fields(
         # 回退到原有逻辑
         logger.warning("未找到借贷标志,使用原有收支字段逻辑")
         income_col = None
-        for col_name in config.INCOME_COLUMNS:
-            if col_name in df.columns:
-                income_col = col_name
-                break
+        income_col = _find_first_matching_column(
+            df, config.INCOME_COLUMNS, is_amount_field=True
+        )
 
         expense_col = None
-        for col_name in config.EXPENSE_COLUMNS:
-            if col_name in df.columns:
-                expense_col = col_name
-                break
+        expense_col = _find_first_matching_column(
+            df, config.EXPENSE_COLUMNS, is_amount_field=True
+        )
 
         if income_col:
-            normalized["income"] = df[income_col].apply(utils.format_amount)
+            normalized["income"] = _normalize_amount_series(df[income_col], income_col)
         else:
             normalized["income"] = 0.0
 
         if expense_col:
-            normalized["expense"] = df[expense_col].apply(utils.format_amount)
+            normalized["expense"] = _normalize_amount_series(df[expense_col], expense_col)
         else:
             normalized["expense"] = 0.0
 
@@ -580,10 +655,9 @@ def standardize_bank_fields(
 
     # 4. 对手方字段 - 支持"交易对方名称"
     counterparty_col = None
-    for col_name in config.BANK_FIELD_MAPPING.get("counterparty_name", []):
-        if col_name in df.columns:
-            counterparty_col = col_name
-            break
+    counterparty_col = _find_first_matching_column(
+        df, config.BANK_FIELD_MAPPING.get("counterparty_name", [])
+    )
 
     if counterparty_col:
         normalized["counterparty"] = df[counterparty_col].apply(utils.clean_text)
@@ -592,13 +666,12 @@ def standardize_bank_fields(
 
     # 5. 余额字段 - 支持"交易余额"
     balance_col = None
-    for col_name in config.BANK_FIELD_MAPPING.get("balance", []):
-        if col_name in df.columns:
-            balance_col = col_name
-            break
+    balance_col = _find_first_matching_column(
+        df, config.BANK_FIELD_MAPPING.get("balance", []), is_amount_field=True
+    )
 
     if balance_col:
-        normalized["balance"] = df[balance_col].apply(utils.format_amount)
+        normalized["balance"] = _normalize_amount_series(df[balance_col], balance_col)
     else:
         normalized["balance"] = 0.0
 
@@ -614,10 +687,7 @@ def standardize_bank_fields(
     # 因此，我们不再信任"现金交易"这个词。除非标志列明确包含"现钞"这种极强指示词。
     is_cash_by_flag = pd.Series(False, index=df.index)
     cash_col = None
-    for col_name in config.BANK_FIELD_MAPPING.get("cash_flag", []):
-        if col_name in df.columns:
-            cash_col = col_name
-            break
+    cash_col = _find_first_matching_column(df, config.BANK_FIELD_MAPPING.get("cash_flag", []))
 
     if cash_col:
         # 只匹配"现钞"、"ATM"。对于"现金"或"现金交易"这种宽泛词予以忽略
@@ -635,13 +705,12 @@ def standardize_bank_fields(
 
     # 7. 账号字段(用于去重)
     account_col = None
-    for col_name in config.BANK_FIELD_MAPPING.get("account_number", []):
-        if col_name in df.columns:
-            account_col = col_name
-            break
+    account_col = _find_first_matching_column(
+        df, config.BANK_FIELD_MAPPING.get("account_number", [])
+    )
 
     if account_col:
-        normalized["account_number"] = df[account_col].astype(str)
+        normalized["account_number"] = df[account_col].fillna("").astype(str).str.strip()
     else:
         normalized["account_number"] = ""
 
@@ -826,13 +895,12 @@ def standardize_bank_fields(
 
     # 8. 交易流水号(用于精确去重)
     tx_id_col = None
-    for col_name in config.BANK_FIELD_MAPPING.get("transaction_id", []):
-        if col_name in df.columns:
-            tx_id_col = col_name
-            break
+    tx_id_col = _find_first_matching_column(
+        df, config.BANK_FIELD_MAPPING.get("transaction_id", [])
+    )
 
     if tx_id_col:
-        normalized["transaction_id"] = df[tx_id_col].astype(str).str.strip()
+        normalized["transaction_id"] = df[tx_id_col].fillna("").astype(str).str.strip()
     else:
         normalized["transaction_id"] = ""
 
@@ -875,9 +943,9 @@ def standardize_bank_fields(
     # ========== 内存优化 ==========
     # 【内存优化】优化数据类型以节省内存
     # 金额列：保持 float64 确保审计精度
-    normalized["income"] = normalized["income"].astype("float64")
-    normalized["expense"] = normalized["expense"].astype("float64")
-    normalized["balance"] = normalized["balance"].astype("float64")
+    normalized["income"] = normalized["income"].round(2).astype("float64")
+    normalized["expense"] = normalized["expense"].round(2).astype("float64")
+    normalized["balance"] = normalized["balance"].round(2).astype("float64")
 
     # 文本列：转为 category 类型节省内存（这是内存优化的关键）
     for col in [
@@ -988,7 +1056,7 @@ def clean_and_merge_files(
 
         try:
             # 读取Excel
-            df_raw = pd.read_excel(filepath)
+            df_raw = _read_transaction_file(filepath)
             original_rows = len(df_raw)
 
             # 标准化字段

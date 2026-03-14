@@ -8,6 +8,7 @@ from typing import Dict, List, Any, Optional
 
 from detectors.base_detector import BaseDetector
 from schemas.suspicion import SuspicionSeverity, SuspicionType
+import utils
 
 
 class FixedAmountDetector(BaseDetector):
@@ -78,7 +79,7 @@ class FixedAmountDetector(BaseDetector):
             try:
                 parsed_tx = {
                     "date": self._parse_date(tx.get("tx_date")),
-                    "amount": float(tx.get("amount", 0)),
+                    "amount": utils.format_amount(tx.get("amount", 0)),
                     "tx_type": tx.get("tx_type", ""),
                     "counterparty": tx.get("counterparty", ""),
                     "account": tx.get("account", ""),
@@ -96,15 +97,8 @@ class FixedAmountDetector(BaseDetector):
             return date_value
         if isinstance(date_value, datetime):
             return date_value.date()
-        if isinstance(date_value, str):
-            try:
-                return datetime.strptime(date_value, "%Y-%m-%d").date()
-            except ValueError:
-                try:
-                    return datetime.strptime(date_value, "%Y/%m/%d").date()
-                except ValueError:
-                    return None
-        return None
+        parsed = utils.parse_date(date_value)
+        return parsed.date() if parsed else None
 
     def _group_by_amount(self, transactions: List[Dict], tolerance: float) -> Dict[float, List[Dict]]:
         """按金额对交易进行分组。"""

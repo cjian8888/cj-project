@@ -9,7 +9,9 @@ import re
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Optional, Union, List, Tuple, Dict, Any
+import numpy as np
 import pandas as pd
 import config
 
@@ -76,7 +78,7 @@ def setup_logger(name: str = 'AuditSystem') -> logging.Logger:
     return logger
 
 
-def parse_date(date_str: Union[str, datetime]) -> Optional[datetime]:
+def parse_date(date_str: Union[str, datetime, pd.Timestamp, int, float]) -> Optional[datetime]:
     """
     智能解析日期字符串
     
@@ -86,13 +88,35 @@ def parse_date(date_str: Union[str, datetime]) -> Optional[datetime]:
     Returns:
         datetime对象,解析失败返回None
     """
+    if isinstance(date_str, pd.Timestamp):
+        if pd.isna(date_str):
+            return None
+        return date_str.to_pydatetime()
+
     if isinstance(date_str, datetime):
         return date_str
-    
+
+    if date_str is None or pd.isna(date_str):
+        return None
+
+    if isinstance(date_str, (int, float)) and not isinstance(date_str, bool):
+        try:
+            excel_serial = float(date_str)
+            if 20000 <= excel_serial <= 80000:
+                parsed = pd.to_datetime(
+                    excel_serial, unit="D", origin="1899-12-30", errors="coerce"
+                )
+                if pd.notna(parsed):
+                    return parsed.to_pydatetime()
+        except (TypeError, ValueError, OverflowError):
+            pass
+
     if not date_str or str(date_str).strip() == '':
         return None
-    
+
     date_str = str(date_str).strip()
+    if date_str.lower() in {"nan", "none", "null", "-", "--", "nat"}:
+        return None
     
     # 尝试各种日期格式
     for fmt in config.DATE_FORMATS:
@@ -103,14 +127,18 @@ def parse_date(date_str: Union[str, datetime]) -> Optional[datetime]:
     
     # 尝试pandas的通用解析
     try:
-        return pd.to_datetime(date_str)
+        parsed = pd.to_datetime(date_str, errors="coerce")
+        if pd.notna(parsed):
+            return parsed.to_pydatetime() if hasattr(parsed, "to_pydatetime") else parsed
     except Exception:
         pass
-    
+
     return None
 
 
-def format_amount(amount: Union[int, float, str, None]) -> float:
+def format_amount(
+    amount: Union[int, float, str, Decimal, None], unit_hint_multiplier: float = 1.0
+) -> float:
     """
     标准化金额格式
     
@@ -120,20 +148,249 @@ def format_amount(amount: Union[int, float, str, None]) -> float:
     Returns:
         浮点数金额
     """
-    if amount is None or amount == '':
+    if amount is None or pd.isna(amount) or amount == '':
         return 0.0
-    
-    if isinstance(amount, (int, float)):
-        return float(amount)
-    
-    # 移除货币符号、逗号、空格等
-    amount_str = str(amount).replace(',', '').replace('¥', '').replace('￥', '')
-    amount_str = amount_str.replace('元', '').replace(' ', '').strip()
-    
+
+    if isinstance(amount, Decimal):
+        return float(amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+    if isinstance(amount, (int, float)) and not isinstance(amount, bool):
+        try:
+            numeric_amount = Decimal(str(amount)) * Decimal(str(unit_hint_multiplier or 1))
+            return float(numeric_amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+        except (InvalidOperation, ValueError, TypeError):
+            return 0.0
+
+    amount_str = str(amount).strip()
+    if amount_str.lower() in {"nan", "none", "null", "-", "--"}:
+        return 0.0
+
+    negative = False
+    if amount_str.startswith("(") and amount_str.endswith(")"):
+        negative = True
+        amount_str = amount_str[1:-1]
+
+    explicit_multiplier = None
+    unit_mappings = {
+        "亿元": Decimal("100000000"),
+        "亿": Decimal("100000000"),
+        "万元": Decimal("10000"),
+        "万": Decimal("10000"),
+        "千元": Decimal("1000"),
+        "千": Decimal("1000"),
+        "百元": Decimal("100"),
+        "百": Decimal("100"),
+    }
+    for unit_text, multiplier in unit_mappings.items():
+        if unit_text in amount_str:
+            explicit_multiplier = multiplier
+            break
+
+    amount_str = amount_str.replace(",", "").replace("，", "")
+    amount_str = amount_str.replace("¥", "").replace("￥", "").replace("RMB", "")
+    amount_str = amount_str.replace("人民币", "").replace("元", "").replace(" ", "").strip()
+
+    numeric_match = re.search(r"[-+]?\d+(?:\.\d+)?", amount_str)
+    if not numeric_match:
+        return 0.0
+
     try:
-        return float(amount_str)
-    except ValueError:
+        decimal_amount = Decimal(numeric_match.group(0))
+        if negative:
+            decimal_amount = -decimal_amount
+        multiplier = explicit_multiplier or Decimal(str(unit_hint_multiplier or 1))
+        normalized = decimal_amount * multiplier
+        return float(normalized.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    except (InvalidOperation, ValueError, TypeError):
         return 0.0
+
+
+def normalize_column_token(column_name: Any) -> str:
+    """标准化列名文本，便于模糊匹配。"""
+    if column_name is None:
+        return ""
+    token = str(column_name).strip().lower()
+    token = token.replace("（", "(").replace("）", ")")
+    token = re.sub(r"\s+", "", token)
+    token = re.sub(r"[(){}\[\]【】:_-]", "", token)
+    token = token.replace("人民币", "").replace("rmb", "")
+    return token
+
+
+def strip_amount_unit_tokens(token: str) -> str:
+    """移除列名中的金额单位字样。"""
+    normalized = token or ""
+    for unit_text in ("亿元", "万元", "亿", "万", "元"):
+        normalized = normalized.replace(unit_text, "")
+    return normalized
+
+
+def get_amount_unit_hint_multiplier(column_name: Any) -> float:
+    """根据列名推断金额单位提示，统一换算到元。"""
+    token = normalize_column_token(column_name)
+    if "亿元" in token or token.endswith("亿"):
+        return 100000000.0
+    if "万元" in token or token.endswith("万"):
+        return 10000.0
+    return 1.0
+
+
+def find_first_matching_column(
+    df: pd.DataFrame, candidates: List[str], is_amount_field: bool = False
+) -> Optional[str]:
+    """在 DataFrame 中查找首个匹配列，兼容列头带单位的情况。"""
+    if df is None or not hasattr(df, "columns"):
+        return None
+
+    for candidate in candidates:
+        if candidate in df.columns:
+            return candidate
+
+    normalized_candidates = []
+    for candidate in candidates:
+        token = normalize_column_token(candidate)
+        if is_amount_field:
+            token = strip_amount_unit_tokens(token)
+        normalized_candidates.append(token)
+
+    for column_name in df.columns:
+        column_token = normalize_column_token(column_name)
+        compare_token = (
+            strip_amount_unit_tokens(column_token) if is_amount_field else column_token
+        )
+        if compare_token in normalized_candidates:
+            return column_name
+    return None
+
+
+def normalize_amount_series(series: pd.Series, column_name: str = "") -> pd.Series:
+    """将一列原始金额统一换算为元。"""
+    multiplier = get_amount_unit_hint_multiplier(column_name)
+    return series.apply(lambda value: format_amount(value, unit_hint_multiplier=multiplier))
+
+
+def normalize_datetime_series(series: pd.Series) -> pd.Series:
+    """对日期列做鲁棒解析，统一返回 pandas datetime64。"""
+    normalized = series.apply(parse_date)
+    return pd.to_datetime(normalized, errors="coerce")
+
+
+def detect_account_identifier_column(df: pd.DataFrame) -> Optional[str]:
+    """识别可用于稳定排序的账户标识列。"""
+    if df is None or df.empty:
+        return None
+
+    candidates = [
+        "account_id",
+        "account_no",
+        "account",
+        "bank_account",
+        "银行卡号",
+        "银行账号",
+        "账号",
+        "卡号",
+    ]
+    return find_first_matching_column(df, candidates)
+
+
+def build_transaction_order_columns(
+    df: pd.DataFrame,
+    date_col: str = "date",
+    source_row_col: str = "source_row_index",
+    transaction_id_col: str = "transaction_id",
+    account_col: Optional[str] = None,
+) -> pd.DataFrame:
+    """为交易明细补齐稳定排序所需的辅助列。"""
+    if df is None:
+        return pd.DataFrame()
+    if df.empty:
+        empty = df.copy()
+        empty["_parsed_ts"] = pd.Series(dtype="datetime64[ns]")
+        empty["_strict_source_row"] = pd.Series(dtype="int64")
+        empty["_strict_transaction_id"] = pd.Series(dtype="object")
+        empty["_strict_account_id"] = pd.Series(dtype="object")
+        return empty
+
+    normalized = df.copy()
+    if date_col in normalized.columns:
+        normalized["_parsed_ts"] = normalize_datetime_series(normalized[date_col])
+    else:
+        normalized["_parsed_ts"] = pd.NaT
+
+    fallback_rows = np.arange(len(normalized), dtype="int64") + 10**12
+    if source_row_col in normalized.columns:
+        source_rows = pd.to_numeric(normalized[source_row_col], errors="coerce")
+        normalized["_strict_source_row"] = (
+            source_rows.where(source_rows.notna(), fallback_rows).astype("int64")
+        )
+    else:
+        normalized["_strict_source_row"] = fallback_rows
+
+    if transaction_id_col in normalized.columns:
+        normalized["_strict_transaction_id"] = (
+            normalized[transaction_id_col].fillna("").astype(str)
+        )
+    else:
+        normalized["_strict_transaction_id"] = ""
+
+    resolved_account_col = account_col or detect_account_identifier_column(normalized)
+    if resolved_account_col and resolved_account_col in normalized.columns:
+        normalized["_strict_account_id"] = (
+            normalized[resolved_account_col].fillna("").astype(str)
+        )
+    else:
+        normalized["_strict_account_id"] = ""
+
+    return normalized
+
+
+def sort_transactions_strict(
+    df: pd.DataFrame,
+    date_col: str = "date",
+    source_row_col: str = "source_row_index",
+    transaction_id_col: str = "transaction_id",
+    account_col: Optional[str] = None,
+    dropna_date: bool = False,
+) -> pd.DataFrame:
+    """按稳定排序键返回交易明细，解决同秒多笔和乱序输入的不确定性。"""
+    normalized = build_transaction_order_columns(
+        df,
+        date_col=date_col,
+        source_row_col=source_row_col,
+        transaction_id_col=transaction_id_col,
+        account_col=account_col,
+    )
+    if normalized.empty:
+        return normalized
+
+    if dropna_date:
+        normalized = normalized[normalized["_parsed_ts"].notna()].copy()
+        if normalized.empty:
+            return normalized
+
+    sort_cols = [
+        "_parsed_ts",
+        "_strict_source_row",
+        "_strict_transaction_id",
+        "_strict_account_id",
+    ]
+    normalized = normalized.sort_values(
+        sort_cols,
+        kind="mergesort",
+        na_position="last",
+    ).reset_index(drop=True)
+
+    if date_col in normalized.columns:
+        normalized[date_col] = normalized["_parsed_ts"]
+
+    return normalized
+
+
+def format_amount_to_wan(
+    amount: Union[int, float, str, Decimal, None], unit_hint_multiplier: float = 1.0
+) -> float:
+    """将原始金额统一解析后转换为万元。"""
+    return format_amount(amount, unit_hint_multiplier=unit_hint_multiplier) / 10000.0
 
 
 def is_amount_similar(amount1: float, amount2: float, tolerance: Optional[float] = None) -> bool:

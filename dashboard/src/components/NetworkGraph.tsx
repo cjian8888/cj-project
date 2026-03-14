@@ -37,6 +37,123 @@ interface TransactionDetail {
   incomeType?: string; // 收入类型
 }
 
+interface TransactionRef {
+  date?: string;
+  amount?: number;
+  source_file?: string;
+  source_row_index?: number;
+  description?: string;
+  direction?: string;
+  counterparty_raw?: string;
+}
+
+interface BasePathExplainability {
+  path_type?: string;
+  summary?: string;
+  inspection_points?: string[];
+  path?: string;
+  nodes?: string[];
+  evidence_template?: {
+    headline?: string;
+    summary?: string;
+    key_points?: string[];
+    metrics?: Array<{ label?: string; value?: string }>;
+    supporting_refs?: {
+      kind?: string;
+      returned?: number;
+      total?: number;
+      truncated?: boolean;
+      notice?: string;
+    };
+  };
+}
+
+interface CycleEdgeSegment {
+  index?: number;
+  from?: string;
+  to?: string;
+  amount?: number;
+  transaction_count?: number;
+  transaction_refs_total?: number;
+  transaction_ref_sample_count?: number;
+  transaction_refs_returned?: number;
+  transaction_refs_truncated?: boolean;
+  transaction_refs_limit?: number;
+  transaction_refs?: TransactionRef[];
+}
+
+interface CyclePathExplainability extends BasePathExplainability {
+  edge_segments?: CycleEdgeSegment[];
+  bottleneck_edge?: {
+    from?: string;
+    to?: string;
+    amount?: number;
+  };
+}
+
+interface RelayTimeAxisEvent {
+  step?: number;
+  event_type?: string;
+  time?: string;
+  label?: string;
+  amount?: number;
+  source_file?: string;
+  source_row_index?: number;
+}
+
+interface RelayPathExplainability extends BasePathExplainability {
+  time_axis?: RelayTimeAxisEvent[];
+  time_axis_total?: number;
+  time_axis_sample_count?: number;
+  time_axis_truncated?: boolean;
+  sequence_summary?: string;
+}
+
+interface DirectFlowPathExplainability extends BasePathExplainability {
+  amount?: number;
+  direction?: string;
+  transaction_refs?: TransactionRef[];
+  transaction_refs_total?: number;
+  transaction_ref_sample_count?: number;
+  transaction_refs_truncated?: boolean;
+}
+
+type RepresentativePathExplainability =
+  | CyclePathExplainability
+  | RelayPathExplainability
+  | DirectFlowPathExplainability
+  | BasePathExplainability;
+
+interface RelationshipRepresentativePath {
+  path_type?: string;
+  path?: string;
+  nodes?: string[];
+  amount?: number;
+  risk_score?: number;
+  confidence?: number;
+  priority_score?: number;
+  priority_reason?: string;
+  summary?: string;
+  inspection_points?: string[];
+  path_explainability?: RepresentativePathExplainability;
+  evidence_template?: BasePathExplainability['evidence_template'];
+}
+
+interface RelationshipClusterPathExplainability extends BasePathExplainability {
+  representative_path_count?: number;
+  representative_paths?: RelationshipRepresentativePath[];
+}
+
+interface LinkedSelection {
+  id: string;
+  type: 'fund_cycle' | 'third_party_relay' | 'relationship_cluster' | 'cluster_representative_path';
+  label: string;
+  path?: string;
+  nodes: string[];
+  riskScore?: number;
+  sectionKeys: string[];
+}
+
 interface NetworkGraphProps {
   onLog?: (message: string) => void;
 }
@@ -61,6 +178,8 @@ interface GraphData {
     mediumRiskCount: number;
     loanPairCount: number;
     noRepayCount: number;
+    discoveredNodeCount: number;
+    relationshipClusterCount: number;
     coreEdgeCount: number;
     companyEdgeCount: number;
     otherEdgeCount: number;
@@ -97,6 +216,90 @@ interface GraphData {
       platform: string;
       amount: number;
     }>;
+    third_party_relays: Array<{
+      from: string;
+      relay: string;
+      to: string;
+      outflow_amount?: number;
+      inflow_amount?: number;
+      amount_diff?: number;
+      time_diff_hours?: number;
+      risk_score?: number;
+      risk_level?: string;
+      confidence?: number;
+      evidence?: string[];
+      path_explainability?: RelayPathExplainability;
+    }>;
+    focus_entities: Array<{
+      name: string;
+      risk_score: number;
+      risk_level?: string;
+      risk_confidence?: number;
+      high_priority_clue_count?: number;
+      top_evidence_score?: number;
+      summary?: string;
+      top_clues?: string[];
+      in_graph?: boolean;
+      graph_node_id?: string | number;
+      graph_group?: string;
+    }>;
+    aggregation_summary?: {
+      极高风险实体数?: number;
+      高风险实体数?: number;
+      中风险实体数?: number;
+      高优先线索实体数?: number;
+    };
+    aggregation_metadata?: Record<string, unknown>;
+    discovered_nodes: Array<{
+      name: string;
+      node_type?: string;
+      occurrences?: number;
+      relation_types?: string[];
+      linked_cores?: string[];
+      total_amount?: number;
+      risk_score?: number;
+      risk_level?: string;
+      confidence?: number;
+      evidence?: string[];
+      path_explainability?: RelayPathExplainability;
+    }>;
+    relationship_clusters: Array<{
+      cluster_id: string;
+      core_members: string[];
+      external_members: string[];
+      all_nodes?: string[];
+      relation_types?: string[];
+      direct_flow_count?: number;
+      relay_count?: number;
+      loop_count?: number;
+      total_amount?: number;
+      risk_score?: number;
+      risk_level?: string;
+      confidence?: number;
+      evidence?: string[];
+      path_explainability?: RelationshipClusterPathExplainability;
+    }>;
+    fund_cycles: Array<{
+      path?: string;
+      nodes?: string[];
+      participants?: string[];
+      length?: number;
+      total_amount?: number;
+      risk_score?: number;
+      risk_level?: string;
+      confidence?: number;
+      evidence?: string[];
+      path_explainability?: CyclePathExplainability;
+    }>;
+    fund_cycle_meta?: {
+      truncated?: boolean;
+      timed_out?: boolean;
+      truncated_reasons?: string[];
+      timeout_seconds?: number;
+      requested_start_nodes?: number;
+      searched_start_nodes?: number;
+      returned_count?: number;
+    };
   };
 }
 
@@ -111,6 +314,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<{ label: string; group: string } | null>(null);
+  const [activeSelection, setActiveSelection] = useState<LinkedSelection | null>(null);
   const [viewMode, setViewMode] = useState<'graph' | 'report'>('graph');
   const [reportUrl, setReportUrl] = useState<string | null>(null);
   // P0-1: 交易详情 Modal 状态
@@ -119,10 +323,29 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
   const exportRef = useRef<HTMLDivElement>(null);
   // 左侧菜单展开状态
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
+  const discoveredNodes = graphData?.report.discovered_nodes || [];
+  const relationshipClusters = graphData?.report.relationship_clusters || [];
+  const fundCycles = graphData?.report.fund_cycles || [];
+  const thirdPartyRelays = graphData?.report.third_party_relays || [];
+  const focusEntities = graphData?.report.focus_entities || [];
+  const aggregationSummary = graphData?.report.aggregation_summary || {};
   
   // 切换展开/折叠状态
   const toggleSection = (section: string) => {
     setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
+  };
+
+  const expandSections = (sections: string[]) => {
+    if (sections.length === 0) {
+      return;
+    }
+    setExpandedSections(prev => {
+      const next = { ...prev };
+      sections.forEach(section => {
+        next[section] = true;
+      });
+      return next;
+    });
   };
 
   // 格式化金额显示 - 统一使用万元单位（P2: 金额单位统一）
@@ -142,6 +365,429 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
       return <span className="text-orange-400 font-medium">⚠ 来源不明</span>;
     }
     return formatPartyName(name);
+  };
+
+  const relationTypeLabels: Record<string, string> = {
+    direct_flow: '直接往来',
+    third_party_relay: '第三方中转',
+    fund_loop: '资金闭环',
+    fund_cycle: '资金闭环',
+    relationship_cluster: '关系簇',
+  };
+  const fundCycleMeta = graphData?.report.fund_cycle_meta || {};
+
+  const formatRelationTypes = (relationTypes?: string[]) => {
+    if (!relationTypes || relationTypes.length === 0) {
+      return '关系类型待补充';
+    }
+    return relationTypes.map(type => relationTypeLabels[type] || type).join(' / ');
+  };
+
+  const formatOptionalAmount = (amount?: number) => {
+    if (!amount || amount <= 0) {
+      return '金额待估';
+    }
+    return formatAmount(amount);
+  };
+
+  const formatConfidence = (confidence?: number) => {
+    if (confidence === undefined || confidence === null) {
+      return '置信度待估';
+    }
+    return `置信度 ${(confidence * 100).toFixed(0)}%`;
+  };
+
+  const formatEvidence = (evidence?: string[], limit = 2) => {
+    if (!evidence || evidence.length === 0) {
+      return '';
+    }
+    return evidence.slice(0, limit).join('；');
+  };
+
+  const formatPathSummary = (payload?: { summary?: string }) => {
+    const summary = payload?.summary?.trim();
+    return summary || '';
+  };
+
+  const formatInspectionPoints = (
+    payload?: { inspection_points?: string[] },
+    limit = 2,
+  ) => {
+    if (!payload?.inspection_points || payload.inspection_points.length === 0) {
+      return '';
+    }
+    return payload.inspection_points
+      .slice(0, limit)
+      .map(point => point.trim())
+      .filter(Boolean)
+      .join('；');
+  };
+
+  const formatCycleEdgeSegments = (
+    payload?: CyclePathExplainability,
+  ) => {
+    if (!payload?.edge_segments || payload.edge_segments.length === 0) {
+      return '';
+    }
+    const lines = payload.edge_segments
+      .slice(0, 3)
+      .map(segment => {
+        const amount = Number(segment.amount || 0);
+        return `第${segment.index || 0}跳 ${segment.from || '未知'} -> ${segment.to || '未知'} ${formatOptionalAmount(amount)}`;
+      });
+    if (payload.bottleneck_edge?.from && payload.bottleneck_edge?.to) {
+      const amount = Number(payload.bottleneck_edge.amount || 0);
+      lines.push(`瓶颈边 ${payload.bottleneck_edge.from} -> ${payload.bottleneck_edge.to} ${formatOptionalAmount(amount)}`);
+    }
+    return lines.join('；');
+  };
+
+  const formatRelayTimeAxis = (
+    payload?: RelayPathExplainability,
+  ) => {
+    const parts: string[] = [];
+    if (payload?.sequence_summary?.trim()) {
+      parts.push(payload.sequence_summary.trim());
+    }
+    if (payload?.time_axis && payload.time_axis.length > 0) {
+      parts.push(
+        payload.time_axis
+          .slice(0, 2)
+          .map(event => {
+            const file = event.source_file
+              ? ` ${event.source_file}${event.source_row_index !== undefined && event.source_row_index !== null ? ` 第${event.source_row_index}行` : ''}`
+              : '';
+            return `${event.time || '未知时间'} ${event.label || '未知事件'} ${formatOptionalAmount(Number(event.amount || 0))}${file}`;
+          })
+          .join('；'),
+      );
+    }
+    return parts.join('；');
+  };
+
+  const getSegmentTransactionTotal = (segment?: CycleEdgeSegment) => {
+    if (!segment) {
+      return 0;
+    }
+    const refs = segment.transaction_refs || [];
+    return Math.max(
+      Number(segment.transaction_refs_total || segment.transaction_count || 0),
+      refs.length,
+    );
+  };
+
+  const getSegmentReturnedCount = (segment?: CycleEdgeSegment) => {
+    if (!segment) {
+      return 0;
+    }
+    const refs = segment.transaction_refs || [];
+    return Math.max(Number(segment.transaction_refs_returned || 0), refs.length);
+  };
+
+  const getTimeAxisTotal = (payload?: RelayPathExplainability) => {
+    if (!payload) {
+      return 0;
+    }
+    const events = payload.time_axis || [];
+    return Math.max(Number(payload.time_axis_total || 0), events.length);
+  };
+
+  const getRepresentativePathPayload = (
+    representativePath?: RelationshipRepresentativePath,
+  ): RepresentativePathExplainability | undefined => {
+    if (!representativePath) {
+      return undefined;
+    }
+    if (representativePath.path_explainability) {
+      return representativePath.path_explainability;
+    }
+    if (representativePath.path || representativePath.summary || representativePath.inspection_points) {
+      return {
+        path_type: representativePath.path_type,
+        path: representativePath.path,
+        nodes: representativePath.nodes,
+        summary: representativePath.summary,
+        inspection_points: representativePath.inspection_points,
+      };
+    }
+    return undefined;
+  };
+
+  const getRepresentativePathNodes = (
+    representativePath?: RelationshipRepresentativePath,
+  ) => {
+    const payload = getRepresentativePathPayload(representativePath);
+    const payloadNodes = payload?.nodes || [];
+    if (payloadNodes.length > 0) {
+      return payloadNodes.filter(Boolean);
+    }
+    const nodes = representativePath?.nodes || [];
+    if (nodes.length > 0) {
+      return nodes.filter(Boolean);
+    }
+    const rawPath = String(representativePath?.path || '').trim();
+    if (!rawPath) {
+      return [];
+    }
+    return rawPath
+      .split('→')
+      .map(node => node.trim())
+      .filter(Boolean);
+  };
+
+  const getDirectFlowRefTotal = (payload?: DirectFlowPathExplainability) => {
+    if (!payload) {
+      return 0;
+    }
+    const refs = payload.transaction_refs || [];
+    return Math.max(Number(payload.transaction_refs_total || 0), refs.length);
+  };
+
+  const findGraphNodesByNames = (names: string[]) => {
+    if (!graphData) {
+      return [];
+    }
+    const normalizedNames = new Set(
+      names
+        .map(name => String(name || '').trim())
+        .filter(Boolean),
+    );
+    return graphData.nodes.filter(node => {
+      const nodeId = String(node.id || '').trim();
+      const nodeLabel = String(node.label || '').trim();
+      return normalizedNames.has(nodeId) || normalizedNames.has(nodeLabel);
+    });
+  };
+
+  const resolveGraphNodeNameById = (nodeId: string | number) => {
+    const matchedNode = graphData?.nodes.find(node => String(node.id) === String(nodeId));
+    return String(matchedNode?.label || matchedNode?.id || nodeId).trim();
+  };
+
+  const focusGraphNodes = (names: string[], label: string) => {
+    if (!networkInstance.current) {
+      return;
+    }
+    const matchedNodes = findGraphNodesByNames(names);
+    if (matchedNodes.length === 0) {
+      onLog?.(`${label} 未在当前采样图中展示`);
+      return;
+    }
+
+    const nodeIds = matchedNodes.map(node => node.id);
+    networkInstance.current.selectNodes(nodeIds);
+    networkInstance.current.fit({
+      nodes: nodeIds,
+      animation: {
+        duration: 500,
+        easingFunction: 'easeInOutQuad',
+      },
+    });
+
+    const firstNode = matchedNodes[0];
+    setSelectedNode({
+      label: formatPartyName(String(firstNode.label || firstNode.id || label)),
+      group: String(firstNode.group || 'other'),
+    });
+    onLog?.(`图谱已定位 ${label}: ${matchedNodes.map(node => String(node.label || node.id)).join('、')}`);
+  };
+
+  const getCycleNodes = (cycle: GraphData['report']['fund_cycles'][number]) => {
+    const nodes = cycle.path_explainability?.nodes || cycle.nodes || cycle.participants || [];
+    return nodes.map(node => String(node || '').trim()).filter(Boolean);
+  };
+
+  const getRelayNodes = (relay: GraphData['report']['third_party_relays'][number]) => {
+    return (
+      relay.path_explainability?.nodes ||
+      [relay.from, relay.relay, relay.to]
+    )
+      .map(node => String(node || '').trim())
+      .filter(Boolean);
+  };
+
+  const getClusterNodes = (cluster: GraphData['report']['relationship_clusters'][number]) => {
+    return (
+      cluster.all_nodes ||
+      [...(cluster.core_members || []), ...(cluster.external_members || [])]
+    )
+      .map(node => String(node || '').trim())
+      .filter(Boolean);
+  };
+
+  const getSelectionEdges = (selection: LinkedSelection) => {
+    const edges: Array<[string, string]> = [];
+    const nodes = selection.nodes || [];
+    if (nodes.length < 2) {
+      return edges;
+    }
+    for (let idx = 0; idx < nodes.length - 1; idx += 1) {
+      edges.push([nodes[idx], nodes[idx + 1]]);
+    }
+    if (selection.type === 'fund_cycle' && nodes.length > 2) {
+      edges.push([nodes[nodes.length - 1], nodes[0]]);
+    }
+    return edges;
+  };
+
+  const buildLinkedSelections = (): LinkedSelection[] => {
+    if (!graphData) {
+      return [];
+    }
+
+    const selections: LinkedSelection[] = [];
+
+    fundCycles.forEach((cycle, idx) => {
+      selections.push({
+        id: `fund_cycle:${idx}`,
+        type: 'fund_cycle',
+        label: `资金闭环 ${idx + 1}`,
+        path: getCyclePath(cycle),
+        nodes: getCycleNodes(cycle),
+        riskScore: cycle.risk_score,
+        sectionKeys: ['fundCycles', `fundCycle:${idx}:details`],
+      });
+    });
+
+    thirdPartyRelays.forEach((relay, idx) => {
+      selections.push({
+        id: `third_party_relay:${idx}`,
+        type: 'third_party_relay',
+        label: `第三方中转 ${idx + 1}`,
+        path: relay.path_explainability?.path || `${relay.from} → ${relay.relay} → ${relay.to}`,
+        nodes: getRelayNodes(relay),
+        riskScore: relay.risk_score,
+        sectionKeys: ['thirdPartyRelays', `relay:${idx}:details`],
+      });
+    });
+
+    relationshipClusters.forEach((cluster, idx) => {
+      selections.push({
+        id: `relationship_cluster:${idx}`,
+        type: 'relationship_cluster',
+        label: `关系簇 ${cluster.cluster_id || idx + 1}`,
+        path: cluster.path_explainability?.path || cluster.cluster_id,
+        nodes: getClusterNodes(cluster),
+        riskScore: cluster.risk_score,
+        sectionKeys: ['relationshipClusters'],
+      });
+
+      (cluster.path_explainability?.representative_paths || []).forEach((representativePath, pathIdx) => {
+        selections.push({
+          id: `cluster_representative_path:${idx}:${pathIdx}`,
+          type: 'cluster_representative_path',
+          label: `关系簇代表路径 ${idx + 1}-${pathIdx + 1}`,
+          path: representativePath.path || representativePath.path_explainability?.path,
+          nodes: getRepresentativePathNodes(representativePath),
+          riskScore: representativePath.risk_score,
+          sectionKeys: ['relationshipClusters', `cluster:${idx}:paths`, `cluster:${idx}:path:${pathIdx}`],
+        });
+      });
+    });
+
+    return selections.filter(selection => selection.nodes.length > 0);
+  };
+
+  const getSelectionTypePriority = (selectionType: LinkedSelection['type']) => {
+    switch (selectionType) {
+      case 'fund_cycle':
+        return 50;
+      case 'third_party_relay':
+        return 45;
+      case 'cluster_representative_path':
+        return 40;
+      case 'relationship_cluster':
+        return 10;
+      default:
+        return 0;
+    }
+  };
+
+  const activateSelection = (
+    selection: LinkedSelection,
+    options?: { focusGraph?: boolean; logMessage?: boolean },
+  ) => {
+    setActiveSelection(selection);
+    expandSections(selection.sectionKeys);
+
+    if (options?.focusGraph !== false) {
+      focusGraphNodes(selection.nodes, selection.path || selection.label);
+    } else if (options?.logMessage !== false) {
+      onLog?.(`右侧已联动到 ${selection.label}: ${selection.path || selection.nodes.join(' → ')}`);
+    }
+  };
+
+  const syncPanelToGraphSelection = (params: { nodeNames: string[]; edgePair?: [string, string] | null }) => {
+    const linkedSelections = buildLinkedSelections();
+    if (linkedSelections.length === 0) {
+      return;
+    }
+
+    const clickedNodeSet = new Set(
+      params.nodeNames
+        .map(node => String(node || '').trim())
+        .filter(Boolean),
+    );
+    if (clickedNodeSet.size === 0 && !params.edgePair) {
+      return;
+    }
+
+    const scored = linkedSelections
+      .map(selection => {
+        const selectionNodeSet = new Set(selection.nodes);
+        const overlapCount = Array.from(clickedNodeSet).filter(node => selectionNodeSet.has(node)).length;
+        const hasEdgeMatch = Boolean(params.edgePair) && getSelectionEdges(selection).some(
+          ([from, to]) => (
+            (from === params.edgePair?.[0] && to === params.edgePair?.[1]) ||
+            (from === params.edgePair?.[1] && to === params.edgePair?.[0])
+          ),
+        );
+        if (overlapCount === 0 && !hasEdgeMatch) {
+          return null;
+        }
+        let score = overlapCount * 100 + getSelectionTypePriority(selection.type) + Number(selection.riskScore || 0);
+        if (hasEdgeMatch) {
+          score += 500;
+        }
+        score -= selection.nodes.length;
+        return { selection, score };
+      })
+      .filter((item): item is { selection: LinkedSelection; score: number } => Boolean(item))
+      .sort((a, b) => b.score - a.score);
+
+    if (scored.length === 0) {
+      return;
+    }
+
+    activateSelection(scored[0].selection, { focusGraph: false, logMessage: false });
+  };
+
+  const isActiveSelection = (selectionId: string) => activeSelection?.id === selectionId;
+
+  const getCyclePath = (cycle: GraphData['report']['fund_cycles'][number]) => {
+    if (cycle.path) {
+      return cycle.path;
+    }
+    const nodes = cycle.nodes || cycle.participants || [];
+    if (nodes.length === 0) {
+      return '未知路径';
+    }
+    return [...nodes, nodes[0]].join(' → ');
+  };
+
+  const focusEntityInGraph = (entity: GraphData['report']['focus_entities'][number]) => {
+    if (!graphData) {
+      return null;
+    }
+    return graphData.nodes.find(node =>
+      node.id === entity.graph_node_id ||
+      node.id === entity.name ||
+      node.label === entity.name
+    ) || null;
+  };
+
+  const focusGraphEntity = (entity: GraphData['report']['focus_entities'][number]) => {
+    focusGraphNodes([entity.name], `重点对象 ${entity.name}`);
   };
 
   useEffect(() => {
@@ -183,6 +829,8 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
 
       if (result.message === 'success' && result.data) {
         setGraphData(result.data);
+        setActiveSelection(null);
+        setSelectedNode(null);
         onLog?.(`图谱数据加载成功: ${result.data.stats.nodeCount} 个节点`);
       } else {
         throw new Error('返回数据格式错误');
@@ -392,7 +1040,8 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
       const nodes = new DataSet<Node>(processedNodes);
 
       // 处理边数据
-      const processedEdges = graphData.edges.map(edge => ({
+      const processedEdges = graphData.edges.map((edge, edgeIdx) => ({
+        id: `${edge.from}->${edge.to}->${edgeIdx}`,
         from: edge.from,
         to: edge.to,
         value: edge.value || 1,
@@ -426,9 +1075,26 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
             const n = nodeData as any;
             setSelectedNode({ label: n.label, group: n.group });
             onLog?.(`选中节点: ${n.label}`);
+            syncPanelToGraphSelection({
+              nodeNames: [resolveGraphNodeNameById(nodeId)],
+            });
+          }
+        } else if (params.edges.length > 0) {
+          const edgeId = params.edges[0];
+          const edgeData = edges.get(edgeId);
+          if (edgeData && !Array.isArray(edgeData)) {
+            const rawEdge = edgeData as any;
+            const fromNode = resolveGraphNodeNameById(rawEdge.from);
+            const toNode = resolveGraphNodeNameById(rawEdge.to);
+            onLog?.(`选中边: ${fromNode} → ${toNode}`);
+            syncPanelToGraphSelection({
+              nodeNames: [fromNode, toNode],
+              edgePair: [fromNode, toNode],
+            });
           }
         } else {
           setSelectedNode(null);
+          setActiveSelection(null);
         }
       });
 
@@ -706,6 +1372,837 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                       </div>
                     ))}
                   </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 重点核查对象 - 可折叠 */}
+          {graphData && (
+            <div className="stat-card bg-white/10 rounded-lg overflow-hidden border-l-4 border-rose-500">
+              <button
+                onClick={() => toggleSection('focusEntities')}
+                className="w-full p-4 hover:bg-white/5 transition-colors text-left flex items-center justify-between"
+              >
+                <div>
+                  <h4 className="text-white text-sm font-medium mb-1">🎯 重点核查对象</h4>
+                  <div className="text-2xl font-bold text-rose-400">
+                    {focusEntities.length}
+                  </div>
+                  <div className="text-xs theme-text-muted">
+                    与正式报告统一的聚合排序口径
+                  </div>
+                </div>
+                {expandedSections['focusEntities'] ?
+                  <ChevronUp className="w-5 h-5 theme-text-muted" /> :
+                  <ChevronDown className="w-5 h-5 theme-text-muted" />
+                }
+              </button>
+              {expandedSections['focusEntities'] && (
+                <div className="px-4 pb-4 border-t border-white/10 pt-3 max-h-72 overflow-y-auto">
+                  {(aggregationSummary.极高风险实体数 || aggregationSummary.高风险实体数 || aggregationSummary.高优先线索实体数) ? (
+                    <div className="mb-3 rounded-lg bg-white/5 p-3 text-xs theme-text-secondary">
+                      极高风险 {aggregationSummary.极高风险实体数 || 0} 个，
+                      高风险 {aggregationSummary.高风险实体数 || 0} 个，
+                      高优先线索实体 {aggregationSummary.高优先线索实体数 || 0} 个
+                    </div>
+                  ) : null}
+                  {focusEntities.length > 0 ? (
+                    <div className="space-y-3">
+                      {focusEntities.map((entity, idx) => {
+                        const inGraph = entity.in_graph || Boolean(focusEntityInGraph(entity));
+                        return (
+                          <button
+                            key={`${entity.name}-${idx}`}
+                            onClick={() => focusGraphEntity(entity)}
+                            className="w-full rounded-lg bg-white/5 p-3 text-left hover:bg-white/10 transition-colors"
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-xs font-mono text-rose-300">#{idx + 1}</span>
+                                  <span className="text-sm font-medium text-white">{formatPartyName(entity.name)}</span>
+                                </div>
+                                <div className="mt-1 text-xs theme-text-muted">
+                                  {inGraph ? '可在当前图谱中定位' : '当前采样图未展示该对象'}
+                                </div>
+                              </div>
+                              <span className={getRiskLevelBadgeStyle(entity.risk_level || 'medium')}>
+                                {formatRiskLevel(entity.risk_level || 'medium')}
+                              </span>
+                            </div>
+                            <div className="mt-2 flex flex-wrap items-center gap-3 text-xs theme-text-secondary">
+                              <span>评分 {entity.risk_score.toFixed(1)}</span>
+                              {entity.risk_confidence !== undefined && (
+                                <span>{formatConfidence(entity.risk_confidence)}</span>
+                              )}
+                              {entity.high_priority_clue_count !== undefined && (
+                                <span>高优先线索 {entity.high_priority_clue_count}</span>
+                              )}
+                            </div>
+                            {entity.summary && (
+                              <div className="mt-2 text-xs theme-text-secondary leading-relaxed">
+                                {entity.summary}
+                              </div>
+                            )}
+                            {entity.top_clues && entity.top_clues.length > 0 && (
+                              <div className="mt-2 text-xs text-amber-200 leading-relaxed">
+                                {entity.top_clues.slice(0, 1).join('；')}
+                              </div>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="text-sm theme-text-dim">当前未形成稳定的重点核查对象排序</div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 资金闭环 - 可折叠 */}
+          {graphData && (
+            <div className="stat-card bg-white/10 rounded-lg overflow-hidden border-l-4 border-fuchsia-500">
+              <button
+                onClick={() => toggleSection('fundCycles')}
+                className="w-full p-4 hover:bg-white/5 transition-colors text-left flex items-center justify-between"
+              >
+                <div className="flex items-center gap-3">
+                  <AlertTriangle className="w-5 h-5 text-fuchsia-400" />
+                  <div>
+                    <h4 className="text-white text-sm font-medium">资金闭环</h4>
+                    <div className="text-2xl font-bold text-fuchsia-400">
+                      {fundCycles.length}
+                    </div>
+                    <div className="text-xs theme-text-muted">优先展示强版闭环路径</div>
+                  </div>
+                </div>
+                {expandedSections['fundCycles'] ?
+                  <ChevronUp className="w-5 h-5 theme-text-muted" /> :
+                  <ChevronDown className="w-5 h-5 theme-text-muted" />
+                }
+              </button>
+              {expandedSections['fundCycles'] && (
+                <div className="px-4 pb-4 border-t border-white/10 pt-3 max-h-56 overflow-y-auto">
+                  {fundCycleMeta.truncated && (
+                    <div className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300">
+                      本次闭环搜索存在截断:
+                      {' '}
+                      {(fundCycleMeta.truncated_reasons || ['search_truncated']).join(' / ')}
+                      {fundCycleMeta.timeout_seconds ? `，超时阈值 ${fundCycleMeta.timeout_seconds} 秒` : ''}
+                    </div>
+                  )}
+                  {fundCycles.length > 0 ? (
+                    <div className="space-y-3">
+                      {fundCycles.map((cycle, idx) => {
+                        const selectionId = `fund_cycle:${idx}`;
+                        return (
+                        <div
+                          key={idx}
+                          className={`rounded-lg p-3 transition-colors ${
+                            isActiveSelection(selectionId)
+                              ? 'bg-fuchsia-500/10 ring-1 ring-fuchsia-400/40'
+                              : 'bg-white/5'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="text-sm text-white leading-relaxed break-all">
+                              {getCyclePath(cycle)}
+                            </div>
+                            <span className={getRiskLevelBadgeStyle(cycle.risk_level || 'medium')}>
+                              {formatRiskLevel(cycle.risk_level || 'medium')}
+                            </span>
+                          </div>
+                          <div className="mt-2 flex flex-wrap items-center gap-3 text-xs theme-text-muted">
+                            <span>节点数 {cycle.length || (cycle.nodes || cycle.participants || []).length || 0}</span>
+                            <span>{formatOptionalAmount(cycle.total_amount)}</span>
+                            {cycle.risk_score !== undefined && <span>评分 {cycle.risk_score.toFixed(1)}</span>}
+                            <span>{formatConfidence(cycle.confidence)}</span>
+                          </div>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <button
+                              onClick={() => activateSelection({
+                                id: selectionId,
+                                type: 'fund_cycle',
+                                label: `资金闭环 ${idx + 1}`,
+                                path: getCyclePath(cycle),
+                                nodes: getCycleNodes(cycle),
+                                riskScore: cycle.risk_score,
+                                sectionKeys: ['fundCycles', `fundCycle:${idx}:details`],
+                              })}
+                              className="rounded border border-fuchsia-400/30 px-2 py-1 text-[11px] text-fuchsia-200 hover:bg-fuchsia-500/10"
+                            >
+                              {isActiveSelection(selectionId) ? '已联动路径' : '定位路径'}
+                            </button>
+                          </div>
+                          {formatPathSummary(cycle.path_explainability) && (
+                            <div className="mt-2 text-xs text-amber-200 leading-relaxed">
+                              {formatPathSummary(cycle.path_explainability)}
+                            </div>
+                          )}
+                          {formatInspectionPoints(cycle.path_explainability) && (
+                            <div className="mt-2 text-xs theme-text-secondary leading-relaxed">
+                              {formatInspectionPoints(cycle.path_explainability)}
+                            </div>
+                          )}
+                          {formatCycleEdgeSegments(cycle.path_explainability) && (
+                            <div className="mt-2 text-xs text-cyan-200 leading-relaxed">
+                              {formatCycleEdgeSegments(cycle.path_explainability)}
+                            </div>
+                          )}
+                          {cycle.path_explainability?.edge_segments && cycle.path_explainability.edge_segments.length > 0 && (
+                            <div className="mt-3 rounded-lg border border-fuchsia-500/20 bg-fuchsia-500/5 p-2">
+                              <button
+                                onClick={() => toggleSection(`fundCycle:${idx}:details`)}
+                                className="flex w-full items-center justify-between gap-3 text-left"
+                              >
+                                <div>
+                                  <div className="text-xs font-medium text-fuchsia-200">逐跳支撑流水</div>
+                                  <div className="mt-1 text-[11px] theme-text-muted">
+                                    共 {cycle.path_explainability.edge_segments.length} 跳，点击展开查看每一跳的原始流水样本
+                                  </div>
+                                </div>
+                                {expandedSections[`fundCycle:${idx}:details`] ? (
+                                  <ChevronUp className="h-4 w-4 theme-text-muted" />
+                                ) : (
+                                  <ChevronDown className="h-4 w-4 theme-text-muted" />
+                                )}
+                              </button>
+                              {expandedSections[`fundCycle:${idx}:details`] && (
+                                <div className="mt-3 space-y-2">
+                                  {cycle.path_explainability.edge_segments.map((segment, segmentIdx) => {
+                                    const segmentKey = `fundCycle:${idx}:hop:${segment.index || segmentIdx + 1}`;
+                                    const refs = segment.transaction_refs || [];
+                                    const totalRefs = getSegmentTransactionTotal(segment);
+                                    return (
+                                      <div
+                                        key={segmentKey}
+                                        className="rounded-lg border border-white/10 bg-black/10 p-2"
+                                      >
+                                        <button
+                                          onClick={() => toggleSection(segmentKey)}
+                                          className="flex w-full items-center justify-between gap-3 text-left"
+                                        >
+                                          <div>
+                                            <div className="text-xs text-white">
+                                              第{segment.index || segmentIdx + 1}跳 {segment.from || '未知'} → {segment.to || '未知'}
+                                            </div>
+                                            <div className="mt-1 text-[11px] theme-text-muted">
+                                              {formatOptionalAmount(segment.amount)} · 支撑流水 {totalRefs} 笔
+                                              {refs.length > 0 ? ` · 当前返回 ${getSegmentReturnedCount(segment)} 条` : ''}
+                                            </div>
+                                          </div>
+                                          {expandedSections[segmentKey] ? (
+                                            <ChevronUp className="h-4 w-4 theme-text-muted" />
+                                          ) : (
+                                            <ChevronDown className="h-4 w-4 theme-text-muted" />
+                                          )}
+                                        </button>
+                                        {expandedSections[segmentKey] && (
+                                          <div className="mt-2 space-y-2">
+                                            {refs.length > 0 ? (
+                                              refs.map((ref, refIdx) => (
+                                                <div
+                                                  key={`${segmentKey}:ref:${refIdx}`}
+                                                  className="rounded-md bg-white/5 p-2 text-[11px] leading-relaxed"
+                                                >
+                                                  <div className="text-cyan-100">
+                                                    {ref.date || '未知时间'} · {formatOptionalAmount(Number(ref.amount || 0))}
+                                                  </div>
+                                                  <div className="mt-1 theme-text-secondary">
+                                                    {(ref.source_file || '未知文件')}
+                                                    {ref.source_row_index !== undefined && ref.source_row_index !== null
+                                                      ? ` 第${ref.source_row_index}行`
+                                                      : ''}
+                                                  </div>
+                                                  {ref.description && (
+                                                    <div className="mt-1 theme-text-muted break-all">
+                                                      摘要: {ref.description}
+                                                    </div>
+                                                  )}
+                                                </div>
+                                              ))
+                                            ) : (
+                                              <div className="text-[11px] theme-text-dim">
+                                                当前未返回可展示的原始流水样本
+                                              </div>
+                                            )}
+                                            {totalRefs > refs.length && (
+                                              <div className="text-[11px] text-amber-200">
+                                                当前仅回传前 {getSegmentReturnedCount(segment)} 条，实际共 {totalRefs} 条支撑流水。
+                                              </div>
+                                            )}
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          {formatEvidence(cycle.evidence) && (
+                            <div className="mt-2 text-xs theme-text-secondary leading-relaxed">
+                              {formatEvidence(cycle.evidence)}
+                            </div>
+                          )}
+                        </div>
+                      )})}
+                    </div>
+                  ) : (
+                    <div className="text-sm theme-text-dim">未发现闭环路径</div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 第三方中转 - 可折叠 */}
+          {graphData && (
+            <div className="stat-card bg-white/10 rounded-lg overflow-hidden border-l-4 border-amber-500">
+              <button
+                onClick={() => toggleSection('thirdPartyRelays')}
+                className="w-full p-4 hover:bg-white/5 transition-colors text-left flex items-center justify-between"
+              >
+                <div className="flex items-center gap-3">
+                  <Landmark className="w-5 h-5 text-amber-400" />
+                  <div>
+                    <h4 className="text-white text-sm font-medium">第三方中转</h4>
+                    <div className="text-2xl font-bold text-amber-400">
+                      {thirdPartyRelays.length}
+                    </div>
+                    <div className="text-xs theme-text-muted">多跳中转链 explainability</div>
+                  </div>
+                </div>
+                {expandedSections['thirdPartyRelays'] ?
+                  <ChevronUp className="w-5 h-5 theme-text-muted" /> :
+                  <ChevronDown className="w-5 h-5 theme-text-muted" />
+                }
+              </button>
+              {expandedSections['thirdPartyRelays'] && (
+                <div className="px-4 pb-4 border-t border-white/10 pt-3 max-h-72 overflow-y-auto">
+                  {thirdPartyRelays.length > 0 ? (
+                    <div className="space-y-3">
+                      {thirdPartyRelays.map((relay, idx) => {
+                        const selectionId = `third_party_relay:${idx}`;
+                        return (
+                        <div
+                          key={`${relay.from}-${relay.relay}-${relay.to}-${idx}`}
+                          className={`rounded-lg p-3 transition-colors ${
+                            isActiveSelection(selectionId)
+                              ? 'bg-amber-500/10 ring-1 ring-amber-400/40'
+                              : 'bg-white/5'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="text-sm text-white leading-relaxed break-all">
+                              {relay.path_explainability?.path || `${relay.from} → ${relay.relay} → ${relay.to}`}
+                            </div>
+                            <span className={getRiskLevelBadgeStyle(relay.risk_level || 'medium')}>
+                              {formatRiskLevel(relay.risk_level || 'medium')}
+                            </span>
+                          </div>
+                          <div className="mt-2 flex flex-wrap items-center gap-3 text-xs theme-text-muted">
+                            <span>{formatOptionalAmount(relay.outflow_amount)}</span>
+                            {relay.risk_score !== undefined && <span>评分 {relay.risk_score.toFixed(1)}</span>}
+                            {relay.time_diff_hours !== undefined && <span>时差 {relay.time_diff_hours.toFixed(1)} 小时</span>}
+                            <span>{formatConfidence(relay.confidence)}</span>
+                          </div>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <button
+                              onClick={() => activateSelection({
+                                id: selectionId,
+                                type: 'third_party_relay',
+                                label: `第三方中转 ${idx + 1}`,
+                                path: relay.path_explainability?.path || `${relay.from} → ${relay.relay} → ${relay.to}`,
+                                nodes: getRelayNodes(relay),
+                                riskScore: relay.risk_score,
+                                sectionKeys: ['thirdPartyRelays', `relay:${idx}:details`],
+                              })}
+                              className="rounded border border-amber-400/30 px-2 py-1 text-[11px] text-amber-200 hover:bg-amber-500/10"
+                            >
+                              {isActiveSelection(selectionId) ? '已联动路径' : '定位路径'}
+                            </button>
+                          </div>
+                          {formatPathSummary(relay.path_explainability) && (
+                            <div className="mt-2 text-xs text-amber-200 leading-relaxed">
+                              {formatPathSummary(relay.path_explainability)}
+                            </div>
+                          )}
+                          {formatInspectionPoints(relay.path_explainability) && (
+                            <div className="mt-2 text-xs theme-text-secondary leading-relaxed">
+                              {formatInspectionPoints(relay.path_explainability)}
+                            </div>
+                          )}
+                          {formatRelayTimeAxis(relay.path_explainability) && (
+                            <div className="mt-2 text-xs text-cyan-200 leading-relaxed">
+                              {formatRelayTimeAxis(relay.path_explainability)}
+                            </div>
+                          )}
+                          {relay.path_explainability?.time_axis && relay.path_explainability.time_axis.length > 0 && (
+                            <div className="mt-3 rounded-lg border border-amber-500/20 bg-amber-500/5 p-2">
+                              <button
+                                onClick={() => toggleSection(`relay:${idx}:details`)}
+                                className="flex w-full items-center justify-between gap-3 text-left"
+                              >
+                                <div>
+                                  <div className="text-xs font-medium text-amber-200">时序明细</div>
+                                  <div className="mt-1 text-[11px] theme-text-muted">
+                                    当前返回 {relay.path_explainability.time_axis.length} 步，
+                                    实际共 {getTimeAxisTotal(relay.path_explainability)} 步
+                                  </div>
+                                </div>
+                                {expandedSections[`relay:${idx}:details`] ? (
+                                  <ChevronUp className="h-4 w-4 theme-text-muted" />
+                                ) : (
+                                  <ChevronDown className="h-4 w-4 theme-text-muted" />
+                                )}
+                              </button>
+                              {expandedSections[`relay:${idx}:details`] && (
+                                <div className="mt-3 space-y-2">
+                                  {relay.path_explainability.time_axis.map((event, eventIdx) => (
+                                    <div
+                                      key={`relay:${idx}:event:${eventIdx}`}
+                                      className="rounded-lg border border-white/10 bg-black/10 p-2 text-[11px] leading-relaxed"
+                                    >
+                                      <div className="text-amber-100">
+                                        第{event.step || eventIdx + 1}步 {event.time || '未知时间'}
+                                      </div>
+                                      <div className="mt-1 text-white">
+                                        {event.label || '未知事件'} · {formatOptionalAmount(Number(event.amount || 0))}
+                                      </div>
+                                      <div className="mt-1 theme-text-secondary">
+                                        {(event.source_file || '未知文件')}
+                                        {event.source_row_index !== undefined && event.source_row_index !== null
+                                          ? ` 第${event.source_row_index}行`
+                                          : ''}
+                                      </div>
+                                    </div>
+                                  ))}
+                                  {getTimeAxisTotal(relay.path_explainability) > relay.path_explainability.time_axis.length && (
+                                    <div className="text-[11px] text-amber-200">
+                                      当前仅回传前 {relay.path_explainability.time_axis.length} 步样本，
+                                      实际共 {getTimeAxisTotal(relay.path_explainability)} 步。
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          {formatEvidence(relay.evidence) && (
+                            <div className="mt-2 text-xs theme-text-secondary leading-relaxed">
+                              {formatEvidence(relay.evidence)}
+                            </div>
+                          )}
+                        </div>
+                      )})}
+                    </div>
+                  ) : (
+                    <div className="text-sm theme-text-dim">当前未识别出稳定的第三方中转链</div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 外围节点 - 可折叠 */}
+          {graphData && (
+            <div className="stat-card bg-white/10 rounded-lg overflow-hidden border-l-4 border-emerald-500">
+              <button
+                onClick={() => toggleSection('discoveredNodes')}
+                className="w-full p-4 hover:bg-white/5 transition-colors text-left flex items-center justify-between"
+              >
+                <div className="flex items-center gap-3">
+                  <Users className="w-5 h-5 text-emerald-400" />
+                  <div>
+                    <h4 className="text-white text-sm font-medium">外围节点</h4>
+                    <div className="text-2xl font-bold text-emerald-400">
+                      {discoveredNodes.length}
+                    </div>
+                    <div className="text-xs theme-text-muted">从中转与闭环中扩展发现</div>
+                  </div>
+                </div>
+                {expandedSections['discoveredNodes'] ?
+                  <ChevronUp className="w-5 h-5 theme-text-muted" /> :
+                  <ChevronDown className="w-5 h-5 theme-text-muted" />
+                }
+              </button>
+              {expandedSections['discoveredNodes'] && (
+                <div className="px-4 pb-4 border-t border-white/10 pt-3 max-h-64 overflow-y-auto">
+                  {discoveredNodes.length > 0 ? (
+                    <div className="space-y-2">
+                      {discoveredNodes.map((node, idx) => (
+                        <div key={`${node.name}-${idx}`} className="rounded-lg bg-white/5 p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <div className="text-sm text-white font-medium">{formatPartyName(node.name)}</div>
+                              <div className="mt-1 text-xs theme-text-muted">
+                                关联核心对象: {(node.linked_cores || []).join('、') || '未标注'}
+                              </div>
+                            </div>
+                            <span className={getRiskLevelBadgeStyle(node.risk_level || 'medium')}>
+                              {formatRiskLevel(node.risk_level || 'medium')}
+                            </span>
+                          </div>
+                          <div className="mt-2 flex flex-wrap items-center gap-3 text-xs theme-text-secondary">
+                            <span>{formatRelationTypes(node.relation_types)}</span>
+                            <span>出现 {node.occurrences || 0} 次</span>
+                            <span>{formatOptionalAmount(node.total_amount)}</span>
+                            {node.risk_score !== undefined && <span>评分 {node.risk_score.toFixed(1)}</span>}
+                            <span>{formatConfidence(node.confidence)}</span>
+                          </div>
+                          {formatPathSummary(node.path_explainability) && (
+                            <div className="mt-2 text-xs text-amber-200 leading-relaxed">
+                              {formatPathSummary(node.path_explainability)}
+                            </div>
+                          )}
+                          {formatInspectionPoints(node.path_explainability) && (
+                            <div className="mt-2 text-xs theme-text-secondary leading-relaxed">
+                              {formatInspectionPoints(node.path_explainability)}
+                            </div>
+                          )}
+                          {formatEvidence(node.evidence) && (
+                            <div className="mt-2 text-xs theme-text-secondary leading-relaxed">
+                              {formatEvidence(node.evidence)}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-sm theme-text-dim">当前图谱未扩展出新的外围节点</div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 关系簇 - 可折叠 */}
+          {graphData && (
+            <div className="stat-card bg-white/10 rounded-lg overflow-hidden border-l-4 border-cyan-500">
+              <button
+                onClick={() => toggleSection('relationshipClusters')}
+                className="w-full p-4 hover:bg-white/5 transition-colors text-left flex items-center justify-between"
+              >
+                <div className="flex items-center gap-3">
+                  <Building2 className="w-5 h-5 text-cyan-400" />
+                  <div>
+                    <h4 className="text-white text-sm font-medium">关系簇</h4>
+                    <div className="text-2xl font-bold text-cyan-400">
+                      {relationshipClusters.length}
+                    </div>
+                    <div className="text-xs theme-text-muted">核心对象与外围节点的联通组件</div>
+                  </div>
+                </div>
+                {expandedSections['relationshipClusters'] ?
+                  <ChevronUp className="w-5 h-5 theme-text-muted" /> :
+                  <ChevronDown className="w-5 h-5 theme-text-muted" />
+                }
+              </button>
+              {expandedSections['relationshipClusters'] && (
+                <div className="px-4 pb-4 border-t border-white/10 pt-3 max-h-72 overflow-y-auto">
+                  {relationshipClusters.length > 0 ? (
+                    <div className="space-y-3">
+                      {relationshipClusters.map((cluster, idx) => {
+                        const clusterSelectionId = `relationship_cluster:${idx}`;
+                        const clusterHasActivePath = Boolean(
+                          activeSelection?.id === clusterSelectionId ||
+                          activeSelection?.id.startsWith(`cluster_representative_path:${idx}:`)
+                        );
+                        return (
+                        <div
+                          key={cluster.cluster_id || idx}
+                          className={`rounded-lg p-3 transition-colors ${
+                            clusterHasActivePath
+                              ? 'bg-sky-500/10 ring-1 ring-sky-400/40'
+                              : 'bg-white/5'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <div className="text-sm text-white font-medium">
+                                {(cluster.cluster_id || `cluster_${idx + 1}`).replace('_', ' ').toUpperCase()}
+                              </div>
+                              <div className="mt-1 text-xs theme-text-muted">
+                                核心成员: {(cluster.core_members || []).join('、') || '未标注'}
+                              </div>
+                              <div className="mt-1 text-xs theme-text-muted">
+                                外围成员: {(cluster.external_members || []).join('、') || '无'}
+                              </div>
+                            </div>
+                            <span className={getRiskLevelBadgeStyle(cluster.risk_level || 'medium')}>
+                              {formatRiskLevel(cluster.risk_level || 'medium')}
+                            </span>
+                          </div>
+                          <div className="mt-2 flex flex-wrap items-center gap-3 text-xs theme-text-secondary">
+                            <span>{formatRelationTypes(cluster.relation_types)}</span>
+                            <span>直接 {cluster.direct_flow_count || 0}</span>
+                            <span>中转 {cluster.relay_count || 0}</span>
+                            <span>闭环 {cluster.loop_count || 0}</span>
+                            <span>{formatOptionalAmount(cluster.total_amount)}</span>
+                            {cluster.risk_score !== undefined && <span>评分 {cluster.risk_score.toFixed(1)}</span>}
+                            <span>{formatConfidence(cluster.confidence)}</span>
+                          </div>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <button
+                              onClick={() => activateSelection({
+                                id: clusterSelectionId,
+                                type: 'relationship_cluster',
+                                label: `关系簇 ${cluster.cluster_id || idx + 1}`,
+                                path: cluster.cluster_id,
+                                nodes: getClusterNodes(cluster),
+                                riskScore: cluster.risk_score,
+                                sectionKeys: ['relationshipClusters'],
+                              })}
+                              className="rounded border border-cyan-400/30 px-2 py-1 text-[11px] text-cyan-200 hover:bg-cyan-500/10"
+                            >
+                              {isActiveSelection(clusterSelectionId) ? '已联动关系簇' : '定位关系簇'}
+                            </button>
+                          </div>
+                          {formatPathSummary(cluster.path_explainability) && (
+                            <div className="mt-2 text-xs text-amber-200 leading-relaxed">
+                              {formatPathSummary(cluster.path_explainability)}
+                            </div>
+                          )}
+                          {formatInspectionPoints(cluster.path_explainability) && (
+                            <div className="mt-2 text-xs theme-text-secondary leading-relaxed">
+                              {formatInspectionPoints(cluster.path_explainability)}
+                            </div>
+                          )}
+                          {cluster.path_explainability?.representative_paths && cluster.path_explainability.representative_paths.length > 0 && (
+                            <div className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/5 p-2">
+                              <button
+                                onClick={() => toggleSection(`cluster:${idx}:paths`)}
+                                className="flex w-full items-center justify-between gap-3 text-left"
+                              >
+                                <div>
+                                  <div className="text-xs font-medium text-sky-200">代表路径</div>
+                                  <div className="mt-1 text-[11px] theme-text-muted">
+                                    已提炼 {cluster.path_explainability.representative_paths.length} 条优先核查链路
+                                  </div>
+                                </div>
+                                {expandedSections[`cluster:${idx}:paths`] ? (
+                                  <ChevronUp className="h-4 w-4 theme-text-muted" />
+                                ) : (
+                                  <ChevronDown className="h-4 w-4 theme-text-muted" />
+                                )}
+                              </button>
+                              {expandedSections[`cluster:${idx}:paths`] && (
+                                <div className="mt-3 space-y-2">
+                                  {cluster.path_explainability.representative_paths.map((representativePath, pathIdx) => {
+                                    const payload = getRepresentativePathPayload(representativePath);
+                                    const pathNodes = getRepresentativePathNodes(representativePath);
+                                    const cyclePayload = payload as CyclePathExplainability | undefined;
+                                    const relayPayload = payload as RelayPathExplainability | undefined;
+                                    const directPayload = payload as DirectFlowPathExplainability | undefined;
+                                    const pathKey = `cluster:${idx}:path:${pathIdx}`;
+                                    const selectionId = `cluster_representative_path:${idx}:${pathIdx}`;
+
+                                    return (
+                                      <div
+                                        key={`${cluster.cluster_id || idx}:rep:${pathIdx}`}
+                                        className={`rounded-lg border p-2 transition-colors ${
+                                          isActiveSelection(selectionId)
+                                            ? 'border-sky-400/40 bg-sky-500/10'
+                                            : 'border-white/10 bg-black/10'
+                                        }`}
+                                      >
+                                        <div className="flex items-start justify-between gap-3">
+                                          <div>
+                                            <div className="text-xs text-white">
+                                              [{relationTypeLabels[representativePath.path_type || ''] || representativePath.path_type || '代表路径'}]
+                                              {' '}
+                                              {representativePath.path || payload?.path || '未知路径'}
+                                            </div>
+                                            <div className="mt-1 flex flex-wrap items-center gap-3 text-[11px] theme-text-muted">
+                                              {representativePath.amount !== undefined && representativePath.amount > 0 && (
+                                                <span>{formatOptionalAmount(representativePath.amount)}</span>
+                                              )}
+                                              {representativePath.risk_score !== undefined && (
+                                                <span>评分 {representativePath.risk_score.toFixed(1)}</span>
+                                              )}
+                                              {representativePath.priority_score !== undefined && (
+                                                <span>优先级 {representativePath.priority_score.toFixed(1)}</span>
+                                              )}
+                                              {representativePath.confidence !== undefined && (
+                                                <span>{formatConfidence(representativePath.confidence)}</span>
+                                              )}
+                                            </div>
+                                          </div>
+                                          <div className="flex items-center gap-2">
+                                            <button
+                                              onClick={() => activateSelection({
+                                                id: selectionId,
+                                                type: 'cluster_representative_path',
+                                                label: `关系簇代表路径 ${idx + 1}-${pathIdx + 1}`,
+                                                path: representativePath.path || payload?.path,
+                                                nodes: pathNodes,
+                                                riskScore: representativePath.risk_score,
+                                                sectionKeys: ['relationshipClusters', `cluster:${idx}:paths`, `cluster:${idx}:path:${pathIdx}`],
+                                              })}
+                                              className="rounded border border-cyan-400/30 px-2 py-1 text-[11px] text-cyan-200 hover:bg-cyan-500/10"
+                                            >
+                                              {isActiveSelection(selectionId) ? '已联动路径' : '定位路径'}
+                                            </button>
+                                            <button
+                                              onClick={() => toggleSection(pathKey)}
+                                              className="rounded border border-white/10 px-2 py-1 text-[11px] theme-text-secondary hover:bg-white/5"
+                                            >
+                                              {expandedSections[pathKey] ? '收起细节' : '展开细节'}
+                                            </button>
+                                          </div>
+                                        </div>
+                                        {formatPathSummary(payload) && (
+                                          <div className="mt-2 text-[11px] text-amber-200 leading-relaxed">
+                                            {formatPathSummary(payload)}
+                                          </div>
+                                        )}
+                                        {formatInspectionPoints(payload, 1) && (
+                                          <div className="mt-2 text-[11px] theme-text-secondary leading-relaxed">
+                                            {formatInspectionPoints(payload, 1)}
+                                          </div>
+                                        )}
+                                        {representativePath.priority_reason && (
+                                          <div className="mt-2 text-[11px] theme-text-muted leading-relaxed">
+                                            排序依据: {representativePath.priority_reason}
+                                          </div>
+                                        )}
+                                        {payload?.evidence_template?.supporting_refs?.notice && (
+                                          <div className="mt-2 text-[11px] text-cyan-200 leading-relaxed">
+                                            {payload.evidence_template.supporting_refs.notice}
+                                          </div>
+                                        )}
+                                        {expandedSections[pathKey] && (
+                                          <div className="mt-3 space-y-2">
+                                            {cyclePayload?.edge_segments && cyclePayload.edge_segments.length > 0 && (
+                                              <div className="rounded-md border border-fuchsia-500/20 bg-fuchsia-500/5 p-2">
+                                                <div className="text-[11px] text-fuchsia-200">
+                                                  {formatCycleEdgeSegments(cyclePayload)}
+                                                </div>
+                                                <div className="mt-2 space-y-2">
+                                                  {cyclePayload.edge_segments.map((segment, segmentIdx) => {
+                                                    const segmentRefs = segment.transaction_refs || [];
+                                                    const totalRefs = getSegmentTransactionTotal(segment);
+                                                    return (
+                                                      <div
+                                                        key={`${pathKey}:segment:${segmentIdx}`}
+                                                        className="rounded-md bg-white/5 p-2 text-[11px] leading-relaxed"
+                                                      >
+                                                        <div className="text-white">
+                                                          第{segment.index || segmentIdx + 1}跳 {segment.from || '未知'} → {segment.to || '未知'}
+                                                          {' '}
+                                                          · {formatOptionalAmount(segment.amount)}
+                                                        </div>
+                                                        {segmentRefs.map((ref, refIdx) => (
+                                                          <div
+                                                            key={`${pathKey}:segment:${segmentIdx}:ref:${refIdx}`}
+                                                            className="mt-1 theme-text-secondary"
+                                                          >
+                                                            {ref.date || '未知时间'} · {formatOptionalAmount(Number(ref.amount || 0))}
+                                                            {' '}
+                                                            {(ref.source_file || '未知文件')}
+                                                            {ref.source_row_index !== undefined && ref.source_row_index !== null
+                                                              ? ` 第${ref.source_row_index}行`
+                                                              : ''}
+                                                          </div>
+                                                        ))}
+                                                        {totalRefs > segmentRefs.length && (
+                                                          <div className="mt-1 text-amber-200">
+                                                            当前仅回传前 {segmentRefs.length} 条样本，实际共 {totalRefs} 条。
+                                                          </div>
+                                                        )}
+                                                      </div>
+                                                    );
+                                                  })}
+                                                </div>
+                                              </div>
+                                            )}
+                                            {relayPayload?.time_axis && relayPayload.time_axis.length > 0 && (
+                                              <div className="rounded-md border border-amber-500/20 bg-amber-500/5 p-2">
+                                                <div className="text-[11px] text-amber-200">
+                                                  {formatRelayTimeAxis(relayPayload)}
+                                                </div>
+                                                <div className="mt-2 space-y-2">
+                                                  {relayPayload.time_axis.map((event, eventIdx) => (
+                                                    <div
+                                                      key={`${pathKey}:event:${eventIdx}`}
+                                                      className="rounded-md bg-white/5 p-2 text-[11px] leading-relaxed"
+                                                    >
+                                                      <div className="text-white">
+                                                        第{event.step || eventIdx + 1}步 {event.time || '未知时间'}
+                                                      </div>
+                                                      <div className="mt-1 theme-text-secondary">
+                                                        {event.label || '未知事件'} · {formatOptionalAmount(Number(event.amount || 0))}
+                                                      </div>
+                                                      <div className="mt-1 theme-text-muted">
+                                                        {(event.source_file || '未知文件')}
+                                                        {event.source_row_index !== undefined && event.source_row_index !== null
+                                                          ? ` 第${event.source_row_index}行`
+                                                          : ''}
+                                                      </div>
+                                                    </div>
+                                                  ))}
+                                                </div>
+                                              </div>
+                                            )}
+                                            {directPayload?.transaction_refs && directPayload.transaction_refs.length > 0 && (
+                                              <div className="rounded-md border border-emerald-500/20 bg-emerald-500/5 p-2">
+                                                <div className="text-[11px] text-emerald-200">
+                                                  直接往来样本
+                                                </div>
+                                                <div className="mt-2 space-y-2">
+                                                  {directPayload.transaction_refs.map((ref, refIdx) => (
+                                                    <div
+                                                      key={`${pathKey}:direct:${refIdx}`}
+                                                      className="rounded-md bg-white/5 p-2 text-[11px] leading-relaxed"
+                                                    >
+                                                      <div className="text-white">
+                                                        {ref.date || '未知时间'} · {formatOptionalAmount(Number(ref.amount || 0))}
+                                                      </div>
+                                                      <div className="mt-1 theme-text-secondary">
+                                                        {(ref.source_file || '未知文件')}
+                                                        {ref.source_row_index !== undefined && ref.source_row_index !== null
+                                                          ? ` 第${ref.source_row_index}行`
+                                                          : ''}
+                                                      </div>
+                                                      {ref.description && (
+                                                        <div className="mt-1 theme-text-muted break-all">
+                                                          摘要: {ref.description}
+                                                        </div>
+                                                      )}
+                                                    </div>
+                                                  ))}
+                                                  {getDirectFlowRefTotal(directPayload) > directPayload.transaction_refs.length && (
+                                                    <div className="text-[11px] text-amber-200">
+                                                      当前仅回传前 {directPayload.transaction_refs.length} 条样本，
+                                                      实际共 {getDirectFlowRefTotal(directPayload)} 条。
+                                                    </div>
+                                                  )}
+                                                </div>
+                                              </div>
+                                            )}
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          {formatEvidence(cluster.evidence) && (
+                            <div className="mt-2 text-xs theme-text-secondary leading-relaxed">
+                              {formatEvidence(cluster.evidence)}
+                            </div>
+                          )}
+                        </div>
+                      )})}
+                    </div>
+                  ) : (
+                    <div className="text-sm theme-text-dim">当前未形成可展示的关系簇</div>
+                  )}
                 </div>
               )}
             </div>
@@ -1075,6 +2572,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                 <div>• 拖拽节点可调整位置</div>
                 <div>• 滚轮缩放视图</div>
                 <div>• 悬停查看交易详情</div>
+                <div>• 点击图中节点/边会自动联动到右侧最相关路径</div>
                 <div>• 导航按钮在右下角</div>
               </div>
             </div>
@@ -1109,6 +2607,11 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
             )}
           </div>
           <div className="flex items-center gap-4">
+            {activeSelection && (
+              <div className="max-w-[520px] rounded-lg border border-cyan-400/20 bg-cyan-500/10 px-3 py-1.5 text-xs text-cyan-200">
+                联动路径: {activeSelection.path || activeSelection.label}
+              </div>
+            )}
             {selectedNode && (
               <div className="text-sm text-cyan-400">
                 选中: {selectedNode.label} ({selectedNode.group})

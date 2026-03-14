@@ -276,6 +276,30 @@ class TestStandardizeBankFields:
         assert result.iloc[0]['account_type'] == '对公结算账户'
         assert bool(result.iloc[0]['is_real_bank_card']) is True
 
+    def test_standardize_parses_wan_unit_values(self):
+        """金额字段中的万/万元应统一换算为元"""
+        df = pd.DataFrame({
+            '交易时间': ['2024-01-01'],
+            '交易金额': ['100万'],
+            '借贷标志': ['贷'],
+            '交易余额': ['1.5万']
+        })
+        result = standardize_bank_fields(df)
+        assert result.iloc[0]['income'] == 1000000.0
+        assert result.iloc[0]['balance'] == 15000.0
+
+    def test_standardize_supports_unit_in_column_name_and_invalid_date(self):
+        """列头带万元且日期异常时不应崩溃"""
+        df = pd.DataFrame({
+            '交易时间': [45292, '坏日期'],
+            '收入(万元)': ['1.2', '0'],
+            '摘要': ['工资', '奖金']
+        })
+        result = standardize_bank_fields(df)
+        assert result.iloc[0]['income'] == 12000.0
+        assert pd.notna(result.iloc[0]['date'])
+        assert pd.isna(result.iloc[1]['date'])
+
 
 class TestGenerateCleaningReport:
     """测试清洗报告生成函数"""
@@ -338,7 +362,22 @@ class TestCleanAndMergeFiles:
         """测试空文件列表"""
         result, stats = clean_and_merge_files([], '张伟')
         assert result.empty
-        assert stats == {}
+
+    def test_clean_merge_supports_csv(self):
+        """测试 CSV 文件也可进入标准清洗流程"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = os.path.join(tmpdir, '工商银行.csv')
+            pd.DataFrame({
+                '交易时间': ['2024-01-01'],
+                '交易金额': ['100万'],
+                '借贷标志': ['贷']
+            }).to_csv(csv_path, index=False, encoding='utf-8-sig')
+
+            result, stats = clean_and_merge_files([csv_path], '张伟')
+
+            assert len(result) == 1
+            assert result.iloc[0]['income'] == 1000000.0
+            assert stats['final_rows'] == 1
     
     def test_clean_merge_with_valid_files(self, tmp_path):
         """测试有效文件处理"""

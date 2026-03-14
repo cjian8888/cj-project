@@ -10,6 +10,7 @@ from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime
 
+import utils
 
 @dataclass
 class AnalysisThresholds:
@@ -101,7 +102,7 @@ class PersonalFundFeatureAnalyzer:
 
         if "amount" not in tx.columns:
             tx["amount"] = 0
-        tx["amount"] = pd.to_numeric(tx["amount"], errors="coerce").fillna(0.0)
+        tx["amount"] = utils.normalize_amount_series(tx["amount"], "amount")
 
         if "counterparty" not in tx.columns:
             tx["counterparty"] = ""

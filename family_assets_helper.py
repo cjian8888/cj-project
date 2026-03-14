@@ -193,10 +193,10 @@ def _parse_property_price(price_str) -> float:
         return 0.0
 
     try:
-        if "万" in str(price_str):
-            return float(str(price_str).replace("万", "").replace(",", ""))
-        else:
-            return float(str(price_str).replace(",", "")) / 10000
+        text = str(price_str)
+        if "万" in text:
+            return utils.format_amount_to_wan(text)
+        return utils.format_amount_to_wan(text, unit_hint_multiplier=1.0)
     except (ValueError, TypeError):
         return 0.0
 

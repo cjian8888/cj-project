@@ -37,6 +37,33 @@ import utils
 logger = utils.setup_logger(__name__)
 
 
+def _normalize_required_amount(value: Any) -> float:
+    """归一化必填金额字段，无法解析时回退为0。"""
+    return utils.format_amount(value)
+
+
+def _normalize_optional_amount(value: Any) -> Optional[float]:
+    """归一化可选金额字段，空值和脏值保留为None。"""
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "null", "-", "--"}:
+        return None
+    if not any(ch.isdigit() for ch in text):
+        return None
+    return utils.format_amount(value)
+
+
+def _normalize_transaction_date(value: Any) -> str:
+    """统一交易日期文本，兼容 Excel 序列值和脏日期。"""
+    parsed = utils.parse_date(value)
+    if parsed is None:
+        return str(value or "").strip()
+    if parsed.hour or parsed.minute or parsed.second:
+        return parsed.strftime("%Y-%m-%d %H:%M:%S")
+    return parsed.strftime("%Y-%m-%d")
+
+
 class DatabaseManager:
     """
     数据库管理器
@@ -350,10 +377,10 @@ class DatabaseManager:
         for _, row in df.iterrows():
             record = {
                 'entity_id': entity_id,
-                'date': str(row.get('date', '')),
-                'income': float(row.get('income', 0)),
-                'expense': float(row.get('expense', 0)),
-                'balance': float(row.get('balance', 0)) if pd.notna(row.get('balance')) else None,
+                'date': _normalize_transaction_date(row.get('date', '')),
+                'income': _normalize_required_amount(row.get('income', 0)),
+                'expense': _normalize_required_amount(row.get('expense', 0)),
+                'balance': _normalize_optional_amount(row.get('balance')),
                 'counterparty': str(row.get('counterparty', '')),
                 'description': str(row.get('description', '')),
                 'account': str(row.get('account', '')),
@@ -1006,10 +1033,10 @@ def save_to_database(cleaned_data: Dict[str, pd.DataFrame],
                     for _, row_data in df.iterrows():
                         record = (
                             entity_id,
-                            str(row_data.get('date', '')),
-                            float(row_data.get('income', 0)),
-                            float(row_data.get('expense', 0)),
-                            float(row_data.get('balance', 0)) if pd.notna(row_data.get('balance')) else None,
+                            _normalize_transaction_date(row_data.get('date', '')),
+                            _normalize_required_amount(row_data.get('income', 0)),
+                            _normalize_required_amount(row_data.get('expense', 0)),
+                            _normalize_optional_amount(row_data.get('balance')),
                             str(row_data.get('counterparty', '')),
                             str(row_data.get('description', '')),
                             str(row_data.get('account', '')),

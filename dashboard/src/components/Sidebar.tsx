@@ -31,6 +31,7 @@ export function Sidebar() {
         analysis,
         ui,
         updateDataSources,
+        syncDataSources,
         updateThresholds,
         updateAnalysisModules,
         startAnalysis,
@@ -63,8 +64,10 @@ export function Sidebar() {
             if (result.success && result.path) {
                 if (type === 'input') {
                     updateDataSources({ inputDirectory: result.path });
+                    await syncDataSources({ inputDirectory: result.path });
                 } else {
                     updateDataSources({ outputDirectory: result.path });
+                    await syncDataSources({ outputDirectory: result.path });
                 }
             } else if (result.error) {
                 console.log('选择目录:', result.error);
@@ -237,6 +240,7 @@ export function Sidebar() {
                                         type="text"
                                         value={config.dataSources.inputDirectory}
                                         onChange={(e) => updateDataSources({ inputDirectory: e.target.value })}
+                                        onBlur={() => { void syncDataSources({ inputDirectory: config.dataSources.inputDirectory }); }}
                                         className="flex-1 min-w-0 bg-transparent text-sm px-3 py-2.5 theme-text placeholder:theme-text-dim outline-none"
                                         placeholder="选择数据文件夹"
                                     />
@@ -258,6 +262,7 @@ export function Sidebar() {
                                         type="text"
                                         value={config.dataSources.outputDirectory}
                                         onChange={(e) => updateDataSources({ outputDirectory: e.target.value })}
+                                        onBlur={() => { void syncDataSources({ outputDirectory: config.dataSources.outputDirectory }); }}
                                         className="flex-1 min-w-0 bg-transparent text-sm px-3 py-2.5 theme-text placeholder:theme-text-dim outline-none"
                                         placeholder="选择输出文件夹"
                                     />

@@ -69,11 +69,25 @@ const defaultData: DataState = {
         loan: { summary: { 双向往来关系数: 0, 网贷平台交易数: 0, 规律还款模式数: 0 }, details: [] },
         income: { summary: { 规律性非工资收入: 0, 个人大额转入: 0, 来源不明收入: 0 }, details: [] },
         ml: { summary: { anomalyCount: 0, highRiskCount: 0 }, predictions: [] },
-        penetration: { summary: { 资金穿透链数: 0, 中间节点数: 0 }, chains: [] },
-        relatedParty: { summary: { 直接往来笔数: 0, 第三方中转链数: 0, 资金闭环数: 0 }, details: [] },
+        penetration: { summary: { 资金穿透链数: 0, 中间节点数: 0 }, chains: [], fund_cycles: [], analysis_metadata: {} },
+        relatedParty: {
+            summary: { 直接往来笔数: 0, 第三方中转链数: 0, 资金闭环数: 0, 外围节点数: 0, 关系簇数: 0 },
+            details: [],
+            direct_flows: [],
+            third_party_relays: [],
+            fund_loops: [],
+            discovered_nodes: [],
+            relationship_clusters: [],
+            analysis_metadata: {},
+        },
         correlation: { summary: { 资金碰撞总数: 0 }, correlations: [] },
         timeSeries: { summary: { 异常时间点数: 0 }, anomalies: [] },
-        aggregation: { rankedEntities: [], summary: { 极高风险实体数: 0, 高风险实体数: 0 } },
+        aggregation: {
+            rankedEntities: [],
+            summary: { 极高风险实体数: 0, 高风险实体数: 0 },
+            evidencePacks: {},
+            analysisMetadata: {},
+        },
     },
     categorizedFiles: {
         persons: {},
@@ -101,6 +115,7 @@ interface AppContextType extends AppState {
     // Config actions
     updateConfig: (config: Partial<AppConfig>) => void;
     updateDataSources: (dataSources: Partial<AppConfig['dataSources']>) => void;
+    syncDataSources: (dataSources?: Partial<AppConfig['dataSources']>) => Promise<void>;
     updateThresholds: (thresholds: Partial<AppConfig['thresholds']>) => void;
     updateAnalysisModules: (modules: Partial<AppConfig['analysisModules']>) => void;
 
@@ -191,6 +206,179 @@ export function AppProvider({ children }: AppProviderProps) {
             return newLogs;
         });
     }, []);
+
+    const buildSafeDataState = useCallback((backendData: any): DataState => {
+        const safeSuspicions: SuspicionResult = {
+            directTransfers: backendData.suspicions?.directTransfers || [],
+            cashCollisions: backendData.suspicions?.cashCollisions || [],
+            hiddenAssets: backendData.suspicions?.hiddenAssets || {},
+            fixedFrequency: backendData.suspicions?.fixedFrequency || {},
+            cashTimingPatterns: backendData.suspicions?.cashTimingPatterns || [],
+            holidayTransactions: backendData.suspicions?.holidayTransactions || {},
+            amountPatterns: backendData.suspicions?.amountPatterns || {},
+        };
+
+        const ar = backendData.analysisResults || {};
+        const safeAnalysisResults: AppAnalysisResults = {
+            loan: {
+                summary: { 双向往来关系数: 0, 网贷平台交易数: 0, 规律还款模式数: 0, ...ar.loan?.summary },
+                details: ar.loan?.details || [],
+            },
+            income: {
+                summary: { 规律性非工资收入: 0, 个人大额转入: 0, 来源不明收入: 0, ...ar.income?.summary },
+                details: ar.income?.details || [],
+            },
+            ml: {
+                summary: { anomalyCount: 0, highRiskCount: 0, ...ar.ml?.summary },
+                predictions: ar.ml?.predictions || [],
+            },
+            penetration: {
+                summary: { 资金穿透链数: 0, 中间节点数: 0, ...ar.penetration?.summary },
+                chains: ar.penetration?.chains || [],
+                fund_cycles: ar.penetration?.fund_cycles || [],
+                analysis_metadata: ar.penetration?.analysis_metadata || {},
+            },
+            relatedParty: {
+                summary: { 直接往来笔数: 0, 第三方中转链数: 0, 资金闭环数: 0, 外围节点数: 0, 关系簇数: 0, ...ar.relatedParty?.summary },
+                details: ar.relatedParty?.details || [],
+                direct_flows: ar.relatedParty?.direct_flows || [],
+                third_party_relays: ar.relatedParty?.third_party_relays || [],
+                fund_loops: ar.relatedParty?.fund_loops || [],
+                discovered_nodes: ar.relatedParty?.discovered_nodes || [],
+                relationship_clusters: ar.relatedParty?.relationship_clusters || [],
+                analysis_metadata: ar.relatedParty?.analysis_metadata || {},
+            },
+            correlation: {
+                summary: { 资金碰撞总数: 0, ...ar.correlation?.summary },
+                correlations: ar.correlation?.correlations || [],
+            },
+            timeSeries: {
+                summary: { 异常时间点数: 0, ...ar.timeSeries?.summary },
+                anomalies: ar.timeSeries?.anomalies || [],
+            },
+            aggregation: {
+                rankedEntities: ar.aggregation?.rankedEntities || [],
+                summary: { 极高风险实体数: 0, 高风险实体数: 0, ...ar.aggregation?.summary },
+                evidencePacks: ar.aggregation?.evidencePacks || {},
+                analysisMetadata: ar.aggregation?.analysisMetadata || {},
+            },
+        };
+
+        return {
+            persons: backendData.persons || [],
+            companies: backendData.companies || [],
+            profiles: backendData.profiles || {},
+            suspicions: safeSuspicions,
+            analysisResults: safeAnalysisResults,
+            categorizedFiles: defaultData.categorizedFiles,
+        };
+    }, []);
+
+    const applyCompletedData = useCallback((
+        backendData: any,
+        options: { currentPhase: string; lastRunTime?: Date | null; preserveLastRunTime?: boolean }
+    ) => {
+        setData(buildSafeDataState(backendData));
+        setAnalysis(prev => ({
+            ...prev,
+            isRunning: false,
+            progress: 100,
+            currentPhase: options.currentPhase,
+            lastRunTime: options.preserveLastRunTime
+                ? prev.lastRunTime
+                : (options.lastRunTime ?? prev.lastRunTime),
+            status: 'completed',
+            isLoading: false,
+        }));
+    }, [buildSafeDataState]);
+
+    const initializeFromBackend = useCallback(async () => {
+        const now = new Date();
+        const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+
+        try {
+            setAnalysis(prev => ({ ...prev, isLoading: true }));
+            addLog({ time: timeStr, level: 'INFO', msg: '正在检查后端缓存数据...' });
+
+            const status = await api.getStatus();
+            const phaseText = (status as any).currentPhase ?? (status as any).phase ?? '';
+
+            if (status.status === 'completed') {
+                addLog({ time: timeStr, level: 'INFO', msg: '检测到后端缓存，正在恢复数据...' });
+
+                const result = await api.getResults();
+                if (result.data) {
+                    const backendData = result.data as any;
+                    applyCompletedData(backendData, {
+                        currentPhase: '从缓存恢复完成',
+                        lastRunTime: status.endTime ? new Date(status.endTime) : null,
+                    });
+                    addLog({ time: timeStr, level: 'INFO', msg: `✓ 已从缓存恢复: ${backendData.persons?.length || 0} 人员, ${backendData.companies?.length || 0} 企业` });
+                    return;
+                }
+            }
+
+            if (status.status === 'running') {
+                setAnalysis({
+                    isRunning: true,
+                    progress: status.progress,
+                    currentPhase: phaseText,
+                    lastRunTime: status.startTime ? new Date(status.startTime) : null,
+                    status: 'running',
+                    isLoading: false,
+                });
+                ws.connect();
+                addLog({ time: timeStr, level: 'INFO', msg: '检测到分析正在进行中，已连接实时日志...' });
+                return;
+            }
+
+            setAnalysis(prev => ({
+                ...prev,
+                status: status.status as AnalysisState['status'],
+                currentPhase: phaseText || '等待开始分析',
+                isLoading: false,
+            }));
+            ws.connect();
+            addLog({ time: timeStr, level: 'INFO', msg: '系统就绪，等待启动分析' });
+        } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : '未知错误';
+            console.error('初始化失败:', error);
+            setAnalysis(prev => ({ ...prev, isLoading: false }));
+            addLog({ time: new Date().toLocaleTimeString(), level: 'WARN', msg: `后端连接失败: ${errorMsg}，请确保后端服务已启动` });
+        }
+    }, [addLog, applyCompletedData]);
+
+    const syncDataSources = useCallback(async (dataSources: Partial<AppConfig['dataSources']> = {}) => {
+        const nextDataSources = {
+            inputDirectory: dataSources.inputDirectory ?? config.dataSources.inputDirectory,
+            outputDirectory: dataSources.outputDirectory ?? config.dataSources.outputDirectory,
+        };
+        const now = new Date();
+        const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+
+        if (analysis.isRunning) {
+            addLog({
+                time: timeStr,
+                level: 'WARN',
+                msg: '分析运行中，路径变更已保存到前端，将在本轮结束后再同步后端',
+            });
+            return;
+        }
+
+        try {
+            await api.syncActivePaths(nextDataSources);
+            await initializeFromBackend();
+        } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : '未知错误';
+            addLog({
+                time: timeStr,
+                level: errorMsg.includes('操作冲突') ? 'WARN' : 'ERROR',
+                msg: errorMsg.includes('操作冲突')
+                    ? `路径同步已跳过: ${errorMsg}`
+                    : `路径同步失败: ${errorMsg}`,
+            });
+        }
+    }, [addLog, analysis.isRunning, config.dataSources.inputDirectory, config.dataSources.outputDirectory, initializeFromBackend]);
 
     const startAnalysis = useCallback(async () => {
         const now = new Date();
@@ -285,71 +473,11 @@ export function AppProvider({ children }: AppProviderProps) {
                 setTimeout(() => {
                     api.getResults().then(result => {
                         if (result.data) {
-                            // 安全合并后端数据与默认值，防止缺失字段导致前端崩溃
                             const backendData = result.data as any;
-
-                            // 合并 suspicions，确保所有字段都有默认值
-                            const safeSuspicions: SuspicionResult = {
-                                directTransfers: backendData.suspicions?.directTransfers || [],
-                                cashCollisions: backendData.suspicions?.cashCollisions || [],
-                                hiddenAssets: backendData.suspicions?.hiddenAssets || {},
-                                fixedFrequency: backendData.suspicions?.fixedFrequency || {},
-                                cashTimingPatterns: backendData.suspicions?.cashTimingPatterns || [],
-                                holidayTransactions: backendData.suspicions?.holidayTransactions || {},
-                                amountPatterns: backendData.suspicions?.amountPatterns || {},
-                            };
-
-                            // 合并 analysisResults，确保所有模块都有默认结构
-                            const ar = backendData.analysisResults || {};
-                            const safeAnalysisResults: AppAnalysisResults = {
-                                loan: {
-                                    summary: { 双向往来关系数: 0, 网贷平台交易数: 0, 规律还款模式数: 0, ...ar.loan?.summary },
-                                    details: ar.loan?.details || [],
-                                },
-                                income: {
-                                    summary: { 规律性非工资收入: 0, 个人大额转入: 0, 来源不明收入: 0, ...ar.income?.summary },
-                                    details: ar.income?.details || [],
-                                },
-                                ml: {
-                                    summary: { anomalyCount: 0, highRiskCount: 0, ...ar.ml?.summary },
-                                    predictions: ar.ml?.predictions || [],
-                                },
-                                penetration: {
-                                    summary: { 资金穿透链数: 0, 中间节点数: 0, ...ar.penetration?.summary },
-                                    chains: ar.penetration?.chains || [],
-                                },
-                                relatedParty: {
-                                    summary: { 直接往来笔数: 0, 第三方中转链数: 0, 资金闭环数: 0, ...ar.relatedParty?.summary },
-                                    details: ar.relatedParty?.details || [],
-                                },
-                                correlation: {
-                                    summary: { 资金碰撞总数: 0, ...ar.correlation?.summary },
-                                    correlations: ar.correlation?.correlations || [],
-                                },
-                                timeSeries: {
-                                    summary: { 异常时间点数: 0, ...ar.timeSeries?.summary },
-                                    anomalies: ar.timeSeries?.anomalies || [],
-                                },
-                                aggregation: {
-                                    rankedEntities: ar.aggregation?.rankedEntities || [],
-                                    summary: { 极高风险实体数: 0, 高风险实体数: 0, ...ar.aggregation?.summary },
-                                },
-                            };
-
-                            setData({
-                                persons: backendData.persons || [],
-                                companies: backendData.companies || [],
-                                profiles: backendData.profiles || {},
-                                suspicions: safeSuspicions,
-                                analysisResults: safeAnalysisResults,
-                                categorizedFiles: defaultData.categorizedFiles,
-                            });
-
-                            // 更新状态为完成
-                            setAnalysis(prev => ({
-                                ...prev,
+                            applyCompletedData(backendData, {
                                 currentPhase: '分析完成',
-                            }));
+                                preserveLastRunTime: true,
+                            });
 
                             // 添加完成日志
                             const now = new Date();
@@ -379,7 +507,7 @@ export function AppProvider({ children }: AppProviderProps) {
             unsubscribe();
             ws.disconnect();
         };
-    }, [addLog]);
+    }, [addLog, applyCompletedData]);
 
     const stopAnalysis = useCallback(async () => {
         const now = new Date();
@@ -471,180 +599,74 @@ export function AppProvider({ children }: AppProviderProps) {
      * 解决问题：刷新页面后需要重新分析的问题
      */
     useEffect(() => {
-        const initializeFromBackend = async () => {
-            const now = new Date();
-            const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+        let disposed = false;
 
+        const bootstrap = async () => {
             try {
-                // 设置加载状态
-                setAnalysis(prev => ({ ...prev, isLoading: true }));
-                addLog({ time: timeStr, level: 'INFO', msg: '正在检查后端缓存数据...' });
-
-                // 1. 获取后端状态
-                const status = await api.getStatus();
-                const phaseText = (status as any).currentPhase ?? (status as any).phase ?? '';
-
-                // 2. 如果后端已有完成的分析结果，加载它们
-                if (status.status === 'completed') {
-                    addLog({ time: timeStr, level: 'INFO', msg: '检测到后端缓存，正在恢复数据...' });
-
-                    const result = await api.getResults();
-
-                    if (result.data) {
-                        // 安全合并后端数据与默认值
-                        const backendData = result.data as any;
-
-                        const safeSuspicions: SuspicionResult = {
-                            directTransfers: backendData.suspicions?.directTransfers || [],
-                            cashCollisions: backendData.suspicions?.cashCollisions || [],
-                            hiddenAssets: backendData.suspicions?.hiddenAssets || {},
-                            fixedFrequency: backendData.suspicions?.fixedFrequency || {},
-                            cashTimingPatterns: backendData.suspicions?.cashTimingPatterns || [],
-                            holidayTransactions: backendData.suspicions?.holidayTransactions || {},
-                            amountPatterns: backendData.suspicions?.amountPatterns || {},
-                        };
-
-                        const ar = backendData.analysisResults || {};
-                        const safeAnalysisResults: AppAnalysisResults = {
-                            loan: {
-                                summary: { 双向往来关系数: 0, 网贷平台交易数: 0, 规律还款模式数: 0, ...ar.loan?.summary },
-                                details: ar.loan?.details || [],
-                            },
-                            income: {
-                                summary: { 规律性非工资收入: 0, 个人大额转入: 0, 来源不明收入: 0, ...ar.income?.summary },
-                                details: ar.income?.details || [],
-                            },
-                            ml: {
-                                summary: { anomalyCount: 0, highRiskCount: 0, ...ar.ml?.summary },
-                                predictions: ar.ml?.predictions || [],
-                            },
-                            penetration: {
-                                summary: { 资金穿透链数: 0, 中间节点数: 0, ...ar.penetration?.summary },
-                                chains: ar.penetration?.chains || [],
-                            },
-                            relatedParty: {
-                                summary: { 直接往来笔数: 0, 第三方中转链数: 0, 资金闭环数: 0, ...ar.relatedParty?.summary },
-                                details: ar.relatedParty?.details || [],
-                            },
-                            correlation: {
-                                summary: { 资金碰撞总数: 0, ...ar.correlation?.summary },
-                                correlations: ar.correlation?.correlations || [],
-                            },
-                            timeSeries: {
-                                summary: { 异常时间点数: 0, ...ar.timeSeries?.summary },
-                                anomalies: ar.timeSeries?.anomalies || [],
-                            },
-                            aggregation: {
-                                rankedEntities: ar.aggregation?.rankedEntities || [],
-                                summary: { 极高风险实体数: 0, 高风险实体数: 0, ...ar.aggregation?.summary },
-                            },
-                        };
-
-                        setData({
-                            persons: backendData.persons || [],
-                            companies: backendData.companies || [],
-                            profiles: backendData.profiles || {},
-                            suspicions: safeSuspicions,
-                            analysisResults: safeAnalysisResults,
-                            categorizedFiles: defaultData.categorizedFiles,
-                        });
-
-                        // 更新分析状态
-                        setAnalysis({
-                            isRunning: false,
-                            progress: 100,
-                            currentPhase: '从缓存恢复完成',
-                            lastRunTime: status.endTime ? new Date(status.endTime) : null,
-                            status: 'completed',
-                            isLoading: false,
-                        });
-
-                        addLog({ time: timeStr, level: 'INFO', msg: `✓ 已从缓存恢复: ${backendData.persons?.length || 0} 人员, ${backendData.companies?.length || 0} 企业` });
-                    }
-                } else if (status.status === 'running') {
-                    // 如果分析正在运行，连接 WebSocket 跟踪进度
-                    setAnalysis({
-                        isRunning: true,
-                        progress: status.progress,
-                        currentPhase: phaseText,
-                        lastRunTime: status.startTime ? new Date(status.startTime) : null,
-                        status: 'running',
-                        isLoading: false,
-                    });
-                    ws.connect();
-                    addLog({ time: timeStr, level: 'INFO', msg: '检测到分析正在进行中，已连接实时日志...' });
-                } else {
-                    // idle 或 failed 状态
-                    setAnalysis(prev => ({
-                        ...prev,
-                        status: status.status as AnalysisState['status'],
-                        currentPhase: phaseText || '等待开始分析',
-                        isLoading: false,
-                    }));
-                    // 无论状态如何，都尝试连接 WebSocket 以显示正确的连接状态
-                    ws.connect();
-                    addLog({ time: timeStr, level: 'INFO', msg: '系统就绪，等待启动分析' });
-                }
-            } catch (error) {
-                const errorMsg = error instanceof Error ? error.message : '未知错误';
-                console.error('初始化失败:', error);
-                // 初始化失败不阻塞用户操作
-                setAnalysis(prev => ({ ...prev, isLoading: false }));
-                addLog({ time: new Date().toLocaleTimeString(), level: 'WARN', msg: `后端连接失败: ${errorMsg}，请确保后端服务已启动` });
-            }
-        };
-
-        initializeFromBackend();
-
-        // 获取默认路径配置
-        const fetchDefaultPaths = async () => {
-            try {
-                // 1. 首先检查 localStorage 是否有用户保存的路径
                 const savedInputDir = localStorage.getItem(STORAGE_KEYS.INPUT_DIR);
                 const savedOutputDir = localStorage.getItem(STORAGE_KEYS.OUTPUT_DIR);
-                
+
                 if (savedInputDir || savedOutputDir) {
-                    // 使用用户保存的路径
+                    const restoredPaths = {
+                        inputDirectory: savedInputDir || defaultConfig.dataSources.inputDirectory,
+                        outputDirectory: savedOutputDir || defaultConfig.dataSources.outputDirectory,
+                    };
+
                     setConfig(prev => ({
                         ...prev,
-                        dataSources: {
-                            inputDirectory: savedInputDir || prev.dataSources.inputDirectory,
-                            outputDirectory: savedOutputDir || prev.dataSources.outputDirectory,
-                        }
+                        dataSources: restoredPaths,
                     }));
-                    addLog({ 
-                        time: new Date().toLocaleTimeString(), 
-                        level: 'INFO', 
-                        msg: `已恢复用户设置路径: 输入=${savedInputDir || '默认'}, 输出=${savedOutputDir || '默认'}` 
+                    addLog({
+                        time: new Date().toLocaleTimeString(),
+                        level: 'INFO',
+                        msg: `已恢复用户设置路径: 输入=${savedInputDir || '默认'}, 输出=${savedOutputDir || '默认'}`,
                     });
-                    return; // 有保存的路径，不再获取后端默认路径
+
+                    if (!disposed) {
+                        await api.syncActivePaths(restoredPaths);
+                        await initializeFromBackend();
+                    }
+                    return;
                 }
-                
-                // 2. 没有保存的路径，获取后端默认路径
+
                 const result = await api.getDefaultPaths();
                 if (result.success && result.data) {
-                    // 更新默认路径为绝对路径
+                    const defaultPaths = {
+                        inputDirectory: result.data.inputDirectory,
+                        outputDirectory: result.data.outputDirectory,
+                    };
+
                     setConfig(prev => ({
                         ...prev,
-                        dataSources: {
-                            inputDirectory: result.data!.inputDirectory,
-                            outputDirectory: result.data!.outputDirectory,
-                        }
+                        dataSources: defaultPaths,
                     }));
-                    addLog({ 
-                        time: new Date().toLocaleTimeString(), 
-                        level: 'INFO', 
-                        msg: `已加载默认路径: 输入=${result.data.inputDirectory}, 输出=${result.data.outputDirectory}` 
+                    addLog({
+                        time: new Date().toLocaleTimeString(),
+                        level: 'INFO',
+                        msg: `已加载默认路径: 输入=${result.data.inputDirectory}, 输出=${result.data.outputDirectory}`,
                     });
+
+                    if (!disposed) {
+                        await api.syncActivePaths(defaultPaths);
+                        await initializeFromBackend();
+                    }
+                    return;
                 }
             } catch (error) {
-                // 获取默认路径失败不影响主流程，保持原有默认值
                 console.warn('获取默认路径失败:', error);
+            }
+
+            if (!disposed) {
+                await initializeFromBackend();
             }
         };
 
-        fetchDefaultPaths();
-    }, []); // 只在组件挂载时执行一次
+        void bootstrap();
+
+        return () => {
+            disposed = true;
+        };
+    }, [addLog, initializeFromBackend]); // 只在组件挂载时执行一次
 
     // ==================== UI Actions ====================
 
@@ -681,6 +703,7 @@ export function AppProvider({ children }: AppProviderProps) {
         ui,
         updateConfig,
         updateDataSources,
+        syncDataSources,
         updateThresholds,
         updateAnalysisModules,
         startAnalysis,

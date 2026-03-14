@@ -23,6 +23,22 @@ from holiday_service import get_holiday_service
 logger = utils.setup_logger(__name__)
 
 
+def _normalize_company_transaction_df(df: pd.DataFrame) -> pd.DataFrame:
+    """统一公司流水中的日期与金额字段，避免脏值影响后续比较。"""
+    if df is None or df.empty:
+        return df
+
+    normalized = df.copy()
+    if "date" in normalized.columns:
+        normalized["date"] = utils.normalize_datetime_series(normalized["date"])
+    for amount_col in ("income", "expense", "balance"):
+        if amount_col in normalized.columns:
+            normalized[amount_col] = utils.normalize_amount_series(
+                normalized[amount_col], amount_col
+            )
+    return normalized
+
+
 # ============================================================================
 # 风险分析阈值配置（可配置）
 # ============================================================================
@@ -118,11 +134,16 @@ def analyze_company_risk(
         return result
     
     logger.info(f"开始分析 {len(company_names)} 家公司的风险")
+
+    normalized_company_transactions = {
+        company: _normalize_company_transaction_df(df)
+        for company, df in company_transactions.items()
+    }
     
     # 1. 公司间资金往来分析（利益输送检测）- 0-30分
     logger.info("执行维度1: 公司间资金往来分析")
     inter_company_score, inter_company_evidence = analyze_inter_company_transfers(
-        company_names, company_transactions, thresholds
+        company_names, normalized_company_transactions, thresholds
     )
     result["dimensions"]["inter_company_risk"]["score"] = inter_company_score
     result["dimensions"]["inter_company_risk"]["evidence"] = inter_company_evidence
@@ -130,7 +151,7 @@ def analyze_company_risk(
     # 2. 公司向个人资金输送分析（洗钱风险）- 0-30分
     logger.info("执行维度2: 公司向个人资金输送分析")
     company_to_person_score, company_to_person_evidence = analyze_company_to_person_transfers(
-        company_names, company_transactions, core_persons, suspicions, thresholds
+        company_names, normalized_company_transactions, core_persons, suspicions, thresholds
     )
     result["dimensions"]["company_to_person_risk"]["score"] = company_to_person_score
     result["dimensions"]["company_to_person_risk"]["evidence"] = company_to_person_evidence
@@ -138,7 +159,7 @@ def analyze_company_risk(
     # 3. 公司资产异常分析 - 0-20分
     logger.info("执行维度3: 公司资产异常分析")
     asset_anomaly_score, asset_anomaly_evidence = analyze_asset_anomalies(
-        company_names, companies_profiles, company_transactions, thresholds
+        company_names, companies_profiles, normalized_company_transactions, thresholds
     )
     result["dimensions"]["asset_anomaly_risk"]["score"] = asset_anomaly_score
     result["dimensions"]["asset_anomaly_risk"]["evidence"] = asset_anomaly_evidence
@@ -146,7 +167,7 @@ def analyze_company_risk(
     # 4. 公司经营合理性分析 - 0-20分
     logger.info("执行维度4: 公司经营合理性分析")
     operational_score, operational_evidence = analyze_operational_rationality(
-        company_names, companies_profiles, company_transactions, thresholds
+        company_names, companies_profiles, normalized_company_transactions, thresholds
     )
     result["dimensions"]["operational_risk"]["score"] = operational_score
     result["dimensions"]["operational_risk"]["evidence"] = operational_evidence
@@ -438,9 +459,10 @@ def detect_fund_cycles(
             if tx["direction"] == "expense":
                 counterparty = tx["counterparty"]
                 matched_cp = next((cp for cp in company_names if cp in counterparty), None)
-                if matched_cp and tx["date"]:
+                parsed_date = utils.parse_date(tx["date"])
+                if matched_cp and parsed_date:
                     time_edges.append({
-                        "date": pd.to_datetime(tx["date"]),
+                        "date": parsed_date,
                         "from": company,
                         "to": matched_cp,
                         "amount": tx["amount"]
@@ -1184,7 +1206,9 @@ def detect_abnormal_time_patterns(
         abnormal_time_tx = []
         
         for idx, row in large_tx.iterrows():
-            date = pd.to_datetime(row['date'])
+            date = utils.parse_date(row['date'])
+            if date is None:
+                continue
             tx_date = date.date()
             amount = row['expense'] if row['expense'] > 0 else row['income']
             

@@ -226,13 +226,10 @@ def calculate_family_total_assets(
         price = prop.get("金额", prop.get("价格", 0))
         if isinstance(price, str):
             try:
-                price = (
-                    float(price.replace("万元", "").replace("万", "").replace(",", ""))
-                    * config.UNIT_WAN
-                )
+                price = utils.format_amount(price, unit_hint_multiplier=config.UNIT_WAN)
             except (ValueError, TypeError):
                 price = 0
-        property_value += float(price) if price else 0
+        property_value += utils.format_amount(price) if price else 0
 
     # 车辆价值（简单估算：根据购买记录或默认值）
     vehicle_value = len(vehicles) * config.DEFAULT_VEHICLE_VALUE  # 默认每辆车估值
@@ -432,15 +429,10 @@ def calculate_family_summary(
             price = prop.get("金额", prop.get("价格", 0))
             if isinstance(price, str):
                 try:
-                    price = (
-                        float(
-                            price.replace("万元", "").replace("万", "").replace(",", "")
-                        )
-                        * config.UNIT_WAN
-                    )
+                    price = utils.format_amount(price, unit_hint_multiplier=config.UNIT_WAN)
                 except (ValueError, TypeError):
                     price = 0
-            property_value += float(price) if price else 0
+            property_value += utils.format_amount(price) if price else 0
 
     vehicle_value = len(vehicles) * config.DEFAULT_VEHICLE_VALUE if vehicles else 0
 

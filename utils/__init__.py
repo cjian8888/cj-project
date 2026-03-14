@@ -27,7 +27,16 @@ try:
     setup_logger = utils_module.setup_logger
     parse_date = utils_module.parse_date
     format_amount = utils_module.format_amount
+    format_amount_to_wan = utils_module.format_amount_to_wan
     format_currency = utils_module.format_currency
+    find_first_matching_column = utils_module.find_first_matching_column
+    get_amount_unit_hint_multiplier = utils_module.get_amount_unit_hint_multiplier
+    normalize_amount_series = utils_module.normalize_amount_series
+    normalize_column_token = utils_module.normalize_column_token
+    normalize_datetime_series = utils_module.normalize_datetime_series
+    detect_account_identifier_column = utils_module.detect_account_identifier_column
+    build_transaction_order_columns = utils_module.build_transaction_order_columns
+    sort_transactions_strict = utils_module.sort_transactions_strict
     normalize_name = utils_module.normalize_name
     extract_chinese_name = utils_module.extract_chinese_name
     extract_company_name = utils_module.extract_company_name
@@ -62,7 +71,16 @@ __all__ = [
     "setup_logger",
     "parse_date",
     "format_amount",
+    "format_amount_to_wan",
     "format_currency",
+    "find_first_matching_column",
+    "get_amount_unit_hint_multiplier",
+    "normalize_amount_series",
+    "normalize_column_token",
+    "normalize_datetime_series",
+    "detect_account_identifier_column",
+    "build_transaction_order_columns",
+    "sort_transactions_strict",
     "normalize_name",
     "extract_chinese_name",
     "extract_company_name",

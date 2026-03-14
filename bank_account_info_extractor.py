@@ -19,6 +19,7 @@ import utils
 from utils.safe_types import (
     safe_str,
     safe_float,
+    safe_amount,
     safe_int,
     safe_date,
     safe_datetime,
@@ -29,6 +30,11 @@ logger = utils.setup_logger(__name__)
 
 # 数据源目录名称
 BANK_ACCOUNT_INFO_DIR_NAME = "银行业金融机构账户信息（定向查询）"
+
+
+def _safe_money(value) -> Optional[float]:
+    """账户余额统一按元解析，兼容显式单位和脏字符串。"""
+    return safe_amount(value, source_unit="yuan", target_unit="yuan")
 
 
 def extract_bank_account_info(data_dir: str, person_id: str = None) -> Dict[str, Dict]:
@@ -135,13 +141,13 @@ def parse_bank_account_info_file(file_path: str) -> Dict[str, Dict]:
                     "bank_name": safe_str(row.get("反馈单位")),
                     "account_type": safe_str(row.get("账户类别")),
                     "status": safe_str(row.get("账户状态")),
-                    "balance": safe_float(row.get("账户余额")),
-                    "available_balance": safe_float(row.get("可用余额")),
+                    "balance": _safe_money(row.get("账户余额")),
+                    "available_balance": _safe_money(row.get("可用余额")),
                     "open_date": safe_date(row.get("开户日期")),
                     "close_date": safe_date(row.get("销户日期")),
                     "branch": safe_str(row.get("开户网点")),
                     "currency": safe_str(row.get("币种")),
-                    "last_transaction": safe_date(row.get("最后交易时间")),
+                    "last_transaction": safe_datetime(row.get("最后交易时间")),
                     "source_file": filename
                 }
                 

@@ -45,6 +45,10 @@ from pydantic import BaseModel
 import config
 from paths import APP_ROOT, DATA_DIR, OUTPUT_DIR
 import utils
+from utils.aggregation_view import (
+    annotate_focus_entities_with_graph,
+    build_aggregation_overview,
+)
 
 # 【修复】Python 3.14 导入路径修复：utils 导入后项目目录可能从 sys.path 消失
 project_dir = str(APP_ROOT)
@@ -202,6 +206,9 @@ _current_config = {}
 _ws_connections = set()
 _log_queue = queue.Queue()  # 日志队列，用于 WebSocket 广播
 _cache_manager: Optional[CacheManager] = None  # 缓存管理器（懒加载）
+_analysis_log_lock = threading.Lock()
+_active_analysis_log_paths: Dict[str, str] = {}
+_last_analysis_log_paths: Dict[str, str] = {}
 
 
 def _get_dashboard_dist_dir() -> Path:
@@ -252,6 +259,89 @@ def _get_cache_manager() -> CacheManager:
     return _cache_manager
 
 
+def _append_analysis_runtime_log(level: str, msg: str):
+    """将前端实时日志流固化到当前分析输出目录。"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"{timestamp} [{level}] {msg}\n"
+    with _analysis_log_lock:
+        paths = [path for path in _active_analysis_log_paths.values() if path]
+    for path in paths:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception:
+            # 日志固化失败不能打断主流程
+            pass
+
+
+def _start_analysis_runtime_log_capture(output_dir: str, start_time: Optional[datetime] = None) -> Dict[str, str]:
+    """为本次分析初始化独立日志文件。"""
+    run_time = start_time or datetime.now()
+    logs_dir = os.path.join(output_dir, "analysis_logs")
+    os.makedirs(logs_dir, exist_ok=True)
+
+    timestamp = run_time.strftime("%Y%m%d_%H%M%S")
+    run_log_path = os.path.join(logs_dir, f"analysis_run_{timestamp}.log")
+    latest_log_path = os.path.join(logs_dir, "analysis_run_latest.log")
+
+    with _analysis_log_lock:
+        _active_analysis_log_paths.clear()
+        _active_analysis_log_paths.update(
+            {
+                "run": run_log_path,
+                "latest": latest_log_path,
+            }
+        )
+        _last_analysis_log_paths.clear()
+        _last_analysis_log_paths.update(_active_analysis_log_paths)
+
+    for path in [run_log_path, latest_log_path]:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(
+                f"# 分析运行日志\n"
+                f"# 启动时间: {run_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"# 输出目录: {output_dir}\n\n"
+            )
+
+    return {
+        "runLog": run_log_path,
+        "latestLog": latest_log_path,
+    }
+
+
+def _attach_analysis_results_log_mirror(results_dir: str) -> Optional[str]:
+    """在 analysis_results 中附加当前运行日志镜像，便于和报告一起查看。"""
+    os.makedirs(results_dir, exist_ok=True)
+    mirror_path = os.path.join(results_dir, "分析执行日志.txt")
+
+    with _analysis_log_lock:
+        run_log_path = _active_analysis_log_paths.get("run")
+        _active_analysis_log_paths["resultsMirror"] = mirror_path
+        _last_analysis_log_paths["resultsMirror"] = mirror_path
+
+    if run_log_path and os.path.exists(run_log_path):
+        shutil.copyfile(run_log_path, mirror_path)
+    else:
+        with open(mirror_path, "w", encoding="utf-8") as f:
+            f.write("# 分析执行日志\n")
+    return mirror_path
+
+
+def _finalize_analysis_runtime_log_capture(status: str):
+    """收尾当前分析日志固化状态，避免后续无关日志继续写入。"""
+    _append_analysis_runtime_log("INFO", f"日志固化收尾，分析状态: {status}")
+    with _analysis_log_lock:
+        _last_analysis_log_paths.clear()
+        _last_analysis_log_paths.update(_active_analysis_log_paths)
+        _active_analysis_log_paths.clear()
+
+
+def _get_last_analysis_log_paths() -> Dict[str, str]:
+    with _analysis_log_lock:
+        return dict(_last_analysis_log_paths)
+
+
 def _get_active_output_dir() -> str:
     """获取当前生效的输出目录（优先使用最近一次分析配置）。"""
     configured = _current_config.get("outputDirectory")
@@ -274,6 +364,21 @@ def _get_active_cache_dir() -> str:
 
 def _get_active_results_dir() -> str:
     return os.path.join(_get_active_output_dir(), "analysis_results")
+
+
+def _refresh_report_index_file(output_dir: str) -> Optional[str]:
+    """刷新报告目录清单，允许在缓存缺失时退化为纯目录扫描。"""
+    logger = logging.getLogger(__name__)
+    reports_dir = os.path.join(output_dir, "analysis_results")
+
+    try:
+        builder = load_investigation_report_builder(output_dir)
+        if builder is None:
+            builder = InvestigationReportBuilder({}, output_dir)
+        return builder.generate_report_index_file(reports_dir)
+    except Exception as exc:
+        logger.warning(f"刷新报告目录清单失败: {exc}")
+        return None
 
 
 def _is_path_within(base_dir: str, target_path: str) -> bool:
@@ -325,6 +430,77 @@ def _has_valid_disk_cache(output_dir: Optional[str] = None) -> bool:
     cache_dir = os.path.join(base, "analysis_cache")
     required_files = ("profiles.json", "derived_data.json", "suspicions.json", "metadata.json")
     return all(os.path.exists(os.path.join(cache_dir, name)) for name in required_files)
+
+
+def _normalize_directory_path(path: Optional[str], fallback: str) -> str:
+    """标准化目录路径，空值回退到默认目录。"""
+    candidate = str(path).strip() if path is not None else ""
+    resolved = candidate or fallback
+    return os.path.abspath(os.path.expanduser(resolved))
+
+
+def _set_active_paths(
+    input_dir: Optional[str] = None, output_dir: Optional[str] = None
+) -> Dict[str, str]:
+    """更新当前活动输入/输出目录，并重置缓存管理器。"""
+    global _cache_manager
+
+    if input_dir is not None:
+        _current_config["inputDirectory"] = _normalize_directory_path(
+            input_dir, str(DATA_DIR)
+        )
+    if output_dir is not None:
+        _current_config["outputDirectory"] = _normalize_directory_path(
+            output_dir, str(OUTPUT_DIR)
+        )
+
+    _cache_manager = None
+
+    return {
+        "inputDirectory": _get_active_input_dir(),
+        "outputDirectory": _get_active_output_dir(),
+    }
+
+
+def _sync_analysis_state_with_active_output(force_reload: bool = False) -> bool:
+    """
+    让内存分析状态与当前活动输出目录对齐。
+
+    force_reload=True 时，即使内存中已有 completed 结果，也优先从当前输出目录缓存重载。
+    """
+    _ensure_completed_state_consistent()
+
+    if analysis_state.status == "running":
+        return False
+
+    target_output_dir = _get_active_output_dir()
+    if (
+        not force_reload
+        and analysis_state.status == "completed"
+        and analysis_state.results
+    ):
+        return True
+
+    if not _has_valid_disk_cache(target_output_dir):
+        return False
+
+    try:
+        cache_mgr = CacheManager(os.path.join(target_output_dir, "analysis_cache"))
+        results_data = cache_mgr.load_results()
+    except Exception as exc:
+        logging.getLogger(__name__).warning(f"从活动输出目录恢复缓存失败: {exc}")
+        return False
+
+    if not results_data:
+        return False
+
+    analysis_state.results = results_data
+    if not analysis_state.end_time:
+        analysis_state.end_time = datetime.now()
+    analysis_state.update(
+        status="completed", progress=100, phase="已从缓存恢复", error=None
+    )
+    return True
 
 
 def _clear_directory_contents(directory: str):
@@ -609,6 +785,7 @@ class WebSocketLogHandler(logging.Handler):
             level = record.levelname
             log_entry = {"time": _get_current_time_str(), "level": level, "msg": msg}
             _log_queue.put({"type": "log", "data": log_entry})
+            _append_analysis_runtime_log(level, msg)
         except Exception:
             pass  # 避免日志处理器本身抛出异常
 
@@ -630,6 +807,7 @@ def broadcast_log(level: str, msg: str):
     """
     log_entry = {"time": _get_current_time_str(), "level": level, "msg": msg}
     _log_queue.put({"type": "log", "data": log_entry})
+    _append_analysis_runtime_log(level, msg)
 
 
 # ==================== Pydantic 模型 ====================
@@ -639,6 +817,11 @@ class AnalysisConfig(BaseModel):
     cashThreshold: Optional[float] = 50000
     timeWindow: Optional[float] = 48
     modules: Optional[Dict[str, bool]] = None
+
+
+class ActivePathsRequest(BaseModel):
+    inputDirectory: Optional[str] = None
+    outputDirectory: Optional[str] = None
 
 
 class DirectorySelectRequest(BaseModel):
@@ -721,6 +904,7 @@ def create_output_directories(base_dir: str) -> Dict[str, str]:
         "cleaned_companies": os.path.join(base_dir, "cleaned_data", "公司"),
         "analysis_cache": os.path.join(base_dir, "analysis_cache"),
         "analysis_results": os.path.join(base_dir, "analysis_results"),
+        "analysis_logs": os.path.join(base_dir, "analysis_logs"),
     }
     for dir_path in dirs.values():
         os.makedirs(dir_path, exist_ok=True)
@@ -864,10 +1048,14 @@ def serialize_profiles(profiles: Dict) -> Dict:
 
 def _pick_first_existing_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     """从候选列中返回第一个存在的列名"""
-    for col in candidates:
-        if col in df.columns:
-            return col
-    return None
+    return utils.find_first_matching_column(
+        df,
+        candidates,
+        is_amount_field=any(
+            keyword in " ".join(candidates)
+            for keyword in ["income", "expense", "amount", "收入", "支出", "金额", "余额"]
+        ),
+    )
 
 
 def _prepare_person_transactions_for_advanced_analyzers(
@@ -909,10 +1097,16 @@ def _prepare_person_transactions_for_advanced_analyzers(
     date_col = _pick_first_existing_column(
         tx_df, ["date", "交易时间", "交易日期", "日期", "time"]
     )
-    income_col = _pick_first_existing_column(tx_df, ["income", "收入(元)", "收入"])
-    expense_col = _pick_first_existing_column(tx_df, ["expense", "支出(元)", "支出"])
+    income_col = _pick_first_existing_column(
+        tx_df, ["income", "收入(元)", "收入(万元)", "收入"]
+    )
+    expense_col = _pick_first_existing_column(
+        tx_df, ["expense", "支出(元)", "支出(万元)", "支出"]
+    )
     direction_col = _pick_first_existing_column(tx_df, ["direction", "收支方向"])
-    amount_col = _pick_first_existing_column(tx_df, ["amount", "交易金额", "金额"])
+    amount_col = _pick_first_existing_column(
+        tx_df, ["amount", "交易金额", "交易金额(万元)", "金额", "金额(万元)"]
+    )
     counterparty_col = _pick_first_existing_column(tx_df, ["counterparty", "交易对手"])
     description_col = _pick_first_existing_column(tx_df, ["description", "交易摘要", "摘要"])
     account_col = _pick_first_existing_column(tx_df, ["account_number", "本方账号", "账号"])
@@ -923,22 +1117,22 @@ def _prepare_person_transactions_for_advanced_analyzers(
     normalized = pd.DataFrame(index=tx_df.index)
 
     if date_col:
-        normalized["date"] = pd.to_datetime(tx_df[date_col], errors="coerce")
+        normalized["date"] = utils.normalize_datetime_series(tx_df[date_col])
     else:
         normalized["date"] = pd.NaT
 
     if income_col:
-        normalized["income"] = pd.to_numeric(tx_df[income_col], errors="coerce").fillna(0.0)
+        normalized["income"] = utils.normalize_amount_series(tx_df[income_col], income_col)
     else:
         normalized["income"] = 0.0
 
     if expense_col:
-        normalized["expense"] = pd.to_numeric(tx_df[expense_col], errors="coerce").fillna(0.0)
+        normalized["expense"] = utils.normalize_amount_series(tx_df[expense_col], expense_col)
     else:
         normalized["expense"] = 0.0
 
     if amount_col:
-        normalized["amount"] = pd.to_numeric(tx_df[amount_col], errors="coerce").fillna(0.0)
+        normalized["amount"] = utils.normalize_amount_series(tx_df[amount_col], amount_col)
     else:
         normalized["amount"] = normalized["income"].where(
             normalized["income"] > 0, normalized["expense"]
@@ -1474,8 +1668,35 @@ def serialize_analysis_results(results: Dict) -> Dict:
 
         elif key == "timeSeries":
             serialized[key] = value
+        elif key == "relatedParty":
+            related_result = value if isinstance(value, dict) else {}
+            details = []
+
+            related_type_mapping = {
+                "direct_flows": "direct_flow",
+                "third_party_relays": "third_party_relay",
+                "fund_loops": "fund_loop",
+                "discovered_nodes": "discovered_node",
+                "relationship_clusters": "relationship_cluster",
+            }
+
+            for array_name, type_name in related_type_mapping.items():
+                for item in related_result.get(array_name, []):
+                    record = item.copy() if isinstance(item, dict) else {}
+                    record["_type"] = type_name
+                    details.append(record)
+
+            serialized["relatedParty"] = {
+                "summary": related_result.get("summary", {}),
+                "details": details,
+                **{
+                    k: v
+                    for k, v in related_result.items()
+                    if k not in ["summary", "details"]
+                },
+            }
         elif key == "aggregation":
-            serialized[key] = value
+            serialized[key] = serialize_for_json(value)
         elif key == "family_tree":
             serialized["family_tree"] = value
         elif key == "family_units_v2":
@@ -1545,12 +1766,11 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
     analysis_state.update(
         status="running", progress=0, phase="初始化分析引擎...", error=None
     )
+    log_capture_started = False
 
     try:
         data_dir = analysis_config.inputDirectory
-        output_dir = analysis_config.outputDirectory or os.path.join(
-            os.path.dirname(data_dir), "output"
-        )
+        output_dir = analysis_config.outputDirectory or str(OUTPUT_DIR)
 
         # 转换为绝对路径
         data_dir = os.path.abspath(os.path.expanduser(data_dir))
@@ -1569,6 +1789,12 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             analysis_state.update(status="failed", phase=error_msg)
             return
 
+        runtime_log_paths = _start_analysis_runtime_log_capture(
+            output_dir,
+            analysis_state.start_time,
+        )
+        log_capture_started = True
+        output_dirs = create_output_directories(output_dir)
         logger.info(f"输入目录 (绝对路径): {data_dir}")
         logger.info(f"输出目录 (绝对路径): {output_dir}")
 
@@ -1586,8 +1812,8 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         # 清除旧缓存（点击"开始分析"时自动清除）
         # ========================================================================
         try:
-            cache_dir = os.path.join(output_dir, "analysis_cache")
-            results_dir = os.path.join(output_dir, "analysis_results")
+            cache_dir = output_dirs["analysis_cache"]
+            results_dir = output_dirs["analysis_results"]
 
             def clear_directory_contents(directory):
                 """清除目录内容（保留目录本身）"""
@@ -1603,8 +1829,15 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
 
             clear_directory_contents(cache_dir)
             clear_directory_contents(results_dir)
+            _attach_analysis_results_log_mirror(output_dirs["analysis_results"])
 
             logger.info(f"  ✓ 已清除旧缓存: {cache_dir}, {results_dir}")
+            logger.info(
+                "分析日志固化已启用: run=%s latest=%s mirror=%s",
+                runtime_log_paths.get("runLog", ""),
+                runtime_log_paths.get("latestLog", ""),
+                _get_last_analysis_log_paths().get("resultsMirror", ""),
+            )
             broadcast_log("INFO", "  ✓ 已清除旧缓存，开始新分析")
         except Exception as e:
             logger.warning(f"  ⚠ 清除缓存失败: {e}，继续分析...")
@@ -1648,7 +1881,6 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         phase2_start = time.time()
 
         cleaned_data = {}
-        output_dirs = create_output_directories(output_dir)
 
         total_entities = len(persons) + len(companies)
         broadcast_log(
@@ -2213,8 +2445,9 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                             feature_tx_df = analyzer_tx_df.copy()
                             # 该分析器按“分”处理金额，这里将元口径转换为分。
                             feature_tx_df["amount"] = (
-                                pd.to_numeric(feature_tx_df["amount"], errors="coerce")
-                                .fillna(0.0)
+                                utils.normalize_amount_series(
+                                    feature_tx_df["amount"], "amount"
+                                )
                                 .astype(float)
                                 * 100.0
                             )
@@ -2632,16 +2865,13 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         broadcast_log("INFO", f"  ✓ 疑点检测完成: 发现 {suspicion_total} 个可疑点")
         _raise_if_analysis_stopped("疑点检测后收到停止请求")
 
-        # ========================================================================
-        # 【修复】在 Phase 8 之前保存基础缓存
-        # 这样报告生成器可以读取缓存文件
-        # ========================================================================
         derived_data = {
             "penetration": analysis_results.get("penetration", {}),
             "ml": analysis_results.get("ml", {}),
             "loan": analysis_results.get("loan", {}),
             "income": analysis_results.get("income", {}),
             "time_series": analysis_results.get("timeSeries", {}),
+            "aggregation": analysis_results.get("aggregation", {}),
             "large_transactions": analysis_results.get("large_transactions", []),
             "family_summary": {
                 "family_units": analysis_results.get("family_units_v2", []),
@@ -2651,33 +2881,6 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             "family_units_v2": analysis_results.get("family_units_v2", []),
             "all_family_summaries": analysis_results.get("all_family_summaries", {}),
         }
-
-        # 保存基础缓存（供报告生成器使用）
-        logger.info("保存基础缓存（供报告生成）...")
-        try:
-            cache_mgr = CacheManager(output_dirs["analysis_cache"])
-            cache_mgr.save_cache("profiles", serialize_profiles(profiles))
-            cache_mgr.save_cache("derived_data", derived_data)
-            cache_mgr.save_cache("suspicions", serialize_suspicions(suspicions))
-            # 保存元数据
-            metadata = {
-                "persons": all_persons,
-                "companies": all_companies,
-                "analysisTime": datetime.now().isoformat(),
-                # 【修复】添加身份证号到人名的映射
-                "id_to_name_map": id_to_name_map,
-            }
-            cache_mgr.save_metadata(metadata)
-            logger.info("  ✓ 基础缓存已保存")
-        except Exception as e:
-            logger.warning(f"  ✗ 保存基础缓存失败: {e}")
-
-        # 【修复】在报告生成前保存外部数据缓存，确保报告生成器能读取到
-        logger.info("保存外部数据缓存（供报告生成）...")
-        try:
-            _save_external_report_caches(cache_mgr, external_data, logger)
-        except Exception as e:
-            logger.warning(f"  ✗ 保存外部数据缓存失败: {e}")
 
         analysis_state.update(progress=95, phase="生成分析报告...")
         broadcast_log("INFO", "▶ Phase 8: 生成分析报告...")
@@ -2784,17 +2987,46 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             logger.warning(f"  ✗ 构建family_assets失败: {e}")
             family_assets = {}
 
-        # 8.2 生成完整txt报告（使用investigation_report_builder）
+        # 8.2 先增强疑点并固化完整缓存，确保报告生成器读取到完整数据
+        enhanced_suspicions = _enhance_suspicions_with_analysis(
+            suspicions, analysis_results
+        )
+
+        analysis_state.results = {
+            "persons": all_persons,
+            "companies": all_companies,
+            "profiles": serialize_profiles(profiles),
+            "suspicions": serialize_suspicions(enhanced_suspicions),
+            "analysisResults": serialize_analysis_results(analysis_results),
+            "graphData": graph_data_cache,
+            "externalData": external_data,
+            "runtimeLogPaths": _get_last_analysis_log_paths(),
+            "_profiles_raw": profiles,
+        }
+
+        logger.info("保存分析缓存（供报告生成）...")
         try:
-            builder = load_investigation_report_builder(output_dir)
-            if builder:
-                if saved_primary_config:
-                    builder.set_primary_config(saved_primary_config)
+            _save_analysis_cache_refactored(
+                analysis_state.results, output_dirs["analysis_cache"], id_to_name_map
+            )
+            logger.info("  ✓ 分析缓存已保存")
+        except Exception as e:
+            logger.error(f"  ✗ 保存分析缓存失败: {e}")
+
+        report_builder = load_investigation_report_builder(output_dir)
+        if report_builder and saved_primary_config:
+            report_builder.set_primary_config(saved_primary_config)
+
+        # 8.3 生成完整txt报告（使用investigation_report_builder）
+        try:
+            if report_builder:
                 txt_report_path = os.path.join(
                     output_dirs["analysis_results"],
                     config.OUTPUT_REPORT_FILE.replace(".docx", ".txt"),
                 )
-                txt_report_path = builder.generate_complete_txt_report(txt_report_path)
+                txt_report_path = report_builder.generate_complete_txt_report(
+                    txt_report_path
+                )
                 logger.info(f"  ✓ 完整txt报告已生成: {txt_report_path}")
                 broadcast_log("INFO", "  ✓ 完整txt报告生成成功")
             else:
@@ -2803,7 +3035,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             logger.warning(f"  ✗ 完整txt报告生成失败: {e}")
             broadcast_log("WARN", f"  ✗ 完整txt报告生成失败: {str(e)[:50]}")
 
-        # 8.3 生成 Excel 核查底稿
+        # 8.4 生成 Excel 核查底稿
         try:
             excel_path = report_generator.generate_excel_workbook(
                 profiles=profiles,
@@ -2824,15 +3056,14 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             logger.warning(f"  ✗ Excel核查底稿生成失败: {e}")
             broadcast_log("WARN", f"  ✗ Excel核查底稿生成失败: {str(e)[:50]}")
 
-        # 8.4 生成专项txt报告
+        # 8.5 生成专项txt报告
         try:
-            logger.info("  8.4 开始生成专项txt报告...")
-            builder = load_investigation_report_builder(output_dir)
-            if builder:
+            logger.info("  8.5 开始生成专项txt报告...")
+            if report_builder:
                 specialized_gen = SpecializedReportGenerator(
                     analysis_results=analysis_results,
-                    profiles=builder.profiles,
-                    suspicions=builder.suspicions,
+                    profiles=report_builder.profiles,
+                    suspicions=report_builder.suspicions,
                     output_dir=output_dirs["analysis_results"],
                     input_dir=_get_active_input_dir(),
                 )
@@ -2855,13 +3086,10 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             logger.warning(f"  ✗ 专项txt报告生成失败: {e}")
             broadcast_log("WARN", f"  ✗ 专项txt报告生成失败: {str(e)[:50]}")
 
-        # 8.5 生成报告目录清单（使用investigation_report_builder）
+        # 8.6 生成报告目录清单
         try:
-            builder = load_investigation_report_builder(output_dir)
-            if builder:
-                index_path = builder.generate_report_index_file(
-                    output_dirs["analysis_results"]
-                )
+            index_path = _refresh_report_index_file(output_dir)
+            if index_path:
                 logger.info(f"  ✓ 报告目录清单已生成: {index_path}")
                 broadcast_log("INFO", "  ✓ 报告目录清单生成成功")
             else:
@@ -2869,35 +3097,6 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         except Exception as e:
             logger.warning(f"  ✗ 报告目录清单生成失败: {e}")
             broadcast_log("WARN", f"  ✗ 报告目录清单生成失败: {str(e)[:50]}")
-
-        # 增强疑点数据
-        enhanced_suspicions = _enhance_suspicions_with_analysis(
-            suspicions, analysis_results
-        )
-
-        # 保存结果
-        analysis_state.results = {
-            "persons": all_persons,
-            "companies": all_companies,
-            "profiles": serialize_profiles(profiles),
-            "suspicions": serialize_suspicions(enhanced_suspicions),
-            "analysisResults": serialize_analysis_results(analysis_results),
-            "graphData": graph_data_cache,
-            "externalData": external_data,
-            "_profiles_raw": profiles,
-        }
-
-        # 【修复】先保存分析缓存，再设置完成状态
-        # 这样报告生成器和前端都能在 complete 时读取到缓存
-        logger.info("保存分析缓存...")
-        try:
-            _save_analysis_cache_refactored(
-                analysis_state.results, output_dirs["analysis_cache"],
-                id_to_name_map
-            )
-            logger.info("  ✓ 分析缓存已保存")
-        except Exception as e:
-            logger.error(f"  ✗ 保存分析缓存失败: {e}")
 
         # 完成状态更新（在缓存保存之后）
         analysis_state.update(progress=100, phase="分析完成")
@@ -2923,6 +3122,8 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         duration = (analysis_state.end_time - analysis_state.start_time).total_seconds()
         logger.info(f"✓ 分析完成，耗时 {duration:.2f} 秒")
         logger.info("🔄 [重构] 新数据流向已生效")
+        if log_capture_started:
+            _finalize_analysis_runtime_log_capture("completed")
 
         return analysis_state.results
 
@@ -2938,10 +3139,14 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             error=None,
         )
         broadcast_log("WARN", f"■ {stop_message}")
+        if log_capture_started:
+            _finalize_analysis_runtime_log_capture("stopped")
         return None
     except Exception as e:
         logger.exception(f"分析失败: {e}")
         analysis_state.update(status="failed", error=str(e))
+        if log_capture_started:
+            _finalize_analysis_runtime_log_capture("failed")
         raise
     finally:
         analysis_state.clear_stop_request()
@@ -3093,8 +3298,53 @@ async def serve_dashboard(requested_path: str = ""):
 @app.get("/api/status")
 async def get_status():
     """获取分析状态"""
-    _ensure_completed_state_consistent()
+    _sync_analysis_state_with_active_output()
     return analysis_state.to_dict()
+
+
+@app.post("/api/active-paths")
+async def sync_active_paths(request: ActivePathsRequest):
+    """同步前端当前选中的输入/输出目录，并尝试恢复该输出目录缓存。"""
+    requested_input = (
+        _normalize_directory_path(request.inputDirectory, _get_active_input_dir())
+        if request.inputDirectory is not None
+        else _get_active_input_dir()
+    )
+    requested_output = (
+        _normalize_directory_path(request.outputDirectory, _get_active_output_dir())
+        if request.outputDirectory is not None
+        else _get_active_output_dir()
+    )
+
+    current_input = _get_active_input_dir()
+    current_output = _get_active_output_dir()
+
+    if analysis_state.status == "running" and (
+        requested_input != current_input or requested_output != current_output
+    ):
+        raise HTTPException(status_code=409, detail="分析运行中，暂不支持切换输入/输出目录")
+
+    active_paths = _set_active_paths(
+        request.inputDirectory, request.outputDirectory
+    )
+    os.makedirs(active_paths["outputDirectory"], exist_ok=True)
+
+    output_changed = active_paths["outputDirectory"] != current_output
+    cache_restored = _sync_analysis_state_with_active_output(
+        force_reload=output_changed
+    )
+
+    if output_changed and not cache_restored:
+        analysis_state.reset("等待开始分析")
+
+    return {
+        "success": True,
+        "data": {
+            **active_paths,
+            "cacheRestored": cache_restored,
+            "status": analysis_state.status,
+        },
+    }
 
 
 @app.post("/api/analysis/start")
@@ -3129,10 +3379,8 @@ async def get_results():
     from fastapi.responses import Response
     import json
 
-    logger = logging.getLogger(__name__)
-
     try:
-        _ensure_completed_state_consistent()
+        _sync_analysis_state_with_active_output()
 
         # 如果内存中有结果，直接返回
         if analysis_state.status == "completed" and analysis_state.results:
@@ -3145,27 +3393,7 @@ async def get_results():
             )
             return Response(content=response_body, media_type="application/json")
 
-        # 内存中没有结果，尝试从缓存文件读取
-        cache_dir = _get_active_cache_dir()
-        cache_mgr = CacheManager(cache_dir)
-        results_data = cache_mgr.load_results()
-
-        if results_data:
-            # 将缓存结果加载到内存
-            analysis_state.results = results_data
-            analysis_state.status = "completed"
-            if not analysis_state.end_time:
-                analysis_state.end_time = datetime.now()
-            results_serialized = serialize_for_json(results_data)
-            results_serialized = to_camel_case(results_serialized)
-            results_serialized = serialize_for_json(results_serialized)
-            response_body = json.dumps(
-                {"message": "分析结果获取成功（来自缓存）", "data": results_serialized},
-                ensure_ascii=False,
-            )
-            return Response(content=response_body, media_type="application/json")
-        else:
-            raise HTTPException(status_code=400, detail="分析尚未完成且缓存无效")
+        raise HTTPException(status_code=400, detail="分析尚未完成且缓存无效")
     except HTTPException:
         raise
     except Exception as e:
@@ -3220,7 +3448,7 @@ async def get_reports():
 @app.get("/api/reports/subjects")
 async def get_report_subjects():
     """获取报告生成可选的核查对象列表"""
-    _ensure_completed_state_consistent()
+    _sync_analysis_state_with_active_output()
 
     # 优先从缓存中获取
     if analysis_state.status == "completed" and analysis_state.results:
@@ -3719,8 +3947,8 @@ async def get_report_files():
         return {"success": False, "reports": [], "error": str(e)}
 
 
-@app.get("/api/reports/preview/{filename:path}")
-async def preview_report_file(filename: str):
+@app.api_route("/api/reports/preview/{filename:path}", methods=["GET", "HEAD"])
+async def preview_report_file(filename: str, request: Request):
     """
     预览报告文件内容
 
@@ -3791,6 +4019,9 @@ async def preview_report_file(filename: str):
 
     # 获取文件扩展名（用于判断文件类型）
     ext = os.path.splitext(filepath)[1].lower()
+    if request.method == "HEAD":
+        media_type = "text/html; charset=utf-8" if ext == ".html" else "application/json"
+        return Response(status_code=200, media_type=media_type)
 
     try:
         if ext == ".txt" or ext == ".md":
@@ -4357,6 +4588,10 @@ async def save_html_report(request: dict):
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(html_content)
 
+        index_path = _refresh_report_index_file(_get_active_output_dir())
+        if index_path:
+            logger.info(f"[报告保存] 报告目录清单已刷新: {index_path}")
+
         logger.info(f"[报告保存] HTML已保存: {filepath}")
         return {"success": True, "path": filepath, "message": "HTML保存成功"}
 
@@ -4485,17 +4720,37 @@ async def open_folder(request: OpenFolderRequest):
 @app.get("/api/analysis/graph-data")
 async def get_graph_data():
     """获取图谱可视化数据"""
+    _sync_analysis_state_with_active_output()
     if analysis_state.status != "completed" or not analysis_state.results:
         raise HTTPException(status_code=400, detail="分析尚未完成")
 
     results = analysis_state.results
     persons = results.get("persons", [])
     companies = results.get("companies", [])
+    analysis_results = results.get("analysisResults", {})
+    related_party = analysis_results.get("relatedParty", {}) if isinstance(analysis_results, dict) else {}
+    penetration = analysis_results.get("penetration", {}) if isinstance(analysis_results, dict) else {}
+    aggregation_overview = build_aggregation_overview(
+        analysis_results=analysis_results if isinstance(analysis_results, dict) else {},
+        scope_entities=persons + companies,
+        limit=8,
+    )
+    penetration_meta = (
+        penetration.get("analysis_metadata", {}) if isinstance(penetration, dict) else {}
+    )
+    related_party_meta = (
+        related_party.get("analysis_metadata", {}) if isinstance(related_party, dict) else {}
+    )
 
     # 从缓存结果中获取图谱数据
     graph_cache = results.get("graphData", {})
     nodes = graph_cache.get("nodes", [])
     edges = graph_cache.get("edges", [])
+    focus_entities = annotate_focus_entities_with_graph(
+        aggregation_overview.get("highlights", []),
+        graph_nodes=nodes,
+    )
+    aggregation_summary = aggregation_overview.get("summary", {})
 
     # 构建完整的统计信息（前端 GraphData 接口要求）
     stats = {
@@ -4504,10 +4759,15 @@ async def get_graph_data():
         "corePersonCount": len(persons),
         "corePersonNames": persons,
         "involvedCompanyCount": len(companies),
-        "highRiskCount": 0,
-        "mediumRiskCount": 0,
+        "highRiskCount": int(
+            aggregation_summary.get("极高风险实体数", 0)
+            + aggregation_summary.get("高风险实体数", 0)
+        ),
+        "mediumRiskCount": int(aggregation_summary.get("中风险实体数", 0) or 0),
         "loanPairCount": 0,
         "noRepayCount": 0,
+        "discoveredNodeCount": len(related_party.get("discovered_nodes", [])),
+        "relationshipClusterCount": len(related_party.get("relationship_clusters", [])),
         "coreEdgeCount": 0,
         "companyEdgeCount": 0,
         "otherEdgeCount": len(edges),
@@ -4519,6 +4779,16 @@ async def get_graph_data():
         "no_repayment_loans": [],
         "high_risk_income": [],
         "online_loans": [],
+        "third_party_relays": related_party.get("third_party_relays", []),
+        "discovered_nodes": related_party.get("discovered_nodes", []),
+        "relationship_clusters": related_party.get("relationship_clusters", []),
+        "fund_cycles": penetration.get("fund_cycles") or related_party.get("fund_loops", []),
+        "fund_cycle_meta": penetration_meta.get("fund_cycles")
+        or related_party_meta.get("fund_loops", {})
+        or {},
+        "focus_entities": focus_entities,
+        "aggregation_summary": aggregation_summary,
+        "aggregation_metadata": aggregation_overview.get("analysis_metadata", {}),
     }
 
     # 构建采样信息
@@ -4548,6 +4818,7 @@ async def get_graph_data():
 @app.get("/api/audit-navigation")
 async def get_audit_navigation():
     """获取审计导航结构（包含文件夹路径和报告列表）"""
+    _sync_analysis_state_with_active_output()
     if analysis_state.status != "completed" or not analysis_state.results:
         raise HTTPException(status_code=400, detail="分析尚未完成")
 

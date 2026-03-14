@@ -74,6 +74,13 @@ class TestParseDate:
         result = parse_date(None)
         assert result is None
 
+    def test_parse_date_with_excel_serial(self):
+        """测试 Excel 序列日期"""
+        result = parse_date(45292)
+        assert result.year == 2024
+        assert result.month == 1
+        assert result.day == 1
+
 
 class TestFormatAmount:
     """测试金额格式化函数"""
@@ -107,6 +114,16 @@ class TestFormatAmount:
         """测试带元文字的金额"""
         result = format_amount("1234.56元")
         assert result == 1234.56
+
+    def test_format_amount_with_wan_unit(self):
+        """测试金额字符串包含万元单位"""
+        result = format_amount("100万")
+        assert result == 1000000.0
+
+    def test_format_amount_with_unit_hint(self):
+        """测试列头提供单位提示时自动换算为元"""
+        result = format_amount("12.34", unit_hint_multiplier=10000)
+        assert result == 123400.0
     
     def test_format_amount_with_none(self):
         """测试None值"""

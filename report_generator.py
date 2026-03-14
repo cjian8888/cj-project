@@ -7,11 +7,16 @@
 
 import pandas as pd
 from datetime import datetime
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 import html
 import json
 import config
 import utils
+from utils.aggregation_view import (
+    build_aggregation_overview as shared_build_aggregation_overview,
+    extract_aggregation_payload as shared_extract_aggregation_payload,
+    normalize_aggregation_ranked_entities as shared_normalize_aggregation_ranked_entities,
+)
 
 logger = utils.setup_logger(__name__)
 
@@ -202,6 +207,83 @@ def _calculate_family_financials(head, members, profiles, func_type):
                   val = max(0, w.get('wealth_purchase', 0) - w.get('wealth_redemption', 0))
               total += val
     return round(total / 10000, 2)
+
+
+def _extract_aggregation_payload(
+    aggregator: Any = None,
+    derived_data: Optional[Dict] = None,
+) -> Dict[str, Any]:
+    """从聚合器实例或 derived_data 中提取聚合结果。"""
+    return shared_extract_aggregation_payload(
+        aggregation=aggregator,
+        derived_data=derived_data,
+    )
+
+
+def _normalize_aggregation_ranked_entities(
+    aggregation_payload: Dict[str, Any],
+    scope_entities: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """标准化聚合排序实体，供老链路复用。"""
+    return shared_normalize_aggregation_ranked_entities(
+        aggregation_payload,
+        scope_entities=scope_entities,
+    )
+
+
+def _build_aggregation_overview(
+    aggregator: Any = None,
+    derived_data: Optional[Dict] = None,
+    scope_entities: Optional[List[str]] = None,
+    limit: int = 5,
+) -> Dict[str, Any]:
+    """为老链路构建聚合风险概览。"""
+    return shared_build_aggregation_overview(
+        aggregation=aggregator,
+        derived_data=derived_data,
+        scope_entities=scope_entities,
+        limit=limit,
+    )
+
+
+def _generate_aggregation_summary_sheet(writer, derived_data: Optional[Dict]) -> None:
+    """生成聚合风险排序摘要页。"""
+    overview = _build_aggregation_overview(derived_data=derived_data)
+    highlights = overview.get("highlights", [])
+    summary = overview.get("summary", {})
+
+    if not highlights and not summary:
+        return
+
+    summary_rows = [
+        {"指标": "极高风险实体数", "值": int(summary.get("极高风险实体数", 0) or 0)},
+        {"指标": "高风险实体数", "值": int(summary.get("高风险实体数", 0) or 0)},
+        {"指标": "高优先线索实体数", "值": int(summary.get("高优先线索实体数", 0) or 0)},
+        {"指标": "平均风险分", "值": overview.get("avg_score", 0)},
+    ]
+    df_summary = pd.DataFrame(summary_rows)
+    df_summary.to_excel(writer, sheet_name="聚合风险排序", index=False, startrow=0)
+
+    if highlights:
+        detail_rows = []
+        for item in highlights:
+            detail_rows.append(
+                {
+                    "对象名称": item["entity"],
+                    "风险评分": item["risk_score"],
+                    "风险置信度": item["risk_confidence"],
+                    "高优先线索数": item["high_priority_clue_count"],
+                    "最强证据分": item["top_evidence_score"],
+                    "综合摘要": item["summary"],
+                    "重点线索": " | ".join(item["top_clues"]),
+                }
+            )
+        pd.DataFrame(detail_rows).to_excel(
+            writer,
+            sheet_name="聚合风险排序",
+            index=False,
+            startrow=len(df_summary) + 3,
+        )
 
 
 def _generate_summary_sheet(writer, profiles):
@@ -996,17 +1078,31 @@ def _generate_fund_cycle_sheets(writer, penetration_results):
     if penetration_results.get('fund_cycles'):
         data = []
         for cycle in penetration_results['fund_cycles']:
-            if isinstance(cycle, list):
+            if isinstance(cycle, dict):
+                cycle_str = cycle.get('path') or ' → '.join(cycle.get('nodes') or cycle.get('participants') or [])
+                cycle_len = cycle.get('length') or len(cycle.get('nodes') or cycle.get('participants') or [])
+                risk_level = str(cycle.get('risk_level', 'medium')).upper()
+                risk_score = cycle.get('risk_score')
+                confidence = cycle.get('confidence')
+            elif isinstance(cycle, list):
                 cycle_str = ' → '.join(cycle)
                 cycle_len = len(cycle)
+                risk_level = 'HIGH' if cycle_len >= 3 else 'MEDIUM'
+                risk_score = None
+                confidence = None
             else:
                 cycle_str = str(cycle)
                 cycle_len = 0
+                risk_level = 'MEDIUM'
+                risk_score = None
+                confidence = None
 
             data.append({
                 '闭环路径': cycle_str,
                 '涉及节点数': cycle_len,
-                '风险等级': 'HIGH' if cycle_len >= 3 else 'MEDIUM',
+                '风险等级': risk_level,
+                '风险评分': risk_score,
+                '置信度': confidence,
             })
         if data:
             pd.DataFrame(data).to_excel(writer, sheet_name='穿透-资金闭环', index=False)
@@ -1242,6 +1338,9 @@ def generate_excel_workbook(profiles: Dict,
 
         # 1. 资金画像汇总表
         _generate_summary_sheet(writer, profiles)
+
+        # 1.5 聚合风险排序摘要
+        _generate_aggregation_summary_sheet(writer, derived_data)
 
 
         # 2. 直接转账关系表
@@ -1550,7 +1649,14 @@ def _estimate_bank_balance(person, cleaned_data):
     return max(0, total_in - total_out)
 
 
-def _generate_report_conclusion(profiles, suspicions, core_persons, involved_companies, aggregator=None):
+def _generate_report_conclusion(
+    profiles,
+    suspicions,
+    core_persons,
+    involved_companies,
+    aggregator=None,
+    derived_data: Optional[Dict] = None,
+):
     """
     生成报告核心结论部分
 
@@ -1573,47 +1679,44 @@ def _generate_report_conclusion(profiles, suspicions, core_persons, involved_com
     direct_sus_count = len(suspicions['direct_transfers'])
     hidden_sus_count = sum(len(v) for v in suspicions['hidden_assets'].values())
 
+    aggregation_overview = _build_aggregation_overview(
+        aggregator=aggregator,
+        derived_data=derived_data,
+        scope_entities=core_persons + involved_companies,
+    )
+
     # 【P1 修复 2026-01-27】使用统一风险评分
-    # 如果有aggregator，使用统一的总体风险评级
-    if aggregator:
-        # 计算所有实体的平均风险分
-        all_entities = core_persons + involved_companies
-        total_risk_score = 0
-        entity_count = 0
-        high_risk_entities = []
+    if aggregation_overview.get("risk_assessment"):
+        risk_assessment = aggregation_overview["risk_assessment"]
+        avg_score = aggregation_overview.get("avg_score", 0.0)
+        highlights = aggregation_overview.get("highlights", [])
 
-        for entity in all_entities:
-            if entity in aggregator.evidence_packs:
-                risk_score = aggregator.evidence_packs[entity].get('risk_score', 0)
-                risk_level = aggregator.evidence_packs[entity].get('risk_level', 'unknown')
-                total_risk_score += risk_score
-                entity_count += 1
+        report_lines.append(
+            f"【总体评价】: 本次核查对象共 {len(core_persons)} 人及 {len(involved_companies)} 家关联公司，"
+            f"总体风险评级为[{risk_assessment}]（平均{avg_score:.1f}分）。"
+        )
 
-                if risk_level in ['critical', 'high']:
-                    high_risk_entities.append(f"{entity}({risk_score}分)")
+        if aggregation_overview.get("summary"):
+            summary = aggregation_overview["summary"]
+            report_lines.append(
+                f"【聚合排序】: 极高风险{summary.get('极高风险实体数', 0)}个，"
+                f"高风险{summary.get('高风险实体数', 0)}个，"
+                f"高优先线索实体{summary.get('高优先线索实体数', 0)}个。"
+            )
 
-        # 计算平均分
-        avg_score = total_risk_score / entity_count if entity_count > 0 else 0
-
-        # 确定总体风险评级
-        if avg_score >= 70:
-            risk_assessment = "高风险"
-            risk_level_cn = "高风险"
-        elif avg_score >= 50:
-            risk_assessment = "关注级"
-            risk_level_cn = "关注级"
-        elif avg_score >= 30:
-            risk_assessment = "低风险"
-            risk_level_cn = "低风险"
-        else:
-            risk_assessment = "低风险"
-            risk_level_cn = "低风险"
-
-        report_lines.append(f"【总体评价】: 本次核查对象共 {len(core_persons)} 人及 {len(involved_companies)} 家关联公司，总体风险评级为[{risk_assessment}]（平均{avg_score:.1f}分）。")
-
-        # 如果有高风险实体，列出
-        if high_risk_entities:
+        if highlights:
+            high_risk_entities = [
+                f"{item['entity']}({item['risk_score']:.1f}分/置信度{item['risk_confidence']:.2f})"
+                for item in highlights[:3]
+            ]
             report_lines.append(f"【高风险实体】: {', '.join(high_risk_entities)}")
+
+            top_clues = []
+            for item in highlights[:2]:
+                if item.get("top_clues"):
+                    top_clues.append(f"{item['entity']}:{item['top_clues'][0]}")
+            if top_clues:
+                report_lines.append(f"【重点线索】: {'；'.join(top_clues)}")
     else:
         # 旧逻辑：如果没有aggregator，使用简单的判断
         risk_assessment = "低风险"
@@ -1635,7 +1738,13 @@ def _generate_report_conclusion(profiles, suspicions, core_persons, involved_com
     if high_flow_persons:
         report_lines.append(f"【特别说明】: {', '.join(high_flow_persons)} 银行流水规模较大，主要系理财产品频繁申赎所致，详见下文理财分析。")
 
-    if direct_sus_count == 0 and hidden_sus_count == 0:
+    if aggregation_overview.get("highlights"):
+        highlighted_entities = "、".join(
+            f"{item['entity']}({item['risk_score']:.1f}分)"
+            for item in aggregation_overview["highlights"][:3]
+        )
+        report_lines.append(f"【主要发现】: 聚合排序识别出重点核查对象 {highlighted_entities}。")
+    elif direct_sus_count == 0 and hidden_sus_count == 0:
         report_lines.append(f"【主要发现】: 未发现核心人员与涉案公司存在直接利益输送，亦未发现明显的隐形房产/车辆购置线索。")
     else:
         report_lines.append(f"【主要发现】: 发现 {direct_sus_count} 笔疑似直接利益输送，{hidden_sus_count} 笔疑似隐形资产线索，需进一步核查。")
@@ -1908,7 +2017,8 @@ def generate_official_report(profiles: Dict,
                             family_summary: Dict = None,
                             family_assets: Dict = None,
                             cleaned_data: Dict = None,
-                            aggregator=None) -> str:
+                            aggregator=None,
+                            derived_data: Dict = None) -> str:
     """
     生成公文格式的核查结果分析报告（2026专业纪检优化版 v6）
     特点：
@@ -1922,7 +2032,18 @@ def generate_official_report(profiles: Dict,
     """
     # 同时也生成HTML报告
     html_path = output_path.replace('.txt', '.html') if output_path else config.OUTPUT_REPORT_FILE.replace('.docx', '.html')
-    generate_html_report(profiles, suspicions, core_persons, involved_companies, html_path, family_summary, family_assets, cleaned_data)
+    generate_html_report(
+        profiles,
+        suspicions,
+        core_persons,
+        involved_companies,
+        html_path,
+        family_summary,
+        family_assets,
+        cleaned_data,
+        aggregator=aggregator,
+        derived_data=derived_data,
+    )
 
     if output_path is None:
         output_path = config.OUTPUT_REPORT_FILE.replace('.docx', '.txt')
@@ -1936,7 +2057,16 @@ def generate_official_report(profiles: Dict,
     report_lines.append("=" * 60)
 
     # 1. 核心结论 (Executive Summary)
-    report_lines.extend(_generate_report_conclusion(profiles, suspicions, core_persons, involved_companies))
+    report_lines.extend(
+        _generate_report_conclusion(
+            profiles,
+            suspicions,
+            core_persons,
+            involved_companies,
+            aggregator=aggregator,
+            derived_data=derived_data,
+        )
+    )
 
     # 2. 家庭/个人详情 (Family Section)
     report_lines.append("二、家庭资产与资金画像")
@@ -2137,7 +2267,14 @@ HTML_TEMPLATE = """
 </html>
 """
 
-def _generate_html_conclusion(profiles, suspicions, core_persons, involved_companies):
+def _generate_html_conclusion(
+    profiles,
+    suspicions,
+    core_persons,
+    involved_companies,
+    aggregator=None,
+    derived_data: Optional[Dict] = None,
+):
     """
     生成HTML报告的核查结论部分
 
@@ -2154,15 +2291,19 @@ def _generate_html_conclusion(profiles, suspicions, core_persons, involved_compa
 
     total_trans = sum(p.get('summary', {}).get('transaction_count', 0) for p in profiles.values() if p.get('has_data', False))
 
-    # 风险评级
-    risk_assessment = "低风险"
     direct_sus_count = len(suspicions['direct_transfers'])
     hidden_sus_count = sum(len(v) for v in suspicions['hidden_assets'].values())
-    if direct_sus_count > 0 or hidden_sus_count > 0:
+    aggregation_overview = _build_aggregation_overview(
+        aggregator=aggregator,
+        derived_data=derived_data,
+        scope_entities=core_persons + involved_companies,
+    )
+    risk_assessment = aggregation_overview.get("risk_assessment") or "低风险"
+    if not aggregation_overview.get("risk_assessment") and (direct_sus_count > 0 or hidden_sus_count > 0):
         risk_assessment = "中高风险" if direct_sus_count > 5 else "关注级"
 
     risk_color = "green"
-    if risk_assessment == "中高风险": risk_color = "red"
+    if risk_assessment in {"中高风险", "高风险"}: risk_color = "red"
     elif risk_assessment == "关注级": risk_color = "orange"
 
     content_html = f"""
@@ -2172,9 +2313,29 @@ def _generate_html_conclusion(profiles, suspicions, core_persons, involved_compa
 
         <div class="section-title">一、核查结论</div>
         <div style="background-color:#f9f9f9; padding:15px; border-left: 5px solid {risk_color}; margin-bottom:20px;">
-            <p><strong>【总体评价】</strong>: 本次核查对象共 {len(core_persons)} 人及 {len(involved_companies)} 家关联公司，总体风险评级为 <strong><span style="color:{risk_color}">{_escape_html(risk_assessment)}</span></strong>。</p>
+            <p><strong>【总体评价】</strong>: 本次核查对象共 {len(core_persons)} 人及 {len(involved_companies)} 家关联公司，总体风险评级为 <strong><span style="color:{risk_color}">{_escape_html(risk_assessment)}</span></strong>{f"（平均{aggregation_overview.get('avg_score', 0):.1f}分）" if aggregation_overview.get('highlights') else ""}。</p>
             <p><strong>【数据概况】</strong>: 累计分析银行流水 {total_trans} 条。</p>
     """
+
+    if aggregation_overview.get("summary"):
+        summary = aggregation_overview["summary"]
+        content_html += (
+            f"""<p><strong>【聚合排序】</strong>: 极高风险{summary.get('极高风险实体数', 0)}个，"""
+            f"""高风险{summary.get('高风险实体数', 0)}个，高优先线索实体{summary.get('高优先线索实体数', 0)}个。</p>"""
+        )
+    if aggregation_overview.get("highlights"):
+        highlight_text = "，".join(
+            f"{_escape_html(item['entity'])}({item['risk_score']:.1f}分/置信度{item['risk_confidence']:.2f})"
+            for item in aggregation_overview["highlights"][:3]
+        )
+        content_html += f"""<p><strong>【高风险实体】</strong>: {highlight_text}</p>"""
+        clue_text = "；".join(
+            f"{_escape_html(item['entity'])}:{_escape_html(item['top_clues'][0])}"
+            for item in aggregation_overview["highlights"][:2]
+            if item.get("top_clues")
+        )
+        if clue_text:
+            content_html += f"""<p><strong>【重点线索】</strong>: {clue_text}</p>"""
 
     # 高流水预警
     high_flow_persons = []
@@ -2187,7 +2348,13 @@ def _generate_html_conclusion(profiles, suspicions, core_persons, involved_compa
     if high_flow_persons:
         content_html += f"""<p><strong>【特别说明】</strong>: <span style="color:red">{', '.join(high_flow_persons)}</span> 银行流水规模较大，主要系理财产品频繁申赎所致(详见下文)。</p>"""
 
-    if direct_sus_count == 0 and hidden_sus_count == 0:
+    if aggregation_overview.get("highlights"):
+        highlighted_entities = "、".join(
+            f"{_escape_html(item['entity'])}({item['risk_score']:.1f}分)"
+            for item in aggregation_overview["highlights"][:3]
+        )
+        content_html += f"""<p><strong>【主要发现】</strong>: 聚合排序识别出重点核查对象 {highlighted_entities}。</p>"""
+    elif direct_sus_count == 0 and hidden_sus_count == 0:
         content_html += f"""<p><strong>【主要发现】</strong>: 未发现核心人员与涉案公司存在直接利益输送，亦未发现明显的隐形房产/车辆购置线索。</p>"""
     else:
         content_html += f"""<p><strong>【主要发现】</strong>: 发现 {direct_sus_count} 笔疑似直接利益输送，{hidden_sus_count} 笔疑似隐形资产线索。</p>"""
@@ -2546,7 +2713,18 @@ def _load_primary_targets_config(output_path=None):
         return None
 
 
-def generate_html_report(profiles, suspicions, core_persons, involved_companies, output_path, family_summary=None, family_assets=None, cleaned_data=None):
+def generate_html_report(
+    profiles,
+    suspicions,
+    core_persons,
+    involved_companies,
+    output_path,
+    family_summary=None,
+    family_assets=None,
+    cleaned_data=None,
+    aggregator=None,
+    derived_data: Dict = None,
+):
     """
     生成HTML格式的分析报告 (V6版 - 匹配最新文本报告逻辑 - Fix Placeholder)
     """
@@ -2580,7 +2758,14 @@ def generate_html_report(profiles, suspicions, core_persons, involved_companies,
     content_html = ""
 
     # 1. 标题与前言（核查结论）
-    content_html += _generate_html_conclusion(profiles, suspicions, core_persons, involved_companies)
+    content_html += _generate_html_conclusion(
+        profiles,
+        suspicions,
+        core_persons,
+        involved_companies,
+        aggregator=aggregator,
+        derived_data=derived_data,
+    )
 
     # 2. 家庭板块 - 使用用户配置或系统识别的家庭分组
     content_html += _generate_html_family_section_v2(profiles, core_persons, family_summary, family_assets, cleaned_data, family_units)
@@ -2800,7 +2985,9 @@ def generate_word_report(profiles: Dict,
                          output_path: str = None,
                          family_summary: Dict = None,
                          family_assets: Dict = None,
-                         cleaned_data: Dict = None) -> str:
+                         cleaned_data: Dict = None,
+                         aggregator: Any = None,
+                         derived_data: Optional[Dict] = None) -> str:
     """
     使用 python-docx 生成专业 Word 审计报告
 
@@ -2813,6 +3000,8 @@ def generate_word_report(profiles: Dict,
         family_summary: 家庭关系摘要
         family_assets: 家庭资产数据
         cleaned_data: 清洗后的数据
+        aggregator: ClueAggregator实例（可选），用于获取统一风险评分
+        derived_data: 派生分析数据（可选），用于读取 aggregation 结果
 
     Returns:
         生成的 Word 文件路径
@@ -2926,17 +3115,27 @@ def generate_word_report(profiles: Dict,
         direct_sus_count = 0
         hidden_sus_count = 0
 
-    risk_assessment = "低风险"
-    if direct_sus_count > 0 or hidden_sus_count > 0:
+    aggregation_overview = _build_aggregation_overview(
+        aggregator=aggregator,
+        derived_data=derived_data,
+        scope_entities=core_persons + involved_companies,
+    )
+
+    risk_assessment = aggregation_overview.get("risk_assessment") or "低风险"
+    if not aggregation_overview.get("risk_assessment") and (direct_sus_count > 0 or hidden_sus_count > 0):
         risk_assessment = "中高风险" if direct_sus_count > 5 else "关注级"
+    avg_score = aggregation_overview.get("avg_score", 0.0)
 
     try:
         p = doc.add_paragraph()
         p.add_run('【总体评价】').bold = True
         p.add_run(f'本次核查对象共 {len(core_persons)} 人及 {len(involved_companies)} 家关联公司，')
-        risk_run = p.add_run(f'总体风险评级为 [{risk_assessment}]。')
-        if risk_assessment == "中高风险":
+        suffix = f'（平均{avg_score:.1f}分）' if aggregation_overview.get("highlights") else ''
+        risk_run = p.add_run(f'总体风险评级为 [{risk_assessment}]{suffix}。')
+        if risk_assessment in {"中高风险", "高风险"}:
             risk_run.font.color.rgb = RGBColor(255, 0, 0)
+        elif risk_assessment == "关注级":
+            risk_run.font.color.rgb = RGBColor(255, 140, 0)
     except Exception as e:
         logger.error(f'添加总体评价段落失败: {e}')
         return None
@@ -2948,11 +3147,55 @@ def generate_word_report(profiles: Dict,
     except Exception as e:
         logger.warning(f'添加数据概况段落失败: {e}')
 
+    if aggregation_overview.get("summary"):
+        try:
+            summary = aggregation_overview["summary"]
+            p_summary = doc.add_paragraph()
+            p_summary.add_run('【聚合排序】').bold = True
+            p_summary.add_run(
+                f"极高风险{summary.get('极高风险实体数', 0)}个，"
+                f"高风险{summary.get('高风险实体数', 0)}个，"
+                f"高优先线索实体{summary.get('高优先线索实体数', 0)}个。"
+            )
+        except Exception as e:
+            logger.warning(f'添加聚合排序段落失败: {e}')
+
+    if aggregation_overview.get("highlights"):
+        try:
+            p_high = doc.add_paragraph()
+            p_high.add_run('【高风险实体】').bold = True
+            highlight_text = "，".join(
+                f"{item['entity']}({item['risk_score']:.1f}分/置信度{item['risk_confidence']:.2f})"
+                for item in aggregation_overview["highlights"][:3]
+            )
+            high_run = p_high.add_run(highlight_text)
+            high_run.font.color.rgb = RGBColor(255, 0, 0)
+        except Exception as e:
+            logger.warning(f'添加高风险实体段落失败: {e}')
+
+        try:
+            top_clues = []
+            for item in aggregation_overview["highlights"][:2]:
+                if item.get("top_clues"):
+                    top_clues.append(f"{item['entity']}:{item['top_clues'][0]}")
+            if top_clues:
+                p_clue = doc.add_paragraph()
+                p_clue.add_run('【重点线索】').bold = True
+                p_clue.add_run("；".join(top_clues))
+        except Exception as e:
+            logger.warning(f'添加重点线索段落失败: {e}')
+
     # 主要发现
     try:
         p3 = doc.add_paragraph()
         p3.add_run('【主要发现】').bold = True
-        if direct_sus_count == 0 and hidden_sus_count == 0:
+        if aggregation_overview.get("highlights"):
+            highlighted_entities = "、".join(
+                f"{item['entity']}({item['risk_score']:.1f}分)"
+                for item in aggregation_overview["highlights"][:3]
+            )
+            p3.add_run(f'聚合排序识别出重点核查对象 {highlighted_entities}。')
+        elif direct_sus_count == 0 and hidden_sus_count == 0:
             p3.add_run('未发现核心人员与涉案公司存在直接利益输送。')
         else:
             finding = p3.add_run(f'发现 {direct_sus_count} 笔疑似直接利益输送，{hidden_sus_count} 笔疑似隐形资产线索。')

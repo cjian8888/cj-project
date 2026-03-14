@@ -9,6 +9,7 @@ from typing import Dict, List, Any, Optional, Set, Tuple
 
 from detectors.base_detector import BaseDetector
 from schemas.suspicion import SuspicionSeverity, SuspicionType
+import utils
 
 
 class SuspiciousPatternDetector(BaseDetector):
@@ -103,7 +104,7 @@ class SuspiciousPatternDetector(BaseDetector):
                         {
                             "datetime": dt,
                             "date": dt.date(),
-                            "amount": float(tx.get("amount", 0)),
+                            "amount": utils.format_amount(tx.get("amount", 0)),
                             "tx_type": tx.get("tx_type", ""),
                             "counterparty": tx.get("counterparty", ""),
                             "account": tx.get("account", ""),
@@ -121,14 +122,7 @@ class SuspiciousPatternDetector(BaseDetector):
             return date_value
         if isinstance(date_value, date):
             return datetime.combine(date_value, datetime.min.time())
-        if isinstance(date_value, str):
-            formats = ["%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d"]
-            for fmt in formats:
-                try:
-                    return datetime.strptime(date_value, fmt)
-                except ValueError:
-                    continue
-        return None
+        return utils.parse_date(date_value)
 
     def _detect_scatter_gather(
         self,

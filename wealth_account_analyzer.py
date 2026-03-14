@@ -239,7 +239,7 @@ class WealthAccountAnalyzer:
         
         # 处理日期格式
         if 'date' in self.df.columns:
-            self.df['date'] = pd.to_datetime(self.df['date'], errors='coerce')
+            self.df['date'] = utils.normalize_datetime_series(self.df['date'])
         
         # 清理空值账号
         self.df = self.df[self.df['account_id'].notna()]
@@ -424,7 +424,7 @@ class WealthAccountAnalyzer:
         for _, row in sub_df.iterrows():
             amount = row.get('income', 0) or row.get('expense', 0)
             if amount and amount > 0:
-                amounts.append(float(amount))
+                amounts.append(utils.format_amount(amount))
         
         if amounts:
             features['avg_amount'] = np.mean(amounts)

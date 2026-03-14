@@ -9,6 +9,7 @@ from typing import Dict, List, Any, Optional, Tuple
 import pandas as pd
 
 import config as global_config
+import utils
 from detectors.base_detector import BaseDetector
 from holiday_service import build_holiday_window
 from schemas.suspicion import SuspicionSeverity, SuspicionType
@@ -172,7 +173,7 @@ class TimeAnomalyDetector(BaseDetector):
                         {
                             "date": dt.date(),
                             "datetime": dt,
-                            "amount": float(tx.get("amount", 0)),
+                            "amount": self._safe_float(tx.get("amount", 0)),
                             "tx_type": tx.get("tx_type", ""),
                             "counterparty": tx.get("counterparty", ""),
                             "account": tx.get("account", ""),
@@ -244,16 +245,7 @@ class TimeAnomalyDetector(BaseDetector):
 
     def _safe_float(self, value: Any) -> float:
         """安全转换为浮点数。"""
-        try:
-            if pd.isna(value):
-                return 0.0
-        except (TypeError, ValueError):
-            pass
-
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return 0.0
+        return utils.format_amount(value)
 
     def _clean_text(self, value: Any) -> str:
         """安全转换为字符串。"""
@@ -278,20 +270,14 @@ class TimeAnomalyDetector(BaseDetector):
                 if t:
                     return datetime.combine(date_value, t)
             return datetime.combine(date_value, time.min)
-        if isinstance(date_value, str):
-            formats = ["%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d"]
-            for fmt in formats:
-                try:
-                    return datetime.strptime(date_value, fmt)
-                except ValueError:
-                    continue
-        try:
-            parsed = pd.to_datetime(date_value, errors="coerce")
-            if not pd.isna(parsed):
-                return parsed.to_pydatetime()
-        except (TypeError, ValueError, AttributeError):
-            pass
-        return None
+        parsed = utils.parse_date(date_value)
+        if parsed is None:
+            return None
+        if time_value:
+            t = self._parse_time(time_value)
+            if t:
+                return datetime.combine(parsed.date(), t)
+        return parsed
 
     def _parse_time(self, time_value: Any) -> Optional[time]:
         """解析时间字段为 time 对象。"""

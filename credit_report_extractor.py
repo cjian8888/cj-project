@@ -19,6 +19,7 @@ import utils
 from utils.safe_types import (
     safe_str,
     safe_float,
+    safe_amount,
     safe_int,
     safe_date,
     safe_datetime,
@@ -30,6 +31,11 @@ logger = utils.setup_logger(__name__)
 
 # 数据源目录名称
 CREDIT_DIR_NAME = "征信（定向查询）"
+
+
+def _safe_money(value) -> Optional[float]:
+    """征信金额字段统一按元解析，兼容显式万/亿单位。"""
+    return safe_amount(value, source_unit="yuan", target_unit="yuan")
 
 
 def extract_credit_data(data_dir: str) -> Dict[str, Dict]:
@@ -213,8 +219,8 @@ def _parse_loan_accounts(xls: pd.ExcelFile) -> tuple:
                 "business_type": safe_str(row.iloc[6]) if len(row) > 6 else None,
                 "open_date": safe_date(row.iloc[7]) if len(row) > 7 else None,
                 "currency": safe_str(row.iloc[8]) if len(row) > 8 else None,
-                "amount": safe_float(row.iloc[9]) if len(row) > 9 else None,
-                "credit_limit": safe_float(row.iloc[10]) if len(row) > 10 else None,
+                "amount": _safe_money(row.iloc[9]) if len(row) > 9 else None,
+                "credit_limit": _safe_money(row.iloc[10]) if len(row) > 10 else None,
             }
 
             # D1=贷款, R1/R2=信用卡

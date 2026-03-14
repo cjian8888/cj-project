@@ -20,6 +20,7 @@ import utils
 from utils.safe_types import (
     safe_str,
     safe_float,
+    safe_amount,
     safe_int,
     safe_date,
     safe_datetime,
@@ -30,6 +31,11 @@ logger = utils.setup_logger(__name__)
 
 # 数据源目录名称
 AML_DIR_NAME = "中国人民银行反洗钱（定向查询）"
+
+
+def _safe_money(value) -> Optional[float]:
+    """反洗钱金额统一按元解析，兼容显式单位和脏字符串。"""
+    return safe_amount(value, source_unit="yuan", target_unit="yuan")
 
 
 def extract_aml_data(data_dir: str) -> Dict[str, Dict]:
@@ -191,14 +197,14 @@ def _parse_query_summary(xls: pd.ExcelFile, source_file: str) -> List[Dict]:
                     continue
                 
                 for idx, row in df.iterrows():
-                    name = row.get("姓名")
-                    id_number = row.get("证件号码")
-                    result_status = row.get("查询结果", "")
+                    name = safe_str(row.get("姓名"))
+                    id_number = safe_str(row.get("证件号码"))
+                    result_status = safe_str(row.get("查询结果", "")) or ""
                     
                     if name and id_number:
                         persons.append({
-                            "name": str(name),
-                            "id_number": str(id_number),
+                            "name": name,
+                            "id_number": id_number,
                             "has_result": result_status == "有",
                             "source_file": source_file
                         })
@@ -271,7 +277,7 @@ def _parse_payment_accounts(xls: pd.ExcelFile, source_file: str) -> List[Dict]:
                         if len(row) > 4:
                             account["close_date"] = safe_date(row.iloc[4])
                         if len(row) > 5:
-                            account["balance"] = safe_float(row.iloc[5])
+                            account["balance"] = _safe_money(row.iloc[5])
                         
                         if account.get("account_number"):
                             accounts.append(account)
@@ -333,7 +339,7 @@ def _parse_payment_transactions(xls: pd.ExcelFile, source_file: str) -> List[Dic
                         if len(row) > 1:
                             tx["transaction_type"] = safe_str(row.iloc[1])
                         if len(row) > 2:
-                            tx["amount"] = safe_float(row.iloc[2])
+                            tx["amount"] = _safe_money(row.iloc[2])
                         if len(row) > 3:
                             tx["counterparty"] = safe_str(row.iloc[3])
                         if len(row) > 4:

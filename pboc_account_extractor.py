@@ -169,12 +169,9 @@ def parse_pboc_account_file(file_path: str) -> List[Dict]:
                     elif isinstance(value, pd.Timestamp):
                         value = value.strftime("%Y-%m-%d")
                     elif dst_col in ["open_date", "close_date"] and value:
-                        # 尝试转换日期字符串
-                        try:
-                            if isinstance(value, str):
-                                value = pd.to_datetime(value).strftime("%Y-%m-%d")
-                        except:
-                            pass
+                        parsed_date = utils.parse_date(value)
+                        if parsed_date is not None:
+                            value = parsed_date.strftime("%Y-%m-%d")
                     
                     account[dst_col] = value
             

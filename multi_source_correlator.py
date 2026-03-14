@@ -16,6 +16,38 @@ import utils
 logger = utils.setup_logger(__name__)
 
 
+def _prepare_transaction_frame(df: pd.DataFrame, account_key: str = "") -> pd.DataFrame:
+    """统一标准化碰撞分析所需的日期和金额字段。"""
+    if df is None or df.empty:
+        return pd.DataFrame(
+            columns=['date', 'counterparty', 'income', 'expense', 'description', '_trans_dt']
+        )
+
+    prepared = pd.DataFrame(index=df.index)
+    prepared['date'] = (
+        df['date'] if 'date' in df.columns else pd.Series(index=df.index, dtype=object)
+    )
+    prepared['counterparty'] = (
+        df['counterparty'].fillna('') if 'counterparty' in df.columns else ''
+    )
+    prepared['income'] = (
+        utils.normalize_amount_series(df['income'], 'income')
+        if 'income' in df.columns
+        else 0.0
+    )
+    prepared['expense'] = (
+        utils.normalize_amount_series(df['expense'], 'expense')
+        if 'expense' in df.columns
+        else 0.0
+    )
+    prepared['description'] = (
+        df['description'].fillna('') if 'description' in df.columns else ''
+    )
+    prepared['_account_key'] = account_key
+    prepared['_trans_dt'] = utils.normalize_datetime_series(prepared['date'])
+    return prepared
+
+
 def correlate_travel_companions(
     data_directory: str,
     all_transactions: Dict[str, pd.DataFrame],
@@ -245,13 +277,7 @@ def _correlate_companions_with_funds(
         for c in person_companions:
             travel_date = c.get('travel_date')
             if travel_date is not None:
-                try:
-                    if hasattr(travel_date, 'date'):
-                        c['_travel_dt'] = travel_date
-                    else:
-                        c['_travel_dt'] = pd.to_datetime(travel_date)
-                except:
-                    c['_travel_dt'] = None
+                c['_travel_dt'] = utils.parse_date(travel_date)
     
     # 遍历每个人员的交易
     for person, person_companions in companions_by_person.items():
@@ -262,20 +288,12 @@ def _correlate_companions_with_funds(
         # 合并该人员所有账户的交易
         all_dfs = []
         for key, df in person_tx_list:
-            df_copy = df[['date', 'counterparty', 'income', 'expense', 'description']].copy()
-            df_copy['_account_key'] = key
-            all_dfs.append(df_copy)
+            all_dfs.append(_prepare_transaction_frame(df, account_key=key))
         
         if not all_dfs:
             continue
         
         merged_df = pd.concat(all_dfs, ignore_index=True)
-        
-        # 预解析交易日期
-        try:
-            merged_df['_trans_dt'] = pd.to_datetime(merged_df['date'], errors='coerce')
-        except:
-            merged_df['_trans_dt'] = None
         
         # 遍历同行人记录
         for c in person_companions:
@@ -464,9 +482,7 @@ def correlate_hotel_cohabitants(
         # 合并该人员所有账户的交易
         all_dfs = []
         for key, df in person_tx_list:
-            df_copy = df[['date', 'counterparty', 'income', 'expense', 'description']].copy()
-            df_copy['_account_key'] = key
-            all_dfs.append(df_copy)
+            all_dfs.append(_prepare_transaction_frame(df, account_key=key))
         
         if not all_dfs:
             continue
@@ -588,7 +604,7 @@ def correlate_express_contacts(
     for person in core_persons:
         person_tx_list = tx_index.get(person, [])
         for key, df in person_tx_list:
-            df_copy = df[['date', 'counterparty', 'income', 'expense', 'description']].copy()
+            df_copy = _prepare_transaction_frame(df, account_key=key)
             df_copy['_person'] = person
             all_dfs.append(df_copy)
     

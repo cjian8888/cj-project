@@ -19,16 +19,7 @@ logger = utils.setup_logger(__name__)
 
 def _safe_float(value) -> float:
     """安全转换金额字段。"""
-    try:
-        if pd.isna(value):
-            return 0.0
-    except (TypeError, ValueError):
-        pass
-
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
+    return utils.format_amount(value)
 
 
 def _safe_text(value) -> str:
@@ -82,7 +73,7 @@ def detect_holiday_transactions(cleaned_data: Dict[str, pd.DataFrame]) -> Dict[s
         if df is None or df.empty or "date" not in df.columns:
             continue
 
-        parsed_dates = pd.to_datetime(df["date"], errors="coerce").dropna()
+        parsed_dates = utils.normalize_datetime_series(df["date"]).dropna()
         if not parsed_dates.empty:
             all_dates.extend(parsed_dates.tolist())
 
@@ -112,7 +103,7 @@ def detect_holiday_transactions(cleaned_data: Dict[str, pd.DataFrame]) -> Dict[s
             continue
 
         working_df = df.copy()
-        working_df["_parsed_date"] = pd.to_datetime(working_df["date"], errors="coerce")
+        working_df["_parsed_date"] = utils.normalize_datetime_series(working_df["date"])
         working_df = working_df.dropna(subset=["_parsed_date"])
         if working_df.empty:
             continue
@@ -194,80 +185,88 @@ def detect_cash_time_collision(
     if withdrawals.empty or deposits.empty:
         return collisions
 
-    # 1. 准备数据：添加辅助列用于交叉连接
-    # 使用 .copy() 避免修改原始 DataFrame（关键修复：防止数据污染）
     wd = withdrawals.copy()
     dp = deposits.copy()
-    wd["date"] = pd.to_datetime(wd["date"], errors="coerce")
-    dp["date"] = pd.to_datetime(dp["date"], errors="coerce")
-    wd = wd.dropna(subset=["date"])
-    dp = dp.dropna(subset=["date"])
+    if "amount" in wd.columns:
+        wd["amount"] = utils.normalize_amount_series(wd["amount"], "amount")
+    if "amount" in dp.columns:
+        dp["amount"] = utils.normalize_amount_series(dp["amount"], "amount")
+
+    wd = utils.sort_transactions_strict(wd, date_col="date", dropna_date=True)
+    dp = utils.sort_transactions_strict(dp, date_col="date", dropna_date=True)
     if wd.empty or dp.empty:
         return collisions
-    wd["join_key"] = 1
-    dp["join_key"] = 1
 
-    # 2. 执行交叉连接 (寻找所有可能的存取现组合)
-    # 注意：在极大数据量(>10万条)下，这可能消耗内存。但对于通常的审计数据(几千-几万条)是极快的。
-    merged = pd.merge(wd, dp, on="join_key", suffixes=("_wd", "_dp"))
+    wd_dates_ns = wd["date"].astype("int64").to_numpy()
+    used_withdrawal_indices = set()
 
-    # 3. 计算时间差和金额差
-    # 确保日期列是datetime类型
-    merged["time_diff"] = (merged["date_dp"] - merged["date_wd"]).abs()
-    # 将时间差转换为小时
-    merged["hours_diff"] = merged["time_diff"].dt.total_seconds() / 3600
+    for _, deposit_row in dp.iterrows():
+        deposit_date = deposit_row["date"]
+        deposit_amount = float(deposit_row.get("amount", 0) or 0)
+        if deposit_amount <= 0:
+            continue
 
-    merged["amount_wd"] = merged["amount_wd"].fillna(0)
-    merged["amount_dp"] = merged["amount_dp"].fillna(0)
-    merged["amount_diff_abs"] = (merged["amount_wd"] - merged["amount_dp"]).abs()
+        min_date = deposit_date - pd.Timedelta(hours=config.CASH_TIME_WINDOW_HOURS)
+        left_idx = np.searchsorted(wd_dates_ns, min_date.value, side="left")
+        right_idx = np.searchsorted(wd_dates_ns, deposit_date.value, side="right")
+        if left_idx >= right_idx:
+            continue
 
-    # 计算金额差异比率 (相对于取现金额)
-    # 避免除以0
-    merged["amount_ratio"] = np.where(
-        merged["amount_wd"] > 0, merged["amount_diff_abs"] / merged["amount_wd"], 1.0
-    )
+        candidates = wd.iloc[left_idx:right_idx].copy()
+        if used_withdrawal_indices:
+            candidates = candidates[~candidates.index.isin(used_withdrawal_indices)]
+        if candidates.empty:
+            continue
 
-    # 4. 应用阈值筛选
-    # 时间窗口：配置的小时数
-    time_mask = merged["hours_diff"] <= config.CASH_TIME_WINDOW_HOURS
+        candidates["hours_diff"] = (
+            (deposit_date - candidates["date"]).dt.total_seconds() / 3600
+        )
+        candidates["amount_diff_abs"] = (candidates["amount"] - deposit_amount).abs()
+        candidates["amount_ratio"] = np.where(
+            candidates["amount"] > 0,
+            candidates["amount_diff_abs"] / candidates["amount"],
+            1.0,
+        )
+        candidates = candidates[candidates["amount_ratio"] <= config.AMOUNT_TOLERANCE_RATIO]
+        if candidates.empty:
+            continue
 
-    # 金额容差：配置的比率
-    amount_mask = merged["amount_ratio"] <= config.AMOUNT_TOLERANCE_RATIO
+        best_match = candidates.sort_values(
+            ["amount_ratio", "hours_diff", "_strict_source_row", "_strict_transaction_id"],
+            kind="mergesort",
+        ).iloc[0]
+        used_withdrawal_indices.add(int(best_match.name))
 
-    # 5. 筛选符合条件的记录
-    valid_collisions = merged[time_mask & amount_mask]
+        withdrawal_amount = float(best_match.get("amount", 0) or 0)
+        amount_diff = abs(withdrawal_amount - deposit_amount)
+        amount_ratio = amount_diff / withdrawal_amount if withdrawal_amount > 0 else 1.0
+        hours_diff = float(best_match["hours_diff"])
 
-    # 6. 格式化结果 (适配 report_generator.py 字段要求)
-    if not valid_collisions.empty:
-        for _, row in valid_collisions.iterrows():
-            # 单实体现金循环默认仅作线索，不计入高/中风险主清单
-            risk = "low"
-
-            collisions.append(
-                {
-                    "type": "single_entity",
-                    "pattern_category": "self_cycle",
-                    "withdrawal_entity": entity_name,  # 取现方
-                    "deposit_entity": entity_name,  # 存现方
-                    "withdrawal_date": row["date_wd"],
-                    "deposit_date": row["date_dp"],
-                    "withdrawal_bank": row.get("银行来源_wd", "未知"),
-                    "deposit_bank": row.get("银行来源_dp", "未知"),
-                    "withdrawal_source": row.get("数据来源_wd", "未知"),
-                    "deposit_source": row.get("数据来源_dp", "未知"),
-                    "time_diff_hours": round(row["hours_diff"], 2),  # 字段名适配
-                    "withdrawal_amount": row["amount_wd"],
-                    "deposit_amount": row["amount_dp"],
-                    "amount_diff": round(row["amount_diff_abs"], 2),  # 字段名适配
-                    "amount_diff_ratio": round(row["amount_ratio"], 2),
-                    "risk_level": risk,
-                    "risk_reason": (
-                        f"[单实体线索] {entity_name}取现{row['amount_wd']}元后"
-                        f"{row['hours_diff']:.1f}小时存现{row['amount_dp']}元，金额接近；"
-                        "默认仅作资金循环线索。"
-                    ),
-                }
-            )
+        collisions.append(
+            {
+                "type": "single_entity",
+                "pattern_category": "self_cycle",
+                "withdrawal_entity": entity_name,
+                "deposit_entity": entity_name,
+                "withdrawal_date": best_match["date"],
+                "deposit_date": deposit_date,
+                "withdrawal_bank": best_match.get("银行来源", best_match.get("bank", "未知")),
+                "deposit_bank": deposit_row.get("银行来源", deposit_row.get("bank", "未知")),
+                "withdrawal_source": best_match.get("数据来源", best_match.get("source_file", "未知")),
+                "deposit_source": deposit_row.get("数据来源", deposit_row.get("source_file", "未知")),
+                "time_diff_hours": round(hours_diff, 2),
+                "withdrawal_amount": withdrawal_amount,
+                "deposit_amount": deposit_amount,
+                "amount_diff": round(amount_diff, 2),
+                "amount_diff_ratio": round(amount_ratio, 2),
+                "risk_level": "low",
+                "risk_reason": (
+                    f"[单实体线索] {entity_name}取现{withdrawal_amount}元后"
+                    f"{hours_diff:.1f}小时存现{deposit_amount}元，金额接近；"
+                    "默认仅作资金循环线索。"
+                ),
+            }
+        )
 
     return collisions
 
@@ -313,10 +312,8 @@ def detect_cross_entity_cash_collision(
         return collisions
 
     # 确保date列是datetime类型并排序（merge_asof要求）
-    wd_df["date"] = pd.to_datetime(wd_df["date"])
-    dp_df["date"] = pd.to_datetime(dp_df["date"])
-    wd_df = wd_df.sort_values("date").reset_index(drop=True)
-    dp_df = dp_df.sort_values("date").reset_index(drop=True)
+    wd_df = utils.sort_transactions_strict(wd_df, date_col="date", dropna_date=True)
+    dp_df = utils.sort_transactions_strict(dp_df, date_col="date", dropna_date=True)
 
     # 添加时间窗口边界列用于快速筛选
     dp_df["date_min"] = dp_df["date"] - pd.Timedelta(hours=time_window_hours)
@@ -627,7 +624,7 @@ def run_all_detections(
                 ]
                 if not transfers_out.empty:
                     for _, row in transfers_out.iterrows():
-                        amount = row.get(expense_col, 0)
+                        amount = _safe_float(row.get(expense_col, 0))
                         # 简单的风险定级
                         if amount > config.INCOME_HIGH_RISK_MIN:
                             risk = "high"
@@ -671,9 +668,9 @@ def run_all_detections(
                                     "transaction_id": str(row.get("transaction_id", ""))
                                     if row.get("transaction_id")
                                     else "",
-                                    "balance_after": float(row.get("balance", 0))
-                                    if row.get("balance")
-                                    else 0.0,
+                                    "balance_after": _safe_float(
+                                        row.get("balance", 0)
+                                    ),
                                     "channel": str(row.get("transaction_channel", ""))
                                     if row.get("transaction_channel")
                                     else "",
@@ -699,7 +696,7 @@ def run_all_detections(
                 ]
                 if not transfers_in.empty:
                     for _, row in transfers_in.iterrows():
-                        amount = row.get(company_expense_col, 0)
+                        amount = _safe_float(row.get(company_expense_col, 0))
                         if not amount or amount <= 0:
                             continue
                         # 简单的风险定级
@@ -745,9 +742,9 @@ def run_all_detections(
                                     "transaction_id": str(row.get("transaction_id", ""))
                                     if row.get("transaction_id")
                                     else "",
-                                    "balance_after": float(row.get("balance", 0))
-                                    if row.get("balance")
-                                    else 0.0,
+                                    "balance_after": _safe_float(
+                                        row.get("balance", 0)
+                                    ),
                                     "channel": str(row.get("transaction_channel", ""))
                                     if row.get("transaction_channel")
                                     else "",

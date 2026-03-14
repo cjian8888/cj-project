@@ -16,6 +16,72 @@ import utils
 # ========== 列名标准化函数（2026-03-01 通用修复） ==========
 
 
+def _normalize_column_token(column_name: str) -> str:
+    if not column_name:
+        return ""
+    token = str(column_name).strip().lower()
+    token = token.replace("（", "(").replace("）", ")")
+    token = re.sub(r"\s+", "", token)
+    token = re.sub(r"[(){}\[\]【】:_-]", "", token)
+    token = token.replace("人民币", "").replace("rmb", "")
+    return token
+
+
+def _strip_amount_unit_tokens(token: str) -> str:
+    normalized = token or ""
+    for unit_text in ("亿元", "万元", "亿", "万", "元"):
+        normalized = normalized.replace(unit_text, "")
+    return normalized
+
+
+def _find_first_matching_column(
+    df: pd.DataFrame, candidates: List[str], is_amount_field: bool = False
+) -> Optional[str]:
+    for candidate in candidates:
+        if candidate in df.columns:
+            return candidate
+
+    normalized_candidates = []
+    for candidate in candidates:
+        token = _normalize_column_token(candidate)
+        if is_amount_field:
+            token = _strip_amount_unit_tokens(token)
+        normalized_candidates.append(token)
+
+    for column_name in df.columns:
+        column_token = _normalize_column_token(column_name)
+        compare_token = (
+            _strip_amount_unit_tokens(column_token) if is_amount_field else column_token
+        )
+        if compare_token in normalized_candidates:
+            return column_name
+    return None
+
+
+def _get_amount_unit_hint_multiplier(column_name: str) -> float:
+    token = _normalize_column_token(column_name)
+    if "亿元" in token or token.endswith("亿"):
+        return 100000000.0
+    if "万元" in token or token.endswith("万"):
+        return 10000.0
+    return 1.0
+
+
+def _safe_amount(value: Any, column_name: str = "") -> float:
+    return utils.format_amount(
+        value, unit_hint_multiplier=_get_amount_unit_hint_multiplier(column_name)
+    )
+
+
+def _normalize_amount_series(series: pd.Series, column_name: str) -> pd.Series:
+    return series.apply(lambda value: _safe_amount(value, column_name))
+
+
+def _normalize_datetime_series(series: pd.Series) -> pd.Series:
+    normalized = series.apply(utils.parse_date)
+    return pd.to_datetime(normalized, errors="coerce")
+
+
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     标准化DataFrame的列名，支持个人和公司Excel的不同格式
@@ -24,16 +90,43 @@ def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         标准化后的DataFrame，包含统一的列名
     """
+    df = df.copy()
+
     # 完整的列名映射字典
     column_mappings = {
         # 日期列
         "date": ["date", "日期", "交易日期", "交易时间", "time", "交易日期时间"],
         # 金额列（单列）
-        "amount": ["amount", "金额", "交易金额", "发生额"],
+        "amount": [
+            "amount",
+            "金额",
+            "金额(元)",
+            "金额(万元)",
+            "交易金额",
+            "交易金额(元)",
+            "交易金额(万元)",
+            "发生额",
+        ],
         # 收入列（分开）
-        "income": ["收入(元)", "收入金额", "收入", "贷方金额", "贷方", "income"],
+        "income": [
+            "收入(元)",
+            "收入(万元)",
+            "收入金额",
+            "收入",
+            "贷方金额",
+            "贷方",
+            "income",
+        ],
         # 支出列（分开）
-        "expense": ["支出(元)", "支出金额", "支出", "借方金额", "借方", "expense"],
+        "expense": [
+            "支出(元)",
+            "支出(万元)",
+            "支出金额",
+            "支出",
+            "借方金额",
+            "借方",
+            "expense",
+        ],
         # 交易对手
         "counterparty": [
             "counterparty",
@@ -50,23 +143,40 @@ def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
         # 账号
         "account": ["account", "本方账号", "账号", "银行账号"],
         # 余额
-        "balance": ["balance", "余额(元)", "余额", "账户余额"],
+        "balance": ["balance", "余额(元)", "余额(万元)", "余额", "账户余额", "交易余额"],
         # 交易分类
         "category": ["category", "交易分类", "分类", "交易类型"],
         # 现金标识
         "cash": ["cash", "现金", "是否现金"],
     }
 
+    matched_columns: Dict[str, str] = {}
+
     # 应用映射
     for standard_name, possible_names in column_mappings.items():
-        for possible_name in possible_names:
-            if possible_name in df.columns and standard_name not in df.columns:
-                df = df.rename(columns={possible_name: standard_name})
-                break
+        if standard_name in df.columns:
+            matched_columns[standard_name] = standard_name
+            continue
+        matched_name = _find_first_matching_column(
+            df,
+            possible_names,
+            is_amount_field=standard_name in {"amount", "income", "expense", "balance"},
+        )
+        if matched_name:
+            matched_columns[standard_name] = matched_name
+            df = df.rename(columns={matched_name: standard_name})
+
+    if "date" in df.columns:
+        df["date"] = _normalize_datetime_series(df["date"])
+
+    for amount_col in ("amount", "income", "expense", "balance"):
+        if amount_col in df.columns:
+            source_col = matched_columns.get(amount_col, amount_col)
+            df[amount_col] = _normalize_amount_series(df[amount_col], source_col)
 
     # 如果有income和expense，合并为amount
     if "income" in df.columns and "expense" in df.columns:
-        df["amount"] = df["income"].fillna(0) - df["expense"].fillna(0)
+        df["amount"] = df["income"].fillna(0.0) - df["expense"].fillna(0.0)
 
     return df
 
@@ -168,33 +278,24 @@ def _find_expenses_near_date(
     """
     if not expense_history:
         return False
+    parsed_target_date = utils.parse_date(target_date)
+    if parsed_target_date is None:
+        return False
+    target_day = parsed_target_date.date()
     tol = abs(amount) * tolerance
     for e in expense_history:
-        try:
-            ex_date = e.get("date")
-            ex_amt = float(e.get("amount", e.get("金额", 0) or 0))
-        except Exception:
-            continue
+        ex_date = e.get("date")
+        ex_amt = _safe_amount(e.get("amount", e.get("金额", 0) or 0), "amount")
         if ex_date is None:
             continue
         # 将日期统一为 datetime.date 或 datetime-like
-        try:
-            if hasattr(ex_date, "to_pydatetime"):
-                ex_dt = ex_date.to_pydatetime()
-            else:
-                ex_dt = pd.to_datetime(ex_date)
-            ex_day = ex_dt.date() if hasattr(ex_dt, "date") else ex_dt
-        except Exception:
+        ex_dt = utils.parse_date(ex_date)
+        if ex_dt is None:
             continue
+        ex_day = ex_dt.date()
         if abs(ex_amt - amount) <= tol:
             # 简单时间匹配：与目标日期在 +/- 30 天内
-            if isinstance(target_date, pd.Timestamp):
-                t_date = target_date.to_pydatetime().date()
-            else:
-                t_date = target_date
-            if isinstance(ex_day, pd.Timestamp):
-                ex_day = ex_day.to_pydatetime().date()
-            days_diff = abs((t_date - ex_day).days)
+            days_diff = abs((target_day - ex_day).days)
             if days_diff <= 30:
                 return True
     return False
@@ -213,8 +314,8 @@ def match_historical_expense(
     匹配空摘要/空对手方的收入记录在历史支出中是否有近似金额且近似日期的支出。
     返回 (matched: bool, months_ago: int or None)。若未匹配，months_ago 为 None。
     """
-    amount = float(income_record.get("amount", 0) or 0)
-    date = income_record.get("date")
+    amount = _safe_amount(income_record.get("amount", 0) or 0, "amount")
+    date = utils.parse_date(income_record.get("date"))
     if date is None:
         return False, None
     for months_ago in [3, 6, 12, 24, 36, 48]:
@@ -1249,8 +1350,8 @@ def _extract_transaction_basic_info(row: pd.Series, entity_name: Optional[str]) 
 
     # 获取交易日期和金额
     tx_date = row.get("date")
-    income = float(row.get("income", 0) or 0)
-    expense = float(row.get("expense", 0) or 0)
+    income = _safe_amount(row.get("income", 0), "income")
+    expense = _safe_amount(row.get("expense", 0), "expense")
 
     return {
         "bank_name": bank_name,
@@ -1279,12 +1380,7 @@ def _extract_balance_from_row(row: pd.Series, balance_col: Optional[str]) -> flo
         return 0.0
 
     raw_balance = row.get(balance_col)
-    if pd.notna(raw_balance):
-        try:
-            return float(raw_balance)
-        except (ValueError, TypeError):
-            pass
-    return 0.0
+    return _safe_amount(raw_balance, balance_col or "balance")
 
 
 def _create_new_account_record(
@@ -1548,15 +1644,10 @@ def _parse_transaction_date(date) -> Tuple[Optional[str], Optional[str]]:
     Returns:
         (年份, 月份)元组，解析失败返回(None, None)
     """
-    try:
-        if hasattr(date, "year"):
-            return str(date.year), f"{date.month:02d}"
-        elif isinstance(date, str):
-            dt = pd.to_datetime(date)
-            return str(dt.year), f"{dt.month:02d}"
+    parsed_date = utils.parse_date(date)
+    if parsed_date is None:
         return None, None
-    except Exception:
-        return None, None
+    return str(parsed_date.year), f"{parsed_date.month:02d}"
 
 
 def _aggregate_yearly_salary_stats(
@@ -1580,7 +1671,7 @@ def _aggregate_yearly_salary_stats(
 
     for detail in salary_details:
         date = detail.get("日期")
-        amount = float(detail.get("金额", 0) or 0)
+        amount = _safe_amount(detail.get("金额", 0) or 0, "amount")
 
         if not date or not amount:
             continue
@@ -2852,12 +2943,7 @@ def _calculate_real_income_expense(
     # 【2026-02-20 修复】增加字段容错处理，避免 KeyError
     # 【P1修复】确保所有amount类型正确
     def _safe_num(val):
-        if isinstance(val, (int, float)):
-            return val
-        try:
-            return float(val) if val is not None else 0
-        except (TypeError, ValueError):
-            return 0
+        return _safe_amount(val, "amount")
 
     self_in = _safe_num(wealth_management.get("self_transfer_income", 0))
     self_out = _safe_num(wealth_management.get("self_transfer_expense", 0))
@@ -3276,6 +3362,8 @@ def generate_profile_report(df: pd.DataFrame, entity_name: str, family_members: 
             df.rename(columns={chinese_col: english_col}, inplace=True)
             logger.debug(f"列名映射: {chinese_col} -> {english_col}")
 
+    df = standardize_columns(df)
+
     # 确保关键列存在
     required_cols = ["date", "income", "expense"]
     for col in required_cols:
@@ -3288,18 +3376,22 @@ def generate_profile_report(df: pd.DataFrame, entity_name: str, family_members: 
             }
 
     # 转换日期列
-    if "date" in df.columns and not pd.api.types.is_datetime64_any_dtype(df["date"]):
-        try:
-            df["date"] = pd.to_datetime(df["date"])
-        except Exception as e:
-            logger.warning(f"日期转换失败: {e}")
+    if "date" in df.columns:
+        df["date"] = _normalize_datetime_series(df["date"])
+        invalid_dates = int(df["date"].isna().sum())
+        if invalid_dates > 0:
+            logger.warning(f"发现 {invalid_dates} 条无法解析的日期，已置为 NaT")
 
     # 转换金额列为数值类型
-    for col in ["income", "expense"]:
+    for col in ["income", "expense", "amount"]:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+            df[col] = _normalize_amount_series(df[col], col)
     if "balance" in df.columns:
-        df["balance"] = pd.to_numeric(df["balance"], errors="coerce").fillna(0)
+        df["balance"] = _normalize_amount_series(df["balance"], "balance")
+
+    for text_col in ["counterparty", "description"]:
+        if text_col in df.columns:
+            df[text_col] = df[text_col].fillna("")
 
     logger.info(f"数据准备完成: {len(df)} 行, 列: {list(df.columns)}")
 
@@ -3781,18 +3873,9 @@ def _make_income_tx_signature(
     description_value="",
 ):
     """构建收入交易签名，用于跨模块定位同一笔收入。"""
-    try:
-        if pd.notna(date_value):
-            date_str = pd.to_datetime(date_value).strftime("%Y-%m-%d")
-        else:
-            date_str = "未知"
-    except Exception:
-        date_str = str(date_value)[:10] if date_value else "未知"
-
-    try:
-        amount = round(float(amount_value or 0), 2)
-    except (TypeError, ValueError):
-        amount = 0.0
+    parsed_date = utils.parse_date(date_value)
+    date_str = parsed_date.strftime("%Y-%m-%d") if parsed_date else "未知"
+    amount = round(_safe_amount(amount_value, "amount"), 2)
 
     return (
         date_str,

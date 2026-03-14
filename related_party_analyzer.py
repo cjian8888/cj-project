@@ -12,8 +12,28 @@ from collections import defaultdict
 import config
 import utils
 from name_normalizer import normalize_for_matching, is_same_person
+import fund_penetration
+import risk_scoring
+from utils.path_explainability import (
+    build_cluster_path_explainability,
+    build_direct_flow_path_explainability,
+    build_relay_path_explainability,
+    rank_representative_paths,
+)
 
 logger = utils.setup_logger(__name__)
+
+
+def _normalize_risk_score(score: float) -> float:
+    return risk_scoring.normalize_risk_score(score)
+
+
+def _normalize_confidence(confidence: float) -> float:
+    return risk_scoring.normalize_confidence(confidence)
+
+
+def _score_to_level(score: float) -> str:
+    return risk_scoring.score_to_risk_level(score)
 
 
 def analyze_related_party_flows(
@@ -38,7 +58,10 @@ def analyze_related_party_flows(
         'direct_flows': [],           # 直接资金往来
         'third_party_relays': [],     # 第三方中转
         'fund_loops': [],             # 资金闭环
+        'discovered_nodes': [],       # 新发现的外围节点
+        'relationship_clusters': [],  # 关系簇
         'flow_matrix': {},            # 资金流向矩阵
+        'analysis_metadata': {},      # 分析过程元数据
         'summary': {}
     }
     
@@ -49,22 +72,38 @@ def analyze_related_party_flows(
     # 2. 检测第三方中转
     logger.info('【阶段2】检测第三方中转模式')
     results['third_party_relays'] = _detect_third_party_relay(all_transactions, core_persons)
+    results['analysis_metadata']['third_party_relays'] = {
+        'returned_count': len(results['third_party_relays']),
+        'time_window_hours': 72,
+        'amount_tolerance': 0.15,
+        'truncated': False,
+    }
     
     # 3. 检测资金闭环
     logger.info('【阶段3】检测资金闭环')
-    results['fund_loops'] = _detect_fund_loops(all_transactions, core_persons)
+    results['fund_loops'], results['analysis_metadata']['fund_loops'] = _detect_fund_loops(
+        all_transactions,
+        core_persons,
+        return_metadata=True,
+    )
     
     # 4. 构建资金流向矩阵
     logger.info('【阶段4】构建资金流向矩阵')
     results['flow_matrix'] = _build_flow_matrix(results['direct_flows'], core_persons)
+
+    # 5. 生成外围节点与关系簇
+    logger.info('【阶段5】提取外围节点与关系簇')
+    results['discovered_nodes'] = _extract_discovered_nodes(results, core_persons)
+    results['relationship_clusters'] = _build_relationship_clusters(results, core_persons)
     
-    # 5. 生成汇总
+    # 6. 生成汇总
     results['summary'] = _generate_summary(results, core_persons)
     
     logger.info('')
     logger.info(f'关联方分析完成: 直接往来{len(results["direct_flows"])}笔, '
                 f'第三方中转{len(results["third_party_relays"])}条链, '
-                f'资金闭环{len(results["fund_loops"])}个')
+                f'资金闭环{len(results["fund_loops"])}个, '
+                f'外围节点{len(results["discovered_nodes"])}个')
     
     return results
 
@@ -194,6 +233,9 @@ def _collect_person_flows(
         full_df = pd.concat(person_dfs_to_process)
         if full_df.empty or 'counterparty' not in full_df.columns:
             continue
+        full_df = utils.sort_transactions_strict(full_df, date_col='date', dropna_date=True)
+        if full_df.empty:
+            continue
             
         # 预先过滤核心人员之间的直接转账
         counterparty_series = full_df['counterparty'].astype(str).fillna('')
@@ -298,6 +340,10 @@ def _find_relay_chains(
                         'amount_diff': abs(outflow['amount'] - inflow['amount']),
                         'outflow_desc': outflow['description'],
                         'inflow_desc': inflow['description'],
+                        'outflow_source_file': outflow.get('source_file', ''),
+                        'outflow_source_row_index': outflow.get('source_row_index'),
+                        'inflow_source_file': inflow.get('source_file', ''),
+                        'inflow_source_row_index': inflow.get('source_row_index'),
                         'risk_level': _assess_relay_risk(time_diff, outflow['amount'], inflow['amount'])
                     }
                     relay_chains.append(relay)
@@ -369,6 +415,14 @@ def _detect_third_party_relay(
     
     # 去重和排序
     unique_chains = _deduplicate_and_sort_relays(relay_chains)
+    unique_chains = [_enrich_relay_record(relay) for relay in unique_chains]
+    unique_chains.sort(
+        key=lambda item: (
+            -item.get('risk_score', 0),
+            -float(item.get('outflow_amount', 0) or 0),
+            float(item.get('time_diff_hours', 9999) or 9999),
+        )
+    )
     
     logger.info(f'  发现 {len(unique_chains)} 条第三方中转链 (已过滤支付平台和小额交易)')
     return unique_chains
@@ -389,60 +443,154 @@ def _assess_relay_risk(time_diff: timedelta, outflow_amount: float, inflow_amoun
         return 'low'
 
 
+def _enrich_relay_record(relay: Dict) -> Dict:
+    """为第三方中转链补充统一评分、置信度和证据。"""
+    outflow_amount = float(relay.get('outflow_amount', 0) or 0)
+    inflow_amount = float(relay.get('inflow_amount', 0) or 0)
+    amount_diff_ratio = abs(outflow_amount - inflow_amount) / max(outflow_amount, 1)
+    time_diff_hours = float(relay.get('time_diff_hours', 0) or 0)
+
+    base_score = {
+        'low': 28,
+        'medium': 52,
+        'high': 72,
+        'critical': 88,
+    }.get(str(relay.get('risk_level', 'medium')), 52)
+
+    if outflow_amount >= 1_000_000:
+        base_score += 18
+    elif outflow_amount >= 500_000:
+        base_score += 14
+    elif outflow_amount >= 100_000:
+        base_score += 10
+    elif outflow_amount >= 50_000:
+        base_score += 6
+
+    if time_diff_hours <= 24:
+        base_score += 8
+    elif time_diff_hours <= 48:
+        base_score += 4
+
+    if amount_diff_ratio <= 0.05:
+        base_score += 6
+    elif amount_diff_ratio <= 0.10:
+        base_score += 3
+
+    confidence = 0.55
+    if time_diff_hours <= 24:
+        confidence += 0.12
+    elif time_diff_hours <= 48:
+        confidence += 0.08
+    if amount_diff_ratio <= 0.05:
+        confidence += 0.12
+    elif amount_diff_ratio <= 0.10:
+        confidence += 0.08
+    if outflow_amount >= 100_000:
+        confidence += 0.10
+
+    evidence = [
+        f"形成链路 {relay.get('from', '未知')} → {relay.get('relay', '未知')} → {relay.get('to', '未知')}",
+        f"时差 {time_diff_hours:.1f} 小时",
+        f"金额差比例 {amount_diff_ratio * 100:.1f}%",
+    ]
+    if outflow_amount > 0:
+        evidence.append(f"中转金额 {utils.format_currency(outflow_amount)} 元")
+
+    risk_score = _normalize_risk_score(base_score)
+    path_explainability = build_relay_path_explainability(relay)
+    enriched = dict(relay)
+    enriched.update(
+        {
+            'risk_score': risk_score,
+            'risk_level': _score_to_level(risk_score),
+            'confidence': _normalize_confidence(confidence),
+            'evidence': evidence,
+            'path_explainability': path_explainability,
+        }
+    )
+    return enriched
+
+
 def _detect_fund_loops(
     all_transactions: Dict[str, pd.DataFrame],
     core_persons: List[str],
-    max_depth: int = 4
+    max_depth: int = 4,
+    return_metadata: bool = False,
 ) -> List[Dict]:
     """
     检测资金闭环: A→B→C→A
-    使用图搜索检测环路
+    复用强版资金图搜索，避免外围节点回流漏检。
     """
-    loops = []
-    
-    # 构建有向图：节点为实体，边为转账
-    edges = defaultdict(list)  # {from: [(to, amount, date), ...]}
-    
+    personal_data = {}
+    company_data = {}
+    companies = []
+
     for entity_name, df in all_transactions.items():
-        if df.empty or 'counterparty' not in df.columns:
+        if df is None or df.empty:
             continue
-        
-        # 提取实体名
-        entity = utils.normalize_person_name(entity_name)
-        if not entity:
-            entity = entity_name.split('_')[0] if '_' in entity_name else entity_name
-        
-        # 只处理有支出的行
-        expense_mask = df['expense'] > 0
-        if not expense_mask.any():
-            continue
-            
-        subset = df[expense_mask]
-        for _, row in subset.iterrows():
-            counterparty = str(row.get('counterparty', ''))
-            edges[entity].append({
-                'to': counterparty,
-                'amount': row['expense'],
-                'date': row.get('date')
-            })
-    
-    # 从每个核心人员开始DFS查找环路
-    for start_person in core_persons:
-        visited = set()
-        path = []
-        _dfs_find_loops(start_person, start_person, edges, path, visited, loops, max_depth, core_persons)
-    
-    # 去重（同一个环可能从不同起点被发现）
+
+        normalized_name = utils.normalize_person_name(entity_name)
+        if not normalized_name:
+            normalized_name = entity_name.split('_')[0] if '_' in entity_name else entity_name
+
+        if '公司' in entity_name or '公司' in normalized_name:
+            company_data[normalized_name] = df
+            companies.append(normalized_name)
+        else:
+            personal_data[normalized_name] = df
+
+    money_graph = fund_penetration.build_money_graph(
+        personal_data,
+        company_data,
+        core_persons,
+        companies,
+    )
+    raw_cycles = money_graph.find_cycles(
+        min_length=3,
+        max_length=max_depth,
+        key_nodes=core_persons + companies,
+        timeout_seconds=30,
+    )
+    cycle_meta = dict(getattr(money_graph, 'last_cycle_search_meta', {}) or {})
+
     unique_loops = []
     seen_loop_keys = set()
-    for loop in loops:
-        # 使用排序后的节点列表作为key
-        key = tuple(sorted(loop['participants']))
-        if key not in seen_loop_keys:
-            seen_loop_keys.add(key)
-            unique_loops.append(loop)
-    
+    normalized_core_names = {normalize_for_matching(person) for person in core_persons}
+
+    for cycle in raw_cycles:
+        participants = cycle[:-1] if cycle and cycle[0] == cycle[-1] else cycle
+        if len(participants) < 2:
+            continue
+
+        key = tuple(sorted(participants))
+        if key in seen_loop_keys:
+            continue
+        seen_loop_keys.add(key)
+
+        core_count = sum(
+            1 for node in participants if normalize_for_matching(str(node)) in normalized_core_names
+        )
+        external_count = len(participants) - core_count
+
+        loop_record = fund_penetration.build_cycle_record(
+            cycle,
+            money_graph,
+            focus_nodes=core_persons + companies,
+            search_metadata=cycle_meta,
+        )
+        loop_record.update(
+            {
+                'participants': participants,
+                'nodes': participants,
+                'core_node_count': core_count,
+                'external_node_count': external_count,
+            }
+        )
+        unique_loops.append(loop_record)
+
     logger.info(f'  发现 {len(unique_loops)} 个资金闭环')
+    if return_metadata:
+        return unique_loops, cycle_meta
     return unique_loops
 
 
@@ -524,11 +672,358 @@ def _build_flow_matrix(direct_flows: List[Dict], core_persons: List[str]) -> Dic
     return result
 
 
+def _extract_discovered_nodes(results: Dict, core_persons: List[str]) -> List[Dict]:
+    """从中转链和闭环中提取外围节点。"""
+    core_name_set = {normalize_for_matching(person) for person in core_persons}
+    node_stats = defaultdict(
+        lambda: {
+            'name': '',
+            'occurrences': 0,
+            'relation_types': set(),
+            'linked_cores': set(),
+            'total_amount': 0.0,
+            'max_risk': 'low',
+        }
+    )
+    risk_order = {'low': 1, 'medium': 2, 'high': 3}
+
+    for relay in results.get('third_party_relays', []):
+        relay_name = str(relay.get('relay', '')).strip()
+        if not relay_name:
+            continue
+        key = normalize_for_matching(relay_name)
+        if key in core_name_set:
+            continue
+
+        stat = node_stats[key]
+        stat['name'] = relay_name
+        stat['occurrences'] += 1
+        stat['relation_types'].add('third_party_relay')
+        stat['linked_cores'].update(
+            {
+                str(relay.get('from', '')).strip(),
+                str(relay.get('to', '')).strip(),
+            }
+        )
+        stat['total_amount'] += float(relay.get('outflow_amount', 0) or 0)
+        relay_risk = str(relay.get('risk_level', 'low'))
+        if risk_order.get(relay_risk, 0) > risk_order.get(stat['max_risk'], 0):
+            stat['max_risk'] = relay_risk
+
+    for loop in results.get('fund_loops', []):
+        participants = loop.get('participants') or loop.get('nodes') or []
+        for node in participants:
+            node_name = str(node).strip()
+            if not node_name:
+                continue
+            key = normalize_for_matching(node_name)
+            if key in core_name_set:
+                continue
+
+            stat = node_stats[key]
+            stat['name'] = node_name
+            stat['occurrences'] += 1
+            stat['relation_types'].add('fund_loop')
+            for participant in participants:
+                participant_name = str(participant).strip()
+                if normalize_for_matching(participant_name) in core_name_set:
+                    stat['linked_cores'].add(participant_name)
+            loop_risk = str(loop.get('risk_level', 'medium'))
+            if risk_order.get(loop_risk, 0) > risk_order.get(stat['max_risk'], 0):
+                stat['max_risk'] = loop_risk
+
+    discovered_nodes = []
+    for stat in node_stats.values():
+        linked_cores = sorted(name for name in stat['linked_cores'] if name)
+        relation_types = sorted(stat['relation_types'])
+        risk_score = 38 + len(relation_types) * 10 + len(linked_cores) * 4 + min(15, stat['occurrences'] * 2)
+        if stat['total_amount'] >= 1_000_000:
+            risk_score += 18
+        elif stat['total_amount'] >= 500_000:
+            risk_score += 14
+        elif stat['total_amount'] >= 100_000:
+            risk_score += 10
+        elif stat['total_amount'] > 0:
+            risk_score += 6
+
+        confidence = 0.50
+        if len(relation_types) >= 2:
+            confidence += 0.15
+        elif relation_types:
+            confidence += 0.10
+        if linked_cores:
+            confidence += min(0.15, len(linked_cores) * 0.05)
+        if stat['total_amount'] > 0:
+            confidence += 0.10
+
+        evidence = [
+            f"关联类型: {'、'.join(relation_types) or '未标注'}",
+            f"关联核心对象 {len(linked_cores)} 个",
+            f"在疑点结构中出现 {stat['occurrences']} 次",
+        ]
+        if stat['total_amount'] > 0:
+            evidence.append(f"累计金额估算 {utils.format_currency(stat['total_amount'])} 元")
+
+        normalized_score = _normalize_risk_score(risk_score)
+        discovered_nodes.append(
+            {
+                'name': stat['name'],
+                'node_type': 'external',
+                'occurrences': stat['occurrences'],
+                'relation_types': relation_types,
+                'linked_cores': linked_cores,
+                'total_amount': stat['total_amount'],
+                'risk_score': normalized_score,
+                'risk_level': _score_to_level(normalized_score),
+                'confidence': _normalize_confidence(confidence),
+                'evidence': evidence,
+            }
+        )
+
+    discovered_nodes.sort(
+        key=lambda item: (
+            -item['risk_score'],
+            -item['occurrences'],
+            -item['total_amount'],
+            item['name'],
+        )
+    )
+    return discovered_nodes
+
+
+def _build_relationship_clusters(results: Dict, core_persons: List[str]) -> List[Dict]:
+    """构建包含核心人员和外围节点的关系簇。"""
+    adjacency = defaultdict(set)
+    cluster_stats = defaultdict(lambda: {'direct_flow_count': 0, 'relay_count': 0, 'loop_count': 0, 'total_amount': 0.0})
+
+    def _collect_representative_paths(component_nodes: Set[str]) -> List[Dict]:
+        candidates = []
+
+        for loop in results.get('fund_loops', []):
+            participants = set(loop.get('participants') or loop.get('nodes') or [])
+            path_explainability = loop.get('path_explainability') or {}
+            if participants and participants.issubset(component_nodes):
+                candidates.append(
+                    {
+                        'path_type': 'fund_cycle',
+                        'path': str(loop.get('path', '')).strip(),
+                        'nodes': list(path_explainability.get('nodes') or list(participants)),
+                        'amount': float(loop.get('total_amount', 0) or 0),
+                        'risk_score': float(loop.get('risk_score', 0) or 0),
+                        'confidence': float(loop.get('confidence', 0) or 0),
+                        'summary': str(path_explainability.get('summary', '') or '').strip(),
+                        'inspection_points': list(path_explainability.get('inspection_points', []) or []),
+                        'path_explainability': path_explainability,
+                    }
+                )
+
+        for relay in results.get('third_party_relays', []):
+            nodes = {
+                str(relay.get('from', '')).strip(),
+                str(relay.get('relay', '')).strip(),
+                str(relay.get('to', '')).strip(),
+            }
+            nodes.discard('')
+            path_explainability = relay.get('path_explainability') or build_relay_path_explainability(relay)
+            if nodes and nodes.issubset(component_nodes):
+                candidates.append(
+                    {
+                        'path_type': 'third_party_relay',
+                        'path': str(path_explainability.get('path', '') or f"{relay.get('from', '未知')} → {relay.get('relay', '未知')} → {relay.get('to', '未知')}").strip(),
+                        'nodes': list(path_explainability.get('nodes') or nodes),
+                        'amount': float(relay.get('outflow_amount', 0) or 0),
+                        'risk_score': float(relay.get('risk_score', 0) or 0),
+                        'confidence': float(relay.get('confidence', 0) or 0),
+                        'summary': str(path_explainability.get('summary', '') or '').strip(),
+                        'inspection_points': list(path_explainability.get('inspection_points', []) or []),
+                        'path_explainability': path_explainability,
+                    }
+                )
+
+        for flow in results.get('direct_flows', []):
+            from_node = str(flow.get('from', '')).strip()
+            to_node = str(flow.get('to', '')).strip()
+            if from_node and to_node and {from_node, to_node}.issubset(component_nodes):
+                path_explainability = build_direct_flow_path_explainability(flow)
+                candidates.append(
+                    {
+                        'path_type': 'direct_flow',
+                        'path': str(path_explainability.get('path', '') or f"{from_node} → {to_node}").strip(),
+                        'nodes': list(path_explainability.get('nodes') or [from_node, to_node]),
+                        'amount': float(flow.get('amount', 0) or 0),
+                        'risk_score': float(flow.get('amount', 0) or 0),
+                        'summary': str(path_explainability.get('summary', '') or '').strip(),
+                        'inspection_points': list(path_explainability.get('inspection_points', []) or []),
+                        'path_explainability': path_explainability,
+                    }
+                )
+
+        return rank_representative_paths(
+            candidates,
+            focus_nodes=core_persons,
+            limit=max(len(candidates), 1),
+        )
+
+    def _add_edge(node_a: str, node_b: str, stat_key: str, amount: float = 0.0):
+        if not node_a or not node_b or node_a == node_b:
+            return
+        adjacency[node_a].add(node_b)
+        adjacency[node_b].add(node_a)
+        cluster_stats[(min(node_a, node_b), max(node_a, node_b))][stat_key] += 1
+        cluster_stats[(min(node_a, node_b), max(node_a, node_b))]['total_amount'] += amount
+
+    for flow in results.get('direct_flows', []):
+        _add_edge(
+            str(flow.get('from', '')).strip(),
+            str(flow.get('to', '')).strip(),
+            'direct_flow_count',
+            float(flow.get('amount', 0) or 0),
+        )
+
+    for relay in results.get('third_party_relays', []):
+        from_person = str(relay.get('from', '')).strip()
+        relay_name = str(relay.get('relay', '')).strip()
+        to_person = str(relay.get('to', '')).strip()
+        amount = float(relay.get('outflow_amount', 0) or 0)
+        _add_edge(from_person, relay_name, 'relay_count', amount)
+        _add_edge(relay_name, to_person, 'relay_count', amount)
+
+    for loop in results.get('fund_loops', []):
+        participants = loop.get('participants') or loop.get('nodes') or []
+        if not participants:
+            continue
+        cycle_nodes = participants + [participants[0]]
+        for idx in range(len(cycle_nodes) - 1):
+            _add_edge(
+                str(cycle_nodes[idx]).strip(),
+                str(cycle_nodes[idx + 1]).strip(),
+                'loop_count',
+                float(loop.get('total_amount', 0) or 0),
+            )
+
+    visited = set()
+    core_name_set = {normalize_for_matching(person) for person in core_persons}
+    clusters = []
+
+    for core_person in core_persons:
+        if core_person in visited:
+            continue
+        if core_person not in adjacency:
+            continue
+
+        stack = [core_person]
+        component = set()
+        while stack:
+            node = stack.pop()
+            if node in visited:
+                continue
+            visited.add(node)
+            component.add(node)
+            stack.extend(neighbor for neighbor in adjacency[node] if neighbor not in visited)
+
+        core_members = sorted(
+            node for node in component if normalize_for_matching(node) in core_name_set
+        )
+        external_members = sorted(
+            node for node in component if normalize_for_matching(node) not in core_name_set
+        )
+
+        if not core_members:
+            continue
+
+        relation_types = set()
+        direct_flow_count = 0
+        relay_count = 0
+        loop_count = 0
+        total_amount = 0.0
+
+        for edge_key, stat in cluster_stats.items():
+            if edge_key[0] in component and edge_key[1] in component:
+                direct_flow_count += stat['direct_flow_count']
+                relay_count += stat['relay_count']
+                loop_count += stat['loop_count']
+                total_amount += stat['total_amount']
+                if stat['direct_flow_count']:
+                    relation_types.add('direct_flow')
+                if stat['relay_count']:
+                    relation_types.add('third_party_relay')
+                if stat['loop_count']:
+                    relation_types.add('fund_loop')
+
+        risk_score = 35 + direct_flow_count * 4 + relay_count * 8 + loop_count * 15
+        risk_score += min(12, len(external_members) * 3)
+        if total_amount >= 1_000_000:
+            risk_score += 18
+        elif total_amount >= 500_000:
+            risk_score += 14
+        elif total_amount >= 100_000:
+            risk_score += 10
+        elif total_amount > 0:
+            risk_score += 6
+
+        confidence = 0.50
+        if loop_count > 0:
+            confidence += 0.18
+        if relay_count > 0:
+            confidence += 0.12
+        if direct_flow_count > 0:
+            confidence += 0.08
+        if total_amount > 0:
+            confidence += 0.10
+
+        evidence = [
+            f"核心成员 {len(core_members)} 个，外围成员 {len(external_members)} 个",
+            f"直接往来/中转/闭环 = {direct_flow_count}/{relay_count}/{loop_count}",
+            f"关系类型: {'、'.join(sorted(relation_types)) or '未标注'}",
+        ]
+        if total_amount > 0:
+            evidence.append(f"聚合金额估算 {utils.format_currency(total_amount)} 元")
+
+        normalized_score = _normalize_risk_score(risk_score)
+        ranked_representative_paths = _collect_representative_paths(component)
+        representative_paths = ranked_representative_paths[:5]
+        cluster_payload = {
+            'cluster_id': f'cluster_{len(clusters) + 1}',
+            'core_members': core_members,
+            'external_members': external_members,
+            'all_nodes': sorted(component),
+            'relation_types': sorted(relation_types),
+            'direct_flow_count': direct_flow_count,
+            'relay_count': relay_count,
+            'loop_count': loop_count,
+            'total_amount': total_amount,
+            'risk_score': normalized_score,
+            'risk_level': _score_to_level(normalized_score),
+            'confidence': _normalize_confidence(confidence),
+            'evidence': evidence,
+            'representative_path_total': len(ranked_representative_paths),
+        }
+        cluster_payload['path_explainability'] = build_cluster_path_explainability(
+            cluster_payload,
+            representative_paths=representative_paths,
+        )
+        clusters.append(
+            cluster_payload
+        )
+
+    clusters.sort(
+        key=lambda item: (
+            -item['risk_score'],
+            -item['loop_count'],
+            -item['relay_count'],
+            -item['total_amount'],
+        )
+    )
+    return clusters
+
+
 def _generate_summary(results: Dict, core_persons: List[str]) -> Dict:
     """生成关联方分析汇总"""
     direct_flows = results['direct_flows']
     relays = results['third_party_relays']
     loops = results['fund_loops']
+    discovered_nodes = results.get('discovered_nodes', [])
+    relationship_clusters = results.get('relationship_clusters', [])
     
     summary = {
         '关联人数量': len(core_persons),
@@ -537,6 +1032,8 @@ def _generate_summary(results: Dict, core_persons: List[str]) -> Dict:
         '第三方中转链数': len(relays),
         '高风险中转': len([r for r in relays if r['risk_level'] == 'high']),
         '资金闭环数': len(loops),
+        '外围节点数': len(discovered_nodes),
+        '关系簇数': len(relationship_clusters),
         '高频中间人': _find_frequent_relays(relays)
     }
     

@@ -16,6 +16,7 @@ from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 import re
 
+import utils
 
 @dataclass
 class SalaryThresholds:
@@ -85,6 +86,14 @@ class RealSalaryIncomeAnalyzer:
             工资收入分析结果字典
         """
         # 1. 识别工资交易
+        transactions = transactions.copy()
+        if 'date' in transactions.columns:
+            transactions['date'] = utils.normalize_datetime_series(transactions['date'])
+        if 'amount' in transactions.columns:
+            transactions['amount'] = utils.normalize_amount_series(
+                transactions['amount'], 'amount'
+            )
+
         salary_df = self._identify_salary_transactions(transactions, person_name)
 
         if salary_df.empty:
@@ -99,7 +108,19 @@ class RealSalaryIncomeAnalyzer:
             }
 
         # 2. 按年统计工资
-        salary_df['year'] = pd.to_datetime(salary_df['date']).dt.year
+        salary_df = salary_df.dropna(subset=['date']).copy()
+        if salary_df.empty:
+            return {
+                'total_salary': 0,
+                'average_salary': 0,
+                'years_count': 0,
+                'yearly_salary': {},
+                'salary_transactions_count': 0,
+                'low_salary_years': {},
+                'data_quality_note': '工资交易日期无法解析，无法按年度统计。'
+            }
+
+        salary_df['year'] = salary_df['date'].dt.year
         yearly_salary = salary_df.groupby('year')['amount'].sum() / 10000  # 转换为万元
         yearly_salary_dict = yearly_salary.to_dict()
 
@@ -252,7 +273,7 @@ class RealSalaryIncomeAnalyzer:
 
         summary_parts = [
             f"{person_name}的工资收入分析：",
-            f"识别出工资收入{total_salary/10000:.2f}万元，跨{years_count}年，年均工资{average_salary/10000:.2f}万元。"
+            f"识别出工资收入{total_salary:.2f}万元，跨{years_count}年，年均工资{average_salary:.2f}万元。"
         ]
 
         if low_salary_years:

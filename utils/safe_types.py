@@ -6,8 +6,16 @@
 提供统一的、健壮的数据类型转换函数，供所有数据提取器使用。
 """
 
+import importlib.util
+import os
 from typing import Optional
 import pandas as pd
+
+_PARENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_UTILS_PATH = os.path.join(_PARENT_DIR, "utils.py")
+_SPEC = importlib.util.spec_from_file_location("safe_types_utils_module", _UTILS_PATH)
+_UTILS_MODULE = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_UTILS_MODULE)
 
 
 def safe_str(value) -> Optional[str]:
@@ -38,9 +46,51 @@ def safe_float(value) -> Optional[float]:
     if pd.isna(value) or value is None:
         return None
     try:
-        return float(value)
+        text = str(value).strip().replace(",", "").replace("，", "")
+        if text.lower() in {"nan", "none", "null", "-", "--"}:
+            return None
+        return float(text)
     except (ValueError, TypeError):
         return None
+
+
+def safe_amount(
+    value,
+    source_unit: str = "auto",
+    target_unit: str = "yuan",
+) -> Optional[float]:
+    """
+    安全转换金额，支持元/万元/亿元和脏字符串。
+
+    Args:
+        value: 任意金额值
+        source_unit: auto/yuan/wan/yi
+        target_unit: yuan/wan/yi
+
+    Returns:
+        目标单位下的浮点数或None
+    """
+    if pd.isna(value) or value is None:
+        return None
+
+    unit_multiplier_map = {
+        "auto": 1.0,
+        "yuan": 1.0,
+        "wan": 10000.0,
+        "yi": 100000000.0,
+    }
+    target_divisor_map = {
+        "yuan": 1.0,
+        "wan": 10000.0,
+        "yi": 100000000.0,
+    }
+
+    unit_hint_multiplier = unit_multiplier_map.get(source_unit, 1.0)
+    amount_yuan = _UTILS_MODULE.format_amount(
+        value, unit_hint_multiplier=unit_hint_multiplier
+    )
+    divisor = target_divisor_map.get(target_unit, 1.0)
+    return amount_yuan / divisor
 
 
 def safe_int(value) -> Optional[int]:
@@ -74,9 +124,10 @@ def safe_date(value) -> Optional[str]:
     if pd.isna(value) or value is None:
         return None
     try:
-        if hasattr(value, "strftime"):
-            return value.strftime("%Y-%m-%d")
-        return str(value)[:10]
+        parsed = _UTILS_MODULE.parse_date(value)
+        if parsed is None:
+            return None
+        return parsed.strftime("%Y-%m-%d")
     except (ValueError, TypeError):
         return None
 
@@ -94,9 +145,10 @@ def safe_datetime(value) -> Optional[str]:
     if pd.isna(value) or value is None:
         return None
     try:
-        if hasattr(value, "strftime"):
-            return value.strftime("%Y-%m-%d %H:%M:%S")
-        return str(value).strip()[:19]
+        parsed = _UTILS_MODULE.parse_date(value)
+        if parsed is None:
+            return None
+        return parsed.strftime("%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError):
         return None
 

@@ -9,6 +9,7 @@ from typing import Dict, List, Any, Optional
 
 from detectors.base_detector import BaseDetector
 from schemas.suspicion import SuspicionSeverity, SuspicionType
+import utils
 
 
 class RoundAmountDetector(BaseDetector):
@@ -95,7 +96,7 @@ class RoundAmountDetector(BaseDetector):
             try:
                 parsed_tx = {
                     "date": self._parse_date(tx.get("tx_date")),
-                    "amount": float(tx.get("amount", 0)),
+                    "amount": utils.format_amount(tx.get("amount", 0)),
                     "tx_type": tx.get("tx_type", ""),
                     "counterparty": tx.get("counterparty", ""),
                     "account": tx.get("account", ""),
@@ -113,15 +114,8 @@ class RoundAmountDetector(BaseDetector):
             return date_value
         if isinstance(date_value, datetime):
             return date_value.date()
-        if isinstance(date_value, str):
-            try:
-                return datetime.strptime(date_value, "%Y-%m-%d").date()
-            except ValueError:
-                try:
-                    return datetime.strptime(date_value, "%Y/%m/%d").date()
-                except ValueError:
-                    return None
-        return None
+        parsed = utils.parse_date(date_value)
+        return parsed.date() if parsed else None
 
     def _is_round_amount(self, amount: float, unit: int) -> bool:
         """判断金额是否为整数单位。"""

@@ -7,6 +7,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Any, Optional
 
+import utils
 from detectors.base_detector import BaseDetector
 from schemas.suspicion import SuspicionSeverity, SuspicionType
 
@@ -99,7 +100,7 @@ class FrequencyAnomalyDetector(BaseDetector):
                             "datetime": dt,
                             "date": dt.date(),
                             "hour": dt.hour,
-                            "amount": float(tx.get("amount", 0)),
+                            "amount": utils.format_amount(tx.get("amount", 0)),
                             "tx_type": tx.get("tx_type", ""),
                             "counterparty": tx.get("counterparty", ""),
                             "account": tx.get("account", ""),
@@ -115,24 +116,18 @@ class FrequencyAnomalyDetector(BaseDetector):
         self, date_value: Any, time_value: Any = None
     ) -> Optional[datetime]:
         """解析日期和时间字段为 datetime 对象。"""
-        if isinstance(date_value, datetime):
-            return date_value
-        if isinstance(date_value, date):
-            from datetime import time as dt_time
+        parsed_date = utils.parse_date(date_value)
+        if parsed_date is None:
+            return None
+        if time_value:
+            t = self._parse_time(time_value)
+            if t:
+                return datetime.combine(parsed_date.date(), t)
+        if isinstance(parsed_date, datetime):
+            return parsed_date
+        from datetime import time as dt_time
 
-            if time_value:
-                t = self._parse_time(time_value)
-                if t:
-                    return datetime.combine(date_value, t)
-            return datetime.combine(date_value, dt_time.min)
-        if isinstance(date_value, str):
-            formats = ["%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d"]
-            for fmt in formats:
-                try:
-                    return datetime.strptime(date_value, fmt)
-                except ValueError:
-                    continue
-        return None
+        return datetime.combine(parsed_date, dt_time.min)
 
     def _parse_time(self, time_value: Any):
         """解析时间字段为 time 对象。"""

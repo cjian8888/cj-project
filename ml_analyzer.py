@@ -449,9 +449,9 @@ COLUMN_MAPPING = {
     "counterparty": ["counterparty", "交易对手", "对方户名", "交易对方名称"],
     "description": ["description", "交易摘要", "摘要"],
     "date": ["date", "交易时间", "交易日期"],
-    "income": ["income", "收入", "收入(元)", "贷方发生额"],
-    "expense": ["expense", "支出", "支出(元)", "借方发生额"],
-    "amount": ["amount", "交易金额"],
+    "income": ["income", "收入", "收入(元)", "收入(万元)", "贷方发生额"],
+    "expense": ["expense", "支出", "支出(元)", "支出(万元)", "借方发生额"],
+    "amount": ["amount", "交易金额", "交易金额(万元)", "金额", "金额(万元)"],
 }
 
 
@@ -556,11 +556,7 @@ def _parse_transaction_date(date_val: Any) -> Optional[datetime]:
     """
     if isinstance(date_val, datetime):
         return date_val
-
-    try:
-        return pd.to_datetime(date_val)
-    except Exception:
-        return None
+    return utils.parse_date(date_val)
 
 
 def _extract_transaction_amount(row: pd.Series, col_map: Dict[str, List[str]]) -> float:
@@ -578,10 +574,19 @@ def _extract_transaction_amount(row: pd.Series, col_map: Dict[str, List[str]]) -
     """
     val_amt = _get_column_value(row, "amount", col_map)
     if val_amt is not None:
-        return abs(float(val_amt))
+        amount_col_name = next((c for c in col_map["amount"] if c in row.index), "amount")
+        return abs(utils.format_amount(val_amt, utils.get_amount_unit_hint_multiplier(amount_col_name)))
 
-    inc = float(_get_column_value(row, "income", col_map) or 0)
-    exp = float(_get_column_value(row, "expense", col_map) or 0)
+    income_col_name = next((c for c in col_map["income"] if c in row.index), "income")
+    expense_col_name = next((c for c in col_map["expense"] if c in row.index), "expense")
+    inc = utils.format_amount(
+        _get_column_value(row, "income", col_map) or 0,
+        utils.get_amount_unit_hint_multiplier(income_col_name),
+    )
+    exp = utils.format_amount(
+        _get_column_value(row, "expense", col_map) or 0,
+        utils.get_amount_unit_hint_multiplier(expense_col_name),
+    )
     return abs(inc + exp)
 
 
@@ -754,17 +759,33 @@ def _build_graph_transactions(all_transactions: Dict[str, pd.DataFrame]) -> List
                 amt = 0.0
                 val_amt = get_row_val(row, "amount")
                 if val_amt is not None:
-                    amt = float(val_amt)
+                    amount_col_name = next((c for c in col_map["amount"] if c in row.index), "amount")
+                    amt = utils.format_amount(
+                        val_amt, utils.get_amount_unit_hint_multiplier(amount_col_name)
+                    )
                 else:
-                    inc = float(get_row_val(row, "income") or 0)
-                    exp = float(get_row_val(row, "expense") or 0)
+                    income_col_name = next((c for c in col_map["income"] if c in row.index), "income")
+                    expense_col_name = next((c for c in col_map["expense"] if c in row.index), "expense")
+                    inc = utils.format_amount(
+                        get_row_val(row, "income") or 0,
+                        utils.get_amount_unit_hint_multiplier(income_col_name),
+                    )
+                    exp = utils.format_amount(
+                        get_row_val(row, "expense") or 0,
+                        utils.get_amount_unit_hint_multiplier(expense_col_name),
+                    )
                     amt = inc + exp
                 amt = abs(amt)
 
                 # 确定方向
                 is_income = False
                 val_inc = get_row_val(row, "income")
-                if val_inc and float(val_inc) > 0:
+                if utils.format_amount(
+                    val_inc or 0,
+                    utils.get_amount_unit_hint_multiplier(
+                        next((c for c in col_map["income"] if c in row.index), "income")
+                    ),
+                ) > 0:
                     is_income = True
 
                 if amt > 0:

@@ -20,6 +20,7 @@ import utils
 from utils.safe_types import (
     safe_str,
     safe_float,
+    safe_amount,
     safe_int,
     safe_date,
     safe_datetime,
@@ -30,6 +31,11 @@ logger = utils.setup_logger(__name__)
 
 # 数据源目录名称
 COMPANY_INFO_DIR_NAME = "市场监管总局企业登记信息（定向查询）"
+
+
+def _safe_capital_wan(value) -> Optional[float]:
+    """企业资本字段统一按万元口径解析，兼容元/万/亿混合写法。"""
+    return safe_amount(value, source_unit="wan", target_unit="wan")
 
 
 def extract_company_info(data_dir: str) -> Dict[str, Dict]:
@@ -168,9 +174,11 @@ def _parse_basic_info(xls: pd.ExcelFile, source_file: str) -> Dict[str, Dict]:
                         "uscc": uscc,
                         "company_name": safe_str(row.get("企业（机构）名称")),
                         "legal_representative": safe_str(row.get("法定代表人")),
-                        "registered_capital": safe_float(row.get("注册资本(金)（万元）")),
+                        "registered_capital": _safe_capital_wan(
+                            row.get("注册资本(金)（万元）")
+                        ),
                         "capital_currency": safe_str(row.get("注册资本(金)币种", "人民币")),
-                        "paid_capital": safe_float(row.get("实收资本")),
+                        "paid_capital": _safe_capital_wan(row.get("实收资本")),
                         "establishment_date": safe_date(row.get("成立日期")),
                         "approval_date": safe_date(row.get("核准日期")),
                         "business_scope": safe_str(row.get("经营范围")),
@@ -231,10 +239,14 @@ def _parse_shareholders(xls: pd.ExcelFile, source_file: str) -> Dict[str, List[D
                         "name": safe_str(row.get("自然人姓名")),
                         "id_type": safe_str(row.get("自然人证件类型")),
                         "id_number": safe_str(row.get("自然人证件号码")),
-                        "subscribed_capital": safe_float(row.get("认缴出资额（万元）")),
+                        "subscribed_capital": _safe_capital_wan(
+                            row.get("认缴出资额（万元）")
+                        ),
                         "subscribed_ratio": safe_float(row.get("认缴出资比例")),
                         "subscribed_date": safe_date(row.get("认缴出资期限")),
-                        "paid_capital": safe_float(row.get("实缴出资额（万元）")),
+                        "paid_capital": _safe_capital_wan(
+                            row.get("实缴出资额（万元）")
+                        ),
                         "currency": safe_str(row.get("币种", "人民币")),
                         "source_file": source_file
                     }
@@ -524,9 +536,9 @@ def parse_credit_code_file(file_path: str) -> Dict[str, Dict]:
                 "legal_representative": safe_str(row.get("法定代表人")),
                 "legal_representative_id": safe_str(row.get("法定代表人证件号码")),
                 "legal_representative_phone": safe_str(row.get("法定代表人电话号码")),
-                "registered_capital": safe_float(row.get("注册资本")),
+                "registered_capital": _safe_capital_wan(row.get("注册资本")),
                 "registered_capital_currency": safe_str(row.get("注册资本币种", "人民币")),
-                "paid_capital": safe_float(row.get("实收资本")),
+                "paid_capital": _safe_capital_wan(row.get("实收资本")),
                 "establishment_date": safe_date(row.get("成立日期")),
                 "business_scope": safe_str(row.get("经营范围")),
                 "operation_period_start": safe_date(row.get("经营期限起")),
@@ -534,7 +546,7 @@ def parse_credit_code_file(file_path: str) -> Dict[str, Dict]:
                 "operation_status": safe_str(row.get("经营状态")),
                 "registration_authority": safe_str(row.get("登记机关")),
                 "address": safe_str(row.get("机构地址")),
-                "feedback_date": safe_str(row.get("反馈录入时间")),
+                "feedback_date": safe_datetime(row.get("反馈录入时间")),
                 "source_file": source_file,
                 "data_source": "统一社会信用代码查询"
             }
@@ -586,4 +598,3 @@ def merge_company_info(company_info: Dict[str, Dict], credit_code_info: Dict[str
             result[uscc] = credit_data
     
     return result
-

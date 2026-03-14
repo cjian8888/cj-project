@@ -387,6 +387,24 @@ class ApiService {
     }
 
     /**
+     * 同步当前活动输入/输出目录，并尝试恢复该输出目录下的缓存结果
+     */
+    async syncActivePaths(dataSources: Partial<Pick<AnalysisConfig, 'inputDirectory' | 'outputDirectory'>>): Promise<{
+        success: boolean;
+        data?: {
+            inputDirectory: string;
+            outputDirectory: string;
+            cacheRestored: boolean;
+            status: AnalysisStatus['status'];
+        };
+    }> {
+        return this.request('/api/active-paths', {
+            method: 'POST',
+            body: JSON.stringify(dataSources),
+        });
+    }
+
+    /**
      * 弹出目录选择对话框
      */
     async selectDirectory(type: 'input' | 'output', currentPath?: string): Promise<{

@@ -525,6 +525,136 @@ class InvestigationReportBuilder:
         company_keywords = ["公司", "集团", "有限", "股份", "企业", "中心", "事务所"]
         return any(kw in name for kw in company_keywords)
 
+    @staticmethod
+    def _safe_float_value(value: Any, default: float = 0.0) -> float:
+        """安全转换数值字段。"""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _get_aggregation_data(self) -> Dict[str, Any]:
+        """获取聚合结果，兼容 camelCase/snake_case。"""
+        aggregation = self.derived_data.get("aggregation", {})
+        return aggregation if isinstance(aggregation, dict) else {}
+
+    def _get_aggregation_ranked_entities(self) -> List[Dict[str, Any]]:
+        """获取聚合排序实体。"""
+        aggregation = self._get_aggregation_data()
+        ranked = aggregation.get("rankedEntities")
+        if not isinstance(ranked, list):
+            ranked = aggregation.get("ranked_entities", [])
+        return ranked if isinstance(ranked, list) else []
+
+    def _get_aggregation_evidence_packs(self) -> Dict[str, Dict[str, Any]]:
+        """获取聚合证据包。"""
+        aggregation = self._get_aggregation_data()
+        packs = aggregation.get("evidencePacks")
+        if not isinstance(packs, dict):
+            packs = aggregation.get("evidence_packs", {})
+        return packs if isinstance(packs, dict) else {}
+
+    def _get_entity_aggregation_pack(self, entity_name: str) -> Dict[str, Any]:
+        """按实体名获取聚合证据包。"""
+        packs = self._get_aggregation_evidence_packs()
+        if entity_name in packs:
+            return packs.get(entity_name, {}) or {}
+
+        target_norm = normalize_for_matching(entity_name)
+        for candidate, pack in packs.items():
+            if normalize_for_matching(candidate) == target_norm:
+                return pack or {}
+        return {}
+
+    def _build_aggregation_highlights(
+        self,
+        limit: int = 3,
+        scope_names: Optional[set] = None,
+    ) -> List[Dict[str, Any]]:
+        """提取聚合高风险重点对象，供正式报告与结论优先使用。"""
+        highlights: List[Dict[str, Any]] = []
+        scope_norms = {normalize_for_matching(name) for name in (scope_names or set()) if name}
+
+        for item in self._get_aggregation_ranked_entities():
+            if not isinstance(item, dict):
+                continue
+            entity_name = str(item.get("name") or item.get("entity") or "").strip()
+            if not entity_name:
+                continue
+            entity_norm = normalize_for_matching(entity_name)
+            if scope_norms and entity_norm not in scope_norms:
+                continue
+
+            pack = self._get_entity_aggregation_pack(entity_name)
+            risk_score = self._safe_float_value(
+                item.get("riskScore", item.get("risk_score")),
+                self._safe_float_value(pack.get("riskScore", pack.get("risk_score")), 0.0),
+            )
+            risk_confidence = self._safe_float_value(
+                item.get("riskConfidence", item.get("risk_confidence")),
+                self._safe_float_value(pack.get("riskConfidence", pack.get("risk_confidence")), 0.05),
+            )
+            high_priority_clue_count = int(
+                self._safe_float_value(
+                    item.get("highPriorityClueCount", item.get("high_priority_clue_count")),
+                    self._safe_float_value(
+                        pack.get("highPriorityClueCount", pack.get("high_priority_clue_count")),
+                        0.0,
+                    ),
+                )
+            )
+            risk_level = str(
+                item.get("riskLevel")
+                or item.get("risk_level")
+                or pack.get("riskLevel")
+                or pack.get("risk_level")
+                or "low"
+            ).strip().lower()
+            if risk_score < 50 and high_priority_clue_count <= 0:
+                continue
+
+            explainability = {}
+            if isinstance(item.get("aggregationExplainability"), dict):
+                explainability = item.get("aggregationExplainability", {})
+            elif isinstance(item.get("aggregation_explainability"), dict):
+                explainability = item.get("aggregation_explainability", {})
+            elif isinstance(pack.get("aggregationExplainability"), dict):
+                explainability = pack.get("aggregationExplainability", {})
+            elif isinstance(pack.get("aggregation_explainability"), dict):
+                explainability = pack.get("aggregation_explainability", {})
+
+            top_clues = explainability.get("top_clues", [])
+            if not isinstance(top_clues, list):
+                top_clues = []
+
+            highlights.append(
+                {
+                    "entity": entity_name,
+                    "entity_type": item.get("entityType") or item.get("entity_type") or "",
+                    "risk_score": round(risk_score, 1),
+                    "risk_confidence": round(risk_confidence, 2),
+                    "risk_level": risk_level,
+                    "summary": str(item.get("summary") or pack.get("summary") or "").strip(),
+                    "high_priority_clue_count": high_priority_clue_count,
+                    "top_evidence_score": self._safe_float_value(
+                        item.get("topEvidenceScore", item.get("top_evidence_score")),
+                        self._safe_float_value(
+                            pack.get("topEvidenceScore", pack.get("top_evidence_score")),
+                            0.0,
+                        ),
+                    ),
+                    "top_clues": [
+                        str(clue.get("description", "")).strip()
+                        for clue in top_clues[:3]
+                        if isinstance(clue, dict) and str(clue.get("description", "")).strip()
+                    ],
+                }
+            )
+            if len(highlights) >= limit:
+                break
+
+        return highlights
+
     def _resolve_profile_person_name(
         self, raw_name: str, candidate_names: set
     ) -> Optional[str]:
@@ -2090,6 +2220,37 @@ class InvestigationReportBuilder:
 
         # 3. 可疑对手
         # 从suspicion获取...
+
+        aggregation_pack = self._get_entity_aggregation_pack(name)
+        aggregation_highlights = self._build_aggregation_highlights(
+            limit=10, scope_names={name}
+        )
+        if aggregation_highlights:
+            top_highlight = aggregation_highlights[0]
+            top_clue = top_highlight.get("top_clues", [])
+            clue_text = f"，重点线索：{top_clue[0]}" if top_clue else ""
+            if top_highlight.get("risk_score", 0) >= 70:
+                warnings.append(
+                    f"聚合风险评分{top_highlight['risk_score']:.1f}分，置信度{top_highlight['risk_confidence']:.2f}，"
+                    f"高优先线索{top_highlight['high_priority_clue_count']}条{clue_text}"
+                )
+            elif top_highlight.get("high_priority_clue_count", 0) >= 2:
+                warnings.append(
+                    f"聚合识别到{top_highlight['high_priority_clue_count']}条高优先线索，"
+                    f"建议优先核查{clue_text.lstrip('，') or '核心关系网络'}"
+                )
+
+        explainability = aggregation_pack.get("aggregation_explainability", {})
+        bucket_counts = explainability.get("evidence_bucket_counts", {}) if isinstance(explainability, dict) else {}
+        if isinstance(bucket_counts, dict):
+            risky_buckets = [
+                bucket
+                for bucket, count in bucket_counts.items()
+                if self._safe_float_value(count, 0.0) > 0
+                and bucket in {"fund_cycles", "third_party_relays", "relationship_clusters", "discovered_nodes"}
+            ]
+            if len(risky_buckets) >= 2:
+                warnings.append(f"聚合证据分布覆盖{'、'.join(risky_buckets[:3])}，存在复合型风险结构")
 
         return warnings
 
@@ -7908,6 +8069,11 @@ class InvestigationReportBuilder:
         """构建v4综合研判"""
         issues = []
         risk_levels = {"high": 0, "medium": 0, "low": 0}
+        scope_names = {
+            str(section.get("name", "")).strip()
+            for section in (person_sections + company_sections)
+            if str(section.get("name", "")).strip()
+        }
 
         # 从个人章节提取问题
         for section in person_sections:
@@ -8011,8 +8177,41 @@ class InvestigationReportBuilder:
                     }
                 )
 
+        aggregation_highlights = self._build_aggregation_highlights(
+            limit=5, scope_names=scope_names
+        )
+        for highlight in aggregation_highlights:
+            score = self._safe_float_value(highlight.get("risk_score", 0))
+            if score >= 70:
+                severity = "high"
+            elif score >= 50:
+                severity = "medium"
+            else:
+                severity = "low"
+
+            risk_levels[severity] += 1
+            top_clues = highlight.get("top_clues", [])
+            clue_text = f"；重点线索：{'；'.join(top_clues[:2])}" if top_clues else ""
+            issues.append(
+                {
+                    "person": highlight.get("entity", ""),
+                    "issue_type": "聚合高风险排序",
+                    "description": (
+                        f"{highlight.get('entity', '未知对象')}在聚合风险排序中评分"
+                        f"{score:.1f}分，置信度{highlight.get('risk_confidence', 0):.2f}，"
+                        f"高优先线索{highlight.get('high_priority_clue_count', 0)}条"
+                        f"{clue_text}"
+                    ),
+                    "severity": severity,
+                }
+            )
+
         # 【6.1修复】生成增强版结论文本
-        conclusion_text = self._generate_enhanced_summary_text_v4(issues, risk_levels)
+        conclusion_text = self._generate_enhanced_summary_text_v4(
+            issues,
+            risk_levels,
+            aggregation_highlights=aggregation_highlights,
+        )
 
         # 【v5.0】计算风险统计
         total_amount = 0.0
@@ -8043,10 +8242,15 @@ class InvestigationReportBuilder:
             "risk_levels": risk_levels,
             "summary_narrative": conclusion_text,
             "risk_statistics": risk_statistics,
+            "aggregation_highlights": aggregation_highlights,
+            "aggregation_summary": self._get_aggregation_data().get("summary", {}),
         }
 
     def _generate_enhanced_summary_text_v4(
-        self, issues: List[Dict], risk_levels: Dict
+        self,
+        issues: List[Dict],
+        risk_levels: Dict,
+        aggregation_highlights: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """生成v4增强版综合研判文本"""
         if not issues:
@@ -8054,11 +8258,21 @@ class InvestigationReportBuilder:
 
         # 【2026-02-22 修复】不再重复列出问题，只保留总结性文字
         # 问题列表已经在模板中通过 report.conclusion.issues 单独展示
+        highlight_text = ""
+        if aggregation_highlights:
+            top_entities = "；".join(
+                f"{item.get('entity', '未知对象')}"
+                f"({item.get('risk_score', 0):.1f}分/置信度{item.get('risk_confidence', 0):.2f})"
+                for item in aggregation_highlights[:3]
+            )
+            if top_entities:
+                highlight_text = f"\n\n聚合排序重点对象：{top_entities}。"
+
         conclusion_text = f"""经对相关人员资金流水进行穿透分析，发现{len(issues)}项需要进一步核实的问题。
 
 风险等级统计：高风险{risk_levels["high"]}项，中风险{risk_levels["medium"]}项，低风险{risk_levels["low"]}项。
 
-建议对上述问题开展进一步核查，重点关注高风险事项。"""
+建议对上述问题开展进一步核查，重点关注高风险事项。{highlight_text}"""
 
         return conclusion_text
 
@@ -12302,6 +12516,14 @@ class InvestigationReportBuilder:
             f"【总体评价】: 本次核查对象{risk_level}，总体风险评级为[{risk_level}]"
         )
         lines.append(f"【风险原因】: {risk_reason}")
+        aggregation_summary = report_conclusion.get("aggregation_summary", {})
+        aggregation_highlights = report_conclusion.get("aggregation_highlights", [])
+        if aggregation_summary:
+            lines.append(
+                f"【聚合排序】: 极高风险{aggregation_summary.get('极高风险实体数', 0)}个，"
+                f"高风险{aggregation_summary.get('高风险实体数', 0)}个，"
+                f"高优先线索实体{aggregation_summary.get('高优先线索实体数', 0)}个"
+            )
         if report_conclusion.get("summary_narrative"):
             lines.append(f"【正式报告综合研判】: {report_conclusion.get('summary_narrative')}")
         lines.append("")
@@ -12322,6 +12544,12 @@ class InvestigationReportBuilder:
             lines.append(f"  • 发现 {aml_positive} 条实质AML预警（可疑/大额/支付交易触发）")
         if len(credit_alerts) > 0:
             lines.append(f"  • 发现 {len(credit_alerts)} 条征信预警")
+        if aggregation_highlights:
+            top_entities = "、".join(
+                f"{item.get('entity', '未知对象')}({item.get('risk_score', 0):.1f}分)"
+                for item in aggregation_highlights[:3]
+            )
+            lines.append(f"  • 聚合排序识别重点对象: {top_entities}")
 
         # 从 derived_data 提取借贷和收入分析结果
         derived_data = self.derived_data

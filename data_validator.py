@@ -16,6 +16,19 @@ import utils
 logger = utils.setup_logger(__name__)
 
 
+def _normalize_transaction_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """在验证入口统一标准化日期和金额字段，避免脏数据导致后续比较崩溃。"""
+    df_work = df.copy()
+    if 'date' in df_work.columns:
+        df_work['date'] = utils.normalize_datetime_series(df_work['date'])
+    for amount_col in ('amount', 'income', 'expense', 'balance'):
+        if amount_col in df_work.columns:
+            df_work[amount_col] = utils.normalize_amount_series(
+                df_work[amount_col], amount_col
+            )
+    return df_work
+
+
 def validate_transaction_data(df: pd.DataFrame, entity_name: str) -> Dict:
     """
     验证银行流水数据的完整性和合理性
@@ -44,12 +57,14 @@ def validate_transaction_data(df: pd.DataFrame, entity_name: str) -> Dict:
             'warnings': warnings,
             'record_count': len(df)
         }
-    
-    # 检查日期格式
-    try:
-        df['date'] = pd.to_datetime(df['date'])
-    except Exception as e:
-        issues.append(f'日期格式错误: {str(e)}')
+
+    df = _normalize_transaction_dataframe(df)
+
+    invalid_date_count = int(df['date'].isna().sum()) if 'date' in df.columns else 0
+    if len(df) > 0 and invalid_date_count == len(df):
+        issues.append('日期格式错误: 全部日期无法解析')
+    elif invalid_date_count > 0:
+        warnings.append(f'有{invalid_date_count}笔交易日期无法解析，已在验证时忽略')
     
     # 检查金额合理性
     if 'income' in df.columns:
@@ -65,12 +80,14 @@ def validate_transaction_data(df: pd.DataFrame, entity_name: str) -> Dict:
     # 检查数据时间跨度
     date_range = 0
     if not df.empty and 'date' in df.columns:
-        date_range = (df['date'].max() - df['date'].min()).days
-        if date_range < 30:
+        valid_dates = df['date'].dropna()
+        if not valid_dates.empty:
+            date_range = (valid_dates.max() - valid_dates.min()).days
+        if date_range < 30 and not valid_dates.empty:
             warnings.append(f'数据时间跨度较短: {date_range}天')
     
     # 检查空值比例
-    null_ratio = df.isnull().sum() / len(df)
+    null_ratio = df.isnull().sum() / len(df) if len(df) > 0 else pd.Series(dtype=float)
     high_null_fields = null_ratio[null_ratio > 0.5].index.tolist()
     if high_null_fields:
         warnings.append(f'以下字段空值比例超过50%: {", ".join(high_null_fields)}')
@@ -328,9 +345,11 @@ def cross_validate_property_transactions(
         
         try:
             # 复制 DataFrame 避免修改原始数据
-            df_copy = df.copy()
-            # 转换日期列
-            df_copy['date'] = pd.to_datetime(df_copy['date'])
+            df_copy = _normalize_transaction_dataframe(df)
+            df_copy = df_copy[df_copy['date'].notna()].copy()
+            if df_copy.empty:
+                indexed_transactions[owner] = None
+                continue
             # 设置日期索引（加速查询）
             df_copy = df_copy.set_index('date').sort_index()
             indexed_transactions[owner] = df_copy
@@ -374,7 +393,17 @@ def cross_validate_property_transactions(
         try:
             # 转换登记日期
             if register_date:
-                register_dt = pd.to_datetime(register_date)
+                register_dt = utils.parse_date(register_date)
+                if register_dt is None:
+                    validation_results.append({
+                        '产权人': owner,
+                        '房产地址': address,
+                        '交易金额': amount,
+                        '登记时间': register_date,
+                        '验证状态': '登记时间无法解析',
+                        '匹配交易': None
+                    })
+                    continue
                 
                 # 扩大时间窗口到配置的月数
                 start_date = register_dt - timedelta(days=time_window_days)
@@ -394,7 +423,9 @@ def cross_validate_property_transactions(
                     })
                     continue
                 
-                amount_yuan = amount * config.UNIT_WAN  # 转换为元
+                amount_yuan = utils.format_amount(
+                    amount, unit_hint_multiplier=config.UNIT_WAN
+                )
                 
                 # 方法1：单笔匹配（向量化优化）
                 tolerance = amount_yuan * single_tolerance

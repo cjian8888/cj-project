@@ -33,14 +33,23 @@
 }
 """
 
+import json
 import pandas as pd
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 from collections import defaultdict
 
 import config
 import utils
+import risk_scoring
+from name_normalizer import normalize_for_matching
 from unified_risk_model import UnifiedRiskModel, calculate_financial_ratio, calculate_family_transfer_ratio
+from utils.path_explainability import (
+    build_cluster_path_explainability,
+    build_cycle_path_explainability,
+    build_relay_path_explainability,
+    get_or_build_path_evidence_template,
+)
 
 logger = utils.setup_logger(__name__)
 
@@ -142,15 +151,319 @@ class ClueAggregator:
         self.core_persons = core_persons
         self.companies = companies
         self.all_entities = core_persons + companies
+        self.entity_alias_map = self._build_entity_alias_map()
+        self.analysis_metadata = {
+            'penetration': {},
+            'related_party': {},
+        }
+        self._bucket_seen_keys = defaultdict(lambda: defaultdict(set))
         
         # 每个实体的证据包
         self.evidence_packs = {entity: self._create_empty_pack() for entity in self.all_entities}
-        
+
+    def _build_entity_alias_map(self) -> Dict[str, str]:
+        """构建实体别名索引，兼容括号、空格和人员后缀差异。"""
+        alias_map = {}
+        for entity in self.all_entities:
+            entity_name = str(entity).strip()
+            if not entity_name:
+                continue
+            aliases = {
+                entity_name,
+                utils.normalize_name(entity_name),
+                utils.normalize_person_name(entity_name),
+                normalize_for_matching(entity_name),
+            }
+            for alias in aliases:
+                if alias:
+                    alias_map[alias] = entity_name
+        return alias_map
+
+    @staticmethod
+    def _serialize_dedupe_key(item: Any) -> str:
+        """为去重生成稳定键。"""
+        try:
+            return json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            return str(item)
+
+    @staticmethod
+    def _normalize_risk_level(level: Any, score: Any = None) -> str:
+        normalized = str(level or '').strip().lower()
+        if normalized in {'critical', 'high', 'medium', 'low'}:
+            return normalized
+        return risk_scoring.score_to_risk_level(score or 0)
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _resolve_entity(self, candidate: Any) -> Optional[str]:
+        """把任意名称解析为排查对象实体。"""
+        if candidate is None:
+            return None
+
+        text = str(candidate).strip()
+        if not text or text.lower() in {'nan', 'none', 'null', 'nat'}:
+            return None
+        if text in self.evidence_packs:
+            return text
+
+        aliases = (
+            text,
+            utils.normalize_name(text),
+            utils.normalize_person_name(text),
+            normalize_for_matching(text),
+        )
+        for alias in aliases:
+            if alias and alias in self.entity_alias_map:
+                return self.entity_alias_map[alias]
+        return None
+
+    def _append_entity_evidence(self, entity: str, bucket: str, item: Dict) -> bool:
+        """向实体证据包追加去重后的线索。"""
+        if entity not in self.evidence_packs:
+            return False
+
+        dedupe_key = self._serialize_dedupe_key(item)
+        seen_keys = self._bucket_seen_keys[entity][bucket]
+        if dedupe_key in seen_keys:
+            return False
+
+        seen_keys.add(dedupe_key)
+        self.evidence_packs[entity]['evidence'][bucket].append(item)
+        return True
+
+    def _append_to_entities(self, bucket: str, item: Dict, *candidates: Any) -> List[str]:
+        """把线索挂到匹配到的实体证据包上。"""
+        matched_entities = []
+        seen_entities = set()
+        pending = list(candidates)
+
+        while pending:
+            candidate = pending.pop(0)
+            if isinstance(candidate, (list, tuple, set)):
+                pending.extend(candidate)
+                continue
+
+            entity = self._resolve_entity(candidate)
+            if entity and entity not in seen_entities:
+                if self._append_entity_evidence(entity, bucket, item):
+                    matched_entities.append(entity)
+                seen_entities.add(entity)
+
+        return matched_entities
+
+    def _normalize_fund_cycle_record(
+        self,
+        raw_cycle: Any,
+        source: str,
+        analysis_metadata: Optional[Dict] = None,
+    ) -> Optional[Dict]:
+        """统一闭环记录格式，兼容旧 list 和新 explainability dict。"""
+        if raw_cycle is None:
+            return None
+
+        if isinstance(raw_cycle, dict):
+            record = dict(raw_cycle)
+            participants = (
+                record.get('participants')
+                or record.get('nodes')
+                or record.get('cycle')
+                or []
+            )
+        else:
+            participants = list(raw_cycle) if isinstance(raw_cycle, (list, tuple)) else []
+            record = {
+                'participants': participants,
+                'nodes': participants,
+                'cycle': participants,
+            }
+
+        participants = [str(node).strip() for node in participants if str(node).strip()]
+        path = record.get('path') or record.get('cycle_str') or ''
+        if not path and participants:
+            path = ' → '.join(participants + [participants[0]])
+        if not participants and not path:
+            return None
+
+        risk_score = risk_scoring.normalize_risk_score(record.get('risk_score', 0))
+        normalized_record = dict(record)
+        normalized_record.update(
+            {
+                'participants': participants,
+                'nodes': normalized_record.get('nodes') or participants,
+                'cycle': normalized_record.get('cycle') or participants,
+                'path': path,
+                'cycle_str': normalized_record.get('cycle_str') or path,
+                'length': int(normalized_record.get('length', len(participants))),
+                'risk_score': risk_score,
+                'risk_level': self._normalize_risk_level(
+                    normalized_record.get('risk_level'),
+                    risk_score,
+                ),
+                'confidence': risk_scoring.normalize_confidence(
+                    normalized_record.get('confidence', 0.05)
+                ),
+                'evidence': list(normalized_record.get('evidence', []) or []),
+                'source': source,
+            }
+        )
+
+        if analysis_metadata:
+            normalized_record['analysis_metadata'] = dict(analysis_metadata)
+            if analysis_metadata.get('truncated'):
+                normalized_record['search_truncated'] = True
+
+        if not normalized_record['evidence']:
+            normalized_record['evidence'] = [
+                f"来自{'资金穿透' if source == 'penetration' else '关联方分析'}的闭环线索"
+            ]
+        if not isinstance(normalized_record.get('path_explainability'), dict):
+            normalized_record['path_explainability'] = build_cycle_path_explainability(
+                nodes=participants,
+                path=path,
+                total_amount=float(normalized_record.get('total_amount', 0) or 0),
+                search_metadata=analysis_metadata,
+            )
+
+        return normalized_record
+
+    @staticmethod
+    def _describe_clue(bucket: str, item: Dict) -> str:
+        label_mapping = {
+            'fund_cycles': '资金闭环',
+            'pass_through': '过账通道',
+            'high_risk_transactions': '高风险交易',
+            'communities': '团伙关系',
+            'periodic_income': '周期性收入',
+            'sudden_changes': '资金突变',
+            'delayed_transfers': '固定延迟转账',
+            'related_party': '直接往来',
+            'loans': '借贷关系',
+            'third_party_relays': '第三方中转',
+            'discovered_nodes': '外围节点',
+            'relationship_clusters': '关系簇',
+        }
+        label = label_mapping.get(bucket, bucket)
+
+        if not isinstance(item, dict):
+            return label
+        if item.get('path'):
+            return f"{label}: {item.get('path')}"
+        if item.get('cycle_str'):
+            return f"{label}: {item.get('cycle_str')}"
+        if isinstance(item.get('path_explainability'), dict):
+            evidence_template = get_or_build_path_evidence_template(item['path_explainability'])
+            headline = str(evidence_template.get('headline', '') or '').strip()
+            if headline:
+                return f"{label}: {headline}"
+            summary = str(item['path_explainability'].get('summary', '')).strip()
+            if summary:
+                return f"{label}: {summary}"
+        if item.get('relay'):
+            return f"{label}: {item.get('from', '未知')} → {item.get('relay')} → {item.get('to', '未知')}"
+        if item.get('cluster_id'):
+            return f"{label}: {item.get('cluster_id')}"
+        if item.get('name'):
+            return f"{label}: {item.get('name')}"
+        if item.get('counterparty'):
+            return f"{label}: {item.get('counterparty')}"
+        if item.get('to'):
+            return f"{label}: {item.get('from', '未知')} → {item.get('to')}"
+        return label
+
+    def _build_explainability_metrics(self, pack: Dict) -> Dict:
+        """基于各类线索的 explainability 生成聚合排序辅助信息。"""
+        scored_clues = []
+        evidence_counts = {}
+
+        for bucket, items in pack.get('evidence', {}).items():
+            evidence_counts[bucket] = len(items) if isinstance(items, list) else 0
+            if not isinstance(items, list):
+                continue
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if 'risk_score' not in item and 'confidence' not in item:
+                    continue
+
+                score = risk_scoring.normalize_risk_score(item.get('risk_score', 0))
+                confidence = risk_scoring.normalize_confidence(item.get('confidence', 0.05))
+                scored_clues.append(
+                    {
+                        'bucket': bucket,
+                        'risk_score': score,
+                        'confidence': confidence,
+                        'description': self._describe_clue(bucket, item),
+                        'evidence': list(item.get('evidence', []) or [])[:3],
+                        'path_explainability': item.get('path_explainability', {}),
+                        'evidence_template': get_or_build_path_evidence_template(
+                            item.get('path_explainability', {})
+                        ),
+                    }
+                )
+
+        scored_clues.sort(
+            key=lambda clue: (
+                -clue['risk_score'],
+                -clue['confidence'],
+                clue['description'],
+            )
+        )
+
+        scores = [clue['risk_score'] for clue in scored_clues]
+        confidences = [clue['confidence'] for clue in scored_clues]
+        model_confidence = risk_scoring.normalize_confidence(pack.get('model_confidence', 0.05))
+        if confidences:
+            avg_confidence = round(sum(confidences) / len(confidences), 2)
+            max_confidence = max(confidences)
+            risk_confidence = risk_scoring.normalize_confidence(
+                model_confidence * 0.45 + avg_confidence * 0.35 + max_confidence * 0.20
+            )
+        else:
+            avg_confidence = model_confidence
+            max_confidence = model_confidence
+            risk_confidence = model_confidence
+
+        top_evidence_score = max(scores) if scores else 0.0
+        high_priority_clue_count = sum(1 for score in scores if score >= 50)
+
+        return {
+            'risk_confidence': risk_confidence,
+            'top_evidence_score': top_evidence_score,
+            'high_priority_clue_count': high_priority_clue_count,
+            'aggregation_explainability': {
+                'model_confidence': model_confidence,
+                'average_evidence_confidence': avg_confidence,
+                'max_evidence_confidence': max_confidence,
+                'scored_clue_count': len(scored_clues),
+                'evidence_bucket_counts': evidence_counts,
+                'top_clues': scored_clues[:3],
+            },
+        }
+    
     def _create_empty_pack(self) -> Dict:
         """创建空证据包"""
         return {
             'risk_score': 0,
             'risk_level': 'low',
+            'risk_confidence': 0.05,
+            'model_confidence': 0.05,
+            'top_evidence_score': 0.0,
+            'high_priority_clue_count': 0,
+            'aggregation_explainability': {
+                'model_confidence': 0.05,
+                'average_evidence_confidence': 0.05,
+                'max_evidence_confidence': 0.05,
+                'scored_clue_count': 0,
+                'evidence_bucket_counts': {},
+                'top_clues': [],
+            },
             'summary': '',
             'evidence': {
                 'fund_cycles': [],           # 涉及的资金闭环
@@ -162,6 +475,9 @@ class ClueAggregator:
                 'sudden_changes': [],        # 资金突变
                 'delayed_transfers': [],     # 固定延迟转账
                 'related_party': [],         # 关联方往来
+                'third_party_relays': [],    # 第三方中转
+                'discovered_nodes': [],      # 外围节点
+                'relationship_clusters': [], # 关系簇
                 'loans': []                  # 借贷关系
             },
             'statistics': {
@@ -176,69 +492,42 @@ class ClueAggregator:
     def aggregate_penetration_results(self, penetration_results: Dict):
         """聚合资金穿透分析结果"""
         logger.info('聚合资金穿透分析结果...')
+        self.analysis_metadata['penetration'] = penetration_results.get('analysis_metadata', {}) or {}
         
         # 聚合资金闭环（去重）
-        seen_cycles = set()
         for cycle in penetration_results.get('fund_cycles', []):
-            # 【P1 修复 2026-01-27】处理不同数据格式
-            # cycle 可能是 List[str] 或 Dict
-            if isinstance(cycle, dict):
-                # 如果是字典，提取 cycle 键的值
-                cycle_list = cycle.get('cycle', [])
-                cycle_str = cycle.get('cycle_str', ' → '.join(cycle_list) if cycle_list else '')
-            else:
-                cycle_list = cycle
-                cycle_str = ' → '.join(cycle) if cycle else ''
-            
-            # 【P1 修复 2026-01-28】使用 json 序列化作为唯一标识，避免包含字典
-            # 这样无论 cycle_list 中是什么类型，都可以放入 set
-            try:
-                cycle_key = tuple(cycle_list) if cycle_list else ()
-                # 检查是否所有元素都是字符串
-                all_strings = all(isinstance(item, str) for item in cycle_key)
-                if not all_strings:
-                    # 如果包含非字符串元素，使用 json 序列化
-                    import json
-                    cycle_key = json.dumps(cycle, sort_keys=True, ensure_ascii=False)
-                
-                if cycle_key in seen_cycles:
-                    continue
-                seen_cycles.add(cycle_key)
-            except (TypeError, ValueError) as e:
-                # 如果 cycle_list 包含不可排序的元素或无法序列化，跳过
-                logger.warning(f"跳过无法处理的闭环: {cycle}, 错误: {e}")
+            cycle_record = self._normalize_fund_cycle_record(
+                cycle,
+                source='penetration',
+                analysis_metadata=self.analysis_metadata['penetration'].get('fund_cycles'),
+            )
+            if not cycle_record:
                 continue
-            
-            # 闭环涉及的所有实体
-            for entity in cycle_list:
-                if entity in self.evidence_packs:
-                    self.evidence_packs[entity]['evidence']['fund_cycles'].append({
-                        'cycle': cycle_list,
-                        'cycle_str': cycle_str,
-                        'length': len(cycle_list)
-                    })
+
+            self._append_to_entities(
+                'fund_cycles',
+                cycle_record,
+                cycle_record.get('participants', []),
+            )
         
         # 聚合过账通道
         for channel in penetration_results.get('pass_through_channels', []):
-            entity = channel.get('node')
-            if entity in self.evidence_packs:
-                self.evidence_packs[entity]['evidence']['pass_through'].append(channel)
+            entity = self._resolve_entity(channel.get('node'))
+            if entity:
+                self._append_entity_evidence(entity, 'pass_through', channel)
         
         # 聚合资金枢纽
         for hub in penetration_results.get('hub_nodes', []):
-            entity = hub.get('node')
-            if entity in self.evidence_packs:
-                self.evidence_packs[entity]['evidence']['hub_connections'].append(hub)
+            entity = self._resolve_entity(hub.get('node'))
+            if entity:
+                self._append_entity_evidence(entity, 'hub_connections', hub)
         
         # 聚合直接往来
         for tx_type in ['person_to_company', 'company_to_person', 'person_to_person', 'company_to_company']:
             for tx in penetration_results.get(tx_type, []):
                 sender = tx.get('发起方')
                 receiver = tx.get('接收方')
-                if sender in self.evidence_packs:
-                    self.evidence_packs[sender]['evidence']['related_party'].append(tx)
-                if receiver in self.evidence_packs:
-                    self.evidence_packs[receiver]['evidence']['related_party'].append(tx)
+                self._append_to_entities('related_party', tx, sender, receiver)
     
     def aggregate_ml_results(self, ml_results: Dict):
         """聚合机器学习分析结果"""
@@ -309,13 +598,64 @@ class ClueAggregator:
     def aggregate_related_party_results(self, rp_results: Dict):
         """聚合关联方分析结果"""
         logger.info('聚合关联方分析结果...')
+        self.analysis_metadata['related_party'] = rp_results.get('analysis_metadata', {}) or {}
         
-        # 直接往来
-        for tx in rp_results.get('direct_transactions', []):
-            for entity in self.all_entities:
-                if entity in str(tx.get('person1', '')) or entity in str(tx.get('person2', '')):
-                    if entity in self.evidence_packs:
-                        self.evidence_packs[entity]['evidence']['related_party'].append(tx)
+        # 兼容旧结构 direct_transactions，并正式消费新结构 direct_flows
+        direct_flows = rp_results.get('direct_flows', []) or rp_results.get('direct_transactions', [])
+        for flow in direct_flows:
+            self._append_to_entities(
+                'related_party',
+                flow,
+                flow.get('from'),
+                flow.get('to'),
+                flow.get('person1'),
+                flow.get('person2'),
+            )
+
+        for relay in rp_results.get('third_party_relays', []):
+            relay_record = dict(relay) if isinstance(relay, dict) else {}
+            if relay_record and not isinstance(relay_record.get('path_explainability'), dict):
+                relay_record['path_explainability'] = build_relay_path_explainability(relay_record)
+            self._append_to_entities(
+                'third_party_relays',
+                relay_record,
+                relay_record.get('from'),
+                relay_record.get('to'),
+            )
+
+        loop_meta = self.analysis_metadata['related_party'].get('fund_loops')
+        for loop in rp_results.get('fund_loops', []):
+            loop_record = self._normalize_fund_cycle_record(
+                loop,
+                source='related_party',
+                analysis_metadata=loop_meta,
+            )
+            if not loop_record:
+                continue
+            self._append_to_entities(
+                'fund_cycles',
+                loop_record,
+                loop_record.get('participants', []),
+            )
+
+        for node in rp_results.get('discovered_nodes', []):
+            self._append_to_entities(
+                'discovered_nodes',
+                node,
+                node.get('linked_cores', []),
+            )
+
+        for cluster in rp_results.get('relationship_clusters', []):
+            cluster_record = dict(cluster) if isinstance(cluster, dict) else {}
+            if cluster_record and not isinstance(cluster_record.get('path_explainability'), dict):
+                cluster_record['path_explainability'] = build_cluster_path_explainability(cluster_record)
+            self._append_to_entities(
+                'relationship_clusters',
+                cluster_record,
+                cluster_record.get('core_members', []),
+                cluster_record.get('external_members', []),
+                cluster_record.get('all_nodes', []),
+            )
     
     def aggregate_loan_results(self, loan_results: Dict):
         """聚合借贷分析结果"""
@@ -362,15 +702,69 @@ class ClueAggregator:
                 if isinstance(community, dict)
                 for member in community.get('members', [])
             ]
+            relay_entities = [
+                relay.get('relay')
+                for relay in evidence.get('third_party_relays', [])
+                if isinstance(relay, dict) and relay.get('relay')
+            ]
+            discovered_entities = [
+                node.get('name')
+                for node in evidence.get('discovered_nodes', [])
+                if isinstance(node, dict) and node.get('name')
+            ]
+            cluster_entities = [
+                member
+                for cluster in evidence.get('relationship_clusters', [])
+                if isinstance(cluster, dict)
+                for member in (
+                    list(cluster.get('core_members', []) or [])
+                    + list(cluster.get('external_members', []) or [])
+                    + list(cluster.get('all_nodes', []) or [])
+                )
+            ]
+            direct_relation_entities = []
+            for relation in evidence.get('related_party', []):
+                if not isinstance(relation, dict):
+                    continue
+                direct_relation_entities.extend(
+                    [
+                        relation.get('from'),
+                        relation.get('to'),
+                        relation.get('发起方'),
+                        relation.get('接收方'),
+                        relation.get('person1'),
+                        relation.get('person2'),
+                    ]
+                )
             
             # 准备风险评分所需的数据
             risk_evidence = {
                 'money_loops': evidence.get('fund_cycles', []),
                 'transit_channel': self._extract_transit_channel_info(evidence),
+                'transit_channels': evidence.get('pass_through', []),
+                'relay_chains': evidence.get('third_party_relays', []),
+                'relationship_clusters': evidence.get('relationship_clusters', []),
+                'discovered_nodes': evidence.get('discovered_nodes', []),
+                'direct_relations': evidence.get('related_party', []),
                 'related_entities': [x for x in (hub_entities + community_members) if x],
                 'ml_anomalies': evidence.get('high_risk_transactions', []),
-                'total_records': stats.get('total_records', stats.get('transaction_count', 0))
+                'total_records': stats.get('total_records', stats.get('transaction_count', 0)),
+                'money_loop_meta': self.analysis_metadata.get('penetration', {}).get('fund_cycles', {}),
+                'relay_meta': self.analysis_metadata.get('related_party', {}).get('third_party_relays', {}),
+                'relationship_meta': self.analysis_metadata.get('related_party', {}).get('fund_loops', {}),
             }
+            risk_evidence['related_entities'] = [
+                item
+                for item in (
+                    hub_entities
+                    + community_members
+                    + relay_entities
+                    + discovered_entities
+                    + cluster_entities
+                    + direct_relation_entities
+                )
+                if item and item != entity
+            ]
             
             # 计算理财交易占比（从cleaned_data中读取）
             financial_ratio = self._calculate_financial_ratio(entity)
@@ -388,12 +782,38 @@ class ClueAggregator:
             
             # 更新风险评分到evidence_pack
             pack['risk_score'] = risk_score.total_score
-            pack['risk_level'] = risk_score.risk_level
+            pack['risk_level'] = self._normalize_risk_level(
+                risk_score.risk_level,
+                risk_score.total_score,
+            )
             pack['summary'] = risk_score.reason
-            pack['risk_confidence'] = risk_score.confidence
+            pack['model_confidence'] = risk_score.confidence
             pack['risk_details'] = risk_score.details
+
+            explainability_metrics = self._build_explainability_metrics(pack)
+            pack['risk_confidence'] = explainability_metrics['risk_confidence']
+            pack['top_evidence_score'] = explainability_metrics['top_evidence_score']
+            pack['high_priority_clue_count'] = explainability_metrics['high_priority_clue_count']
+            pack['aggregation_explainability'] = explainability_metrics['aggregation_explainability']
+
+            top_clues = pack['aggregation_explainability'].get('top_clues', [])
+            if top_clues:
+                top_categories = '、'.join(
+                    clue.get('description', '').split(':', 1)[0]
+                    for clue in top_clues
+                    if clue.get('description')
+                )
+                if top_categories and top_categories not in pack['summary']:
+                    pack['summary'] = (
+                        f'{pack["summary"]}；重点线索：{top_categories}'
+                        if pack['summary']
+                        else f'重点线索：{top_categories}'
+                    )
             
-            logger.info(f"{entity} 统一风险评分: {risk_score.total_score:.1f} ({risk_score.risk_level})")
+            logger.info(
+                f"{entity} 统一风险评分: {risk_score.total_score:.1f} "
+                f"({pack['risk_level']}, confidence={pack['risk_confidence']:.2f})"
+            )
     
     def _extract_transit_channel_info(self, evidence: Dict) -> Dict:
         """提取过账通道信息"""
@@ -503,18 +923,99 @@ class ClueAggregator:
         entities = []
         for entity, pack in self.evidence_packs.items():
             if pack['risk_score'] > 0:  # 只返回有发现的实体
+                entity_type = 'person' if entity in self.core_persons else 'company'
+                evidence_count = sum(len(v) for v in pack['evidence'].values())
                 entities.append({
+                    'name': entity,
                     'entity': entity,
-                    'entity_type': 'person' if entity in self.core_persons else 'company',
+                    'entity_type': entity_type,
+                    'entityType': entity_type,
                     'risk_score': pack['risk_score'],
-                    'risk_level': pack['risk_level'],
+                    'riskScore': pack['risk_score'],
+                    'risk_level': self._normalize_risk_level(pack.get('risk_level'), pack['risk_score']),
+                    'riskLevel': self._normalize_risk_level(pack.get('risk_level'), pack['risk_score']),
+                    'risk_confidence': pack.get('risk_confidence', 0.05),
+                    'riskConfidence': pack.get('risk_confidence', 0.05),
+                    'top_evidence_score': pack.get('top_evidence_score', 0.0),
+                    'topEvidenceScore': pack.get('top_evidence_score', 0.0),
+                    'high_priority_clue_count': pack.get('high_priority_clue_count', 0),
+                    'highPriorityClueCount': pack.get('high_priority_clue_count', 0),
                     'summary': pack['summary'],
-                    'evidence_count': sum(len(v) for v in pack['evidence'].values())
+                    'evidence_count': evidence_count,
+                    'evidenceCount': evidence_count,
+                    'aggregation_explainability': pack.get('aggregation_explainability', {}),
+                    'aggregationExplainability': pack.get('aggregation_explainability', {}),
+                    'reasons': [
+                        clue.get('description')
+                        for clue in pack.get('aggregation_explainability', {}).get('top_clues', [])
+                        if clue.get('description')
+                    ],
                 })
         
-        # 按风险分降序
-        entities.sort(key=lambda x: -x['risk_score'])
+        # 按风险分、风险置信度、最强证据强度、高优先线索数降序
+        entities.sort(
+            key=lambda item: (
+                -item['riskScore'],
+                -item['riskConfidence'],
+                -item['topEvidenceScore'],
+                -item['highPriorityClueCount'],
+                -item['evidenceCount'],
+                item['entity'],
+            )
+        )
         return entities
+
+    def get_summary(self) -> Dict[str, int]:
+        """生成聚合排序摘要。"""
+        ranked = self.get_ranked_entities()
+        critical = sum(1 for item in ranked if item.get('riskLevel') == 'critical')
+        high = sum(1 for item in ranked if item.get('riskLevel') == 'high')
+        medium = sum(1 for item in ranked if item.get('riskLevel') == 'medium')
+        return {
+            '极高风险实体数': critical,
+            '高风险实体数': high,
+            '中风险实体数': medium,
+            '风险实体总数': len(ranked),
+            '高优先线索实体数': sum(
+                1 for item in ranked if int(item.get('highPriorityClueCount', 0) or 0) > 0
+            ),
+        }
+
+    def to_dict(self) -> Dict:
+        """对外稳定输出聚合结果，兼容前端 camelCase 和旧逻辑 snake_case。"""
+        ranked = self.get_ranked_entities()
+        summary = self.get_summary()
+        evidence_packs = {}
+
+        for entity, pack in self.evidence_packs.items():
+            normalized_pack = dict(pack)
+            normalized_pack['risk_level'] = self._normalize_risk_level(
+                pack.get('risk_level'),
+                pack.get('risk_score', 0),
+            )
+            normalized_pack['riskLevel'] = normalized_pack['risk_level']
+            normalized_pack['riskScore'] = pack.get('risk_score', 0)
+            normalized_pack['riskConfidence'] = pack.get('risk_confidence', 0.05)
+            normalized_pack['topEvidenceScore'] = pack.get('top_evidence_score', 0.0)
+            normalized_pack['highPriorityClueCount'] = pack.get('high_priority_clue_count', 0)
+            normalized_pack['aggregationExplainability'] = pack.get('aggregation_explainability', {})
+            evidence_packs[entity] = normalized_pack
+
+        return {
+            'rankedEntities': ranked,
+            'summary': summary,
+            'evidencePacks': evidence_packs,
+            'analysisMetadata': self.analysis_metadata,
+            'corePersons': self.core_persons,
+            'companies': self.companies,
+            'allEntities': self.all_entities,
+            # 兼容旧字段
+            'ranked_entities': ranked,
+            'evidence_packs': evidence_packs,
+            'analysis_metadata': self.analysis_metadata,
+            'core_persons': self.core_persons,
+            'all_entities': self.all_entities,
+        }
     
     def get_entity_evidence_pack(self, entity: str) -> Dict:
         """获取指定实体的完整证据包"""
@@ -595,7 +1096,8 @@ def _write_aggregation_report_header(f) -> None:
     f.write('2. 涉及资金闭环: +30分\n')
     f.write('3. 过账通道特征: +20分\n')
     f.write('4. 连接多个实体: +10分(>=3个)\n')
-    f.write('5. ML模型检测异常: +15分\n\n')
+    f.write('5. ML模型检测异常: +15分\n')
+    f.write('6. 排序并列时，进一步比较风险置信度、最强证据分和高优先线索数\n\n')
     
     f.write('【风险等级划分】\n')
     f.write('• 极高风险 (70-100分): 建议立即核查\n')
@@ -645,7 +1147,10 @@ def _write_pass_through_section(f, pass_through: List[Dict]) -> None:
     """写入过账通道部分"""
     f.write('    ▶ 过账通道特征:\n')
     for ch in pass_through[:3]:
-        f.write(f'      进账: {ch.get("inflow", 0)/10000:.2f}万 | 出账: {ch.get("outflow", 0)/10000:.2f}万 | 进出比: {ch.get("ratio", 0)*100:.1f}%\n')
+        f.write(
+            f'      进账: {ch.get("inflow", 0)/10000:.2f}万 | 出账: {ch.get("outflow", 0)/10000:.2f}万 '
+            f'| 进出比: {ch.get("ratio", 0)*100:.1f}% | 证据分: {ch.get("risk_score", 0):.1f}\n'
+        )
     f.write('\n')
 
 
@@ -708,6 +1213,49 @@ def _write_delayed_transfers_section(f, delayed_transfers: List[Dict]) -> None:
     f.write('\n')
 
 
+def _write_third_party_relays_section(f, relays: List[Dict]) -> None:
+    """写入第三方中转部分。"""
+    f.write('    ▶ 第三方中转链路:\n')
+    for j, relay in enumerate(relays[:3], 1):
+        f.write(
+            f'      {j}. {relay.get("from", "未知")} → {relay.get("relay", "未知")} → {relay.get("to", "未知")} '
+            f'| 金额: {relay.get("outflow_amount", 0)/10000:.2f}万 | 证据分: {relay.get("risk_score", 0):.1f}\n'
+        )
+    if len(relays) > 3:
+        f.write(f'      ... 共{len(relays)}条\n')
+    f.write('\n')
+
+
+def _write_discovered_nodes_section(f, nodes: List[Dict]) -> None:
+    """写入外围节点部分。"""
+    f.write('    ▶ 外围节点发现:\n')
+    for j, node in enumerate(nodes[:3], 1):
+        linked_cores = '、'.join(node.get('linked_cores', [])[:3]) or '未知核心对象'
+        f.write(
+            f'      {j}. {node.get("name", "未知节点")} | 核心关联: {linked_cores} '
+            f'| 出现次数: {node.get("occurrences", 0)} | 证据分: {node.get("risk_score", 0):.1f}\n'
+        )
+    if len(nodes) > 3:
+        f.write(f'      ... 共{len(nodes)}个\n')
+    f.write('\n')
+
+
+def _write_relationship_clusters_section(f, clusters: List[Dict]) -> None:
+    """写入关系簇部分。"""
+    f.write('    ▶ 关系簇识别:\n')
+    for j, cluster in enumerate(clusters[:3], 1):
+        core_members = '、'.join(cluster.get('core_members', [])[:3]) or '未知'
+        external_members = '、'.join(cluster.get('external_members', [])[:3]) or '无'
+        f.write(
+            f'      {j}. 核心成员: {core_members} | 外围成员: {external_members} '
+            f'| 闭环/中转/直连: {cluster.get("loop_count", 0)}/{cluster.get("relay_count", 0)}/{cluster.get("direct_flow_count", 0)} '
+            f'| 证据分: {cluster.get("risk_score", 0):.1f}\n'
+        )
+    if len(clusters) > 3:
+        f.write(f'      ... 共{len(clusters)}个\n')
+    f.write('\n')
+
+
 def _write_communities_section(f, communities: List[Dict]) -> None:
     """写入团伙部分"""
     # 只显示有意义的团伙
@@ -728,6 +1276,11 @@ def _write_entity_evidence_pack(f, aggregator: ClueAggregator, entity_info: Dict
     
     f.write(f'【{index}】{entity}\n')
     f.write(f'    风险评分: {pack["risk_score"]}分 [{pack["risk_level"].upper()}]\n')
+    f.write(
+        f'    风险置信度: {pack.get("risk_confidence", 0.05):.2f} | '
+        f'最强证据分: {pack.get("top_evidence_score", 0.0):.1f} | '
+        f'高优先线索数: {pack.get("high_priority_clue_count", 0)}\n'
+    )
     f.write(f'    综合评估: {pack["summary"]}\n\n')
     
     evidence = pack['evidence']
@@ -755,6 +1308,18 @@ def _write_entity_evidence_pack(f, aggregator: ClueAggregator, entity_info: Dict
     # 固定延迟转账
     if evidence['delayed_transfers']:
         _write_delayed_transfers_section(f, evidence['delayed_transfers'])
+
+    # 第三方中转
+    if evidence['third_party_relays']:
+        _write_third_party_relays_section(f, evidence['third_party_relays'])
+
+    # 外围节点
+    if evidence['discovered_nodes']:
+        _write_discovered_nodes_section(f, evidence['discovered_nodes'])
+
+    # 关系簇
+    if evidence['relationship_clusters']:
+        _write_relationship_clusters_section(f, evidence['relationship_clusters'])
     
     # 团伙
     if evidence['communities']:

@@ -23,8 +23,12 @@ from collections import defaultdict
 
 import config
 import utils
+import risk_scoring
+from utils.path_explainability import build_cycle_path_explainability
 
 logger = utils.setup_logger(__name__)
+
+TRANSACTION_REF_RETURN_LIMIT = 200
 
 
 # ============================================================
@@ -52,15 +56,37 @@ class MoneyGraph:
         self.node_types = {}
         # 节点流量统计: node -> {inflow, outflow}
         self.node_flows = defaultdict(lambda: {"inflow": 0, "outflow": 0})
+        # 最近一次闭环搜索的元数据
+        self.last_cycle_search_meta = {}
 
     def add_edge(
-        self, source: str, target: str, amount: float, date, edge_type: str = "transfer"
+        self,
+        source: str,
+        target: str,
+        amount: float,
+        date,
+        edge_type: str = "transfer",
+        supporting_transactions: List[Dict] = None,
+        transaction_count: int = 0,
+        supporting_transactions_total: int = 0,
+        supporting_transactions_truncated: bool = False,
+        supporting_transactions_limit: int = TRANSACTION_REF_RETURN_LIMIT,
     ):
         """添加资金边"""
         self.nodes.add(source)
         self.nodes.add(target)
         self.edges[source].append(
-            {"target": target, "amount": amount, "date": date, "type": edge_type}
+            {
+                "target": target,
+                "amount": amount,
+                "date": date,
+                "type": edge_type,
+                "supporting_transactions": list(supporting_transactions or []),
+                "transaction_count": int(transaction_count or 0),
+                "supporting_transactions_total": int(supporting_transactions_total or transaction_count or 0),
+                "supporting_transactions_truncated": bool(supporting_transactions_truncated),
+                "supporting_transactions_limit": int(supporting_transactions_limit or TRANSACTION_REF_RETURN_LIMIT),
+            }
         )
         # 更新流量统计
         self.node_flows[source]["outflow"] += amount
@@ -139,6 +165,10 @@ class MoneyGraph:
 
         start_time = time.time()
         cycles = []
+        timed_out = False
+        search_node_truncated = False
+        cycle_limit_hit = False
+        max_cycles = 100
 
         # 公共节点排除列表（这些节点连接太多人，不是真正的闭环）
         # 【优化 2026-01-11】使用更精确的匹配规则
@@ -182,8 +212,10 @@ class MoneyGraph:
             return False
 
         def dfs_cycle(start: str, current: str, path: List[str], visited: Set[str]):
+            nonlocal timed_out, cycle_limit_hit
             # 超时检查
             if time.time() - start_time > timeout_seconds:
+                timed_out = True
                 return
 
             if len(path) > max_length:
@@ -199,7 +231,8 @@ class MoneyGraph:
                 # 找到闭环
                 if next_node == start and len(path) >= min_length:
                     cycles.append(path + [start])
-                    if len(cycles) >= 100:  # 限制最多100个闭环
+                    if len(cycles) >= max_cycles:  # 限制最多100个闭环
+                        cycle_limit_hit = True
                         return
                     continue
 
@@ -219,9 +252,11 @@ class MoneyGraph:
                 n for n in self.nodes if self.node_types.get(n) in ["person", "company"]
             ]
         )
+        requested_start_nodes = len(search_nodes)
 
         # 如果还是太多，只取前50个
         if len(search_nodes) > 50:
+            search_node_truncated = True
             search_nodes = search_nodes[:50]
 
         logger.info(
@@ -230,8 +265,12 @@ class MoneyGraph:
 
         # 从关键节点开始搜索闭环
         for node in search_nodes:
+            if cycle_limit_hit:
+                logger.warning(f"  闭环搜索达到结果上限 {max_cycles}，提前截断")
+                break
             if time.time() - start_time > timeout_seconds:
                 logger.warning(f"  闭环搜索超时（已找到 {len(cycles)} 个）")
+                timed_out = True
                 break
             if not is_public_node(node):
                 dfs_cycle(node, node, [node], {node})
@@ -246,6 +285,28 @@ class MoneyGraph:
             if normalized not in seen:
                 seen.add(normalized)
                 unique_cycles.append(cycle)
+
+        truncated_reasons = []
+        if search_node_truncated:
+            truncated_reasons.append("search_nodes_capped")
+        if cycle_limit_hit:
+            truncated_reasons.append("result_limit_hit")
+        if timed_out:
+            truncated_reasons.append("timeout")
+
+        self.last_cycle_search_meta = {
+            "timed_out": timed_out,
+            "search_node_truncated": search_node_truncated,
+            "cycle_limit_hit": cycle_limit_hit,
+            "truncated": bool(truncated_reasons),
+            "truncated_reasons": truncated_reasons,
+            "requested_start_nodes": requested_start_nodes,
+            "searched_start_nodes": len(search_nodes),
+            "returned_count": len(unique_cycles),
+            "raw_count": len(cycles),
+            "timeout_seconds": timeout_seconds,
+            "max_cycles": max_cycles,
+        }
 
         return unique_cycles
 
@@ -330,6 +391,268 @@ class MoneyGraph:
         return hubs
 
 
+def _estimate_cycle_amount(money_graph: MoneyGraph, cycle: List[str]) -> float:
+    """按闭环路径的最小边额估算可回流金额。"""
+    if not cycle:
+        return 0.0
+
+    nodes = list(cycle)
+    if len(nodes) > 1 and nodes[0] == nodes[-1]:
+        nodes = nodes[:-1]
+    if len(nodes) < 2:
+        return 0.0
+
+    edge_amounts = []
+    path_nodes = nodes + [nodes[0]]
+    for idx in range(len(path_nodes) - 1):
+        source = path_nodes[idx]
+        target = path_nodes[idx + 1]
+        amount = sum(
+            float(edge.get("amount", 0) or 0)
+            for edge in money_graph.edges.get(source, [])
+            if edge.get("target") == target
+        )
+        if amount > 0:
+            edge_amounts.append(amount)
+
+    return round(min(edge_amounts), 2) if edge_amounts else 0.0
+
+
+def _supporting_ref_sort_key(ref: Dict) -> Tuple[float, str]:
+    """按金额优先、时间次之排序支撑交易样本，保证展示稳定。"""
+    try:
+        amount = abs(float(ref.get("amount", 0) or 0))
+    except (TypeError, ValueError, AttributeError):
+        amount = 0.0
+    return (
+        amount,
+        str(ref.get("date", "") or ""),
+    )
+
+
+def _build_cycle_edge_segments(money_graph: MoneyGraph, cycle: List[str]) -> List[Dict]:
+    """按闭环路径提取每一跳的累计金额口径。"""
+    if not cycle:
+        return []
+
+    nodes = list(cycle)
+    if len(nodes) > 1 and nodes[0] == nodes[-1]:
+        nodes = nodes[:-1]
+    if len(nodes) < 2:
+        return []
+
+    segments = []
+    path_nodes = nodes + [nodes[0]]
+    for idx in range(len(path_nodes) - 1):
+        source = path_nodes[idx]
+        target = path_nodes[idx + 1]
+        matched_edges = [
+            edge for edge in money_graph.edges.get(source, [])
+            if edge.get("target") == target
+        ]
+        amount = round(
+            sum(float(edge.get("amount", 0) or 0) for edge in matched_edges),
+            2,
+        )
+        edge_types = sorted(
+            {
+                str(edge.get("type", "")).strip()
+                for edge in matched_edges
+                if str(edge.get("type", "")).strip()
+            }
+        )
+        transaction_refs_total = sum(
+            int(
+                edge.get(
+                    "supporting_transactions_total",
+                    edge.get("transaction_count", 0),
+                )
+                or 0
+            )
+            for edge in matched_edges
+        )
+        matched_refs = [
+            ref
+            for edge in matched_edges
+            for ref in list(edge.get("supporting_transactions", []) or [])
+            if isinstance(ref, dict)
+        ]
+        matched_refs = sorted(
+            matched_refs,
+            key=_supporting_ref_sort_key,
+            reverse=True,
+        )
+        transaction_refs = matched_refs[:TRANSACTION_REF_RETURN_LIMIT]
+        transaction_refs_returned = len(transaction_refs)
+        transaction_refs_total = max(transaction_refs_total, transaction_refs_returned)
+        segments.append(
+            {
+                "index": idx + 1,
+                "from": source,
+                "to": target,
+                "amount": amount,
+                "edge_types": edge_types,
+                "date_available": any(edge.get("date") is not None for edge in matched_edges),
+                "time_basis": "aggregated_counterparty_total",
+                "transaction_count": transaction_refs_total,
+                "transaction_refs_total": transaction_refs_total,
+                "transaction_ref_sample_count": transaction_refs_returned,
+                "transaction_refs_returned": transaction_refs_returned,
+                "transaction_refs_truncated": transaction_refs_total > transaction_refs_returned,
+                "transaction_refs_limit": TRANSACTION_REF_RETURN_LIMIT,
+                "transaction_refs": transaction_refs,
+            }
+        )
+    return segments
+
+
+def build_cycle_record(
+    cycle: List[str],
+    money_graph: MoneyGraph,
+    focus_nodes: List[str] = None,
+    search_metadata: Dict = None,
+) -> Dict:
+    """将原始闭环节点序列转换为带评分和解释的统一记录。"""
+    focus_set = set(focus_nodes or [])
+    nodes = list(cycle or [])
+    if len(nodes) > 1 and nodes[0] == nodes[-1]:
+        nodes = nodes[:-1]
+
+    path_nodes = nodes + [nodes[0]] if nodes else []
+    path = " → ".join(path_nodes) if path_nodes else "未知路径"
+    unique_count = len(set(nodes))
+    external_node_count = sum(1 for node in nodes if focus_set and node not in focus_set)
+    estimated_amount = _estimate_cycle_amount(money_graph, cycle)
+    edge_segments = _build_cycle_edge_segments(money_graph, cycle)
+    positive_segments = [segment for segment in edge_segments if float(segment.get("amount", 0) or 0) > 0]
+    bottleneck_edge = min(
+        positive_segments,
+        key=lambda item: float(item.get("amount", 0) or 0),
+    ) if positive_segments else {}
+    amount_basis_detail = (
+        "按闭环每一跳的累计金额取最小边额，作为可稳定确认的回流金额上限"
+        if positive_segments
+        else "当前资金图仅稳定确认闭环路径，未形成可用边级金额口径"
+    )
+
+    risk_score = 45 + max(0, unique_count - 2) * 8
+    if estimated_amount >= 1_000_000:
+        risk_score += 20
+    elif estimated_amount >= 500_000:
+        risk_score += 16
+    elif estimated_amount >= 100_000:
+        risk_score += 12
+    elif estimated_amount >= 50_000:
+        risk_score += 8
+    elif estimated_amount > 0:
+        risk_score += 4
+    if external_node_count > 0:
+        risk_score += min(15, external_node_count * 5)
+
+    confidence = 0.55
+    if unique_count >= 3:
+        confidence += 0.10
+    if estimated_amount > 0:
+        confidence += 0.15
+    if external_node_count > 0:
+        confidence += 0.10
+    if search_metadata and search_metadata.get("truncated"):
+        confidence -= 0.15
+
+    evidence = [
+        f"形成闭环路径: {path}",
+        f"涉及 {unique_count} 个唯一节点",
+    ]
+    if external_node_count > 0:
+        evidence.append(f"包含 {external_node_count} 个外围节点")
+    if estimated_amount > 0:
+        evidence.append(f"最小边额估算 {utils.format_currency(estimated_amount)} 元")
+    else:
+        evidence.append("当前无法稳定估算闭环金额")
+    if search_metadata and search_metadata.get("truncated"):
+        reasons = ",".join(search_metadata.get("truncated_reasons", [])) or "搜索截断"
+        evidence.append(f"闭环搜索存在截断: {reasons}")
+
+    normalized_score = risk_scoring.normalize_risk_score(risk_score)
+    path_explainability = build_cycle_path_explainability(
+        nodes=nodes,
+        path=path,
+        focus_nodes=focus_nodes,
+        total_amount=estimated_amount,
+        search_metadata=search_metadata,
+        edge_segments=edge_segments,
+        bottleneck_edge=bottleneck_edge,
+        amount_basis_detail=amount_basis_detail,
+    )
+    return {
+        "nodes": nodes,
+        "participants": nodes,
+        "path": path,
+        "length": len(nodes),
+        "unique_count": unique_count,
+        "external_node_count": external_node_count,
+        "total_amount": estimated_amount,
+        "risk_score": normalized_score,
+        "risk_level": risk_scoring.score_to_risk_level(normalized_score),
+        "confidence": risk_scoring.normalize_confidence(confidence),
+        "evidence": evidence,
+        "path_explainability": path_explainability,
+    }
+
+
+def _enrich_pass_through_channel(channel: Dict) -> Dict:
+    """为过账通道补充统一评分与解释字段。"""
+    inflow = float(channel.get("inflow", 0) or 0)
+    outflow = float(channel.get("outflow", 0) or 0)
+    ratio = float(channel.get("ratio", 0) or 0)
+    gross_amount = max(inflow, outflow)
+
+    risk_score = 40
+    if ratio >= 0.98:
+        risk_score += 25
+    elif ratio >= 0.95:
+        risk_score += 20
+    elif ratio >= 0.90:
+        risk_score += 15
+    else:
+        risk_score += 8
+
+    if gross_amount >= 1_000_000:
+        risk_score += 20
+    elif gross_amount >= 500_000:
+        risk_score += 15
+    elif gross_amount >= 100_000:
+        risk_score += 10
+    elif gross_amount > 0:
+        risk_score += 5
+
+    confidence = 0.60
+    if ratio >= 0.95:
+        confidence += 0.15
+    elif ratio >= 0.90:
+        confidence += 0.10
+    if gross_amount >= 100_000:
+        confidence += 0.10
+
+    evidence = [
+        f"进出比达到 {ratio * 100:.1f}%",
+        f"总流量 {utils.format_currency(inflow + outflow)} 元",
+        f"净沉淀 {utils.format_currency(abs(inflow - outflow))} 元",
+    ]
+
+    normalized_score = risk_scoring.normalize_risk_score(risk_score)
+    enriched = dict(channel)
+    enriched.update(
+        {
+            "risk_score": normalized_score,
+            "risk_level": risk_scoring.score_to_risk_level(normalized_score),
+            "confidence": risk_scoring.normalize_confidence(confidence),
+            "evidence": evidence,
+        }
+    )
+    return enriched
+
+
 # ============================================================
 # 构建资金图
 # ============================================================
@@ -375,27 +698,63 @@ def build_money_graph(
         if df_copy.empty:
             return
 
-        # 按对手方聚合
-        agg_result = (
-            df_copy.groupby("counterparty")
-            .agg({"income": "sum", "expense": "sum"})
-            .reset_index()
-        )
+        def _build_supporting_refs(group_df: pd.DataFrame, amount_col: str, direction: str) -> List[Dict]:
+            if group_df.empty or amount_col not in group_df.columns:
+                return []
+            sorted_df = group_df.sort_values(by=amount_col, ascending=False, na_position="last")
+            refs = []
+            for _, tx in sorted_df.head(TRANSACTION_REF_RETURN_LIMIT).iterrows():
+                amount = tx.get(amount_col, 0)
+                refs.append(
+                    {
+                        "date": str(tx.get("date", "") or "")[:19],
+                        "amount": float(amount or 0),
+                        "description": str(tx.get("description", "") or "").strip(),
+                        "source_file": str(tx.get("数据来源", "") or "").strip(),
+                        "source_row_index": tx.get("source_row_index"),
+                        "direction": direction,
+                        "counterparty_raw": str(tx.get("counterparty", "") or "").strip(),
+                    }
+                )
+            return refs
 
-        # 遍历聚合结果，按累计金额判断是否添加边
-        for _, row in agg_result.iterrows():
-            cp = row["counterparty"]
-            total_income = row["income"] if pd.notna(row["income"]) else 0
-            total_expense = row["expense"] if pd.notna(row["expense"]) else 0
+        # 按对手方聚合并保留原始交易引用
+        for cp, cp_group in df_copy.groupby("counterparty", sort=False):
+            total_income = float(cp_group["income"].sum()) if "income" in cp_group.columns else 0.0
+            total_expense = float(cp_group["expense"].sum()) if "expense" in cp_group.columns else 0.0
 
             # 累计金额超过阈值才添加边
             if total_income > config.GRAPH_EDGE_MIN_AMOUNT:
                 # 收入边：对手方 -> 当前实体
-                graph.add_edge(cp, entity_name, total_income, None, "income")
+                income_rows = cp_group[cp_group["income"] > 0] if "income" in cp_group.columns else cp_group.iloc[0:0]
+                graph.add_edge(
+                    cp,
+                    entity_name,
+                    total_income,
+                    None,
+                    "income",
+                    supporting_transactions=_build_supporting_refs(income_rows, "income", "income"),
+                    transaction_count=len(income_rows),
+                    supporting_transactions_total=len(income_rows),
+                    supporting_transactions_truncated=len(income_rows) > TRANSACTION_REF_RETURN_LIMIT,
+                    supporting_transactions_limit=TRANSACTION_REF_RETURN_LIMIT,
+                )
 
             if total_expense > config.GRAPH_EDGE_MIN_AMOUNT:
                 # 支出边：当前实体 -> 对手方
-                graph.add_edge(entity_name, cp, total_expense, None, "expense")
+                expense_rows = cp_group[cp_group["expense"] > 0] if "expense" in cp_group.columns else cp_group.iloc[0:0]
+                graph.add_edge(
+                    entity_name,
+                    cp,
+                    total_expense,
+                    None,
+                    "expense",
+                    supporting_transactions=_build_supporting_refs(expense_rows, "expense", "expense"),
+                    transaction_count=len(expense_rows),
+                    supporting_transactions_total=len(expense_rows),
+                    supporting_transactions_truncated=len(expense_rows) > TRANSACTION_REF_RETURN_LIMIT,
+                    supporting_transactions_limit=TRANSACTION_REF_RETURN_LIMIT,
+                )
 
     # 从个人数据添加边
     for person_name, df in personal_data.items():
@@ -454,21 +813,41 @@ def _analyze_graph_deep_analysis(
         "hub_nodes": [],
         "multi_hop_paths": [],
         "graph_stats": {},
+        "analysis_metadata": {},
     }
 
     # 检测资金闭环
     logger.info("【阶段0.1】检测资金闭环（利益回流）...")
     key_nodes = core_persons + companies
-    results["fund_cycles"] = money_graph.find_cycles(
+    raw_cycles = money_graph.find_cycles(
         min_length=3, max_length=4, key_nodes=key_nodes, timeout_seconds=30
     )
+    cycle_meta = dict(getattr(money_graph, "last_cycle_search_meta", {}) or {})
+    results["fund_cycles"] = [
+        build_cycle_record(
+            cycle,
+            money_graph,
+            focus_nodes=key_nodes,
+            search_metadata=cycle_meta,
+        )
+        for cycle in raw_cycles
+    ]
+    results["analysis_metadata"]["fund_cycles"] = cycle_meta
     logger.info(f"  发现 {len(results['fund_cycles'])} 个资金闭环")
 
     # 识别过账通道
     logger.info("【阶段0.2】识别过账通道（空壳/马甲）...")
-    results["pass_through_channels"] = money_graph.identify_pass_through_channels(
+    raw_channels = money_graph.identify_pass_through_channels(
         threshold_ratio=0.85
     )
+    results["pass_through_channels"] = [
+        _enrich_pass_through_channel(channel) for channel in raw_channels
+    ]
+    results["analysis_metadata"]["pass_through_channels"] = {
+        "threshold_ratio": 0.85,
+        "returned_count": len(results["pass_through_channels"]),
+        "truncated": False,
+    }
     logger.info(f"  发现 {len(results['pass_through_channels'])} 个过账通道")
 
     # 分析资金枢纽节点
@@ -805,14 +1184,27 @@ def _write_transaction_details(f, items: List[Dict], title: str) -> None:
     f.write("\n")
 
 
-def _write_fund_cycles_section(f, cycles: List[List[str]]) -> None:
+def _write_fund_cycles_section(f, cycles: List[Dict], meta: Dict = None) -> None:
     """写入资金闭环部分"""
     f.write("六、资金闭环（利益回流铁证）\n")
     f.write("-" * 40 + "\n")
     f.write("★ 资金闭环说明资金最终回流到起点，是典型的洗钱或利益输送结构\n")
     f.write(f"共 {len(cycles)} 个闭环\n\n")
+    if meta and meta.get("truncated"):
+        reasons = "、".join(meta.get("truncated_reasons", [])) or "搜索截断"
+        f.write(f"⚠ 本次闭环搜索存在截断: {reasons}（超时阈值 {meta.get('timeout_seconds', 30)} 秒）\n\n")
     for i, cycle in enumerate(cycles, 1):
-        f.write(f"{i}. {' → '.join(cycle)}\n")
+        if isinstance(cycle, dict):
+            f.write(f"{i}. 【{str(cycle.get('risk_level', 'medium')).upper()}】{cycle.get('path', '未知路径')}\n")
+            if cycle.get("total_amount"):
+                f.write(f"   估算金额: {utils.format_currency(cycle.get('total_amount', 0))} 元\n")
+            if cycle.get("risk_score") is not None:
+                f.write(f"   风险评分: {cycle.get('risk_score', 0):.1f} | 置信度: {float(cycle.get('confidence', 0) or 0):.2f}\n")
+            evidence = cycle.get("evidence") or []
+            if evidence:
+                f.write(f"   证据摘要: {'；'.join(str(item) for item in evidence[:3])}\n")
+        else:
+            f.write(f"{i}. {' → '.join(cycle)}\n")
     f.write("\n")
 
 
@@ -827,6 +1219,11 @@ def _write_pass_through_channels_section(f, channels: List[Dict]) -> None:
         f.write(
             f"   进账: {ch['inflow'] / 10000:.2f}万 | 出账: {ch['outflow'] / 10000:.2f}万 | 进出比: {ch['ratio'] * 100:.1f}%\n"
         )
+        if ch.get("risk_score") is not None:
+            f.write(f"   风险评分: {ch.get('risk_score', 0):.1f} | 置信度: {float(ch.get('confidence', 0) or 0):.2f}\n")
+        evidence = ch.get("evidence") or []
+        if evidence:
+            f.write(f"   证据摘要: {'；'.join(str(item) for item in evidence[:2])}\n")
     f.write("\n")
 
 
@@ -944,7 +1341,11 @@ def generate_penetration_report(results: Dict, output_dir: str) -> str:
 
         # 资金闭环
         if results.get("fund_cycles"):
-            _write_fund_cycles_section(f, results["fund_cycles"])
+            _write_fund_cycles_section(
+                f,
+                results["fund_cycles"],
+                (results.get("analysis_metadata") or {}).get("fund_cycles"),
+            )
 
         # 过账通道
         if results.get("pass_through_channels"):
