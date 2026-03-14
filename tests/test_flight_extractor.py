@@ -41,11 +41,10 @@ class TestSafeStr:
         assert _safe_str(123) == "123"
     
     def test_safe_str_with_nan(self):
-        assert _safe_str(pd.NA) == ""
+        assert _safe_str(pd.NA) is None
     
     def test_safe_str_with_none(self):
-        # pd.isna(None) returns True, so it returns empty string
-        assert _safe_str(None) == ""
+        assert _safe_str(None) is None
     
     def test_safe_str_with_whitespace(self):
         assert _safe_str("  test  ") == "test"
@@ -61,13 +60,13 @@ class TestSafeInt:
         assert _safe_int("42") == 42
     
     def test_safe_int_with_nan(self):
-        assert _safe_int(pd.NA) == 0
+        assert _safe_int(pd.NA) is None
     
     def test_safe_int_with_invalid_string(self):
-        assert _safe_int("abc") == 0
+        assert _safe_int("abc") is None
     
     def test_safe_int_with_none(self):
-        assert _safe_int(None) == 0
+        assert _safe_int(None) is None
 
 
 class TestSafeFloat:
@@ -80,13 +79,13 @@ class TestSafeFloat:
         assert _safe_float("3.14") == 3.14
     
     def test_safe_float_with_nan(self):
-        assert _safe_float(pd.NA) == 0.0
+        assert _safe_float(pd.NA) is None
     
     def test_safe_float_with_invalid_string(self):
-        assert _safe_float("abc") == 0.0
+        assert _safe_float("abc") is None
     
     def test_safe_float_with_none(self):
-        assert _safe_float(None) == 0.0
+        assert _safe_float(None) is None
 
 
 class TestSafeDate:
@@ -104,11 +103,10 @@ class TestSafeDate:
         assert _safe_date("2024-01-15 10:30:00") == "2024-01-15"
     
     def test_safe_date_with_nan(self):
-        assert _safe_date(pd.NA) == ""
+        assert _safe_date(pd.NA) is None
     
     def test_safe_date_with_none(self):
-        # pd.isna(None) returns True, so it returns empty string
-        assert _safe_date(None) == ""
+        assert _safe_date(None) is None
 
 
 class TestExtractIdFromFilename:
@@ -195,9 +193,9 @@ class TestParseFlightRow:
         })
         result = _parse_flight_row(row, "test.xlsx", True)
         assert result is not None
-        assert result["passenger_id"] == ""
-        assert result["phone"] == ""
-        assert result["airline"] == ""
+        assert result["passenger_id"] is None
+        assert result["phone"] is None
+        assert result["airline"] is None
     
     def test_parse_flight_row_cancelled(self):
         row = pd.Series({

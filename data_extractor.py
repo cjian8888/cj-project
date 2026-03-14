@@ -133,12 +133,13 @@ def _calculate_match_score(normalized_col: str, keyword: str) -> Tuple[int, str]
     if normalized_col == keyword:
         return 100, "exact_match"
 
-    # 前缀匹配（关键词是列名的前缀）
-    if normalized_col.startswith(keyword):
+    # 前缀匹配：允许常见单位后缀，避免将“交易日”这类截断关键词误判为高分匹配。
+    suffix = normalized_col[len(keyword):] if normalized_col.startswith(keyword) else ""
+    if suffix and (len(suffix) >= 2 or suffix in {"元"}):
         return 80, "prefix_match"
 
     # 包含匹配（关键词在列名中，但不是前缀）
-    if keyword in normalized_col:
+    if keyword in normalized_col and not normalized_col.startswith(keyword):
         return 60, "contains_match"
 
     # 相似度匹配（使用简单的编辑距离）

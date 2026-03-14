@@ -88,8 +88,8 @@ LOG_BACKUP_COUNT = 5
 # 全局日志配置
 # ============================================================
 
-# 已配置的日志记录器（避免重复配置）
-_configured_loggers = set()
+# 已配置的日志记录器（记录最后一次配置，便于同名 logger 在配置变更时重建）
+_configured_loggers: Dict[str, Dict[str, Any]] = {}
 
 # 上下文信息（用于结构化日志）
 _log_context: Dict[str, Any] = {}
@@ -182,17 +182,29 @@ def setup_logger(
     Returns:
         配置好的日志记录器
     """
-    # 避免重复配置
     logger_key = f"{name}_{category}"
-    if logger_key in _configured_loggers:
-        return logging.getLogger(name)
-    
-    # 创建日志记录器
     logger = logging.getLogger(name)
-    logger.setLevel(getattr(logging, level.upper(), logging.INFO))
+    resolved_level = getattr(logging, level.upper(), logging.INFO)
+    desired_config = {
+        'level': resolved_level,
+        'log_file': os.path.abspath(log_file) if log_file else None,
+        'structured': structured,
+        'console_output': console_output,
+    }
+
+    # 相同配置直接复用，避免重复添加处理器。
+    if _configured_loggers.get(logger_key) == desired_config:
+        return logger
+
+    logger.setLevel(resolved_level)
     
-    # 清除现有的处理器
-    logger.handlers.clear()
+    # 配置变更时先移除旧处理器，避免复用到过时的输出目标。
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
     
     # 创建格式化器
     if structured:
@@ -230,7 +242,7 @@ def setup_logger(
         logger.addHandler(file_handler)
     
     # 标记为已配置
-    _configured_loggers.add(logger_key)
+    _configured_loggers[logger_key] = desired_config
     
     return logger
 
