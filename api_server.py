@@ -20,6 +20,7 @@ import os
 import json
 import shutil
 import logging
+from pathlib import Path
 from datetime import datetime, timedelta, date
 from typing import Dict, List, Optional, Any
 from contextlib import asynccontextmanager
@@ -201,6 +202,37 @@ _current_config = {}
 _ws_connections = set()
 _log_queue = queue.Queue()  # 日志队列，用于 WebSocket 广播
 _cache_manager: Optional[CacheManager] = None  # 缓存管理器（懒加载）
+
+
+def _get_dashboard_dist_dir() -> Path:
+    """返回前端生产构建目录。"""
+    return APP_ROOT / "dashboard" / "dist"
+
+
+def _resolve_dashboard_file(requested_path: str = "") -> Optional[Path]:
+    """解析 Dashboard 静态文件，未知前端路由回落到 index.html。"""
+    dist_dir = _get_dashboard_dist_dir().resolve()
+    index_file = dist_dir / "index.html"
+    if not index_file.exists():
+        return None
+
+    normalized_path = requested_path.replace("\\", "/").lstrip("/")
+    if normalized_path in {"", "."}:
+        return index_file
+
+    candidate = (dist_dir / normalized_path).resolve()
+    try:
+        candidate.relative_to(dist_dir)
+    except ValueError:
+        return None
+
+    if candidate.is_file():
+        return candidate
+
+    # SPA 前端路由回落到 index.html；真实静态资源缺失则返回 404。
+    if "." not in Path(normalized_path).name:
+        return index_file
+    return None
 
 
 def _get_current_time_str() -> str:
@@ -3001,6 +3033,8 @@ def _save_analysis_cache_refactored(results, cache_dir, id_to_name_map=None):
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     logger = logging.getLogger(__name__)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     logger.info("🚀 资金穿透审计系统启动 (重构版)")
     yield
     logger.info("🛑 资金穿透审计系统关闭")
@@ -3031,7 +3065,29 @@ async def root():
         "status": "running",
         "dataFlow": "external_data_first",
         "refactored": True,
+        "dashboardUrl": "/dashboard/",
+        "deliveryTarget": "windows-offline-one-folder",
     }
+
+
+@app.get("/dashboard", include_in_schema=False)
+@app.get("/dashboard/", include_in_schema=False)
+@app.get("/dashboard/{requested_path:path}", include_in_schema=False)
+async def serve_dashboard(requested_path: str = ""):
+    """提供前端生产构建产物，支持 SPA 路由回落。"""
+    asset_path = _resolve_dashboard_file(requested_path)
+    if asset_path is None:
+        dist_dir = _get_dashboard_dist_dir()
+        if not (dist_dir / "index.html").exists():
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Dashboard 生产构建不存在，请先在 dashboard 目录执行 npm run build。"
+                ),
+            )
+        raise HTTPException(status_code=404, detail="Dashboard 资源不存在")
+
+    return FileResponse(str(asset_path))
 
 
 @app.get("/api/status")

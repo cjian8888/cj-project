@@ -1,3 +1,5 @@
 @echo off
-set PYTHONPATH=D:\cj\project
+setlocal
+cd /d "%~dp0"
+set PYTHONPATH=%CD%
 python api_server.py

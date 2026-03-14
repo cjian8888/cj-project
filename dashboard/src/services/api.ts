@@ -2,8 +2,17 @@
  * API 服务 - 与 FastAPI 后端通信
  */
 
-export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000/ws';
+function getDefaultWsUrl(): string {
+    if (typeof window === 'undefined') {
+        return 'ws://localhost:8000/ws';
+    }
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${window.location.host}/ws`;
+}
+
+export const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+const WS_URL = import.meta.env.VITE_WS_URL || getDefaultWsUrl();
 
 // ==================== Types ====================
 

@@ -1,3 +1,4 @@
 @echo off
-cd D:\cj\project\dashboard
+setlocal
+cd /d "%~dp0dashboard"
 npm run dev

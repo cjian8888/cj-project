@@ -11,6 +11,12 @@
 
 **唯一入口**: `api_server.py` (`main.py` 已废弃)
 
+**当前交付主方向**:
+- 最终目标是 `Windows 单机离线 one-folder 包`
+- 开发态仍可使用 `python api_server.py` + `cd dashboard && npm run dev`
+- 交付态必须由后端直接承载前端生产构建，访问路径为 `http://localhost:8000/dashboard/`
+- 新增功能时必须默认满足：`无互联网依赖`、`无 Node 开发服务器依赖`、`无硬编码绝对路径`
+
 ---
 
 ## STRUCTURE
@@ -86,6 +92,12 @@ pytest tests/ -v
 
 # 类型检查
 cd dashboard && npm run type-check
+
+# 构建前端生产产物（供后端 /dashboard/ 承载）
+cd dashboard && npm run build
+
+# Windows 离线打包（应在 Windows 机器上执行）
+python build_windows_package.py
 ```
 
 ---
@@ -102,6 +114,12 @@ cd dashboard && npm run type-check
 
 ### 废弃代码
 - `main.py` 已废弃，使用 `api_server.py`
+
+### Windows 离线交付约束
+- 如果任务涉及运行形态、启动方式、打包、路径处理、依赖引入，必须优先考虑 `Windows 单机离线 one-folder 包`
+- 不要再把 `npm run dev` 视为最终交付方案，它只用于开发
+- 前端生产构建由后端 `GET /dashboard/` 提供
+- 优先阅读 `WINDOWS_OFFLINE_DELIVERY.md`
 
 ---
 
@@ -132,4 +150,3 @@ from utils.safe_types import (
 2. **行为一致性** - 统一空值检查、异常处理、类型注解
 3. **易于维护** - 修改只需在一个地方进行
 4. **减少bug** - 消除不同实现之间的细微差异
-

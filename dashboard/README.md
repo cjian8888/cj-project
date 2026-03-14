@@ -47,11 +47,15 @@ npm run dev
 
 访问 http://localhost:5173 查看 Dashboard。
 
+开发态默认通过 Vite 代理访问后端 `/api` 和 `/ws`。
+
 ### 构建生产版本
 
 ```bash
 npm run build
 ```
+
+生产构建产物会被后端挂载到 `http://localhost:8000/dashboard/`。
 
 ## 🔌 后端 API
 
@@ -64,6 +68,7 @@ python api_server.py
 ```
 
 API 服务默认运行在 http://localhost:8000。
+如果没有显式设置 `VITE_API_URL` / `VITE_WS_URL`，前端默认走同源地址。
 
 ### 环境变量
 

@@ -100,6 +100,10 @@ graph TD
 - 所有前端资源本地打包（无 CDN 依赖）
 - 生成的 HTML 报告可离线查看
 - 适用于保密环境下的审计工作
+- 当前已明确交付目标为 `Windows 单机离线 one-folder 包`
+- 交付态由后端直接承载前端生产构建产物，访问地址为 `http://localhost:8000/dashboard/`
+
+详细说明见 [WINDOWS_OFFLINE_DELIVERY.md](WINDOWS_OFFLINE_DELIVERY.md)
 
 ---
 
@@ -143,6 +147,20 @@ npm run dev
 访问 **http://localhost:5173** 打开 Dashboard，点击"开始分析"运行完整分析流程。
 
 后端 API 文档：**http://localhost:8000/docs**
+
+### Windows 离线交付构建
+
+```bash
+python -m pip install -r requirements.txt
+python -m pip install -r requirements-windows-build.txt
+cd dashboard
+npm install
+npm run build
+cd ..
+python build_windows_package.py
+```
+
+构建完成后，Windows one-folder 产物位于 `dist/fpas-offline/`。
 
 
 ---
