@@ -4,6 +4,7 @@ TimeAnomalyDetector 单元测试
 """
 from datetime import date, datetime
 
+import pandas as pd
 import pytest
 
 from detectors.time_anomaly_detector import TimeAnomalyDetector
@@ -107,6 +108,29 @@ class TestTimeAnomalyDetector:
         
         # 应该检测到节假日交易
         assert len(result) >= 1
+
+    def test_detect_supports_cleaned_data_input(self):
+        """测试检测器兼容 SuspicionEngine 的 cleaned_data 输入结构"""
+        detector = TimeAnomalyDetector()
+        data = {
+            "cleaned_data": {
+                "引擎测试实体": pd.DataFrame(
+                    [
+                        {
+                            "date": "2024-02-10 23:30:00",
+                            "income": 120000.0,
+                            "expense": 0.0,
+                            "counterparty": "A",
+                            "description": "春节夜间交易",
+                        }
+                    ]
+                )
+            }
+        }
+        result = detector.detect(data, {"min_amount": 50000})
+
+        assert len(result) >= 1
+        assert any(item["entity_name"] == "引擎测试实体" for item in result)
 
     def test_detect_returns_valid_suspicion_data(self):
         """测试返回的数据可以通过 Suspicion 模型验证"""

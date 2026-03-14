@@ -12,8 +12,164 @@ from typing import Dict, List, Tuple
 from itertools import combinations
 import config
 import utils
+from holiday_service import build_holiday_window
 
 logger = utils.setup_logger(__name__)
+
+
+def _safe_float(value) -> float:
+    """安全转换金额字段。"""
+    try:
+        if pd.isna(value):
+            return 0.0
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _safe_text(value) -> str:
+    """安全转换文本字段。"""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+
+    text = str(value)
+    return "" if text == "nan" else text
+
+
+def _extract_tx_amount(row: pd.Series) -> float:
+    """统一提取单笔交易金额。"""
+    income = _safe_float(row.get("income", row.get("收入(元)", 0)))
+    expense = _safe_float(row.get("expense", row.get("支出(元)", 0)))
+    if income or expense:
+        return max(abs(income), abs(expense))
+
+    return abs(_safe_float(row.get("amount", 0)))
+
+
+def _extract_tx_direction(row: pd.Series) -> str:
+    """提取交易方向。"""
+    income = _safe_float(row.get("income", row.get("收入(元)", 0)))
+    expense = _safe_float(row.get("expense", row.get("支出(元)", 0)))
+    if income > 0 and income >= expense:
+        return "income"
+    if expense > 0:
+        return "expense"
+
+    amount = _safe_float(row.get("amount", 0))
+    if amount > 0:
+        return "income"
+    if amount < 0:
+        return "expense"
+    return ""
+
+
+def detect_holiday_transactions(cleaned_data: Dict[str, pd.DataFrame]) -> Dict[str, List[Dict]]:
+    """
+    检测节假日及临近窗口（节前/节中/节后）的大额交易。
+
+    使用原始数据可覆盖的最小/最大日期构建完整检测窗口，确保时间跨度内的传统节假日
+    都会被纳入审计范围。
+    """
+    all_dates: List[pd.Timestamp] = []
+    for df in cleaned_data.values():
+        if df is None or df.empty or "date" not in df.columns:
+            continue
+
+        parsed_dates = pd.to_datetime(df["date"], errors="coerce").dropna()
+        if not parsed_dates.empty:
+            all_dates.extend(parsed_dates.tolist())
+
+    if not all_dates:
+        return {}
+
+    start_date = min(all_dates).date()
+    end_date = max(all_dates).date()
+    holiday_config = getattr(config, "HOLIDAY_DETECTION_CONFIG", {}) or {}
+    days_before = int(holiday_config.get("days_before", 3))
+    days_after = int(holiday_config.get("days_after", 2))
+    amount_threshold = float(getattr(config, "HOLIDAY_LARGE_AMOUNT_THRESHOLD", 50000))
+    holiday_window = build_holiday_window(
+        start_date,
+        end_date,
+        days_before=days_before,
+        days_after=days_after,
+    )
+
+    if not holiday_window:
+        return {}
+
+    results: Dict[str, List[Dict]] = {}
+
+    for entity_name, df in cleaned_data.items():
+        if df is None or df.empty or "date" not in df.columns:
+            continue
+
+        working_df = df.copy()
+        working_df["_parsed_date"] = pd.to_datetime(working_df["date"], errors="coerce")
+        working_df = working_df.dropna(subset=["_parsed_date"])
+        if working_df.empty:
+            continue
+
+        entity_records: List[Dict] = []
+        for _, row in working_df.iterrows():
+            tx_date = row["_parsed_date"].date()
+            holiday_info = holiday_window.get(tx_date)
+            if not holiday_info:
+                continue
+
+            amount = _extract_tx_amount(row)
+            if amount < amount_threshold:
+                continue
+
+            holiday_name, holiday_period = holiday_info
+            evidence_refs = {
+                "source_row_index": int(row.get("source_row_index", row.name))
+                if row.get("source_row_index") is not None
+                else int(row.name) + 2,
+                "transaction_id": _safe_text(row.get("transaction_id", "")),
+            }
+
+            entity_records.append(
+                {
+                    "date": row["_parsed_date"],
+                    "amount": amount,
+                    "description": _safe_text(
+                        row.get("description", row.get("交易摘要", ""))
+                    ),
+                    "counterparty": _safe_text(
+                        row.get("counterparty", row.get("交易对手", ""))
+                    ),
+                    "holiday_name": holiday_name,
+                    "holiday_period": holiday_period,
+                    "direction": _extract_tx_direction(row),
+                    "bank": _safe_text(row.get("银行来源", row.get("bank", ""))),
+                    "source_file": _safe_text(
+                        row.get("数据来源", row.get("source_file", ""))
+                    ),
+                    "risk_level": "high"
+                    if holiday_period == "before" or amount >= amount_threshold * 2
+                    else "medium",
+                    "risk_reason": (
+                        f"交易发生在{holiday_name}"
+                        f"{'节前' if holiday_period == 'before' else '节中' if holiday_period == 'during' else '节后'}"
+                        "敏感窗口，且金额达到大额阈值"
+                    ),
+                    "evidence_refs": evidence_refs,
+                }
+            )
+
+        if entity_records:
+            entity_records.sort(key=lambda item: (item["date"], -item["amount"]))
+            results[entity_name] = entity_records
+
+    return results
 
 
 def detect_cash_time_collision(
@@ -600,14 +756,26 @@ def run_all_detections(
                         )
 
     # ============================
-    # 3. 预留检测模块 (待后续实现)
+    # 3. 节假日/特殊时段大额交易检测
     # ============================
-    # 以下检测模块预留接口，待后续完善：
-    #   - holiday: 节假日异常交易检测 (参考 holiday_utils.py)
-    #   - fixed_frequency: 固定频率异常检测 (参考 config.FIXED_FREQUENCY_* 常量)
-    # 实现时可参考 detect_cash_time_collision 和 detect_cross_entity_cash_collision 的模式
+    logger.info("  -> 正在检测节假日/特殊时段大额交易...")
+    results["holiday_transactions"] = detect_holiday_transactions(cleaned_data)
+    holiday_tx_count = sum(
+        len(records) for records in results["holiday_transactions"].values()
+    )
+    if holiday_tx_count:
+        logger.info(f"    发现 {holiday_tx_count} 笔节假日/特殊时段大额交易")
 
-    total_found = len(results["cash_collisions"]) + len(results["direct_transfers"])
+    # ============================
+    # 4. 预留检测模块 (待后续实现)
+    # ============================
+    # fixed_frequency: 固定频率异常检测 (参考 config.FIXED_FREQUENCY_* 常量)
+
+    total_found = (
+        len(results["cash_collisions"])
+        + len(results["direct_transfers"])
+        + holiday_tx_count
+    )
     logger.info(f"✓ 疑点检测完成，共发现 {total_found} 条有效线索")
 
     return results

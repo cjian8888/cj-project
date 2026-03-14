@@ -551,8 +551,8 @@ fixed_frequency:
 # ============================================================
 
 holiday:
-  # 【重要】节假日现在由 holiday_generator.py 模块自动生成
-  # 根据核查数据的时间范围自动计算，无需手动配置
+  # 【重要】节假日优先由 holiday_service.py + chinese-calendar 库离线计算
+  # 并根据核查数据的时间范围自动覆盖相关年份
   auto_generate: true
   
   # 如果需要手动覆盖，可以在这里添加自定义节假日

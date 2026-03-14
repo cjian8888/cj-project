@@ -18,6 +18,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 import numpy as np
 import utils
+from holiday_service import get_holiday_service
 
 logger = utils.setup_logger(__name__)
 
@@ -1161,6 +1162,7 @@ def detect_abnormal_time_patterns(
     - 节假日的大额交易
     """
     evidences = []
+    holiday_service = get_holiday_service()
     
     for company in company_names:
         df = company_transactions.get(company)
@@ -1183,12 +1185,22 @@ def detect_abnormal_time_patterns(
         
         for idx, row in large_tx.iterrows():
             date = pd.to_datetime(row['date'])
+            tx_date = date.date()
+            amount = row['expense'] if row['expense'] > 0 else row['income']
             
-            # 检查是否为周末
-            if date.weekday() >= 5:  # 5=周六, 6=周日
+            holiday_name = holiday_service.get_holiday_name(tx_date)
+            if holiday_name:
                 abnormal_time_tx.append({
                     "date": date,
-                    "amount": row['expense'] if row['expense'] > 0 else row['income'],
+                    "amount": amount,
+                    "counterparty": row.get('counterparty', ''),
+                    "reason": f"节假日（{holiday_name}）"
+                })
+            # 检查是否为周末
+            elif date.weekday() >= 5:  # 5=周六, 6=周日
+                abnormal_time_tx.append({
+                    "date": date,
+                    "amount": amount,
                     "counterparty": row.get('counterparty', ''),
                     "reason": "周末"
                 })
@@ -1197,7 +1209,7 @@ def detect_abnormal_time_patterns(
                  date.hour >= thresholds.TIME_WORKING_HOURS_END:
                 abnormal_time_tx.append({
                     "date": date,
-                    "amount": row['expense'] if row['expense'] > 0 else row['income'],
+                    "amount": amount,
                     "counterparty": row.get('counterparty', ''),
                     "reason": "非工作时间"
                 })
@@ -1210,7 +1222,10 @@ def detect_abnormal_time_patterns(
                 "company": company,
                 "count": len(abnormal_time_tx),
                 "total_amount": total_amount,
-                "description": f"{company}在异常时间（周末/非工作时间）发生{len(abnormal_time_tx)}笔大额交易，总计{utils.format_currency(total_amount)}元"
+                "description": (
+                    f"{company}在异常时间（节假日/周末/非工作时间）发生"
+                    f"{len(abnormal_time_tx)}笔大额交易，总计{utils.format_currency(total_amount)}元"
+                )
             }
             evidence["strength"] = "中"
             evidence["risk_reason"] = "异常时间大额交易，需核实业务背景"

@@ -1267,6 +1267,32 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
             "riskReason": record.get("risk_reason", ""),
         }
 
+    def convert_holiday_transaction(record: Dict) -> Dict:
+        """转换单条 holiday_transaction 记录。"""
+        evidence_refs = record.get("evidence_refs", {})
+        if not isinstance(evidence_refs, dict):
+            evidence_refs = {}
+        source_row_index = evidence_refs.get("source_row_index")
+        transaction_id = evidence_refs.get("transaction_id", "")
+        return {
+            "date": _format_date(record.get("date")),
+            "amount": record.get("amount", 0),
+            "description": record.get("description", ""),
+            "holidayName": record.get("holiday_name", record.get("holidayName", "")),
+            "holidayPeriod": record.get(
+                "holiday_period", record.get("holidayPeriod", "")
+            ),
+            "counterparty": record.get("counterparty", ""),
+            "direction": record.get("direction", ""),
+            "bank": record.get("bank", ""),
+            "sourceFile": record.get("source_file", ""),
+            "sourceRowIndex": source_row_index,
+            "transactionId": transaction_id,
+            "evidenceRefs": evidence_refs,
+            "riskLevel": record.get("risk_level", "medium"),
+            "riskReason": record.get("risk_reason", ""),
+        }
+
     def _format_date(date_val) -> str:
         """格式化日期为 ISO 字符串"""
         if date_val is None:
@@ -1303,6 +1329,11 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
             result[new_key] = [convert_cash_collision(r) for r in value]
         elif key == "direct_transfers" and isinstance(value, list):
             result[new_key] = [convert_direct_transfer(r) for r in value]
+        elif key == "holiday_transactions" and isinstance(value, dict):
+            result[new_key] = {
+                entity: [convert_holiday_transaction(r) for r in records]
+                for entity, records in value.items()
+            }
         else:
             result[new_key] = value
 
@@ -2497,6 +2528,17 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                 "suspicion_medium_high_amount": getattr(
                     config, "SUSPICION_MEDIUM_HIGH_AMOUNT", 20000
                 ),
+                "off_hours_start": getattr(config, "NON_WORKING_HOURS_START", 20),
+                "off_hours_end": getattr(config, "NON_WORKING_HOURS_END", 8),
+                "holiday_threshold": getattr(
+                    config, "HOLIDAY_LARGE_AMOUNT_THRESHOLD", 50000
+                ),
+                "weekend_threshold": getattr(
+                    config, "HOLIDAY_LARGE_AMOUNT_THRESHOLD", 50000
+                ),
+                "holiday_detection_config": getattr(
+                    config, "HOLIDAY_DETECTION_CONFIG", {}
+                ),
                 # 默认不把“本人取现-本人存现”当作风险主清单
                 "include_single_entity_collisions": False,
                 # 节假日由配置统一管理（支持多年）
@@ -2514,6 +2556,8 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                 suspicions["direct_transfers"] = plugin_results["direct_transfer"]
             if plugin_results.get("cash_collision"):
                 suspicions["cash_collisions"] = plugin_results["cash_collision"]
+            if plugin_results.get("time_anomaly"):
+                suspicions["timeSeriesAlerts"] = plugin_results["time_anomaly"]
         except Exception as e:
             logger.warning(f"SuspicionEngine 增强失败，保留旧检测器结果: {e}")
 

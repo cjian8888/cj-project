@@ -30,6 +30,7 @@ import re
 
 import config
 import utils
+from holiday_service import get_holiday_service
 
 logger = utils.setup_logger(__name__)
 
@@ -163,6 +164,31 @@ def _is_cash_transaction(row: pd.Series) -> bool:
     return utils.contains_keywords(desc, config.CASH_KEYWORDS)
 
 
+def _normalize_transaction_datetime(value) -> Optional[datetime]:
+    """统一解析交易时间字段。"""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, pd.Timestamp):
+        return value.to_pydatetime()
+
+    parsed = pd.to_datetime(value, errors='coerce')
+    if pd.isna(parsed):
+        return None
+    return parsed.to_pydatetime()
+
+
+def _is_off_hours(dt: datetime) -> bool:
+    """使用全局配置判断是否处于非工作时间。"""
+    start_hour = int(getattr(config, 'NON_WORKING_HOURS_START', 20))
+    end_hour = int(getattr(config, 'NON_WORKING_HOURS_END', 8))
+    hour = dt.hour
+    if start_hour <= end_hour:
+        return start_hour <= hour <= end_hour
+    return hour >= start_hour or hour <= end_hour
+
+
 # ============================================================
 # 交易级风险评分
 # ============================================================
@@ -213,16 +239,16 @@ def score_transaction(
     
     # 3. 时间评分
     time_score = 0
-    date = row.get('date')
+    date = _normalize_transaction_datetime(row.get('date'))
     if date:
         try:
-            if hasattr(date, 'hour'):
-                hour = date.hour
-                if hour >= 22 or hour <= 6:
-                    time_score += RISK_SCORE_WEIGHTS['time']['night']
-            if hasattr(date, 'weekday'):
-                if date.weekday() >= 5:
-                    time_score += RISK_SCORE_WEIGHTS['time']['weekend']
+            holiday_service = get_holiday_service()
+            if _is_off_hours(date):
+                time_score += RISK_SCORE_WEIGHTS['time']['night']
+            if holiday_service.is_holiday(date.date()):
+                time_score += RISK_SCORE_WEIGHTS['time']['holiday']
+            if date.weekday() >= 5:
+                time_score += RISK_SCORE_WEIGHTS['time']['weekend']
         except (AttributeError, TypeError):
             pass
     scores['time'] = time_score
@@ -315,13 +341,18 @@ def explain_risk_score(
     
     # 时间解释
     if breakdown.get('time', 0) >= 15:
-        date = row.get('date')
-        if hasattr(date, 'hour'):
-            if date.hour >= 22 or date.hour <= 6:
-                reasons.append(f"发生在凌晨{date.hour}:{date.minute:02d}（深夜交易）")
-        if hasattr(date, 'weekday'):
+        date = _normalize_transaction_datetime(row.get('date'))
+        if date:
+            if _is_off_hours(date):
+                reasons.append(f"发生在{date.hour}:{date.minute:02d}（非工作时段交易）")
+
+            holiday_service = get_holiday_service()
+            holiday_name = holiday_service.get_holiday_name(date.date())
+            if holiday_name:
+                reasons.append(f"发生在{holiday_name}（法定节假日）")
+
             if date.weekday() >= 5:
-                reasons.append(f"发生在周末（非工作日）")
+                reasons.append("发生在周末（非工作日）")
     
     # 摘要解释
     if breakdown.get('description', 0) >= 20:

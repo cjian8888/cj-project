@@ -3,11 +3,14 @@
 检测异常时间的交易，如凌晨、节假日等的交易。
 """
 
-from datetime import date, datetime, time
-from typing import Dict, List, Any, Optional, Set, Tuple
+from datetime import date, datetime, time, timedelta
+from typing import Dict, List, Any, Optional, Tuple
+
+import pandas as pd
 
 import config as global_config
 from detectors.base_detector import BaseDetector
+from holiday_service import build_holiday_window
 from schemas.suspicion import SuspicionSeverity, SuspicionType
 
 
@@ -36,31 +39,83 @@ class TimeAnomalyDetector(BaseDetector):
         """执行时间异常检测。
 
         Args:
-            data: 包含交易数据的字典，必须包含 'transactions' 键
+            data: 包含交易数据的字典，支持两种结构：
+                - {'transactions': [...], 'entity_name': '...'}
+                - {'cleaned_data': {entity_name: DataFrame, ...}}
             config: 检测配置参数
-                - off_hours_start: 非工作时段开始时间（小时，默认22）
-                - off_hours_end: 非工作时段结束时间（小时，默认6）
+                - off_hours_start: 非工作时段开始时间（小时，默认取 config.NON_WORKING_HOURS_START）
+                - off_hours_end: 非工作时段结束时间（小时，默认取 config.NON_WORKING_HOURS_END）
                 - holiday_threshold: 节假日大额交易阈值（默认50000）
                 - weekend_threshold: 周末大额交易阈值（默认50000）
                 - min_amount: 检测的最低金额（默认10000）
+                - holiday_days_before: 节前纳入窗口的天数
+                - holiday_days_after: 节后纳入窗口的天数
 
         Returns:
             List[Dict]: 检测到的疑点列表
         """
-        transactions = data.get("transactions", [])
-        entity_name = data.get("entity_name", "未知实体")
+        if "transactions" in data:
+            return self._detect_for_entity(
+                transactions=data.get("transactions", []),
+                entity_name=data.get("entity_name", "未知实体"),
+                config=config,
+            )
 
+        cleaned_data = data.get("cleaned_data", {})
+        if not isinstance(cleaned_data, dict) or not cleaned_data:
+            return []
+
+        results: List[Dict[str, Any]] = []
+        for entity_name, df in cleaned_data.items():
+            transactions = self._extract_transactions_from_dataframe(df)
+            results.extend(
+                self._detect_for_entity(
+                    transactions=transactions,
+                    entity_name=entity_name,
+                    config=config,
+                )
+            )
+        return results
+
+    def _detect_for_entity(
+        self,
+        transactions: List[Dict[str, Any]],
+        entity_name: str,
+        config: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """对单个实体的交易执行时间异常检测。"""
         if not transactions:
             return []
 
-        off_hours_start = config.get("off_hours_start", 22)
-        off_hours_end = config.get("off_hours_end", 6)
-        holiday_threshold = config.get("holiday_threshold", 50000)
-        weekend_threshold = config.get("weekend_threshold", 50000)
-        min_amount = config.get("min_amount", 10000)
-        holidays = config.get("holidays", self._get_default_holidays())
+        off_hours_start = int(
+            config.get(
+                "off_hours_start",
+                getattr(global_config, "NON_WORKING_HOURS_START", 20),
+            )
+        )
+        off_hours_end = int(
+            config.get(
+                "off_hours_end",
+                getattr(global_config, "NON_WORKING_HOURS_END", 8),
+            )
+        )
+        holiday_threshold = float(
+            config.get(
+                "holiday_threshold",
+                getattr(global_config, "HOLIDAY_LARGE_AMOUNT_THRESHOLD", 50000),
+            )
+        )
+        weekend_threshold = float(config.get("weekend_threshold", holiday_threshold))
+        min_amount = float(config.get("min_amount", 10000))
+        weekend_detection_enabled = bool(
+            config.get(
+                "weekend_detection_enabled",
+                getattr(global_config, "WEEKEND_DETECTION_ENABLED", True),
+            )
+        )
 
         parsed_transactions = self._parse_transactions(transactions)
+        holiday_lookup = self._build_holiday_lookup(parsed_transactions, config)
 
         off_hours_txs = []
         holiday_txs = []
@@ -74,17 +129,33 @@ class TimeAnomalyDetector(BaseDetector):
             if self._is_off_hours(tx["datetime"], off_hours_start, off_hours_end):
                 off_hours_txs.append(tx)
 
-            if (
-                self._is_holiday(tx["date"], holidays)
-                and abs_amount >= holiday_threshold
-            ):
-                holiday_txs.append(tx)
+            holiday_info = holiday_lookup.get(tx["date"])
+            if holiday_info and abs_amount >= holiday_threshold:
+                holiday_name, holiday_period = holiday_info
+                holiday_txs.append(
+                    {
+                        **tx,
+                        "holiday_name": holiday_name,
+                        "holiday_period": holiday_period,
+                    }
+                )
 
-            if self._is_weekend(tx["date"]) and abs_amount >= weekend_threshold:
+            if (
+                weekend_detection_enabled
+                and self._is_weekend(tx["date"])
+                and abs_amount >= weekend_threshold
+            ):
                 weekend_txs.append(tx)
 
         results = []
-        results.extend(self._create_off_hours_suspicions(off_hours_txs, entity_name))
+        results.extend(
+            self._create_off_hours_suspicions(
+                off_hours_txs,
+                entity_name,
+                off_hours_start,
+                off_hours_end,
+            )
+        )
         results.extend(self._create_holiday_suspicions(holiday_txs, entity_name))
         results.extend(self._create_weekend_suspicions(weekend_txs, entity_name))
 
@@ -113,6 +184,88 @@ class TimeAnomalyDetector(BaseDetector):
                 continue
         return parsed
 
+    def _extract_transactions_from_dataframe(self, df: Any) -> List[Dict[str, Any]]:
+        """将 cleaned_data 中的 DataFrame 行转换为检测器标准交易结构。"""
+        if df is None or not hasattr(df, "iterrows") or "date" not in getattr(df, "columns", []):
+            return []
+
+        transactions: List[Dict[str, Any]] = []
+        for _, row in df.iterrows():
+            amount = self._extract_amount_from_row(row)
+            if amount <= 0:
+                continue
+
+            transactions.append(
+                {
+                    "tx_date": row.get("date"),
+                    "amount": amount,
+                    "tx_type": self._extract_tx_type(row),
+                    "counterparty": self._clean_text(
+                        row.get("counterparty", row.get("交易对手", ""))
+                    ),
+                    "description": self._clean_text(
+                        row.get("description", row.get("交易摘要", ""))
+                    ),
+                    "account": self._clean_text(
+                        row.get("account", row.get("本方账号", ""))
+                    ),
+                    "bank": self._clean_text(
+                        row.get("银行来源", row.get("bank", ""))
+                    ),
+                }
+            )
+
+        return transactions
+
+    def _extract_amount_from_row(self, row: Any) -> float:
+        """从 DataFrame 行中提取绝对金额。"""
+        income = self._safe_float(row.get("income", row.get("收入(元)", 0)))
+        expense = self._safe_float(row.get("expense", row.get("支出(元)", 0)))
+        if income or expense:
+            return max(abs(income), abs(expense))
+
+        return abs(self._safe_float(row.get("amount", 0)))
+
+    def _extract_tx_type(self, row: Any) -> str:
+        """从 DataFrame 行中提取交易方向。"""
+        income = self._safe_float(row.get("income", row.get("收入(元)", 0)))
+        expense = self._safe_float(row.get("expense", row.get("支出(元)", 0)))
+        if income > 0 and income >= expense:
+            return "收入"
+        if expense > 0:
+            return "支出"
+
+        amount = self._safe_float(row.get("amount", 0))
+        if amount > 0:
+            return "收入"
+        if amount < 0:
+            return "支出"
+        return ""
+
+    def _safe_float(self, value: Any) -> float:
+        """安全转换为浮点数。"""
+        try:
+            if pd.isna(value):
+                return 0.0
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _clean_text(self, value: Any) -> str:
+        """安全转换为字符串。"""
+        try:
+            if pd.isna(value):
+                return ""
+        except (TypeError, ValueError):
+            pass
+
+        text = str(value)
+        return "" if text == "nan" else text
+
     def _parse_datetime(
         self, date_value: Any, time_value: Any = None
     ) -> Optional[datetime]:
@@ -132,6 +285,12 @@ class TimeAnomalyDetector(BaseDetector):
                     return datetime.strptime(date_value, fmt)
                 except ValueError:
                     continue
+        try:
+            parsed = pd.to_datetime(date_value, errors="coerce")
+            if not pd.isna(parsed):
+                return parsed.to_pydatetime()
+        except (TypeError, ValueError, AttributeError):
+            pass
         return None
 
     def _parse_time(self, time_value: Any) -> Optional[time]:
@@ -155,34 +314,101 @@ class TimeAnomalyDetector(BaseDetector):
         else:
             return hour >= start_hour or hour <= end_hour
 
-    def _is_holiday(self, d: date, holidays: List[Tuple[str, str, str]]) -> bool:
-        """判断日期是否为节假日。"""
-        for start, end, _ in holidays:
-            try:
-                start_date = datetime.strptime(start, "%Y-%m-%d").date()
-                end_date = datetime.strptime(end, "%Y-%m-%d").date()
-                if start_date <= d <= end_date:
-                    return True
-            except ValueError:
-                continue
-        return False
+    def _build_holiday_lookup(
+        self, transactions: List[Dict[str, Any]], config: Dict[str, Any]
+    ) -> Dict[date, Tuple[str, str]]:
+        """基于交易时间范围构建节前/节中/节后检测窗口。"""
+        if not transactions:
+            return {}
+
+        detection_config = config.get(
+            "holiday_detection_config",
+            getattr(global_config, "HOLIDAY_DETECTION_CONFIG", {}),
+        ) or {}
+        days_before = int(
+            config.get(
+                "holiday_days_before",
+                detection_config.get("days_before", 3),
+            )
+        )
+        days_after = int(
+            config.get(
+                "holiday_days_after",
+                detection_config.get("days_after", 2),
+            )
+        )
+
+        tx_dates = [tx["date"] for tx in transactions]
+        start_date = min(tx_dates)
+        end_date = max(tx_dates)
+
+        custom_holidays = config.get("holidays")
+        if custom_holidays:
+            return self._build_window_from_ranges(
+                custom_holidays,
+                start_date,
+                end_date,
+                days_before,
+                days_after,
+            )
+
+        return build_holiday_window(
+            start_date,
+            end_date,
+            days_before=days_before,
+            days_after=days_after,
+        )
 
     def _is_weekend(self, d: date) -> bool:
         """判断日期是否为周末。"""
         return d.weekday() >= 5
 
-    def _get_default_holidays(self) -> List[Tuple[str, str, str]]:
-        """获取默认节假日列表。"""
-        # 优先使用全局配置中的按年节假日，避免检测器内置日期过期
-        holiday_map = getattr(global_config, "CHINESE_HOLIDAYS", {})
-        merged: List[Tuple[str, str, str]] = []
-        if isinstance(holiday_map, dict):
-            for year in sorted(holiday_map.keys()):
-                merged.extend(holiday_map.get(year, []))
-        return merged
+    def _build_window_from_ranges(
+        self,
+        holidays: List[Tuple[str, str, str]],
+        start_date: date,
+        end_date: date,
+        days_before: int,
+        days_after: int,
+    ) -> Dict[date, Tuple[str, str]]:
+        """将显式传入的节假日区间构建为节前/节中/节后窗口。"""
+        lookup: Dict[date, Tuple[str, str]] = {}
+        priority = {"during": 3, "before": 2, "after": 2}
+
+        def assign(target_date: date, name: str, period: str) -> None:
+            if target_date < start_date or target_date > end_date:
+                return
+            existing = lookup.get(target_date)
+            if existing and priority.get(existing[1], 0) >= priority.get(period, 0):
+                return
+            lookup[target_date] = (name, period)
+
+        for start, end, name in holidays:
+            try:
+                holiday_start = datetime.strptime(start, "%Y-%m-%d").date()
+                holiday_end = datetime.strptime(end, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+
+            for offset in range(days_before, 0, -1):
+                assign(holiday_start - timedelta(days=offset), name, "before")
+
+            current = holiday_start
+            while current <= holiday_end:
+                assign(current, name, "during")
+                current += timedelta(days=1)
+
+            for offset in range(1, days_after + 1):
+                assign(holiday_end + timedelta(days=offset), name, "after")
+
+        return lookup
 
     def _create_off_hours_suspicions(
-        self, transactions: List[Dict], entity_name: str
+        self,
+        transactions: List[Dict],
+        entity_name: str,
+        start_hour: int,
+        end_hour: int,
     ) -> List[Dict[str, Any]]:
         """创建非工作时段交易疑点。"""
         if not transactions:
@@ -202,7 +428,7 @@ class TimeAnomalyDetector(BaseDetector):
         sample_times = [tx["datetime"].strftime("%H:%M") for tx in transactions[:5]]
 
         description = (
-            f"发现非工作时段交易异常：在22:00-06:00时段发生 {tx_count} 笔交易，"
+            f"发现非工作时段交易异常：在{start_hour:02d}:00-{end_hour:02d}:00时段发生 {tx_count} 笔交易，"
             f"涉及总金额 {total_amount:,.2f} 元。样本交易时间：{', '.join(sample_times)}。"
             f"非工作时段的大额交易可能具有特殊目的或风险。"
         )
@@ -224,7 +450,10 @@ class TimeAnomalyDetector(BaseDetector):
             "detection_date": date.today(),
             "entity_name": entity_name,
             "confidence": confidence,
-            "evidence": f"非工作时段交易: {tx_count}笔, 总金额: {total_amount:,.2f}元, 时段: 22:00-06:00",
+            "evidence": (
+                f"非工作时段交易: {tx_count}笔, 总金额: {total_amount:,.2f}元, "
+                f"时段: {start_hour:02d}:00-{end_hour:02d}:00"
+            ),
             "status": "待核实",
         }
 
@@ -248,10 +477,24 @@ class TimeAnomalyDetector(BaseDetector):
             f"TX_{tx['raw_data'].get('tx_date', '')}_{tx['amount']}"
             for tx in transactions[:50]
         ]
+        holiday_names = sorted(
+            {tx.get("holiday_name", "节假日") for tx in transactions if tx.get("holiday_name")}
+        )
+        holiday_periods = sorted(
+            {tx.get("holiday_period", "during") for tx in transactions if tx.get("holiday_period")}
+        )
+        period_labels = {
+            "before": "节前",
+            "during": "节中",
+            "after": "节后",
+        }
+        period_text = "、".join(period_labels.get(item, item) for item in holiday_periods)
+        holiday_text = "、".join(holiday_names[:3]) if holiday_names else "节假日"
 
         description = (
-            f"发现节假日大额交易异常：在法定节假日发生 {tx_count} 笔大额交易，"
-            f"涉及总金额 {total_amount:,.2f} 元。节假日期间的大额资金往来需要关注。"
+            f"发现节假日敏感窗口大额交易异常：在{holiday_text}{period_text or '相关时段'}"
+            f"发生 {tx_count} 笔大额交易，涉及总金额 {total_amount:,.2f} 元。"
+            f"节假日及临近窗口的大额资金往来需要重点关注。"
         )
 
         severity = (
@@ -271,7 +514,10 @@ class TimeAnomalyDetector(BaseDetector):
             "detection_date": date.today(),
             "entity_name": entity_name,
             "confidence": confidence,
-            "evidence": f"节假日大额交易: {tx_count}笔, 总金额: {total_amount:,.2f}元",
+            "evidence": (
+                f"节假日敏感窗口交易: {tx_count}笔, 总金额: {total_amount:,.2f}元, "
+                f"节日: {holiday_text}, 时段: {period_text or '节中'}"
+            ),
             "status": "待核实",
         }
 
