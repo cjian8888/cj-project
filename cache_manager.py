@@ -49,6 +49,14 @@ class CacheManager:
         "securitiesData": "securitiesData.json",
         "creditData": "creditData.json",
         "amlData": "amlData.json",
+        "insuranceData": "insuranceData.json",
+        "immigrationData": "immigrationData.json",
+        "hotelData": "hotelData.json",
+        "hotelCohabitation": "hotelCohabitation.json",
+        "railwayData": "railwayData.json",
+        "flightData": "flightData.json",
+        "coaddressData": "coaddressData.json",
+        "coviolationData": "coviolationData.json",
         "external_p0": "external_p0.json",
         "external_p1": "external_p1.json",
         "external_p2": "external_p2.json",
@@ -285,6 +293,28 @@ class CacheManager:
                 if "precise_property_data" in p1_data:
                     self.save_cache("precisePropertyData", p1_data["precise_property_data"])
 
+            # P2 外部数据
+            if "p2" in external_data:
+                p2_data = external_data["p2"]
+                self.save_cache("external_p2", p2_data)
+
+                if "insurance_data" in p2_data:
+                    self.save_cache("insuranceData", p2_data["insurance_data"])
+                if "immigration_data" in p2_data:
+                    self.save_cache("immigrationData", p2_data["immigration_data"])
+                if "hotel_data" in p2_data:
+                    self.save_cache("hotelData", p2_data["hotel_data"])
+                if "hotel_cohabitation" in p2_data:
+                    self.save_cache("hotelCohabitation", p2_data["hotel_cohabitation"])
+                if "railway_data" in p2_data:
+                    self.save_cache("railwayData", p2_data["railway_data"])
+                if "flight_data" in p2_data:
+                    self.save_cache("flightData", p2_data["flight_data"])
+                if "coaddress_data" in p2_data:
+                    self.save_cache("coaddressData", p2_data["coaddress_data"])
+                if "coviolation_data" in p2_data:
+                    self.save_cache("coviolationData", p2_data["coviolation_data"])
+
         # 保存元数据
         metadata = {
             "persons": results.get("persons", []),
@@ -337,8 +367,17 @@ class CacheManager:
             "securitiesData": self.load_cache("securitiesData"),
             "creditData": self.load_cache("creditData"),
             "amlData": self.load_cache("amlData"),
+            "insuranceData": self.load_cache("insuranceData"),
+            "immigrationData": self.load_cache("immigrationData"),
+            "hotelData": self.load_cache("hotelData"),
+            "hotelCohabitation": self.load_cache("hotelCohabitation"),
+            "railwayData": self.load_cache("railwayData"),
+            "flightData": self.load_cache("flightData"),
+            "coaddressData": self.load_cache("coaddressData"),
+            "coviolationData": self.load_cache("coviolationData"),
             "external_p0": self.load_cache("external_p0"),
             "external_p1": self.load_cache("external_p1"),
+            "external_p2": self.load_cache("external_p2"),
         }
         # 检查必需缓存（profiles_full 不再是必需的）
         required_caches = ["profiles", "suspicions", "analysisResults", "graphData"]

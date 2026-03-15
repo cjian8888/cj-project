@@ -2,11 +2,17 @@
 # -*- coding: utf-8 -*-
 """节假日检测主流程回归测试。"""
 
-from datetime import datetime
+import sys
+import os
+from datetime import datetime, date
+from types import SimpleNamespace
 
 import pandas as pd
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import config
+from holiday_service import HolidayService
 from api_server import serialize_suspicions
 from risk_scoring import RISK_SCORE_WEIGHTS, score_transaction
 from suspicion_detector import run_all_detections
@@ -93,3 +99,25 @@ def test_score_transaction_adds_holiday_time_weight():
 def test_local_holiday_fallback_extends_backward_to_2020():
     expected_years = {2020, 2021, 2022, 2023, 2024, 2025, 2026}
     assert expected_years.issubset(set(config.CHINESE_HOLIDAYS.keys()))
+
+
+def test_holiday_service_normalizes_library_string_names_to_chinese(monkeypatch):
+    library_holidays = {
+        date(2024, 1, 1): "New Year's Day",
+        date(2024, 2, 10): "Spring Festival",
+        date(2024, 2, 11): "Spring Festival",
+    }
+
+    fake_calendar = SimpleNamespace(
+        is_holiday=lambda d: d in library_holidays,
+        get_holiday_detail=lambda d: (d in library_holidays, library_holidays.get(d)),
+        is_workday=lambda d: False,
+    )
+    monkeypatch.setitem(sys.modules, "chinese_calendar", fake_calendar)
+
+    service = HolidayService()
+
+    assert service.get_holiday_name(date(2024, 1, 1)) == "元旦"
+
+    ranges = service.get_holiday_ranges_for_year(2024)
+    assert any(name == "春节" for _, _, name in ranges)

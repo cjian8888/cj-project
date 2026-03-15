@@ -172,7 +172,7 @@ tax_analysis, travel_analysis
         性别暂未获取，
         {% endif %}
         {% if bg.birth_date and bg.birth_date not in ['暂无数据', '暂未获取', '未知'] %}
-        {{ bg.birth_date }}出生，
+        {{ bg.birth_date|format_display_date }}出生，
         {% else %}
         出生日期暂未获取，
         {% endif %}
@@ -188,7 +188,7 @@ tax_analysis, travel_analysis
         现任职务为{{ bg.current_position }}。
         {% endif %}
         {% if bg.entry_date and bg.entry_date not in ['暂无数据', '暂未获取', '信息待补充', '未提供', '未知', 'nan', 'None', 'null'] %}
-        于{{ bg.entry_date }}进入现单位工作。
+        于{{ bg.entry_date|format_display_date }}进入现单位工作。
         {% endif %}
         {% if bg.family_members_desc and bg.family_members_desc != '暂无家庭成员信息' %}
         除本人外其家庭成员还有：{{ bg.family_members_desc }}。
@@ -202,9 +202,9 @@ tax_analysis, travel_analysis
     <p>家庭成员名下房产{{ prop.count }}处：
         {% for estate in prop.properties %}
         {% set estate_amount = estate.交易金额 or estate.transaction_amount %}
-        第{{ loop.index }}处位于{{ estate.房地坐落 or estate.location or estate.坐落 }}，房屋面积{{ estate.建筑面积 or estate.area or
-        estate.面积 }}平方米，
-        于{{ estate.登记时间 or estate.registration_date or estate.register_date }}登记{% if estate_amount and
+        第{{ loop.index }}处位于{{ estate.房地坐落 or estate.location or estate.坐落 }}，房屋面积{{ (estate.建筑面积 or estate.area or
+        estate.面积)|format_area }}，
+        于{{ (estate.登记时间 or estate.registration_date or estate.register_date)|format_display_date }}登记{% if estate_amount and
         estate_amount not in ['暂无数据', '—'] %}，交易金额{{ estate_amount }}万{% endif %}{% if estate.共有人名称 or
         estate.co_owners or estate.共有人 %}，与{{ estate.共有人名称 or estate.co_owners or estate.共有人 }}共有{% endif %}。
         {% endfor %}
@@ -226,9 +226,9 @@ tax_analysis, travel_analysis
         <tr>
             <td class="seq-col">{{ loop.index }}</td>
             <td>{{ estate.房地坐落 or estate.location or estate.坐落 or '—' }}</td>
-            <td class="text-center">{{ estate.建筑面积 or estate.area or estate.面积 or '—' }}</td>
+            <td class="text-center">{{ (estate.建筑面积 or estate.area or estate.面积 or '—')|format_area }}</td>
             <td class="text-center">{{ estate.权属状态 or estate.status or '现势' }}</td>
-            <td class="text-center">{{ estate.登记时间 or estate.registration_date or estate.register_date or '—' }}</td>
+            <td class="text-center">{{ (estate.登记时间 or estate.registration_date or estate.register_date or '—')|format_display_date }}</td>
             <td class="money-col">{{ estate.交易金额 or estate.transaction_amount or '—' }}</td>
             <td class="text-center">{{ estate.共有情况 or estate.ownership_type or '单独所有' }}</td>
             <td>{{ estate.共有人名称 or estate.co_owners or estate.共有人 or '' }}</td>
@@ -343,7 +343,7 @@ tax_analysis, travel_analysis
         {% set reg_date = v.registration_date or v.登记时间 or '' %}
         有一辆{{ v.color or v.颜色 or '' }}{{ v.brand or v.品牌 or '' }}汽车，车牌号{{ v.plate_number or v.车牌号 or '' }}，
         {% if reg_date and reg_date not in ['暂无数据', '暂未获取', '信息待补充', '未提供', '未知', '【待补充】', 'nan', 'None', 'null'] %}
-        于{{ reg_date }}登记购入{% if not loop.last %}；{% else %}。{% endif %}
+        于{{ reg_date|format_display_date }}登记购入{% if not loop.last %}；{% else %}。{% endif %}
         {% else %}
         登记时间待补充{% if not loop.last %}；{% else %}。{% endif %}
         {% endif %}
@@ -568,7 +568,7 @@ tax_analysis, travel_analysis
                 {% for tx in cash.transactions %}
                 <tr>
                     <td class="seq-col">{{ loop.index }}</td>
-                    <td class="text-center">{{ tx.日期 or tx.date or '—' }}</td>
+                    <td class="text-center">{{ (tx.日期 or tx.date or '—')|format_display_date }}</td>
                     <td class="text-center">{{ tx.类型 or tx.type or '—' }}</td>
                     <td class="money-col">{{ ((tx.金额 or tx.amount or 0) / 10000)|round(2) }}</td>
                     <td>{{ tx.摘要 or tx.description or '—' }}</td>
@@ -655,7 +655,7 @@ tax_analysis, travel_analysis
                 {% for tx in transfer.inflow.transactions[:10] %}
                 <tr>
                     <td class="seq-col">{{ loop.index }}</td>
-                    <td class="text-center">{{ tx.date or tx.日期 or '—' }}</td>
+                    <td class="text-center">{{ (tx.date or tx.日期 or '—')|format_display_date }}</td>
                     <td>{{ tx.counterparty or tx.对手方 or '—' }}</td>
                     <td class="money-col">{{ ((tx.amount or tx.金额 or 0) / 10000)|round(2) }}</td>
                     <td>{{ tx.description or tx.摘要 or '—' }}</td>
@@ -677,7 +677,7 @@ tax_analysis, travel_analysis
                 {% for tx in transfer.outflow.transactions[:10] %}
                 <tr>
                     <td class="seq-col">{{ loop.index }}</td>
-                    <td class="text-center">{{ tx.date or tx.日期 or '—' }}</td>
+                    <td class="text-center">{{ (tx.date or tx.日期 or '—')|format_display_date }}</td>
                     <td>{{ tx.counterparty or tx.对手方 or '—' }}</td>
                     <td class="money-col">{{ ((tx.amount or tx.金额 or 0) / 10000)|round(2) }}</td>
                     <td>{{ tx.description or tx.摘要 or '—' }}</td>
@@ -792,7 +792,7 @@ tax_analysis, travel_analysis
                     <td>{{ tx.product_name or tx.产品名称 or '—' }}</td>
                     <td class="text-center">{{ tx.transaction_type or tx.交易类型 or '—' }}</td>
                     <td class="money-col">{{ ((tx.amount or tx.金额 or 0) / 10000)|round(2) }}</td>
-                    <td class="text-center">{{ tx.date or tx.日期 or '—' }}</td>
+                    <td class="text-center">{{ (tx.date or tx.日期 or '—')|format_display_date }}</td>
                 </tr>
                 {% endfor %}
                 <tr style="font-weight: bold; background-color: #f0f0f0;">
@@ -844,7 +844,7 @@ tax_analysis, travel_analysis
                 {% for tx in abnormal_tx.large_transfers[:10] %}
                 <tr>
                     <td class="seq-col">{{ loop.index }}</td>
-                    <td class="text-center">{{ tx.date or tx.transaction_date or '—' }}</td>
+                    <td class="text-center">{{ (tx.date or tx.transaction_date or '—')|format_display_date }}</td>
                     <td>{{ tx.counterparty or '—' }}</td>
                     <td class="money-col">{{ ((tx.amount or 0) / 10000)|round(2) }}</td>
                     <td>{{ tx.description or tx.summary or '—' }}</td>
@@ -859,9 +859,13 @@ tax_analysis, travel_analysis
             {# 【新增】7. 关联方往来分析 #}
             {% set ns.idx = ns.idx + 1 %}
             {% set related_party = analysis.related_party_analysis %}
-            {% if related_party and related_party.bidirectional_relations and related_party.bidirectional_relations|length > 0 %}
+            {% set has_bidirectional = related_party and related_party.bidirectional_relations and related_party.bidirectional_relations|length > 0 %}
+            {% set has_coaddress = related_party and related_party.coaddress_relations and related_party.coaddress_relations|length > 0 %}
+            {% set has_coviolation = related_party and related_party.coviolation_relations and related_party.coviolation_relations|length > 0 %}
+            {% if has_bidirectional or has_coaddress or has_coviolation %}
             <h3 class="item-title">{{ ns.idx }}、关联方往来分析</h3>
-            <p>以下人员或单位与{{ unit.name }}存在双向资金往来：</p>
+            <p>{{ related_party.narrative or '以下人员或单位与' ~ unit.name ~ '存在关联方往来或外围关系线索。' }}</p>
+            {% if has_bidirectional %}
             <table>
                 <tr>
                     <th class="seq-col">序号</th>
@@ -888,6 +892,51 @@ tax_analysis, travel_analysis
                 </tr>
                 {% endfor %}
             </table>
+            {% endif %}
+            {% if has_coaddress %}
+            <p><strong>同住址线索：</strong>{{ related_party.residence_relation_summary or '' }}</p>
+            <table>
+                <tr>
+                    <th class="seq-col">序号</th>
+                    <th>姓名</th>
+                    <th>身份证号</th>
+                    <th>与户主关系</th>
+                    <th>户籍地</th>
+                    <th>从业单位</th>
+                </tr>
+                {% for rel in related_party.coaddress_relations %}
+                <tr>
+                    <td class="seq-col">{{ loop.index }}</td>
+                    <td>{{ rel.name or '—' }}</td>
+                    <td class="text-center">{{ rel.id_number or '—' }}</td>
+                    <td class="text-center">{{ rel.relation_to_head or '—' }}</td>
+                    <td>{{ rel.hukou_address or '—' }}</td>
+                    <td>{{ rel.employer or '—' }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% endif %}
+            {% if has_coviolation %}
+            <p><strong>同车违章线索：</strong></p>
+            <table>
+                <tr>
+                    <th class="seq-col">序号</th>
+                    <th>姓名</th>
+                    <th>身份证号</th>
+                    <th>车牌号</th>
+                    <th>同次数</th>
+                </tr>
+                {% for rel in related_party.coviolation_relations %}
+                <tr>
+                    <td class="seq-col">{{ loop.index }}</td>
+                    <td>{{ rel.name or '—' }}</td>
+                    <td class="text-center">{{ rel.id_number or '—' }}</td>
+                    <td class="text-center">{{ rel.plate_number or '—' }}</td>
+                    <td class="text-center">{{ rel.violation_count or 0 }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% endif %}
             {% else %}
             {% set ns.idx = ns.idx + 0 %}
             {% endif %}
@@ -1026,4 +1075,75 @@ tax_analysis, travel_analysis
             <p>
                 {{ travel.narrative or '未查见航班同行人、铁路同行人、同住宿人与本次核查的相关当事人存在关联。' }}
             </p>
+            {% if travel.high_frequency_companions and travel.high_frequency_companions|length > 0 %}
+            <p><strong>高频/多人同行对象：</strong></p>
+            <table>
+                <tr>
+                    <th class="seq-col">序号</th>
+                    <th>对象姓名</th>
+                    <th>同行次数</th>
+                    <th>涉及核心人员</th>
+                    <th>风险等级</th>
+                </tr>
+                {% for item in travel.high_frequency_companions %}
+                <tr>
+                    <td class="seq-col">{{ loop.index }}</td>
+                    <td>{{ item.name or '—' }}</td>
+                    <td class="text-center">{{ item.count or 0 }}</td>
+                    <td>{{ item.persons|join('、') if item.persons else '—' }}</td>
+                    <td class="text-center {{ 'risk-high' if item.risk_level == 'high' else ('risk-medium' if item.risk_level == 'medium' else '') }}">
+                        {{ '高' if item.risk_level == 'high' else ('中' if item.risk_level == 'medium' else '低') }}
+                    </td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% endif %}
+            {% if travel.travel_fund_correlations and travel.travel_fund_correlations|length > 0 %}
+            <p><strong>同行资金碰撞：</strong></p>
+            <table>
+                <tr>
+                    <th class="seq-col">序号</th>
+                    <th>同行对象</th>
+                    <th>出行方式</th>
+                    <th>出行日期</th>
+                    <th>交易日期</th>
+                    <th>金额 (万元)</th>
+                    <th>时序关系</th>
+                </tr>
+                {% for item in travel.travel_fund_correlations %}
+                <tr>
+                    <td class="seq-col">{{ loop.index }}</td>
+                    <td>{{ item.companion or '—' }}</td>
+                    <td class="text-center">{{ item.travel_type or '—' }}</td>
+                    <td class="text-center">{{ (item.travel_date or '—')|format_display_date }}</td>
+                    <td class="text-center">{{ (item.transaction_date or '—')|format_display_date }}</td>
+                    <td class="money-col">{{ ((item.amount or 0) / 10000)|round(2) }}</td>
+                    <td class="text-center">{{ item.timing or '—' }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% endif %}
+            {% if travel.hotel_fund_correlations and travel.hotel_fund_correlations|length > 0 %}
+            <p><strong>同住宿资金碰撞：</strong></p>
+            <table>
+                <tr>
+                    <th class="seq-col">序号</th>
+                    <th>同住宿对象</th>
+                    <th>住宿日期</th>
+                    <th>交易日期</th>
+                    <th>金额 (万元)</th>
+                    <th>时序关系</th>
+                </tr>
+                {% for item in travel.hotel_fund_correlations %}
+                <tr>
+                    <td class="seq-col">{{ loop.index }}</td>
+                    <td>{{ item.cohabitant or '—' }}</td>
+                    <td class="text-center">{{ (item.stay_date or '—')|format_display_date }}</td>
+                    <td class="text-center">{{ (item.transaction_date or '—')|format_display_date }}</td>
+                    <td class="money-col">{{ ((item.amount or 0) / 10000)|round(2) }}</td>
+                    <td class="text-center">{{ item.timing or '—' }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% endif %}
             {% endif %}

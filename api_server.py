@@ -710,6 +710,14 @@ def _save_external_report_caches(
         "securitiesData": external_data.get("p1", {}).get("securities_data", {}),
         "creditData": external_data.get("p0", {}).get("credit_data", {}),
         "amlData": external_data.get("p0", {}).get("aml_data", {}),
+        "insuranceData": external_data.get("p2", {}).get("insurance_data", {}),
+        "immigrationData": external_data.get("p2", {}).get("immigration_data", {}),
+        "hotelData": external_data.get("p2", {}).get("hotel_data", {}),
+        "hotelCohabitation": external_data.get("p2", {}).get("hotel_cohabitation", {}),
+        "railwayData": external_data.get("p2", {}).get("railway_data", {}),
+        "flightData": external_data.get("p2", {}).get("flight_data", {}),
+        "coaddressData": external_data.get("p2", {}).get("coaddress_data", {}),
+        "coviolationData": external_data.get("p2", {}).get("coviolation_data", {}),
     }
 
     for key, data in external_cache_mapping.items():
@@ -721,6 +729,43 @@ def _raise_if_analysis_stopped(phase: str = "分析已停止"):
     """在分析流程关键节点检查是否收到停止请求。"""
     if analysis_state.is_stop_requested():
         raise AnalysisStoppedError(phase)
+
+
+def _populate_transport_external_data(
+    data_dir: str, phase2_external_data: Dict[str, Any], logger: logging.Logger
+) -> None:
+    """提取铁路/航班主体数据与时间线，避免单点失败抹掉已提取结果。"""
+    try:
+        railway_data = railway_extractor.extract_railway_data(data_dir)
+        phase2_external_data["railway_data"] = railway_data
+        logger.info(f"    ✓ 铁路出行: {len(railway_data)} 个主体")
+    except Exception as e:
+        logger.warning(f"    ✗ 铁路出行提取失败: {e}")
+        phase2_external_data["railway_data"] = {}
+
+    try:
+        phase2_external_data["railway_timeline"] = (
+            railway_extractor.get_travel_timeline(data_dir)
+        )
+    except Exception as e:
+        logger.warning(f"    ✗ 铁路出行时间线构建失败: {e}")
+        phase2_external_data["railway_timeline"] = []
+
+    try:
+        flight_data = flight_extractor.extract_flight_data(data_dir)
+        phase2_external_data["flight_data"] = flight_data
+        logger.info(f"    ✓ 航班出行: {len(flight_data)} 个主体")
+    except Exception as e:
+        logger.warning(f"    ✗ 航班出行提取失败: {e}")
+        phase2_external_data["flight_data"] = {}
+
+    try:
+        phase2_external_data["flight_timeline"] = (
+            flight_extractor.get_flight_timeline(data_dir)
+        )
+    except Exception as e:
+        logger.warning(f"    ✗ 航班出行时间线构建失败: {e}")
+        phase2_external_data["flight_timeline"] = []
 
 
 def _load_json_dict_or_default(
@@ -911,6 +956,81 @@ def create_output_directories(base_dir: str) -> Dict[str, str]:
     return dirs
 
 
+def _safe_abs_amount(value: Any) -> float:
+    """将交易金额安全转换为绝对值浮点数。"""
+    if value in (None, ""):
+        return 0.0
+
+    if isinstance(value, str):
+        value = value.replace(",", "").replace("¥", "").replace("￥", "").strip()
+        if not value:
+            return 0.0
+
+    try:
+        return abs(float(value))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _calculate_profile_max_transaction(profile_dict: Dict[str, Any]) -> float:
+    """
+    从现有画像中的交易明细列表提取最大单笔金额。
+
+    仅扫描具备交易特征的明细项，避免把资产余额、汇总统计误判为单笔交易。
+    """
+    amount_keys = ("金额", "amount", "交易金额", "transaction_amount", "abs_amount")
+    fallback_amount_keys = ("income", "expense", "收入", "支出")
+    transaction_hint_keys = (
+        "日期",
+        "date",
+        "交易日期",
+        "摘要",
+        "description",
+        "对手方",
+        "counterparty",
+        "类型",
+        "type",
+        "transaction_id",
+        "source_file",
+        "source_row_index",
+    )
+    max_amount = 0.0
+
+    def walk(node: Any) -> None:
+        nonlocal max_amount
+
+        if isinstance(node, dict):
+            for value in node.values():
+                walk(value)
+            return
+
+        if not isinstance(node, list):
+            return
+
+        for item in node:
+            if isinstance(item, dict):
+                if any(key in item for key in transaction_hint_keys):
+                    direct_amount = 0.0
+                    for key in amount_keys:
+                        direct_amount = max(direct_amount, _safe_abs_amount(item.get(key)))
+
+                    if direct_amount > 0:
+                        max_amount = max(max_amount, direct_amount)
+                    else:
+                        for key in fallback_amount_keys:
+                            max_amount = max(
+                                max_amount, _safe_abs_amount(item.get(key))
+                            )
+
+                for value in item.values():
+                    walk(value)
+            elif isinstance(item, list):
+                walk(item)
+
+    walk(profile_dict)
+    return max_amount
+
+
 def serialize_profiles(profiles: Dict) -> Dict:
     """
     序列化画像数据
@@ -957,6 +1077,7 @@ def serialize_profiles(profiles: Dict) -> Dict:
             third_party_total = fund_flow.get("third_party_income", 0) + fund_flow.get(
                 "third_party_expense", 0
             )
+            max_transaction = _calculate_profile_max_transaction(profile_dict)
 
             # 【2026-02-12 关键改进】保留完整的原始数据，供报告生成使用
             # 问题背景：之前的简化版缺失 yearly_salary 等关键字段，导致报告生成器
@@ -980,7 +1101,7 @@ def serialize_profiles(profiles: Dict) -> Dict:
                 "cashTransactions": fund_flow.get("cash_transactions", []),
                 "thirdPartyTotal": third_party_total,
                 "wealthTotal": wealth_mgmt.get("total_transactions", 0),
-                "maxTransaction": income_structure.get("max_single_transaction", 0),
+                "maxTransaction": max_transaction,
                 "salaryRatio": summary.get("salary_ratio", 0),
                 # 【修复】保留房产/车辆/理财等资产数据，供报告生成使用
                 "properties": profile_dict.get("properties", []),
@@ -989,9 +1110,15 @@ def serialize_profiles(profiles: Dict) -> Dict:
                 "wealth_products": profile_dict.get("wealth_products", []),
                 "securities": profile_dict.get("securities", []),
                 "insurance": profile_dict.get("insurance", []),
+                "insurance_summary": profile_dict.get("insurance_summary", {}),
                 "bank_accounts_official": profile_dict.get(
                     "bank_accounts_official", []
                 ),
+                "hotel_records": profile_dict.get("hotel_records", []),
+                "railway_records": profile_dict.get("railway_records", {}),
+                "flight_records": profile_dict.get("flight_records", {}),
+                "coaddress_persons": profile_dict.get("coaddress_persons", []),
+                "coviolation_vehicles": profile_dict.get("coviolation_vehicles", []),
                 # 【2026-02-12 新增】保留完整的原始嵌套数据，供报告生成使用
                 # 这样报告生成器只需要使用 profiles.json，无需再加载 profiles_full.json
                 "entity_name": profile_dict.get("entity_name", name),
@@ -2127,29 +2254,22 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             external_data["p2"]["hotel_data"] = {}
             external_data["p2"]["hotel_cohabitation"] = {}
 
-        # P2.4: 铁路出行
+        # P2.3b: 同住址 / 同车违章
         try:
-            railway_data = railway_extractor.extract_railway_data(data_dir)
-            railway_timeline = railway_extractor.build_railway_timeline(data_dir)
-            external_data["p2"]["railway_data"] = railway_data
-            external_data["p2"]["railway_timeline"] = railway_timeline
-            logger.info(f"    ✓ 铁路出行: {len(railway_data)} 个主体")
+            coaddress_data = cohabitation_extractor.extract_coaddress_data(data_dir)
+            coviolation_data = cohabitation_extractor.extract_coviolation_data(data_dir)
+            external_data["p2"]["coaddress_data"] = coaddress_data
+            external_data["p2"]["coviolation_data"] = coviolation_data
+            logger.info(
+                f"    ✓ 同住址/同车违章: {len(coaddress_data)} 个同住址主体, {len(coviolation_data)} 个同车主体"
+            )
         except Exception as e:
-            logger.warning(f"    ✗ 铁路出行提取失败: {e}")
-            external_data["p2"]["railway_data"] = {}
-            external_data["p2"]["railway_timeline"] = {}
+            logger.warning(f"    ✗ 同住址/同车违章提取失败: {e}")
+            external_data["p2"]["coaddress_data"] = {}
+            external_data["p2"]["coviolation_data"] = {}
 
-        # P2.5: 航班出行
-        try:
-            flight_data = flight_extractor.extract_flight_data(data_dir)
-            flight_timeline = flight_extractor.build_flight_timeline(data_dir)
-            external_data["p2"]["flight_data"] = flight_data
-            external_data["p2"]["flight_timeline"] = flight_timeline
-            logger.info(f"    ✓ 航班出行: {len(flight_data)} 个主体")
-        except Exception as e:
-            logger.warning(f"    ✗ 航班出行提取失败: {e}")
-            external_data["p2"]["flight_data"] = {}
-            external_data["p2"]["flight_timeline"] = {}
+        # P2.4/P2.5: 铁路/航班出行
+        _populate_transport_external_data(data_dir, external_data["p2"], logger)
 
         phase4_duration = (time.time() - phase4_start) * 1000
         logging_config.log_performance(
@@ -2329,31 +2449,64 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                         break
 
                 # 6. 🔄 融合外部数据 (P2 - 行为)
+                entity_id = next(
+                    (person_id for person_id, person_name in id_to_name_map.items() if person_name == entity),
+                    None,
+                )
+
                 # P2.1: 保险
-                if entity in external_data["p2"].get("insurance_data", {}):
-                    profile["insurance"] = external_data["p2"]["insurance_data"][entity]
+                insurance_data = external_data["p2"].get("insurance_data", {})
+                if entity_id and entity_id in insurance_data:
+                    insurance_info = insurance_data[entity_id]
+                    if isinstance(insurance_info, dict):
+                        profile["insurance"] = insurance_info.get("policies", [])
+                        profile["insurance_summary"] = insurance_info.get("summary", {})
+                    else:
+                        profile["insurance"] = insurance_info
+                elif entity in insurance_data:
+                    profile["insurance"] = insurance_data[entity]
 
                 # P2.2: 出入境
-                if entity in external_data["p2"].get("immigration_data", {}):
-                    profile["immigration_records"] = external_data["p2"][
-                        "immigration_data"
-                    ][entity]
+                immigration_data = external_data["p2"].get("immigration_data", {})
+                if entity_id and entity_id in immigration_data:
+                    profile["immigration_records"] = immigration_data[entity_id]
+                elif entity in immigration_data:
+                    profile["immigration_records"] = immigration_data[entity]
 
                 # P2.3: 住宿
-                if entity in external_data["p2"].get("hotel_data", {}):
-                    profile["hotel_records"] = external_data["p2"]["hotel_data"][entity]
+                hotel_data = external_data["p2"].get("hotel_data", {})
+                if entity_id and entity_id in hotel_data:
+                    profile["hotel_records"] = hotel_data[entity_id]
+                elif entity in hotel_data:
+                    profile["hotel_records"] = hotel_data[entity]
 
                 # P2.4: 铁路
-                if entity in external_data["p2"].get("railway_data", {}):
-                    profile["railway_records"] = external_data["p2"]["railway_data"][
-                        entity
-                    ]
+                railway_data = external_data["p2"].get("railway_data", {})
+                if entity_id and entity_id in railway_data:
+                    profile["railway_records"] = railway_data[entity_id]
+                elif entity in railway_data:
+                    profile["railway_records"] = railway_data[entity]
 
                 # P2.5: 航班
-                if entity in external_data["p2"].get("flight_data", {}):
-                    profile["flight_records"] = external_data["p2"]["flight_data"][
-                        entity
-                    ]
+                flight_data = external_data["p2"].get("flight_data", {})
+                if entity_id and entity_id in flight_data:
+                    profile["flight_records"] = flight_data[entity_id]
+                elif entity in flight_data:
+                    profile["flight_records"] = flight_data[entity]
+
+                # P2.6: 同住址
+                coaddress_data = external_data["p2"].get("coaddress_data", {})
+                if entity_id and entity_id in coaddress_data:
+                    profile["coaddress_persons"] = coaddress_data[entity_id]
+                elif entity in coaddress_data:
+                    profile["coaddress_persons"] = coaddress_data[entity]
+
+                # P2.7: 同车违章
+                coviolation_data = external_data["p2"].get("coviolation_data", {})
+                if entity_id and entity_id in coviolation_data:
+                    profile["coviolation_vehicles"] = coviolation_data[entity_id]
+                elif entity in coviolation_data:
+                    profile["coviolation_vehicles"] = coviolation_data[entity]
 
                 # 7. 增强分析器（工资/真实工资/理财）
                 if entity in all_persons:
@@ -2867,6 +3020,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
 
         derived_data = {
             "penetration": analysis_results.get("penetration", {}),
+            "correlation": analysis_results.get("correlation", {}),
             "ml": analysis_results.get("ml", {}),
             "loan": analysis_results.get("loan", {}),
             "income": analysis_results.get("income", {}),

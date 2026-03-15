@@ -3,6 +3,7 @@
 """正式报告关键口径单元测试。"""
 
 import json
+import logging
 import os
 import sys
 
@@ -28,6 +29,50 @@ def _make_builder(profile, derived_data=None):
         "metadata": {},
     }
     return InvestigationReportBuilder(analysis_cache, output_dir="output")
+
+
+def test_build_report_v4_missing_primary_config_logs_info_and_falls_back(monkeypatch, caplog):
+    builder = _make_builder({"summary": {}})
+
+    monkeypatch.setattr(
+        "report_config.primary_targets_service.PrimaryTargetsService.load_config",
+        lambda self: (None, "配置文件不存在"),
+    )
+    monkeypatch.setattr(
+        builder,
+        "_build_families_from_config_or_cache",
+        lambda all_persons, config=None: {
+            "张三": {
+                "anchor": "张三",
+                "members": ["张三"],
+                "unit_type": "individual",
+                "member_details": [],
+            }
+        },
+    )
+    monkeypatch.setattr(builder, "_build_v4_preface", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        builder, "_build_v4_family_section", lambda family_info: {"member_sections": []}
+    )
+    monkeypatch.setattr(
+        builder, "_build_enhanced_company_section", lambda *args, **kwargs: {}
+    )
+    monkeypatch.setattr(builder, "_build_v4_conclusion", lambda *args, **kwargs: {})
+    monkeypatch.setattr(builder, "_build_v4_next_steps", lambda *args, **kwargs: [])
+
+    with caplog.at_level(logging.INFO):
+        report = builder.build_report_v4()
+
+    assert report["family_sections"] == [{"member_sections": []}]
+    assert any(
+        record.levelno == logging.INFO
+        and "未加载正式归集配置" in record.message
+        for record in caplog.records
+    )
+    assert not any(
+        record.levelno >= logging.WARNING and "归集配置" in record.message
+        for record in caplog.records
+    )
 
 
 def test_income_match_analysis_separates_raw_and_real_metrics():
@@ -459,6 +504,42 @@ def test_load_builder_keeps_valid_profiles_when_first_entity_has_no_income(tmp_p
     assert builder.profiles["张三"]["totalIncome"] == 10000
 
 
+def test_load_builder_reads_phase2_external_cache_files(tmp_path):
+    cache_dir = tmp_path / "analysis_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    files = {
+        "profiles.json": {
+            "张三": {"totalIncome": 10000, "summary": {"total_income": 10000}}
+        },
+        "derived_data.json": {},
+        "suspicions.json": {},
+        "graph_data.json": {},
+        "metadata.json": {"id_to_name_map": {"310101199001010011": "张三"}},
+        "flightData.json": {
+            "310101199001010011": {"completed": [{"flight_no": "MU5123"}]}
+        },
+        "railwayData.json": {
+            "310101199001010011": {"tickets": [{"train_no": "G123"}]}
+        },
+        "coaddressData.json": {
+            "310101199001010011": [{"name": "李四", "id_number": "310101199002020022"}]
+        },
+    }
+    for filename, payload in files.items():
+        (cache_dir / filename).write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+        )
+
+    builder = load_investigation_report_builder(str(tmp_path))
+
+    assert builder is not None
+    travel = builder._get_external_travel_data("张三")
+    assert travel["flight"]["completed"][0]["flight_no"] == "MU5123"
+    assert travel["railway"]["tickets"][0]["train_no"] == "G123"
+    assert builder._external_coaddress_cache["310101199001010011"][0]["name"] == "李四"
+
+
 def test_counterparty_analysis_prefers_reason_breakdown_amount_over_truncated_details():
     profile = {
         "summary": {
@@ -716,6 +797,222 @@ def test_complete_txt_report_marks_real_metrics_and_pending_members(tmp_path):
     assert "工资性收入: 12.00万元" in text
     assert "来源待核实收入5.0万元" in text
     assert "来源不明收入5.0万元" not in text
+
+
+def test_travel_analysis_uses_phase2_profile_fields_and_correlation_results():
+    profile = {
+        "flight_records": {"completed": [{"flight_no": "MU5123"}]},
+        "railway_records": {"tickets": [{"train_no": "G123"}]},
+        "hotel_records": [{"hotel_name": "某酒店", "stay_date": "2024-01-12"}],
+    }
+    derived_data = {
+        "correlation": {
+            "travel_companions": {
+                "fund_correlations": [
+                    {
+                        "person": "张三",
+                        "companion": "李四",
+                        "travel_type": "航班",
+                        "travel_date": "2024-01-10",
+                        "transaction_date": "2024-01-12",
+                        "amount": 50000,
+                        "direction": "income",
+                        "timing": "先同行后收款",
+                        "risk_level": "high",
+                    }
+                ],
+                "companion_summary": {
+                    "李四": {
+                        "count": 3,
+                        "persons": ["张三"],
+                        "is_multi_person": False,
+                        "risk_level": "high",
+                    }
+                },
+            },
+            "hotel_cohabitants": {
+                "fund_correlations": [
+                    {
+                        "person": "张三",
+                        "cohabitant": "王五",
+                        "stay_date": "2024-01-12",
+                        "transaction_date": "2024-01-13",
+                        "amount": 20000,
+                        "direction": "expense",
+                        "timing": "先同住后付款",
+                        "risk_level": "medium",
+                    }
+                ],
+                "cohabitants": [{"person": "张三", "cohabitant": "王五"}],
+            },
+        }
+    }
+
+    builder = _make_builder(profile, derived_data=derived_data)
+    result = builder._build_travel_analysis_v4("张三", profile)
+
+    assert result["flight_count"] == 1
+    assert result["railway_count"] == 1
+    assert result["hotel_count"] == 1
+    assert result["travel_correlation_count"] == 1
+    assert result["hotel_correlation_count"] == 1
+    assert result["high_frequency_count"] == 1
+    assert result["travel_fund_correlations"][0]["companion"] == "李四"
+    assert result["hotel_fund_correlations"][0]["cohabitant"] == "王五"
+    assert result["has_suspicious_travel"] is True
+    assert "同行资金碰撞1条" in result["narrative"]
+    assert "同住宿资金碰撞1条" in result["narrative"]
+
+
+def test_travel_analysis_excludes_single_non_multi_companion_from_high_frequency_summary():
+    profile = {
+        "hotel_records": [{"hotel_name": "某酒店", "stay_date": "2024-01-12"}],
+    }
+    derived_data = {
+        "correlation": {
+            "travel_companions": {
+                "fund_correlations": [],
+                "companion_summary": {
+                    "李四": {
+                        "count": 1,
+                        "persons": ["张三"],
+                        "is_multi_person": False,
+                        "risk_level": "medium",
+                    }
+                },
+            },
+            "hotel_cohabitants": {
+                "fund_correlations": [],
+                "cohabitants": [],
+            },
+        }
+    }
+
+    builder = _make_builder(profile, derived_data=derived_data)
+    result = builder._build_travel_analysis_v4("张三", profile)
+
+    assert result["high_frequency_count"] == 0
+    assert result["high_frequency_companions"] == []
+    assert "高频或多人同行对象" not in result["narrative"]
+
+
+def test_render_html_report_v3_formats_dates_and_property_area_cleanly():
+    profile = {
+        "entityName": "张三",
+        "summary": {
+            "total_income": 100000,
+            "total_expense": 50000,
+            "real_income": 80000,
+            "real_expense": 40000,
+            "salary_ratio": 0.25,
+        },
+        "yearly_salary": {
+            "summary": {"total": 20000},
+            "yearly": {},
+            "details": [],
+        },
+        "properties": [
+            {
+                "location": "东明路355弄61号302室",
+                "area": "124.70平方米",
+                "register_date": "2024-01-02T00:00:00",
+                "ownership_type": "单独所有",
+            }
+        ],
+        "bank_accounts_official": [],
+        "bank_accounts": [],
+        "vehicles": [],
+        "transactions": [],
+        "coaddress_persons": [],
+        "coviolation_vehicles": [],
+    }
+    derived_data = {
+        "correlation": {
+            "travel_companions": {
+                "fund_correlations": [
+                    {
+                        "person": "张三",
+                        "companion": "李四",
+                        "travel_type": "航班",
+                        "travel_date": 20240105,
+                        "transaction_date": "2024-01-06T13:14:15",
+                        "amount": 50000,
+                        "timing": "先同行后收款",
+                        "risk_level": "high",
+                    }
+                ],
+                "companion_summary": {
+                    "李四": {
+                        "count": 2,
+                        "persons": ["张三"],
+                        "is_multi_person": False,
+                        "risk_level": "high",
+                    }
+                },
+            },
+            "hotel_cohabitants": {
+                "fund_correlations": [],
+                "cohabitants": [],
+            },
+        }
+    }
+
+    builder = _make_builder(profile, derived_data=derived_data)
+    section = builder.build_v4_person_section("张三")
+    report = {
+        "meta": {
+            "doc_number": "测试字号",
+            "generation_options": {"sections": ["assets", "risks"]},
+            "title_subject": "张三",
+        },
+        "preface": {},
+        "family_sections": [],
+        "person_sections": [section],
+        "company_sections": [],
+    }
+
+    html = builder.render_html_report_v3(report)
+
+    assert "124.70平方米平方米" not in html
+    assert "房屋面积124.70平方米" in html
+    assert "2024-01-02T00:00:00" not in html
+    assert "2024-01-02" in html
+    assert "20240105" not in html
+    assert "2024-01-05" in html
+    assert "2024-01-06T13:14:15" not in html
+    assert "2024-01-06 13:14:15" in html
+
+
+def test_related_party_analysis_includes_coaddress_and_coviolation_clues():
+    profile = {
+        "coaddress_persons": [
+            {
+                "name": "李四",
+                "id_number": "310101199002020022",
+                "relation_to_head": "配偶",
+                "hukou_address": "上海市闵行区某路1号",
+                "employer": "某公司",
+            }
+        ],
+        "coviolation_vehicles": [
+            {
+                "name": "王五",
+                "id_number": "310101199003030033",
+                "plate_number": "沪A12345",
+                "violation_count": 2,
+            }
+        ],
+    }
+
+    builder = _make_builder(profile)
+    result = builder._build_person_section_7_related_party("张三", profile)
+
+    assert result["bidirectional_relations"] == []
+    assert result["coaddress_relations"][0]["name"] == "李四"
+    assert result["coaddress_relations"][0]["relation_to_head"] == "配偶"
+    assert result["coviolation_relations"][0]["plate_number"] == "沪A12345"
+    assert result["residence_relation_summary"] == "同住址1人，同车违章1条。"
+    assert "识别同住址关系1人" in result["narrative"]
 
 def test_fund_flow_analysis_without_suspicious_counterparty_uses_fallback_wording():
     profile = {

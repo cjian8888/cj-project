@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 from starlette.requests import Request
@@ -20,6 +21,7 @@ from api_server import (
     InvestigationReportRequest,
     _apply_report_generation_overrides,
     _get_effective_family_units_for_analysis,
+    _populate_transport_external_data,
     _save_external_report_caches,
     get_graph_data,
     serialize_analysis_results,
@@ -125,6 +127,80 @@ def test_save_external_report_caches_overwrites_stale_empty_data(tmp_path):
         vehicle_data = json.load(f)
 
     assert vehicle_data == {}
+
+
+def test_cache_manager_save_and_load_results_preserves_phase2_external_data(tmp_path):
+    cache_dir = tmp_path / "analysis_cache"
+    cache_mgr = CacheManager(str(cache_dir))
+
+    cache_mgr.save_results(
+        {
+            "persons": ["张三"],
+            "companies": [],
+            "profiles": {"张三": {"totalIncome": 1000, "summary": {"total_income": 1000}}},
+            "suspicions": {},
+            "analysisResults": {},
+            "graphData": {},
+            "externalData": {
+                "p2": {
+                    "hotel_data": {
+                        "310101199001010011": [{"hotel_name": "某酒店"}]
+                    },
+                    "flight_data": {
+                        "310101199001010011": {
+                            "completed": [{"flight_no": "MU5123"}]
+                        }
+                    },
+                    "coaddress_data": {
+                        "310101199001010011": [{"name": "李四"}]
+                    },
+                }
+            },
+        },
+        id_to_name_map={"310101199001010011": "张三"},
+    )
+
+    loaded = cache_mgr.load_results()
+
+    assert loaded is not None
+    assert loaded["hotelData"]["310101199001010011"][0]["hotel_name"] == "某酒店"
+    assert (
+        loaded["flightData"]["310101199001010011"]["completed"][0]["flight_no"]
+        == "MU5123"
+    )
+    assert loaded["coaddressData"]["310101199001010011"][0]["name"] == "李四"
+    assert loaded["external_p2"]["hotel_data"]["310101199001010011"][0]["hotel_name"] == "某酒店"
+
+
+def test_populate_transport_external_data_keeps_base_data_when_timeline_fails(monkeypatch):
+    monkeypatch.setattr(
+        api_server,
+        "railway_extractor",
+        SimpleNamespace(
+            extract_railway_data=lambda _data_dir: {"pid": {"tickets": [{"id": 1}]}},
+            get_travel_timeline=lambda _data_dir: (_ for _ in ()).throw(
+                RuntimeError("timeline unavailable")
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        api_server,
+        "flight_extractor",
+        SimpleNamespace(
+            extract_flight_data=lambda _data_dir: {
+                "pid": {"completed": [{"flight_no": "MU5123"}]}
+            },
+            get_flight_timeline=lambda _data_dir: [{"type": "flight", "id": 1}],
+        ),
+    )
+
+    phase2 = {}
+    _populate_transport_external_data("dummy-data", phase2, logging.getLogger(__name__))
+
+    assert phase2["railway_data"]["pid"]["tickets"][0]["id"] == 1
+    assert phase2["railway_timeline"] == []
+    assert phase2["flight_data"]["pid"]["completed"][0]["flight_no"] == "MU5123"
+    assert phase2["flight_timeline"][0]["type"] == "flight"
 
 
 def test_serialize_analysis_results_uses_aggregation_to_dict_output():
@@ -621,10 +697,53 @@ def test_save_html_report_refreshes_report_index(tmp_path):
 
         index_content = index_path.read_text(encoding="utf-8")
         assert "HTML报告: 1 个" in index_content
+        assert "txt报告: 1 个" in index_content
         assert "初查报告.html" in index_content
+        assert "报告目录清单.txt" in index_content
     finally:
         api_server._current_config.clear()
         api_server._current_config.update(previous_config)
+
+
+def test_serialize_profiles_calculates_max_transaction_from_detail_records():
+    profiles = {
+        "张三": {
+            "summary": {
+                "total_income": 100000,
+                "total_expense": 80000,
+                "transaction_count": 3,
+            },
+            "income_structure": {"total_income": 100000, "total_expense": 80000},
+            "fund_flow": {
+                "cash_income": 0,
+                "cash_expense": 0,
+                "third_party_income": 20000,
+                "third_party_expense": 30000,
+                "third_party_transactions": [
+                    {"日期": "2026-01-01", "金额": 12345, "摘要": "转账", "对手方": "李四"}
+                ],
+            },
+            "wealth_management": {
+                "wealth_purchase_transactions": [
+                    {"日期": "2026-01-02", "金额": 88888, "摘要": "理财申购", "对手方": "某银行"}
+                ]
+            },
+            "categories": {
+                "large_amount": [
+                    {
+                        "date": "2026-01-03",
+                        "description": "大额支出",
+                        "counterparty": "王五",
+                        "amount": -50000,
+                    }
+                ]
+            },
+        }
+    }
+
+    result = api_server.serialize_profiles(profiles)
+
+    assert result["张三"]["maxTransaction"] == 88888
 
 
 def test_specialized_suspicion_report_keeps_hits_visible_and_supports_camel_case_fields(

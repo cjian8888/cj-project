@@ -313,12 +313,12 @@ def _correlate_companions_with_funds(
             matched = merged_df[mask]
             
             # 对匹配结果进行二次模糊匹配验证 + 时间窗口过滤
-            for row in matched.itertuples():
-                counterparty = str(row.counterparty)
+            for _, row in matched.iterrows():
+                counterparty = str(row.get('counterparty', ''))
                 if not _fuzzy_match(companion_name, counterparty):
                     continue
                 
-                trans_dt = row._trans_dt
+                trans_dt = row.get('_trans_dt')
                 if pd.isna(trans_dt):
                     continue
                 
@@ -334,12 +334,12 @@ def _correlate_companions_with_funds(
                     'companion': companion_name,
                     'travel_date': c.get('travel_date'),
                     'travel_type': c.get('travel_type', ''),
-                    'transaction_date': row.date,
+                    'transaction_date': row.get('date'),
                     'days_diff': days_diff,
                     'timing': timing,
-                    'amount': max(getattr(row, 'income', 0) or 0, getattr(row, 'expense', 0) or 0),
-                    'direction': 'income' if (getattr(row, 'income', 0) or 0) > 0 else 'expense',
-                    'description': getattr(row, 'description', ''),
+                    'amount': max(row.get('income', 0) or 0, row.get('expense', 0) or 0),
+                    'direction': 'income' if (row.get('income', 0) or 0) > 0 else 'expense',
+                    'description': row.get('description', ''),
                     'counterparty_raw': counterparty,
                     'risk_level': 'high' if abs(days_diff) <= 7 else 'medium'
                 })
@@ -395,7 +395,8 @@ def _summarize_companions(companions: List[Dict]) -> Dict:
 def correlate_hotel_cohabitants(
     data_directory: str,
     all_transactions: Dict[str, pd.DataFrame],
-    core_persons: List[str]
+    core_persons: List[str],
+    time_window_days: int = 30,
 ) -> Dict:
     """
     同住宿人与资金碰撞分析
@@ -471,6 +472,8 @@ def correlate_hotel_cohabitants(
     from collections import defaultdict
     cohabitants_by_person = defaultdict(list)
     for rec in results['cohabitants']:
+        stay_date = rec.get('stay_date')
+        rec['_stay_dt'] = utils.parse_date(stay_date) if stay_date is not None else None
         cohabitants_by_person[rec['person']].append(rec)
     
     # 遍历每个人员
@@ -493,21 +496,52 @@ def correlate_hotel_cohabitants(
         for rec in person_cohabitants:
             cohabitant = rec['cohabitant']
             stay_date = rec.get('stay_date')
+            stay_dt = rec.get('_stay_dt')
+            normalized_cohabitant = _normalize_name(cohabitant)
+            if not normalized_cohabitant or len(normalized_cohabitant) < 2:
+                continue
             
             # 使用向量化字符串匹配
-            mask = merged_df['counterparty'].astype(str).str.contains(cohabitant, na=False, regex=False)
+            mask = merged_df['counterparty'].astype(str).str.contains(
+                normalized_cohabitant, na=False, regex=False
+            )
             matched = merged_df[mask]
             
-            for row in matched.itertuples():
+            for _, row in matched.iterrows():
+                counterparty = str(row.get('counterparty', ''))
+                if not _fuzzy_match(cohabitant, counterparty):
+                    continue
+
+                trans_dt = row.get('_trans_dt')
+                if pd.isna(trans_dt):
+                    continue
+
+                days_diff = None
+                timing = '日期待核'
+                risk_level = 'medium'
+                if stay_dt is not None:
+                    days_diff = (trans_dt - stay_dt).days
+                    if abs(days_diff) > time_window_days:
+                        continue
+                    timing = (
+                        '先付款后同住'
+                        if days_diff < 0
+                        else ('先同住后付款' if days_diff > 0 else '同日')
+                    )
+                    risk_level = 'high' if abs(days_diff) <= 7 else 'medium'
+
                 results['fund_correlations'].append({
                     'person': person,
                     'cohabitant': cohabitant,
                     'stay_date': stay_date,
-                    'transaction_date': row.date,
-                    'amount': max(getattr(row, 'income', 0) or 0, getattr(row, 'expense', 0) or 0),
-                    'direction': 'income' if (getattr(row, 'income', 0) or 0) > 0 else 'expense',
-                    'description': getattr(row, 'description', ''),
-                    'risk_level': 'high'
+                    'transaction_date': row.get('date'),
+                    'days_diff': days_diff,
+                    'timing': timing,
+                    'amount': max(row.get('income', 0) or 0, row.get('expense', 0) or 0),
+                    'direction': 'income' if (row.get('income', 0) or 0) > 0 else 'expense',
+                    'description': row.get('description', ''),
+                    'counterparty_raw': counterparty,
+                    'risk_level': risk_level
                 })
     logger.info(f'同住宿分析完成: 发现 {len(results["fund_correlations"])} 条资金碰撞')
     
@@ -605,7 +639,7 @@ def correlate_express_contacts(
         person_tx_list = tx_index.get(person, [])
         for key, df in person_tx_list:
             df_copy = _prepare_transaction_frame(df, account_key=key)
-            df_copy['_person'] = person
+            df_copy['person'] = person
             all_dfs.append(df_copy)
     
     if not all_dfs:
@@ -630,13 +664,13 @@ def correlate_express_contacts(
         matched = merged_tx[mask]
         
         # 对匹配结果进行处理（使用模糊匹配二次验证）
-        for row in matched.itertuples():
+        for row in matched.itertuples(index=False):
             # 使用模糊匹配验证，避免误匹配
             if not _fuzzy_match(contact_name, str(row.counterparty)):
                 continue
             
             results['fund_correlations'].append({
-                'person': row._person,
+                'person': getattr(row, 'person', ''),
                 'contact': contact_name,
                 'transaction_date': row.date,
                 'amount': max(getattr(row, 'income', 0) or 0, getattr(row, 'expense', 0) or 0),
@@ -670,18 +704,36 @@ def run_all_correlations(
     logger.info('开始多源数据交叉碰撞分析')
     logger.info('='*60)
     
-    results = {
-        'travel_companions': correlate_travel_companions(
-            data_directory, all_transactions, core_persons
-        ),
-        'hotel_cohabitants': correlate_hotel_cohabitants(
-            data_directory, all_transactions, core_persons
-        ),
-        'express_contacts': correlate_express_contacts(
-            data_directory, all_transactions, core_persons
-        ),
-        'summary': {}
+    stage_defaults = {
+        'travel_companions': {
+            'flight_companions': [],
+            'rail_companions': [],
+            'fund_correlations': [],
+            'companion_summary': {},
+        },
+        'hotel_cohabitants': {
+            'cohabitants': [],
+            'fund_correlations': [],
+        },
+        'express_contacts': {
+            'express_contacts': [],
+            'frequent_addresses': [],
+            'fund_correlations': [],
+        },
     }
+    stage_runners = {
+        'travel_companions': correlate_travel_companions,
+        'hotel_cohabitants': correlate_hotel_cohabitants,
+        'express_contacts': correlate_express_contacts,
+    }
+    results = {'summary': {}}
+
+    for stage_name, runner in stage_runners.items():
+        try:
+            results[stage_name] = runner(data_directory, all_transactions, core_persons)
+        except Exception as exc:
+            logger.warning(f'{stage_name} 分析失败，保留其他阶段结果: {exc}')
+            results[stage_name] = stage_defaults[stage_name].copy()
     
     # 生成汇总
     total_correlations = (

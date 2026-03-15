@@ -66,15 +66,15 @@ class UserConfig(BaseModel):
     family_relations: Optional[List[FamilyRelation]] = Field(None, description="家庭关系")
 
     @model_validator(mode="after")
-    def check_units(cls, values):
-        units = values.get("analysis_units")
+    def check_units(self):
+        units = self.analysis_units
         if not isinstance(units, list) or len(units) < 1:
             raise ValueError("analysis_units must contain at least 1 item")
-        return values
+        return self
 
     @model_validator(mode="after")
-    def check_nested_depth(cls, values):
+    def check_nested_depth(self):
         max_depth = _is_depth_within_limit()
         if max_depth > 5:
             raise ValueError(f"Nested depth {max_depth} exceeds maximum of 5 layers")
-        return values
+        return self

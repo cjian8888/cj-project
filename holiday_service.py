@@ -14,7 +14,7 @@
 """
 
 from datetime import datetime, date, timedelta
-from typing import Optional, List, Tuple, Set, Dict
+from typing import Any, Optional, List, Tuple, Set, Dict
 
 import utils
 
@@ -22,6 +22,17 @@ logger = utils.setup_logger(__name__)
 
 HolidayRange = Tuple[date, date, str]
 HolidayWindowInfo = Tuple[str, str]
+
+ENGLISH_HOLIDAY_NAME_MAP = {
+    "New Year's Day": "元旦",
+    "Spring Festival": "春节",
+    "Tomb-sweeping Day": "清明节",
+    "Labour Day": "劳动节",
+    "Labor Day": "劳动节",
+    "Dragon Boat Festival": "端午节",
+    "Mid-autumn Festival": "中秋节",
+    "National Day": "国庆节",
+}
 
 
 class HolidayService:
@@ -87,6 +98,30 @@ class HolidayService:
                 self._cached_holiday_names.setdefault(current, name)
                 current += timedelta(days=1)
 
+    @staticmethod
+    def _resolve_holiday_name(detail: Any) -> str:
+        """兼容不同版本 chinese-calendar 的节日详情返回结构。"""
+        raw_name = detail
+        if isinstance(detail, tuple):
+            if len(detail) > 1:
+                raw_name = detail[1]
+            elif detail:
+                raw_name = detail[0]
+            else:
+                raw_name = None
+
+        if hasattr(raw_name, "chinese"):
+            raw_name = getattr(raw_name, "chinese", None)
+
+        if raw_name is None:
+            return "节假日"
+
+        normalized = str(raw_name).strip()
+        if not normalized:
+            return "节假日"
+
+        return ENGLISH_HOLIDAY_NAME_MAP.get(normalized, normalized)
+
     def _build_ranges_from_library(self, year: int) -> List[HolidayRange]:
         """从 chinese-calendar 动态生成指定年份的节假日区间。"""
         import chinese_calendar
@@ -102,7 +137,7 @@ class HolidayService:
         while current <= year_end:
             if chinese_calendar.is_holiday(current):
                 detail = chinese_calendar.get_holiday_detail(current)
-                name = detail[1].chinese if detail[1] else '节假日'
+                name = self._resolve_holiday_name(detail)
 
                 if (
                     range_start is not None
@@ -298,8 +333,7 @@ class HolidayService:
                 import chinese_calendar
                 if chinese_calendar.is_holiday(check_date):
                     detail = chinese_calendar.get_holiday_detail(check_date)
-                    if detail[1]:
-                        return detail[1].chinese
+                    return self._resolve_holiday_name(detail)
             except Exception as e:
                 logger.warning(f'chinese-calendar 获取节假日名称失败，回退本地配置: {e}')
                 self._use_library = False

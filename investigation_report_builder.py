@@ -431,6 +431,16 @@ class InvestigationReportBuilder:
         self._external_vehicle_cache = analysis_cache.get("vehicleData", {})
         self._external_wealth_cache = analysis_cache.get("wealthProductData", {})
         self._external_securities_cache = analysis_cache.get("securitiesData", {})
+        self._external_insurance_cache = analysis_cache.get("insuranceData", {})
+        self._external_immigration_cache = analysis_cache.get("immigrationData", {})
+        self._external_hotel_cache = analysis_cache.get("hotelData", {})
+        self._external_hotel_cohabitation_cache = analysis_cache.get(
+            "hotelCohabitation", {}
+        )
+        self._external_railway_cache = analysis_cache.get("railwayData", {})
+        self._external_flight_cache = analysis_cache.get("flightData", {})
+        self._external_coaddress_cache = analysis_cache.get("coaddressData", {})
+        self._external_coviolation_cache = analysis_cache.get("coviolationData", {})
 
         # 【2026-03-03 新增】加载风险等级阈值配置
         try:
@@ -6343,9 +6353,16 @@ class InvestigationReportBuilder:
                         all_persons, config=loaded_config
                     )
                 else:
-                    raise ValueError("配置文件为空或无分析单元")
+                    logger.info(
+                        f"[初查报告v4] 未加载正式归集配置: {load_msg or '配置文件为空或无分析单元'}，使用默认分组"
+                    )
+                    all_persons = self._core_persons.copy()
+                    include_companies = self._companies.copy()
+                    families = self._build_families_from_config_or_cache(
+                        all_persons, config=None
+                    )
             except Exception as e:
-                logger.warning(f"[初查报告v4] 无法加载配置文件: {e}，使用默认分组")
+                logger.warning(f"[初查报告v4] 读取归集配置异常: {e}，使用默认分组")
                 all_persons = self._core_persons.copy()
                 include_companies = self._companies.copy()
                 # 无config时，尝试从family_summary构建家庭分组
@@ -8931,10 +8948,62 @@ class InvestigationReportBuilder:
                         }
                     )
 
+        coaddress_relations = []
+        for item in profile.get("coaddress_persons", []) or []:
+            if not isinstance(item, dict):
+                continue
+            coaddress_relations.append(
+                {
+                    "name": item.get("name", "") or "未知",
+                    "id_number": item.get("id_number", "") or "",
+                    "relation_to_head": item.get("relation_to_head", "") or "",
+                    "hukou_address": item.get("hukou_address", "") or "",
+                    "employer": item.get("employer", "") or "",
+                    "source_file": item.get("source_file", "") or "",
+                }
+            )
+
+        coviolation_relations = []
+        for item in profile.get("coviolation_vehicles", []) or []:
+            if not isinstance(item, dict):
+                continue
+            coviolation_relations.append(
+                {
+                    "name": item.get("name", "") or "未知",
+                    "id_number": item.get("id_number", "") or "",
+                    "plate_number": item.get("plate_number", "") or "",
+                    "violation_count": int(item.get("violation_count", 0) or 0),
+                    "source_file": item.get("source_file", "") or "",
+                }
+            )
+
+        narrative_parts = []
+        if bidirectional_relations:
+            narrative_parts.append(f"发现双向资金往来对象{len(bidirectional_relations)}个")
+        if coaddress_relations:
+            narrative_parts.append(f"识别同住址关系{len(coaddress_relations)}人")
+        if coviolation_relations:
+            narrative_parts.append(f"识别同车违章线索{len(coviolation_relations)}条")
+        if sensitive_contacts:
+            narrative_parts.append(f"另有敏感预警接触{len(sensitive_contacts)}条")
+
+        residence_relation_summary = (
+            f"同住址{len(coaddress_relations)}人，同车违章{len(coviolation_relations)}条。"
+            if coaddress_relations or coviolation_relations
+            else ""
+        )
+
         return {
             "investigation_unit_flows": unit_flows,
+            "bidirectional_relations": bidirectional_relations,
             "supplier_transactions": bidirectional_relations,  # 双向往来作为"供应商"类别
+            "coaddress_relations": coaddress_relations[:20],
+            "coviolation_relations": coviolation_relations[:20],
+            "residence_relation_summary": residence_relation_summary,
             "sensitive_person_contacts": sensitive_contacts[:10],  # 限制前10条
+            "narrative": "；".join(narrative_parts) + "。"
+            if narrative_parts
+            else "未发现需重点关注的关联方往来或外围关系线索。",
         }
 
     def _build_person_section_8_collision(self, name: str, profile: Dict) -> Dict:
@@ -9334,6 +9403,8 @@ class InvestigationReportBuilder:
             jinja2.TemplateNotFound: 指定的模板文件不存在时抛出。
             jinja2.TemplateError: 模板语法错误或渲染过程中出现其他模板相关错误时抛出。
         """
+        import re
+
         import jinja2
 
         if template_dir is None:
@@ -9370,8 +9441,73 @@ class InvestigationReportBuilder:
             }
             return class_map.get(level, "risk-low")
 
+        def format_display_date(value):
+            """统一清洗模板中的日期/日期时间展示。"""
+            placeholders = {
+                "",
+                "—",
+                "-",
+                "暂无数据",
+                "暂未获取",
+                "信息待补充",
+                "待补充",
+                "待核",
+                "日期待核",
+                "登记时间待补充",
+            }
+
+            if value is None:
+                return "—"
+
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                if float(value).is_integer():
+                    raw = str(int(value))
+                else:
+                    raw = str(value)
+            else:
+                raw = str(value).strip()
+
+            if raw in placeholders:
+                return raw or "—"
+
+            normalized = raw.replace("/", "-")
+
+            if re.fullmatch(r"\d{8}", normalized):
+                return f"{normalized[:4]}-{normalized[4:6]}-{normalized[6:]}"
+
+            if re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}[T ]00:00:00(?:\.\d+)?", normalized
+            ):
+                return normalized[:10]
+
+            if re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?", normalized
+            ):
+                return f"{normalized[:10]} {normalized[11:19]}"
+
+            return normalized
+
+        def format_area(value):
+            """统一房产面积显示，避免重复单位。"""
+            placeholders = {"", "—", "-", "暂无数据", "暂未获取", "信息待补充"}
+
+            if value is None:
+                return "—"
+
+            raw = str(value).strip()
+            if raw in placeholders:
+                return raw or "—"
+
+            if "平方米" in raw:
+                numeric = raw.replace("平方米", "").strip()
+                return f"{numeric}平方米" if numeric else "—"
+
+            return f"{raw}平方米"
+
         env.filters["format_money"] = format_money
         env.filters["risk_class"] = risk_class
+        env.filters["format_display_date"] = format_display_date
+        env.filters["format_area"] = format_area
 
         # 加载主模板
         template = env.get_template("report.html")
@@ -10426,8 +10562,19 @@ class InvestigationReportBuilder:
         获取出行数据（默认仅使用缓存，不回读原始data）
         """
         if not hasattr(self, "_external_travel_cache"):
-            self._external_travel_cache = {"railway": {}, "flight": {}}
-            if self._is_raw_data_fallback_enabled():
+            self._external_travel_cache = {
+                "railway": self._external_railway_cache
+                if isinstance(self._external_railway_cache, dict)
+                else {},
+                "flight": self._external_flight_cache
+                if isinstance(self._external_flight_cache, dict)
+                else {},
+            }
+            if (
+                not self._external_travel_cache["railway"]
+                and not self._external_travel_cache["flight"]
+                and self._is_raw_data_fallback_enabled()
+            ):
                 try:
                     import railway_extractor
                     import flight_extractor
@@ -10456,6 +10603,76 @@ class InvestigationReportBuilder:
             "flight": self._external_travel_cache.get("flight", {}).get(person_id, [])
             if person_id
             else [],
+        }
+
+    def _get_person_correlation_results(self, name: str) -> Dict[str, Any]:
+        """获取当前人员的多源碰撞结果。"""
+        correlation_data = self.derived_data.get("correlation", {})
+        if not isinstance(correlation_data, dict):
+            correlation_data = {}
+
+        travel_companions = correlation_data.get("travel_companions", {})
+        if not isinstance(travel_companions, dict):
+            travel_companions = {}
+
+        hotel_cohabitants = correlation_data.get("hotel_cohabitants", {})
+        if not isinstance(hotel_cohabitants, dict):
+            hotel_cohabitants = {}
+
+        travel_fund_correlations = [
+            item
+            for item in (travel_companions.get("fund_correlations", []) or [])
+            if isinstance(item, dict) and item.get("person") == name
+        ]
+        hotel_fund_correlations = [
+            item
+            for item in (hotel_cohabitants.get("fund_correlations", []) or [])
+            if isinstance(item, dict) and item.get("person") == name
+        ]
+        hotel_cohabitants_records = [
+            item
+            for item in (hotel_cohabitants.get("cohabitants", []) or [])
+            if isinstance(item, dict) and item.get("person") == name
+        ]
+
+        high_frequency_companions = []
+        companion_summary = travel_companions.get("companion_summary", {})
+        if isinstance(companion_summary, dict):
+            for companion_name, summary in companion_summary.items():
+                if not isinstance(summary, dict):
+                    continue
+                persons = summary.get("persons", [])
+                if not isinstance(persons, list) or name not in persons:
+                    continue
+                count = int(summary.get("count", 0) or 0)
+                is_multi_person = bool(summary.get("is_multi_person"))
+                # 仅保留真正满足“高频”或“多人同行”的对象，避免单次同行误入表格。
+                if count <= 1 and not is_multi_person:
+                    continue
+                high_frequency_companions.append(
+                    {
+                        "name": companion_name,
+                        "count": count,
+                        "persons": persons,
+                        "is_multi_person": is_multi_person,
+                        "risk_level": str(summary.get("risk_level", "medium")),
+                    }
+                )
+
+        high_frequency_companions.sort(
+            key=lambda item: (
+                int(item.get("count", 0) or 0),
+                1 if item.get("is_multi_person") else 0,
+                str(item.get("name", "")),
+            ),
+            reverse=True,
+        )
+
+        return {
+            "travel_fund_correlations": travel_fund_correlations,
+            "hotel_fund_correlations": hotel_fund_correlations,
+            "hotel_cohabitants": hotel_cohabitants_records,
+            "high_frequency_companions": high_frequency_companions,
         }
 
     def _get_external_aml_data(self, name: str) -> Dict:
@@ -11734,69 +11951,131 @@ class InvestigationReportBuilder:
 
     def _build_travel_analysis_v4(self, name: str, profile: Dict) -> Dict:
         """构建同行人分析"""
-        # 【修复】优先从外部提取器获取出行数据
+        def _flatten_record_payload(payload: Any) -> List[Dict]:
+            if isinstance(payload, list):
+                return [item for item in payload if isinstance(item, dict)]
+            if not isinstance(payload, dict):
+                return []
+
+            records = []
+            preferred_keys = [
+                "completed",
+                "cancelled",
+                "tickets",
+                "transactions",
+                "records",
+                "items",
+            ]
+            for key in preferred_keys:
+                value = payload.get(key)
+                if isinstance(value, list):
+                    records.extend(item for item in value if isinstance(item, dict))
+
+            if records:
+                return records
+
+            for value in payload.values():
+                if isinstance(value, list):
+                    records.extend(item for item in value if isinstance(item, dict))
+            return records
+
         external_travel = self._get_external_travel_data(name)
-
-        # 处理嵌套字典结构
-        # railway 格式: {"tickets": [...], "transactions": [...]}
-        # flight 格式: {"completed": [...], "cancelled": [...]}
-        railway_data = external_travel.get("railway", {})
-        flight_data = external_travel.get("flight", {})
-
-        # 展平为列表
-        flights = []
-        if isinstance(flight_data, dict):
-            for key in ["completed", "cancelled", "tickets", "transactions"]:
-                if key in flight_data and isinstance(flight_data[key], list):
-                    flights.extend(flight_data[key])
-        elif isinstance(flight_data, list):
-            flights = flight_data
-
-        railway = []
-        if isinstance(railway_data, dict):
-            for key in ["tickets", "transactions", "completed", "cancelled"]:
-                if key in railway_data and isinstance(railway_data[key], list):
-                    railway.extend(railway_data[key])
-        elif isinstance(railway_data, list):
-            railway = railway_data
-
-        # 如果外部数据为空，回退到 profile
+        flights = _flatten_record_payload(profile.get("flight_records"))
         if not flights:
-            flights = profile.get("flights", [])
-        if not railway:
-            railway = profile.get("railway", [])
+            flights = _flatten_record_payload(external_travel.get("flight"))
+        if not flights:
+            flights = _flatten_record_payload(profile.get("flights", []))
 
-        hotels = profile.get("hotels", [])
+        railway = _flatten_record_payload(profile.get("railway_records"))
+        if not railway:
+            railway = _flatten_record_payload(external_travel.get("railway"))
+        if not railway:
+            railway = _flatten_record_payload(profile.get("railway", []))
+
+        hotels = _flatten_record_payload(profile.get("hotel_records"))
+        if not hotels:
+            hotels = _flatten_record_payload(profile.get("hotels", []))
 
         flight_count = len(flights) if isinstance(flights, list) else 0
         railway_count = len(railway) if isinstance(railway, list) else 0
+        hotel_count = len(hotels) if isinstance(hotels, list) else 0
 
-        # 同行人分析需要交叉比对
-        cohabitation = []  # TODO: 从 cohabitation_extractor 获取
+        correlation_results = self._get_person_correlation_results(name)
+        travel_fund_correlations = correlation_results.get(
+            "travel_fund_correlations", []
+        )
+        hotel_fund_correlations = correlation_results.get("hotel_fund_correlations", [])
+        high_frequency_companions = correlation_results.get(
+            "high_frequency_companions", []
+        )
+
+        unique_travel_companions = sorted(
+            {
+                str(item.get("companion", "")).strip()
+                for item in travel_fund_correlations
+                if str(item.get("companion", "")).strip()
+            }
+        )
+        unique_hotel_companions = sorted(
+            {
+                str(item.get("cohabitant", "")).strip()
+                for item in hotel_fund_correlations
+                if str(item.get("cohabitant", "")).strip()
+            }
+        )
 
         narrative_parts = []
-        if flight_count == 0:
-            narrative_parts.append("本人无航班出行记录")
-        else:
-            narrative_parts.append(f"本人有{flight_count}条航班记录")
+        travel_record_parts = []
+        if flight_count > 0:
+            travel_record_parts.append(f"航班记录{flight_count}条")
+        if railway_count > 0:
+            travel_record_parts.append(f"铁路记录{railway_count}条")
+        if hotel_count > 0:
+            travel_record_parts.append(f"住宿记录{hotel_count}条")
 
-        if railway_count == 0:
-            narrative_parts.append("无铁路出行记录")
+        if travel_record_parts:
+            narrative_parts.append("、".join(travel_record_parts))
         else:
-            narrative_parts.append(f"有{railway_count}条铁路出行记录")
+            narrative_parts.append("未发现航班、铁路或住宿记录")
 
-        include_companies = self.metadata.get("include_companies", [])
-        if include_companies:
-            narrative_parts.append(f"，未查见与本次核查的三家单位存在关联关系")
+        if travel_fund_correlations:
+            narrative_parts.append(
+                f"发现同行资金碰撞{len(travel_fund_correlations)}条，涉及{len(unique_travel_companions)}名同行对象"
+            )
+        else:
+            narrative_parts.append("未发现同行资金碰撞")
+
+        if high_frequency_companions:
+            narrative_parts.append(
+                f"其中高频或多人同行对象{len(high_frequency_companions)}名"
+            )
+
+        if hotel_fund_correlations:
+            narrative_parts.append(
+                f"发现同住宿资金碰撞{len(hotel_fund_correlations)}条，涉及{len(unique_hotel_companions)}名同住宿对象"
+            )
+        elif hotel_count > 0:
+            narrative_parts.append("未发现同住宿资金碰撞")
 
         return {
             "flight_count": flight_count,
             "railway_count": railway_count,
-            "cohabitation": cohabitation,
-            "has_suspicious_travel": False,
+            "hotel_count": hotel_count,
+            "cohabitation": hotel_fund_correlations[:10],
+            "travel_fund_correlations": travel_fund_correlations[:10],
+            "hotel_fund_correlations": hotel_fund_correlations[:10],
+            "high_frequency_companions": high_frequency_companions[:10],
+            "travel_correlation_count": len(travel_fund_correlations),
+            "hotel_correlation_count": len(hotel_fund_correlations),
+            "high_frequency_count": len(high_frequency_companions),
+            "has_suspicious_travel": bool(
+                travel_fund_correlations
+                or hotel_fund_correlations
+                or high_frequency_companions
+            ),
             "narrative": "；".join(narrative_parts) + "。"
             if narrative_parts
-            else "暂无出行数据",
+            else "暂无出行数据。",
         }
 
     # ==================== v5.0 新增方法 ====================
@@ -13203,6 +13482,7 @@ class InvestigationReportBuilder:
             return index_path
 
         # 获取所有文件
+        index_path = os.path.join(reports_dir, "报告目录清单.txt")
         files = []
         for filename in os.listdir(reports_dir):
             filepath = os.path.join(reports_dir, filename)
@@ -13229,14 +13509,19 @@ class InvestigationReportBuilder:
                         }
                     )
 
+        if not any(f["name"] == "报告目录清单.txt" for f in files):
+            files.append(
+                {
+                    "name": "报告目录清单.txt",
+                    "path": index_path,
+                    "size": None,
+                }
+            )
+
         # 按类别分组
         html_files = [f for f in files if f["name"].endswith(".html")]
         excel_files = [f for f in files if f["name"].endswith(".xlsx")]
-        txt_files = [
-            f
-            for f in files
-            if f["name"].endswith(".txt") and not f["name"].startswith("报告目录清单")
-        ]
+        txt_files = [f for f in files if f["name"].endswith(".txt")]
 
         # 统计
         lines.append(f"【报告文件统计】")
@@ -13259,7 +13544,10 @@ class InvestigationReportBuilder:
         if txt_files:
             lines.append("【专项txt报告】")
             for f in txt_files:
-                lines.append(f"  • {f['name']} ({f['size']:.1f} KB) - 深度分析报告")
+                if f["size"] is None:
+                    lines.append(f"  • {f['name']} (当前生成) - 报告索引文件")
+                else:
+                    lines.append(f"  • {f['name']} ({f['size']:.1f} KB) - 深度分析报告")
             lines.append("")
 
         # Excel底稿
@@ -13295,7 +13583,6 @@ class InvestigationReportBuilder:
         lines.append("=" * 70)
 
         # 写入文件
-        index_path = os.path.join(reports_dir, "报告目录清单.txt")
         with open(index_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
 
@@ -13421,6 +13708,14 @@ def load_investigation_report_builder(
         "securitiesData": "securitiesData.json",
         "creditData": "creditData.json",
         "amlData": "amlData.json",
+        "insuranceData": "insuranceData.json",
+        "immigrationData": "immigrationData.json",
+        "hotelData": "hotelData.json",
+        "hotelCohabitation": "hotelCohabitation.json",
+        "railwayData": "railwayData.json",
+        "flightData": "flightData.json",
+        "coaddressData": "coaddressData.json",
+        "coviolationData": "coviolationData.json",
     }
 
     for key, filename in external_data_files.items():
