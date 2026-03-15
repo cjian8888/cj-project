@@ -5,9 +5,15 @@
 生成Excel底稿和公文格式报告
 """
 
-import pandas as pd
+import os
+import re
+from decimal import Decimal, InvalidOperation
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+
+import pandas as pd
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 import html
 import json
 import config
@@ -19,6 +25,34 @@ from utils.aggregation_view import (
 )
 
 logger = utils.setup_logger(__name__)
+_INVISIBLE_CHAR_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]")
+_EMPTY_TEXT_VALUES = {"", "nan", "none", "nat", "null"}
+_RISK_LEVEL_MAP = {
+    "critical": "极高风险",
+    "high": "高风险",
+    "medium": "中风险",
+    "low": "低风险",
+    "info": "提示",
+}
+_DIRECTION_MAP = {
+    "in": "流入",
+    "income": "流入",
+    "out": "流出",
+    "expense": "流出",
+}
+_ENTITY_TYPE_MAP = {
+    "person": "人员",
+    "company": "公司",
+    "external": "外部联系",
+    "unknown": "未知",
+}
+_CHANGE_TYPE_MAP = {
+    "income_spike": "收入突增",
+    "expense_spike": "支出突增",
+    "balance_shift": "收支结构突变",
+}
+_HEADER_FILL = PatternFill("solid", fgColor="D9E2F3")
+_HEADER_FONT = Font(bold=True)
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN">
@@ -154,24 +188,270 @@ def _safe_format_date(date_val):
     Returns:
         格式化后的日期字符串 (YYYY-MM-DD) 或空字符串
     """
+    dt = _coerce_datetime(date_val)
+    if dt is not None:
+        return dt.strftime("%Y-%m-%d")
+
+    fallback = _clean_excel_text(date_val)
+    if "T" in fallback:
+        return fallback.split("T", 1)[0]
+    if len(fallback) >= 10:
+        return fallback[:10]
+    return fallback
+
+
+def _safe_format_datetime(date_val):
+    """格式化时间，保留时分秒。"""
+    dt = _coerce_datetime(date_val)
+    if dt is not None:
+        if dt.hour == 0 and dt.minute == 0 and dt.second == 0:
+            return dt.strftime("%Y-%m-%d")
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    fallback = _clean_excel_text(date_val)
+    return fallback.replace("T", " ")
+
+
+def _coerce_datetime(date_val):
+    """尽量将不同来源的日期值统一转成 datetime。"""
     if date_val is None:
-        return ''
+        return None
 
-    # 检查是否是 pandas 的 NaT 或 numpy 的 nan
-    if pd.isna(date_val):
-        return ''
+    if isinstance(date_val, str):
+        date_str = _clean_excel_text(date_val)
+        if not date_str:
+            return None
+        if date_str.isdigit() and len(date_str) == 8:
+            try:
+                return datetime.strptime(date_str, "%Y%m%d")
+            except ValueError:
+                return None
+    elif isinstance(date_val, (int, float)) and not isinstance(date_val, bool):
+        if pd.isna(date_val):
+            return None
+        digits = str(int(date_val))
+        if len(digits) == 8 and digits.isdigit():
+            try:
+                return datetime.strptime(digits, "%Y%m%d")
+            except ValueError:
+                return None
 
-    # 使用 pd.to_datetime 统一处理各种日期格式
+    try:
+        if pd.isna(date_val):
+            return None
+    except Exception:
+        pass
+
     try:
         dt = pd.to_datetime(date_val)
-        return dt.strftime('%Y-%m-%d')
-    except Exception as e:
-        logger.warning(f'日期格式化失败: {date_val}, 错误: {e}')
-        # 回退到字符串截取
-        date_str = str(date_val)
-        if len(date_str) >= 10:
-            return date_str[:10]
-        return date_str
+        if pd.isna(dt):
+            return None
+        if hasattr(dt, "to_pydatetime"):
+            return dt.to_pydatetime()
+        return dt
+    except Exception:
+        return None
+
+
+def _clean_excel_text(value: Any) -> str:
+    """清洗 Excel 输出中的脏文本。"""
+    if value is None:
+        return ""
+    if isinstance(value, float) and pd.isna(value):
+        return ""
+
+    text = str(value).strip()
+    text = _INVISIBLE_CHAR_RE.sub("", text)
+    if text.lower() in _EMPTY_TEXT_VALUES:
+        return ""
+
+    if re.fullmatch(r"\d\.\d+e\+\d+", text, flags=re.IGNORECASE):
+        try:
+            text = format(Decimal(text), "f").rstrip("0").rstrip(".")
+        except (InvalidOperation, ValueError):
+            pass
+    return text
+
+
+def _clean_excel_value(value: Any) -> Any:
+    """统一清洗单元格值，避免 nan/None/脏字符直接落盘。"""
+    if value is None:
+        return ""
+
+    if isinstance(value, float):
+        if pd.isna(value):
+            return ""
+        return round(value, 2)
+
+    if isinstance(value, (int, bool)):
+        return value
+
+    if isinstance(value, datetime):
+        return _safe_format_datetime(value)
+
+    if isinstance(value, pd.Timestamp):
+        return _safe_format_datetime(value)
+
+    if isinstance(value, list):
+        return "; ".join(_clean_excel_text(item) for item in value if _clean_excel_text(item))
+
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+    return _clean_excel_text(value)
+
+
+def _normalize_risk_level(value: Any) -> str:
+    """统一输出中文风险等级。"""
+    raw = _clean_excel_text(value).lower()
+    if not raw:
+        return ""
+    return _RISK_LEVEL_MAP.get(raw, _clean_excel_text(value))
+
+
+def _normalize_direction(value: Any) -> str:
+    raw = _clean_excel_text(value).lower()
+    if not raw:
+        return ""
+    return _DIRECTION_MAP.get(raw, _clean_excel_text(value))
+
+
+def _normalize_yes_no(value: Any) -> str:
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, (int, float)) and not pd.isna(value):
+        return "是" if float(value) != 0 else "否"
+    text = _clean_excel_text(value).lower()
+    if text in {"1", "true", "yes", "y", "是"}:
+        return "是"
+    if text in {"0", "false", "no", "n", "否"}:
+        return "否"
+    return _clean_excel_text(value)
+
+
+def _normalize_entity_type(value: Any) -> str:
+    raw = _clean_excel_text(value).lower()
+    if not raw:
+        return ""
+    return _ENTITY_TYPE_MAP.get(raw, _clean_excel_text(value))
+
+
+def _normalize_change_type(value: Any) -> str:
+    raw = _clean_excel_text(value).lower()
+    if not raw:
+        return ""
+    return _CHANGE_TYPE_MAP.get(raw, _clean_excel_text(value))
+
+
+def _has_meaningful_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, float) and pd.isna(value):
+        return False
+    if isinstance(value, str):
+        return bool(_clean_excel_text(value))
+    if isinstance(value, (list, tuple, set, dict)):
+        return bool(value)
+    return True
+
+
+def _first_present(record: Optional[Dict[str, Any]], *keys: str, default: Any = None) -> Any:
+    if not isinstance(record, dict):
+        return default
+    for key in keys:
+        if key in record and _has_meaningful_value(record.get(key)):
+            return record.get(key)
+    return default
+
+
+def _get_collection(record: Optional[Dict[str, Any]], *keys: str, default: Any = None) -> Any:
+    value = _first_present(record, *keys, default=default)
+    if value is None:
+        return default
+    return value
+
+
+def _clean_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    cleaned = []
+    for record in records:
+        cleaned.append({key: _clean_excel_value(value) for key, value in record.items()})
+    return cleaned
+
+
+def _drop_empty_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """删除整列全空的字段，减少底稿噪音。"""
+    keep_columns = []
+    for column in df.columns:
+        series = df[column]
+        if any(_has_meaningful_value(value) for value in series.tolist()):
+            keep_columns.append(column)
+    if not keep_columns:
+        return df
+    return df.loc[:, keep_columns]
+
+
+def _apply_sheet_formatting(writer, sheet_name: str, df: pd.DataFrame, startrow: int = 0) -> None:
+    worksheet = writer.sheets.get(sheet_name)
+    if worksheet is None or df.empty:
+        return
+
+    header_row = startrow + 1
+    for cell in worksheet[header_row]:
+        cell.font = _HEADER_FONT
+        cell.fill = _HEADER_FILL
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    if startrow == 0 and worksheet.max_row >= 2:
+        worksheet.freeze_panes = "A2"
+        worksheet.auto_filter.ref = worksheet.dimensions
+
+    sample_df = df.head(200)
+    for idx, column in enumerate(df.columns, start=1):
+        values = [len(_clean_excel_text(column))]
+        for value in sample_df[column]:
+            values.append(len(_clean_excel_text(value)))
+        width = min(max(values) + 2, 40)
+        worksheet.column_dimensions[get_column_letter(idx)].width = max(width, 10)
+
+
+def _write_excel_sheet(
+    writer,
+    sheet_name: str,
+    records: List[Dict[str, Any]],
+    *,
+    startrow: int = 0,
+) -> None:
+    if not records:
+        return
+    df = pd.DataFrame(_clean_records(records))
+    df = _drop_empty_columns(df)
+    if df.empty:
+        return
+    df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=startrow)
+    _apply_sheet_formatting(writer, sheet_name, df, startrow=startrow)
+
+
+def _extract_source_columns(record: Dict[str, Any]) -> Dict[str, Any]:
+    source_file = _first_present(
+        record,
+        "source_file",
+        "sourceFile",
+        "source",
+        "来源文件",
+    )
+    source_row = _first_present(
+        record,
+        "source_row_index",
+        "sourceRowIndex",
+        "source_row",
+        "row_index",
+        "来源行号",
+    )
+    source_file = os.path.basename(_clean_excel_text(source_file)) if source_file else ""
+    return {
+        "来源文件": source_file,
+        "来源行号": source_row if source_row is not None else "",
+    }
 
 
 def _calculate_family_financials(head, members, profiles, func_type):
@@ -259,10 +539,9 @@ def _generate_aggregation_summary_sheet(writer, derived_data: Optional[Dict]) ->
         {"指标": "极高风险实体数", "值": int(summary.get("极高风险实体数", 0) or 0)},
         {"指标": "高风险实体数", "值": int(summary.get("高风险实体数", 0) or 0)},
         {"指标": "高优先线索实体数", "值": int(summary.get("高优先线索实体数", 0) or 0)},
-        {"指标": "平均风险分", "值": overview.get("avg_score", 0)},
+        {"指标": "平均风险分", "值": round(float(overview.get("avg_score", 0) or 0), 2)},
     ]
-    df_summary = pd.DataFrame(summary_rows)
-    df_summary.to_excel(writer, sheet_name="聚合风险排序", index=False, startrow=0)
+    _write_excel_sheet(writer, "聚合风险排序", summary_rows)
 
     if highlights:
         detail_rows = []
@@ -270,20 +549,15 @@ def _generate_aggregation_summary_sheet(writer, derived_data: Optional[Dict]) ->
             detail_rows.append(
                 {
                     "对象名称": item["entity"],
-                    "风险评分": item["risk_score"],
-                    "风险置信度": item["risk_confidence"],
+                    "风险评分": round(float(item.get("risk_score", 0) or 0), 2),
+                    "风险置信度": round(float(item.get("risk_confidence", 0) or 0), 2),
                     "高优先线索数": item["high_priority_clue_count"],
-                    "最强证据分": item["top_evidence_score"],
+                    "最强证据分": round(float(item.get("top_evidence_score", 0) or 0), 2),
                     "综合摘要": item["summary"],
                     "重点线索": " | ".join(item["top_clues"]),
                 }
             )
-        pd.DataFrame(detail_rows).to_excel(
-            writer,
-            sheet_name="聚合风险排序",
-            index=False,
-            startrow=len(df_summary) + 3,
-        )
+        _write_excel_sheet(writer, "聚合风险重点对象", detail_rows)
 
 
 def _generate_summary_sheet(writer, profiles):
@@ -348,8 +622,9 @@ def _generate_summary_sheet(writer, profiles):
         summary_data.append(row_data)
 
     if summary_data:
-        df_summary = pd.DataFrame(summary_data)
+        df_summary = pd.DataFrame(_clean_records(summary_data))
         df_summary.to_excel(writer, sheet_name='资金画像汇总', index=False)
+        _apply_sheet_formatting(writer, '资金画像汇总', df_summary)
         worksheet = writer.sheets['资金画像汇总']
         # 设置百分比格式
         for row in range(2, len(df_summary) + 2):
@@ -359,85 +634,128 @@ def _generate_summary_sheet(writer, profiles):
 
 def _generate_direct_transfer_sheet(writer, suspicions):
     """生成直接转账关系表"""
-    if not suspicions.get('direct_transfers'):
+    direct_transfers = _get_collection(
+        suspicions, "direct_transfers", "directTransfers", default=[]
+    )
+    if not direct_transfers:
         return
 
     transfer_data = []
-    for t in suspicions['direct_transfers']:
+    for t in direct_transfers:
+        direction = _normalize_direction(_first_present(t, "direction", default=""))
+        person = _first_present(t, "person", "from", "from_name", default="")
+        counterparty = _first_present(t, "company", "counterparty", "to", "to_name", default="")
+        if not _has_meaningful_value(t.get("person")) and direction == "流入":
+            person = _first_present(t, "to", "to_name", default=person)
+            counterparty = _first_present(t, "from", "from_name", default=counterparty)
         transfer_data.append({
-            '日期': _safe_format_date(t.get('date')),
-            '人员': t.get('person', ''),
-            '方向': t.get('direction', ''),
-            '公司': t.get('company', ''),
-            '金额(元)': t.get('amount', 0),
-            '摘要': t.get('description', '')
+            '日期': _safe_format_date(_first_present(t, 'date', 'transaction_date')),
+            '人员': person,
+            '方向': direction,
+            '对手方': counterparty,
+            '金额(元)': _first_present(t, 'amount', 'transaction_amount', default=0),
+            '摘要': _first_present(t, 'description', 'summary', default=''),
+            '风险等级': _normalize_risk_level(_first_present(t, 'risk_level', 'riskLevel')),
+            **_extract_source_columns(t),
         })
 
-    if transfer_data:
-        df_transfer = pd.DataFrame(transfer_data)
-        df_transfer.to_excel(writer, sheet_name='直接转账关系', index=False)
+    _write_excel_sheet(writer, '直接转账关系', transfer_data)
 
 
 def _generate_cash_collision_sheet(writer, suspicions):
     """生成现金时空伴随表"""
-    if not suspicions.get('cash_collisions'):
+    cash_collisions = _get_collection(
+        suspicions, "cash_collisions", "cashCollisions", default=[]
+    )
+    if not cash_collisions:
         return
 
     collision_data = []
-    for collision in suspicions['cash_collisions']:
+    for collision in cash_collisions:
         collision_data.append({
-            '日期': _safe_format_date(collision.get('date', collision.get('withdrawal_date'))),
-            '人员A': collision.get('person_a', collision.get('withdrawal_entity', '')),
-            '人员B': collision.get('person_b', collision.get('deposit_entity', '')),
-            '地点': collision.get('location', ''),
-            '时间差(分钟)': collision.get('time_diff', collision.get('time_diff_hours', 0) * 60)
+            '日期': _safe_format_date(
+                _first_present(collision, 'date', 'withdrawal_date', 'time1')
+            ),
+            '人员A': _first_present(
+                collision, 'person_a', 'person1', 'withdrawal_entity', default=''
+            ),
+            '人员B': _first_present(
+                collision, 'person_b', 'person2', 'deposit_entity', default=''
+            ),
+            '取现金额(元)': _first_present(collision, 'amount1', 'withdrawal_amount', default=0),
+            '存现金额(元)': _first_present(collision, 'amount2', 'deposit_amount', default=0),
+            '取现地点': _first_present(collision, 'location1', 'withdrawal_location', 'location'),
+            '存现地点': _first_present(collision, 'location2', 'deposit_location', 'location'),
+            '时间差(小时)': round(
+                float(
+                    _first_present(collision, 'time_diff', 'timeDiff', 'time_diff_hours', default=0)
+                    or 0
+                ),
+                2,
+            ),
+            '风险等级': _normalize_risk_level(_first_present(collision, 'risk_level', 'riskLevel')),
+            '风险说明': _first_present(collision, 'risk_reason', 'riskReason', default=''),
+            '取现来源文件': os.path.basename(
+                _clean_excel_text(
+                    _first_present(collision, 'withdrawalSource', 'withdrawal_source')
+                )
+            ),
+            '取现来源行号': _first_present(collision, 'withdrawalRow', 'withdrawal_row', default=''),
+            '存现来源文件': os.path.basename(
+                _clean_excel_text(_first_present(collision, 'depositSource', 'deposit_source'))
+            ),
+            '存现来源行号': _first_present(collision, 'depositRow', 'deposit_row', default=''),
         })
 
-    if collision_data:
-        df_collision = pd.DataFrame(collision_data)
-        df_collision.to_excel(writer, sheet_name='现金时空伴随', index=False)
+    _write_excel_sheet(writer, '现金时空伴随', collision_data)
 
 
 def _generate_hidden_asset_sheet(writer, suspicions):
     """生成隐形资产明细表"""
-    if not suspicions.get('hidden_assets'):
+    hidden_assets = _get_collection(suspicions, 'hidden_assets', 'hiddenAssets', default={})
+    if not hidden_assets:
         return
 
     hidden_data = []
-    for person, assets in suspicions['hidden_assets'].items():
+    for person, assets in hidden_assets.items():
         for asset in assets:
             hidden_data.append({
                 '日期': _safe_format_date(asset.get('date')),
                 '人员': person,
-                '对手方': asset.get('counterparty', ''),
-                '金额(元)': asset.get('amount', 0),
-                '摘要': asset.get('description', '')
+                '对手方': _first_present(asset, 'counterparty', 'counter_party', default=''),
+                '金额(元)': _first_present(asset, 'amount', default=0),
+                '摘要': _first_present(asset, 'description', default=''),
+                '风险说明': _first_present(asset, 'risk_reason', 'riskReason', default=''),
+                **_extract_source_columns(asset),
             })
 
-    if hidden_data:
-        df_hidden = pd.DataFrame(hidden_data)
-        df_hidden.to_excel(writer, sheet_name='隐形资产明细', index=False)
+    _write_excel_sheet(writer, '隐形资产明细', hidden_data)
 
 
 def _generate_fixed_frequency_sheet(writer, suspicions):
     """生成固定频率异常进账表"""
-    if not suspicions.get('fixed_frequency'):
+    fixed_frequency = _get_collection(
+        suspicions, 'fixed_frequency', 'fixedFrequency', default={}
+    )
+    if not fixed_frequency:
         return
 
     fixed_data = []
-    for person, items in suspicions['fixed_frequency'].items():
+    for person, items in fixed_frequency.items():
         for item in items:
             fixed_data.append({
                 '人员': person,
-                '平均日期': item['day_avg'],
-                '平均金额(元)': item['amount_avg'],
-                '发生次数': item['occurrences'],
-                '金额范围': f"{item.get('min_amount', 0)}-{item.get('max_amount', 0)}"
+                '平均日期': _clean_excel_text(_first_present(item, 'day_avg', 'avg_day')),
+                '平均金额(元)': _first_present(item, 'amount_avg', 'avg_amount', default=0),
+                '发生次数': _first_present(item, 'occurrences', 'count', default=0),
+                '金额范围': (
+                    f"{_first_present(item, 'min_amount', default=0)}-"
+                    f"{_first_present(item, 'max_amount', default=0)}"
+                ),
+                **_extract_source_columns(item),
             })
 
-    if fixed_data:
-        df_fixed = pd.DataFrame(fixed_data)
-        df_fixed.to_excel(writer, sheet_name='固定频率异常进账', index=False)
+    _write_excel_sheet(writer, '固定频率异常进账', fixed_data)
 
 
 def _generate_large_cash_sheet(writer, profiles):
@@ -452,15 +770,14 @@ def _generate_large_cash_sheet(writer, profiles):
         for tx in fund_flow.get('large_cash_transactions', []):
             large_cash_data.append({
                 '对象': entity,
-                '日期': tx['日期'].strftime('%Y-%m-%d') if hasattr(tx['日期'], 'strftime') else str(tx['日期'])[:10],
-                '金额(元)': tx['金额'],
-                '摘要': tx['摘要'],
-                '对手方': tx['对手方']
+                '日期': _safe_format_datetime(_first_present(tx, '日期', 'date')),
+                '金额(元)': _first_present(tx, '金额', 'amount', default=0),
+                '摘要': _first_present(tx, '摘要', 'description', default=''),
+                '对手方': _first_present(tx, '对手方', 'counterparty', default=''),
+                **_extract_source_columns(tx),
             })
 
-    if large_cash_data:
-        df_large_cash = pd.DataFrame(large_cash_data)
-        df_large_cash.to_excel(writer, sheet_name='大额现金明细', index=False)
+    _write_excel_sheet(writer, '大额现金明细', large_cash_data)
 
 
 def _generate_third_party_sheets(writer, profiles):
@@ -478,31 +795,26 @@ def _generate_third_party_sheets(writer, profiles):
         for tx in fund_flow.get('third_party_income_transactions', []):
             third_party_income_data.append({
                 '对象': entity,
-                '日期': tx['日期'].strftime('%Y-%m-%d') if hasattr(tx['日期'], 'strftime') else str(tx['日期'])[:10],
-                '金额(元)': tx['金额'],
-                '摘要': tx['摘要'],
-                '对手方': tx['对手方']
+                '日期': _safe_format_datetime(_first_present(tx, '日期', 'date')),
+                '金额(元)': _first_present(tx, '金额', 'amount', default=0),
+                '摘要': _first_present(tx, '摘要', 'description', default=''),
+                '对手方': _first_present(tx, '对手方', 'counterparty', default=''),
+                **_extract_source_columns(tx),
             })
 
         # 支出明细
         for tx in fund_flow.get('third_party_expense_transactions', []):
             third_party_expense_data.append({
                 '对象': entity,
-                '日期': tx['日期'].strftime('%Y-%m-%d') if hasattr(tx['日期'], 'strftime') else str(tx['日期'])[:10],
-                '金额(元)': tx['金额'],
-                '摘要': tx['摘要'],
-                '对手方': tx['对手方']
+                '日期': _safe_format_datetime(_first_present(tx, '日期', 'date')),
+                '金额(元)': _first_present(tx, '金额', 'amount', default=0),
+                '摘要': _first_present(tx, '摘要', 'description', default=''),
+                '对手方': _first_present(tx, '对手方', 'counterparty', default=''),
+                **_extract_source_columns(tx),
             })
 
-    # 第三方支付-收入工作表
-    if third_party_income_data:
-        df_tp_income = pd.DataFrame(third_party_income_data)
-        df_tp_income.to_excel(writer, sheet_name='第三方支付-收入', index=False)
-
-    # 第三方支付-支出工作表
-    if third_party_expense_data:
-        df_tp_expense = pd.DataFrame(third_party_expense_data)
-        df_tp_expense.to_excel(writer, sheet_name='第三方支付-支出', index=False)
+    _write_excel_sheet(writer, '第三方支付-收入', third_party_income_data)
+    _write_excel_sheet(writer, '第三方支付-支出', third_party_expense_data)
 
     # 第三方支付汇总
     third_party_summary = []
@@ -520,9 +832,7 @@ def _generate_third_party_sheets(writer, profiles):
                 '净流入(元)': fund_flow.get('third_party_income', 0) - fund_flow.get('third_party_expense', 0)
             })
 
-    if third_party_summary:
-        df_tp_summary = pd.DataFrame(third_party_summary)
-        df_tp_summary.to_excel(writer, sheet_name='第三方支付-汇总', index=False)
+    _write_excel_sheet(writer, '第三方支付-汇总', third_party_summary)
 
 
 def _generate_wealth_management_sheets(writer, profiles):
@@ -540,33 +850,28 @@ def _generate_wealth_management_sheets(writer, profiles):
         for tx in wealth_mgmt.get('wealth_purchase_transactions', []):
             wealth_purchase_data.append({
                 '对象': entity,
-                '日期': tx['日期'].strftime('%Y-%m-%d') if hasattr(tx['日期'], 'strftime') else str(tx['日期'])[:10],
-                '金额(元)': tx['金额'],
-                '摘要': tx['摘要'],
-                '对手方': tx['对手方'],
-                '判断依据': tx.get('判断依据', '')
+                '日期': _safe_format_datetime(_first_present(tx, '日期', 'date')),
+                '金额(元)': _first_present(tx, '金额', 'amount', default=0),
+                '摘要': _first_present(tx, '摘要', 'description', default=''),
+                '对手方': _first_present(tx, '对手方', 'counterparty', default=''),
+                '判断依据': _first_present(tx, '判断依据', 'reason', default=''),
+                **_extract_source_columns(tx),
             })
 
         # 赎回明细
         for tx in wealth_mgmt.get('wealth_redemption_transactions', []):
             wealth_redemption_data.append({
                 '对象': entity,
-                '日期': tx['日期'].strftime('%Y-%m-%d') if hasattr(tx['日期'], 'strftime') else str(tx['日期'])[:10],
-                '金额(元)': tx['金额'],
-                '摘要': tx['摘要'],
-                '对手方': tx['对手方'],
-                '判断依据': tx.get('判断依据', '')
+                '日期': _safe_format_datetime(_first_present(tx, '日期', 'date')),
+                '金额(元)': _first_present(tx, '金额', 'amount', default=0),
+                '摘要': _first_present(tx, '摘要', 'description', default=''),
+                '对手方': _first_present(tx, '对手方', 'counterparty', default=''),
+                '判断依据': _first_present(tx, '判断依据', 'reason', default=''),
+                **_extract_source_columns(tx),
             })
 
-    # 理财产品-购买工作表
-    if wealth_purchase_data:
-        df_wealth_purchase = pd.DataFrame(wealth_purchase_data)
-        df_wealth_purchase.to_excel(writer, sheet_name='理财产品-购买', index=False)
-
-    # 理财产品-赎回工作表
-    if wealth_redemption_data:
-        df_wealth_redemption = pd.DataFrame(wealth_redemption_data)
-        df_wealth_redemption.to_excel(writer, sheet_name='理财产品-赎回', index=False)
+    _write_excel_sheet(writer, '理财产品-购买', wealth_purchase_data)
+    _write_excel_sheet(writer, '理财产品-赎回', wealth_redemption_data)
 
     # 理财产品汇总
     wealth_summary = []
@@ -585,9 +890,7 @@ def _generate_wealth_management_sheets(writer, profiles):
                 '持有估算(元)': wealth_mgmt.get('estimated_holding', 0)
             })
 
-    if wealth_summary:
-        df_wealth_summary = pd.DataFrame(wealth_summary)
-        df_wealth_summary.to_excel(writer, sheet_name='理财产品-汇总', index=False)
+    _write_excel_sheet(writer, '理财产品-汇总', wealth_summary)
 
 
 def _generate_family_tree_sheet(writer, family_tree):
@@ -601,17 +904,15 @@ def _generate_family_tree_sheet(writer, family_tree):
             family_data.append({
                 '核心人员': person,
                 '家族成员': member.get('姓名', ''),
-                '身份证号': member.get('身份证号', ''),
+                '身份证号': _clean_excel_text(member.get('身份证号', '')),
                 '与户主关系': member.get('与户主关系', ''),
                 '性别': member.get('性别', ''),
-                '出生日期': member.get('出生日期', ''),
+                '出生日期': _safe_format_date(member.get('出生日期', '')),
                 '户籍地': member.get('户籍地', ''),
                 '数据来源': member.get('数据来源', '')
             })
 
-    if family_data:
-        df_family = pd.DataFrame(family_data)
-        df_family.to_excel(writer, sheet_name='家族关系图谱', index=False)
+    _write_excel_sheet(writer, '家族关系图谱', family_data)
 
 
 def _generate_family_assets_sheets(writer, family_assets, profiles):
@@ -633,9 +934,7 @@ def _generate_family_assets_sheets(writer, family_assets, profiles):
             '理财持仓(万元)': _calculate_family_financials(person, assets['家族成员'], profiles, 'wealth')
         })
 
-    if asset_summary_data:
-        df_asset_summary = pd.DataFrame(asset_summary_data)
-        df_asset_summary.to_excel(writer, sheet_name='家族资产汇总', index=False)
+    _write_excel_sheet(writer, '家族资产汇总', asset_summary_data)
 
     # 8.2 房产明细表
     property_data = []
@@ -656,16 +955,13 @@ def _generate_family_assets_sheets(writer, family_assets, profiles):
                 '数据质量': prop.get('数据质量', '正常')
             })
 
-    if property_data:
-        df_properties = pd.DataFrame(property_data)
-        df_properties = df_properties.fillna('-')
-        df_properties.to_excel(writer, sheet_name='房产明细', index=False)
+    _write_excel_sheet(writer, '房产明细', property_data)
 
     # 8.3 车辆明细表
     vehicle_data = []
     for person, assets in family_assets.items():
         for vehicle in assets['车辆']:
-            vehicle_data.append({
+            row = {
                 '核心人员': person,
                 '所有人': vehicle.get('所有人', ''),
                 '号牌号码': vehicle.get('号牌号码', ''),
@@ -673,14 +969,17 @@ def _generate_family_assets_sheets(writer, family_assets, profiles):
                 '车身颜色': vehicle.get('车身颜色', ''),
                 '初次登记日期': vehicle.get('初次登记日期', ''),
                 '机动车状态': vehicle.get('机动车状态', ''),
-                '是否抵押质押': vehicle.get('是否抵押质押', 0),
+                '是否抵押质押': _normalize_yes_no(vehicle.get('是否抵押质押', 0)),
                 '能源种类': vehicle.get('能源种类', ''),
                 '住所地址': vehicle.get('住所地址', '')
-            })
+            }
+            if any(
+                _has_meaningful_value(row.get(key))
+                for key in ['所有人', '号牌号码', '中文品牌', '车身颜色', '初次登记日期', '机动车状态', '能源种类', '住所地址']
+            ):
+                vehicle_data.append(row)
 
-    if vehicle_data:
-        df_vehicles = pd.DataFrame(vehicle_data)
-        df_vehicles.to_excel(writer, sheet_name='车辆明细', index=False)
+    _write_excel_sheet(writer, '车辆明细', vehicle_data)
 
 
 def _generate_validation_sheets(writer, validation_results):
@@ -702,8 +1001,7 @@ def _generate_validation_sheets(writer, validation_results):
             })
 
         if validation_data:
-            df_validation = pd.DataFrame(validation_data)
-            df_validation.to_excel(writer, sheet_name='数据验证-流水', index=False)
+            _write_excel_sheet(writer, '数据验证-流水', validation_data)
 
     # 9.2 房产交易验证
     if 'properties' in validation_results:
@@ -720,8 +1018,7 @@ def _generate_validation_sheets(writer, validation_results):
             })
 
         if prop_validation_data:
-            df_prop_validation = pd.DataFrame(prop_validation_data)
-            df_prop_validation.to_excel(writer, sheet_name='数据验证-房产', index=False)
+            _write_excel_sheet(writer, '数据验证-房产', prop_validation_data)
 
 
 def _generate_penetration_sheets(writer, penetration_results):
@@ -753,72 +1050,71 @@ def _generate_penetration_sheets(writer, penetration_results):
         '金额(万元)': summary.get('涉案公司间总金额', 0) / 10000
     })
 
-    df_penetration_summary = pd.DataFrame(penetration_summary)
-    df_penetration_summary.to_excel(writer, sheet_name='资金穿透-汇总', index=False)
+    _write_excel_sheet(writer, '资金穿透-汇总', penetration_summary)
 
     # 10.2 个人→公司明细
-    if penetration_results.get('person_to_company'):
+    person_to_company = _get_collection(penetration_results, 'person_to_company', default=[])
+    if person_to_company:
         p2c_data = []
-        for item in penetration_results['person_to_company']:
+        for item in person_to_company:
             p2c_data.append({
-                '发起方': item['发起方'],
-                '接收方': item['接收方'],
-                '日期': item['日期'],
-                '收入': item['收入'],
-                '支出': item['支出'],
-                '摘要': item['摘要'],
-                '对方原文': item['交易对方原文']
+                '发起方': _first_present(item, '发起方', 'from', 'source', default=''),
+                '接收方': _first_present(item, '接收方', 'to', 'target', default=''),
+                '日期': _safe_format_datetime(_first_present(item, '日期', 'date')),
+                '收入(元)': _first_present(item, '收入', 'income', default=0),
+                '支出(元)': _first_present(item, '支出', 'expense', default=0),
+                '摘要': _first_present(item, '摘要', 'description', default=''),
+                '对方原文': _first_present(item, '交易对方原文', 'counterparty_raw', default='')
             })
-        if p2c_data:
-            pd.DataFrame(p2c_data).to_excel(writer, sheet_name='穿透-个人到公司', index=False)
+        _write_excel_sheet(writer, '穿透-个人到公司', p2c_data)
 
     # 10.3 公司→个人明细
-    if penetration_results.get('company_to_person'):
+    company_to_person = _get_collection(penetration_results, 'company_to_person', default=[])
+    if company_to_person:
         c2p_data = []
-        for item in penetration_results['company_to_person']:
+        for item in company_to_person:
             c2p_data.append({
-                '发起方': item['发起方'],
-                '接收方': item['接收方'],
-                '日期': item['日期'],
-                '收入': item['收入'],
-                '支出': item['支出'],
-                '摘要': item['摘要'],
-                '对方原文': item['交易对方原文']
+                '发起方': _first_present(item, '发起方', 'from', 'source', default=''),
+                '接收方': _first_present(item, '接收方', 'to', 'target', default=''),
+                '日期': _safe_format_datetime(_first_present(item, '日期', 'date')),
+                '收入(元)': _first_present(item, '收入', 'income', default=0),
+                '支出(元)': _first_present(item, '支出', 'expense', default=0),
+                '摘要': _first_present(item, '摘要', 'description', default=''),
+                '对方原文': _first_present(item, '交易对方原文', 'counterparty_raw', default='')
             })
-        if c2p_data:
-            pd.DataFrame(c2p_data).to_excel(writer, sheet_name='穿透-公司到个人', index=False)
+        _write_excel_sheet(writer, '穿透-公司到个人', c2p_data)
 
     # 10.4 核心人员之间明细
-    if penetration_results.get('person_to_person'):
+    person_to_person = _get_collection(penetration_results, 'person_to_person', default=[])
+    if person_to_person:
         p2p_data = []
-        for item in penetration_results['person_to_person']:
+        for item in person_to_person:
             p2p_data.append({
-                '发起方': item['发起方'],
-                '接收方': item['接收方'],
-                '日期': item['日期'],
-                '收入': item['收入'],
-                '支出': item['支出'],
-                '摘要': item['摘要'],
-                '对方原文': item['交易对方原文']
+                '发起方': _first_present(item, '发起方', 'from', 'source', default=''),
+                '接收方': _first_present(item, '接收方', 'to', 'target', default=''),
+                '日期': _safe_format_datetime(_first_present(item, '日期', 'date')),
+                '收入(元)': _first_present(item, '收入', 'income', default=0),
+                '支出(元)': _first_present(item, '支出', 'expense', default=0),
+                '摘要': _first_present(item, '摘要', 'description', default=''),
+                '对方原文': _first_present(item, '交易对方原文', 'counterparty_raw', default='')
             })
-        if p2p_data:
-            pd.DataFrame(p2p_data).to_excel(writer, sheet_name='穿透-人员之间', index=False)
+        _write_excel_sheet(writer, '穿透-人员之间', p2p_data)
 
     # 10.5 涉案公司之间明细
-    if penetration_results.get('company_to_company'):
+    company_to_company = _get_collection(penetration_results, 'company_to_company', default=[])
+    if company_to_company:
         c2c_data = []
-        for item in penetration_results['company_to_company']:
+        for item in company_to_company:
             c2c_data.append({
-                '发起方': item['发起方'],
-                '接收方': item['接收方'],
-                '日期': item['日期'],
-                '收入': item['收入'],
-                '支出': item['支出'],
-                '摘要': item['摘要'],
-                '对方原文': item['交易对方原文']
+                '发起方': _first_present(item, '发起方', 'from', 'source', default=''),
+                '接收方': _first_present(item, '接收方', 'to', 'target', default=''),
+                '日期': _safe_format_datetime(_first_present(item, '日期', 'date')),
+                '收入(元)': _first_present(item, '收入', 'income', default=0),
+                '支出(元)': _first_present(item, '支出', 'expense', default=0),
+                '摘要': _first_present(item, '摘要', 'description', default=''),
+                '对方原文': _first_present(item, '交易对方原文', 'counterparty_raw', default='')
             })
-        if c2c_data:
-            pd.DataFrame(c2c_data).to_excel(writer, sheet_name='穿透-公司之间', index=False)
+        _write_excel_sheet(writer, '穿透-公司之间', c2c_data)
 
 
 def _generate_loan_analysis_sheets(writer, loan_results):
@@ -831,9 +1127,10 @@ def _generate_loan_analysis_sheets(writer, loan_results):
         return
 
     # 11.1 双向资金往来
-    if loan_results.get('bidirectional_flows'):
+    bidirectional_flows = _get_collection(loan_results, 'bidirectional_flows', default=[])
+    if bidirectional_flows:
         data = []
-        for item in loan_results['bidirectional_flows']:
+        for item in bidirectional_flows:
             data.append({
                 '人员': item.get('person', ''),
                 '对手方': item.get('counterparty', ''),
@@ -843,15 +1140,16 @@ def _generate_loan_analysis_sheets(writer, loan_results):
                 '支出金额(元)': item.get('expense_total', 0),
                 '支出/收入比': round(item.get('ratio', 0), 3),
                 '借贷类型': item.get('loan_type', ''),
-                '风险等级': item.get('risk_level', '').upper(),
+                '风险等级': _normalize_risk_level(item.get('risk_level', '')),
+                **_extract_source_columns(item),
             })
-        if data:
-            pd.DataFrame(data).to_excel(writer, sheet_name='借贷-双向往来', index=False)
+        _write_excel_sheet(writer, '借贷-双向往来', data)
 
     # 11.2 无还款借贷（疑似利益输送）
-    if loan_results.get('no_repayment_loans'):
+    no_repayment_loans = _get_collection(loan_results, 'no_repayment_loans', default=[])
+    if no_repayment_loans:
         data = []
-        for item in loan_results['no_repayment_loans']:
+        for item in no_repayment_loans:
             data.append({
                 '人员': item.get('person', ''),
                 '对手方': item.get('counterparty', ''),
@@ -861,34 +1159,36 @@ def _generate_loan_analysis_sheets(writer, loan_results):
                 '已还金额(元)': item.get('total_repaid', 0),
                 '还款比例': f"{item.get('repay_ratio', 0)*100:.1f}%",
                 '风险原因': item.get('risk_reason', ''),
-                '风险等级': item.get('risk_level', '').upper(),
+                '风险等级': _normalize_risk_level(item.get('risk_level', '')),
                 '交易摘要': item.get('description', ''),
+                **_extract_source_columns(item),
             })
-        if data:
-            pd.DataFrame(data).to_excel(writer, sheet_name='借贷-无还款', index=False)
+        _write_excel_sheet(writer, '借贷-无还款', data)
 
     # 11.3 规律性还款模式
-    if loan_results.get('regular_repayments'):
+    regular_repayments = _get_collection(loan_results, 'regular_repayments', default=[])
+    if regular_repayments:
         data = []
-        for item in loan_results['regular_repayments']:
+        for item in regular_repayments:
             data.append({
                 '人员': item.get('person', ''),
                 '对手方': item.get('counterparty', ''),
                 '还款日(每月)': item.get('day_of_month', 0),
-                '还款次数': item.get('occurrences', 0),
+                '还款次数': _first_present(item, 'occurrences', 'count', default=0),
                 '平均金额(元)': round(item.get('avg_amount', 0), 2),
                 '总金额(元)': round(item.get('total_amount', 0), 2),
                 '变异系数': round(item.get('cv', 0), 3),
                 '疑似贷款': '是' if item.get('is_likely_loan') else '否',
-                '风险等级': item.get('risk_level', '').upper(),
+                '风险等级': _normalize_risk_level(item.get('risk_level', '')),
+                **_extract_source_columns(item),
             })
-        if data:
-            pd.DataFrame(data).to_excel(writer, sheet_name='借贷-规律还款', index=False)
+        _write_excel_sheet(writer, '借贷-规律还款', data)
 
     # 11.4 借贷配对分析
-    if loan_results.get('loan_pairs'):
+    loan_pairs = _get_collection(loan_results, 'loan_pairs', default=[])
+    if loan_pairs:
         data = []
-        for item in loan_results['loan_pairs']:
+        for item in loan_pairs:
             data.append({
                 '人员': item.get('person', ''),
                 '对手方': item.get('counterparty', ''),
@@ -900,27 +1200,30 @@ def _generate_loan_analysis_sheets(writer, loan_results):
                 '利率(%)': round(item.get('interest_rate', 0), 2),
                 '年化利率(%)': round(item.get('annual_rate', 0), 1),
                 '风险原因': item.get('risk_reason', ''),
-                '风险等级': item.get('risk_level', '').upper(),
+                '风险等级': _normalize_risk_level(item.get('risk_level', '')),
+                **_extract_source_columns(item),
             })
-        if data:
-            pd.DataFrame(data).to_excel(writer, sheet_name='借贷-配对分析', index=False)
+        _write_excel_sheet(writer, '借贷-配对分析', data)
 
     # 11.5 网贷平台往来
-    if loan_results.get('online_loan_platforms'):
+    online_loan_platforms = _get_collection(
+        loan_results, 'online_loan_platforms', default=[]
+    )
+    if online_loan_platforms:
         data = []
-        for item in loan_results['online_loan_platforms']:
+        for item in online_loan_platforms:
             data.append({
                 '人员': item.get('person', ''),
                 '平台': item.get('platform', ''),
                 '对手方': item.get('counterparty', ''),
                 '日期': _safe_format_date(item.get('date')),
                 '金额(元)': item.get('amount', 0),
-                '方向': '收入' if item.get('direction') == 'income' else '支出',
+                '方向': _normalize_direction(item.get('direction')),
                 '摘要': item.get('description', ''),
-                '风险等级': item.get('risk_level', '').upper(),
+                '风险等级': _normalize_risk_level(item.get('risk_level', '')),
+                **_extract_source_columns(item),
             })
-        if data:
-            pd.DataFrame(data).to_excel(writer, sheet_name='借贷-网贷平台', index=False)
+        _write_excel_sheet(writer, '借贷-网贷平台', data)
 
 
 def _generate_income_anomaly_sheets(writer, income_results):
@@ -930,37 +1233,60 @@ def _generate_income_anomaly_sheets(writer, income_results):
     if not income_results:
         return
 
-    # 12.1 异常收入汇总
     all_anomalies = []
 
-    # 规律性非工资收入
-    for item in income_results.get('regular_non_salary', []):
-        all_anomalies.append({
+    regular_non_salary = _get_collection(income_results, 'regular_non_salary', default=[])
+    large_individual_income = _get_collection(
+        income_results, 'large_individual_income', 'large_personal_income', default=[]
+    )
+    unknown_source_income = _get_collection(
+        income_results, 'unknown_source_income', 'unknown_source', default=[]
+    )
+    same_source_multi = _get_collection(
+        income_results, 'same_source_multi', 'multi_source', default=[]
+    )
+    large_single_income = _get_collection(income_results, 'large_single_income', default=[])
+    potential_bribe_installment = _get_collection(
+        income_results, 'potential_bribe_installment', 'suspected_bribery', default=[]
+    )
+
+    regular_rows = []
+    for item in regular_non_salary:
+        row = {
             '人员': item.get('person', ''),
             '异常类型': '规律性非工资收入',
             '对手方': item.get('counterparty', ''),
             '金额(元)': item.get('total_amount', 0),
-            '次数': item.get('count', 0),
+            '次数': _first_present(item, 'occurrences', 'count', default=0),
             '平均金额(元)': item.get('avg_amount', 0),
-            '可疑原因': item.get('income_type', ''),
-            '风险等级': item.get('risk_level', '').upper(),
-        })
+            '可疑原因': _first_present(item, 'possible_type', 'income_type', default=''),
+            '首笔日期': _safe_format_date((_first_present(item, 'date_range') or ['', ''])[0] if isinstance(_first_present(item, 'date_range'), list) and _first_present(item, 'date_range') else ''),
+            '末笔日期': _safe_format_date((_first_present(item, 'date_range') or ['', ''])[-1] if isinstance(_first_present(item, 'date_range'), list) and _first_present(item, 'date_range') else ''),
+            '风险等级': _normalize_risk_level(item.get('risk_level', '')),
+            **_extract_source_columns(item),
+        }
+        regular_rows.append(row)
+        all_anomalies.append(row)
 
-    # 个人大额转入
-    for item in income_results.get('large_personal_income', []):
-        all_anomalies.append({
+    large_transfer_rows = []
+    for item in large_individual_income:
+        row = {
             '人员': item.get('person', ''),
             '异常类型': '个人大额转入',
-            '对手方': item.get('counterparty', ''),
+            '对手方': _first_present(item, 'counterparty', 'from_individual', default=''),
             '金额(元)': item.get('amount', 0),
             '日期': _safe_format_date(item.get('date')),
             '可疑原因': '个人大额转入需核实',
-            '风险等级': item.get('risk_level', '').upper(),
-        })
+            '摘要': item.get('description', ''),
+            '风险等级': _normalize_risk_level(item.get('risk_level', '')),
+            **_extract_source_columns(item),
+        }
+        large_transfer_rows.append(row)
+        all_anomalies.append(row)
 
-    # 来源不明收入
-    for item in income_results.get('unknown_source', []):
-        all_anomalies.append({
+    unknown_rows = []
+    for item in unknown_source_income:
+        row = {
             '人员': item.get('person', ''),
             '异常类型': '来源不明收入',
             '对手方': item.get('counterparty', '(缺失)'),
@@ -968,54 +1294,71 @@ def _generate_income_anomaly_sheets(writer, income_results):
             '日期': _safe_format_date(item.get('date')),
             '可疑原因': item.get('reason', ''),
             '摘要': item.get('description', ''),
-            '风险等级': item.get('risk_level', '').upper(),
-        })
+            '风险等级': _normalize_risk_level(item.get('risk_level', '')),
+            **_extract_source_columns(item),
+        }
+        unknown_rows.append(row)
+        all_anomalies.append(row)
 
-    # 同源多次收入
-    for item in income_results.get('multi_source', []):
-        all_anomalies.append({
+    same_source_rows = []
+    for item in same_source_multi:
+        date_range = _first_present(item, 'date_range', default=[])
+        start_date = _safe_format_date(date_range[0]) if isinstance(date_range, list) and date_range else ''
+        end_date = _safe_format_date(date_range[-1]) if isinstance(date_range, list) and date_range else ''
+        row = {
             '人员': item.get('person', ''),
             '异常类型': '同源多次收入',
             '对手方': item.get('counterparty', ''),
-            '金额(元)': item.get('total_amount', 0),
-            '次数': item.get('count', 0),
+            '金额(元)': _first_present(item, 'total_amount', 'total', default=0),
+            '次数': _first_present(item, 'count', 'occurrences', default=0),
             '平均金额(元)': item.get('avg_amount', 0),
-            '可疑原因': item.get('income_type', ''),
-            '风险等级': item.get('risk_level', '').upper(),
-        })
+            '首笔日期': start_date,
+            '末笔日期': end_date,
+            '可疑原因': _first_present(item, 'possible_type', 'income_type', default=''),
+            '风险等级': _normalize_risk_level(item.get('risk_level', '')),
+            **_extract_source_columns(item),
+        }
+        same_source_rows.append(row)
+        all_anomalies.append(row)
 
-    # 大额单笔收入
-    for item in income_results.get('large_single_income', []):
-        all_anomalies.append({
+    large_single_rows = []
+    for item in large_single_income:
+        row = {
             '人员': item.get('person', ''),
             '异常类型': '大额单笔收入',
             '对手方': item.get('counterparty', ''),
             '金额(元)': item.get('amount', 0),
             '日期': _safe_format_date(item.get('date')),
-            '可疑原因': item.get('income_type', ''),
-            '风险等级': item.get('risk_level', '').upper(),
-        })
+            '可疑原因': _first_present(item, 'possible_type', 'income_type', default=''),
+            '摘要': item.get('description', ''),
+            '风险等级': _normalize_risk_level(item.get('risk_level', '')),
+            **_extract_source_columns(item),
+        }
+        large_single_rows.append(row)
+        all_anomalies.append(row)
 
-    if all_anomalies:
-        pd.DataFrame(all_anomalies).to_excel(writer, sheet_name='异常收入-汇总', index=False)
+    bribery_rows = []
+    for item in potential_bribe_installment:
+        row = {
+            '人员': item.get('person', ''),
+            '对手方': item.get('counterparty', ''),
+            '月均金额(元)': _first_present(item, 'avg_monthly', 'avg_amount', default=0),
+            '波动系数': round(item.get('cv', 0), 3),
+            '持续月数': item.get('months', 0),
+            '总笔数': _first_present(item, 'count', 'occurrences', default=0),
+            '总金额(元)': item.get('total_amount', 0),
+            '风险因素': _first_present(item, 'risk_factors', 'reason', default=''),
+            '风险等级': _normalize_risk_level(item.get('risk_level', '')),
+            **_extract_source_columns(item),
+        }
+        bribery_rows.append(row)
 
-    # 12.2 疑似分期受贿（单独工作表）
-    if income_results.get('suspected_bribery'):
-        data = []
-        for item in income_results['suspected_bribery']:
-            data.append({
-                '人员': item.get('person', ''),
-                '对手方': item.get('counterparty', ''),
-                '月均金额(元)': item.get('avg_monthly', 0),
-                '波动系数': round(item.get('cv', 0), 3),
-                '持续月数': item.get('months', 0),
-                '总笔数': item.get('count', 0),
-                '总金额(元)': item.get('total_amount', 0),
-                '风险因素': item.get('risk_factors', ''),
-                '风险等级': item.get('risk_level', '').upper(),
-            })
-        if data:
-            pd.DataFrame(data).to_excel(writer, sheet_name='异常收入-疑似分期受贿', index=False)
+    _write_excel_sheet(writer, '异常收入-汇总', all_anomalies)
+    _write_excel_sheet(writer, '异常收入-大额转入', large_transfer_rows)
+    _write_excel_sheet(writer, '异常收入-来源不明', unknown_rows)
+    _write_excel_sheet(writer, '异常收入-同源多次', same_source_rows)
+    _write_excel_sheet(writer, '异常收入-大额单笔', large_single_rows)
+    _write_excel_sheet(writer, '异常收入-疑似分期受贿', bribery_rows)
 
 
 def _generate_time_series_sheets(writer, time_series_results):
@@ -1025,27 +1368,31 @@ def _generate_time_series_sheets(writer, time_series_results):
     if not time_series_results:
         return
 
-    # 13.1 资金突变事件
-    if time_series_results.get('突变事件'):
+    sudden_changes = _get_collection(
+        time_series_results, 'sudden_changes', '突变事件', default=[]
+    )
+    if sudden_changes:
         data = []
-        for item in time_series_results['突变事件']:
+        for item in sudden_changes:
             person = item.get('person', '')
             data.append({
                 '人员': person if person and str(person) != 'nan' else '(未知)',
                 '日期': _safe_format_date(item.get('date')),
                 '金额(元)': item.get('amount', 0),
                 'Z值': round(item.get('z_score', 0), 2),
-                '均值(元)': round(item.get('mean', 0), 2),
-                '风险等级': item.get('risk_level', '').upper(),
+                '历史均值(元)': round(_first_present(item, 'avg_before', 'mean', default=0), 2),
+                '异常类型': _normalize_change_type(item.get('change_type', '')),
+                '风险等级': _normalize_risk_level(item.get('risk_level', '')),
+                **_extract_source_columns(item),
             })
-        if data:
-            pd.DataFrame(data).to_excel(writer, sheet_name='时序-资金突变', index=False)
+        _write_excel_sheet(writer, '时序-资金突变', data)
 
-    # 13.2 固定延迟转账
-    if time_series_results.get('延迟转账'):
+    delayed_transfers = _get_collection(
+        time_series_results, 'delayed_transfers', '延迟转账', default=[]
+    )
+    if delayed_transfers:
         data = []
-        for item in time_series_results['延迟转账']:
-            # 安全处理 nan 值
+        for item in delayed_transfers:
             person = item.get('person', '')
             income_cp = item.get('income_counterparty', '')
             expense_cp = item.get('expense_counterparty', '')
@@ -1056,15 +1403,17 @@ def _generate_time_series_sheets(writer, time_series_results):
 
             data.append({
                 '人员': person,
-                '收入来源': income_cp,
-                '支出去向': expense_cp,
+                '收入来源': income_cp if income_cp and str(income_cp) != 'nan' else _clean_excel_text(item.get('income_from', '(未知)')),
+                '支出去向': expense_cp if expense_cp and str(expense_cp) != 'nan' else _clean_excel_text(item.get('expense_to', '(未知)')),
+                '首笔收入日期': _safe_format_date(item.get('first_income_date')),
                 '延迟天数': item.get('delay_days', 0),
-                '发生次数': item.get('count', 0),
+                '发生次数': _first_present(item, 'occurrences', 'count', default=0),
+                '平均金额(元)': round(item.get('avg_amount', 0), 2),
                 '总金额(元)': round(item.get('total_amount', 0), 2),
-                '风险等级': item.get('risk_level', '').upper(),
+                '风险等级': _normalize_risk_level(item.get('risk_level', '')),
+                **_extract_source_columns(item),
             })
-        if data:
-            pd.DataFrame(data).to_excel(writer, sheet_name='时序-固定延迟', index=False)
+        _write_excel_sheet(writer, '时序-固定延迟', data)
 
 
 def _generate_fund_cycle_sheets(writer, penetration_results):
@@ -1074,26 +1423,26 @@ def _generate_fund_cycle_sheets(writer, penetration_results):
     if not penetration_results:
         return
 
-    # 14.1 资金闭环
-    if penetration_results.get('fund_cycles'):
+    fund_cycles = _get_collection(penetration_results, 'fund_cycles', default=[])
+    if fund_cycles:
         data = []
-        for cycle in penetration_results['fund_cycles']:
+        for cycle in fund_cycles:
             if isinstance(cycle, dict):
                 cycle_str = cycle.get('path') or ' → '.join(cycle.get('nodes') or cycle.get('participants') or [])
                 cycle_len = cycle.get('length') or len(cycle.get('nodes') or cycle.get('participants') or [])
-                risk_level = str(cycle.get('risk_level', 'medium')).upper()
+                risk_level = _normalize_risk_level(cycle.get('risk_level', 'medium'))
                 risk_score = cycle.get('risk_score')
                 confidence = cycle.get('confidence')
             elif isinstance(cycle, list):
                 cycle_str = ' → '.join(cycle)
                 cycle_len = len(cycle)
-                risk_level = 'HIGH' if cycle_len >= 3 else 'MEDIUM'
+                risk_level = '高风险' if cycle_len >= 3 else '中风险'
                 risk_score = None
                 confidence = None
             else:
                 cycle_str = str(cycle)
                 cycle_len = 0
-                risk_level = 'MEDIUM'
+                risk_level = '中风险'
                 risk_score = None
                 confidence = None
 
@@ -1104,37 +1453,193 @@ def _generate_fund_cycle_sheets(writer, penetration_results):
                 '风险评分': risk_score,
                 '置信度': confidence,
             })
-        if data:
-            pd.DataFrame(data).to_excel(writer, sheet_name='穿透-资金闭环', index=False)
+        _write_excel_sheet(writer, '穿透-资金闭环', data)
 
     # 14.2 过账通道
-    if penetration_results.get('passthrough_channels'):
+    pass_through_channels = _get_collection(
+        penetration_results, 'pass_through_channels', 'passthrough_channels', default=[]
+    )
+    if pass_through_channels:
         data = []
-        for item in penetration_results['passthrough_channels']:
+        for item in pass_through_channels:
             data.append({
-                '实体名称': item.get('entity', ''),
-                '实体类型': item.get('type', ''),
+                '节点名称': _first_present(item, 'node', 'entity', 'name', default=''),
+                '节点类型': _normalize_entity_type(
+                    _first_present(item, 'node_type', 'type', default='')
+                ),
                 '进账金额(万元)': round(item.get('inflow', 0) / 10000, 2),
                 '出账金额(万元)': round(item.get('outflow', 0) / 10000, 2),
+                '净沉淀(万元)': round(_first_present(item, 'net_retention', default=0) / 10000, 2),
                 '进出比(%)': round(item.get('ratio', 0) * 100, 1),
-                '风险等级': item.get('risk_level', '').upper(),
+                '风险等级': _normalize_risk_level(item.get('risk_level', '')),
+                '风险评分': item.get('risk_score', ''),
+                '置信度': item.get('confidence', ''),
+                '证据摘要': '; '.join(item.get('evidence', [])) if isinstance(item.get('evidence'), list) else '',
             })
-        if data:
-            pd.DataFrame(data).to_excel(writer, sheet_name='穿透-过账通道', index=False)
+        _write_excel_sheet(writer, '穿透-过账通道', data)
 
     # 14.3 资金枢纽节点
-    if penetration_results.get('hub_nodes'):
+    hub_nodes = _get_collection(penetration_results, 'hub_nodes', default=[])
+    if hub_nodes:
         data = []
-        for item in penetration_results['hub_nodes']:
+        for item in hub_nodes:
             data.append({
-                '节点名称': item.get('name', ''),
-                '节点类型': item.get('type', ''),
+                '节点名称': _first_present(item, 'node', 'name', default=''),
+                '节点类型': _normalize_entity_type(
+                    _first_present(item, 'node_type', 'type', default='')
+                ),
                 '入度': item.get('in_degree', 0),
                 '出度': item.get('out_degree', 0),
                 '总连接数': item.get('total_degree', 0),
             })
-        if data:
-            pd.DataFrame(data).to_excel(writer, sheet_name='穿透-枢纽节点', index=False)
+        _write_excel_sheet(writer, '穿透-枢纽节点', data)
+
+def _resolve_family_summaries(derived_data: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """从不同兼容形态中提取家庭汇总。"""
+    if not isinstance(derived_data, dict):
+        return {}
+
+    all_family_summaries = _get_collection(derived_data, 'all_family_summaries', default={})
+    if isinstance(all_family_summaries, dict) and all_family_summaries:
+        return all_family_summaries
+
+    family_summary = _get_collection(derived_data, 'family_summary', default={})
+    if isinstance(family_summary, dict):
+        nested = _get_collection(family_summary, 'all_family_summaries', default={})
+        if isinstance(nested, dict) and nested:
+            return nested
+        if _has_meaningful_value(family_summary.get('total_assets')):
+            householder = _clean_excel_text(family_summary.get('householder')) or '默认分析单元'
+            return {householder: family_summary}
+    return {}
+
+
+def _generate_correlation_sheets(writer, derived_data):
+    """生成同行、同住宿、快递联系等多源关联工作表。"""
+    if not isinstance(derived_data, dict):
+        return
+
+    correlation = _get_collection(derived_data, 'correlation', default={})
+    if not isinstance(correlation, dict) or not correlation:
+        return
+
+    travel = _get_collection(correlation, 'travel_companions', default={}) or {}
+    hotel = _get_collection(correlation, 'hotel_cohabitants', default={}) or {}
+    express = _get_collection(correlation, 'express_contacts', default={}) or {}
+    summary = _get_collection(correlation, 'summary', default={}) or {}
+
+    summary_rows = [
+        {'分析类型': '航班同行人数', '数量': summary.get('航班同行人数', len(_get_collection(travel, 'flight_companions', default=[]) or [])), '说明': '航班同行明细'},
+        {'分析类型': '铁路同行人数', '数量': summary.get('铁路同行人数', len(_get_collection(travel, 'rail_companions', default=[]) or [])), '说明': '铁路同行明细'},
+        {'分析类型': '同行资金关联数', '数量': len(_get_collection(travel, 'fund_correlations', default=[]) or []), '说明': '同行人与资金往来交叉'},
+        {'分析类型': '同住宿人数', '数量': summary.get('同住宿人数', len(_get_collection(hotel, 'cohabitants', default=[]) or [])), '说明': '酒店同住明细'},
+        {'分析类型': '同住宿资金关联数', '数量': len(_get_collection(hotel, 'fund_correlations', default=[]) or []), '说明': '同住宿人与资金往来交叉'},
+        {'分析类型': '快递联系人数', '数量': summary.get('快递联系人数', len(_get_collection(express, 'express_contacts', default=[]) or [])), '说明': '快递收寄联系人'},
+        {'分析类型': '快递资金关联数', '数量': len(_get_collection(express, 'fund_correlations', default=[]) or []), '说明': '快递联系人与资金往来交叉'},
+    ]
+    _write_excel_sheet(writer, '关联分析-汇总', summary_rows)
+
+    flight_rows = []
+    for item in _get_collection(travel, 'flight_companions', default=[]) or []:
+        flight_rows.append({
+            '核心人员': item.get('person', ''),
+            '同行人': _first_present(item, 'companion_name', 'companion', default=''),
+            '出行日期': _safe_format_date(_first_present(item, '_travel_dt', 'travel_date')),
+            '交通方式': _first_present(item, 'travel_type', default='航班'),
+            '航班号': _first_present(item, 'flight_no', 'transport_no', default=''),
+            **_extract_source_columns(item),
+        })
+    _write_excel_sheet(writer, '同行分析-航班', flight_rows)
+
+    rail_rows = []
+    for item in _get_collection(travel, 'rail_companions', default=[]) or []:
+        rail_rows.append({
+            '核心人员': item.get('person', ''),
+            '同行人': _first_present(item, 'companion_name', 'companion', default=''),
+            '出行日期': _safe_format_date(_first_present(item, '_travel_dt', 'travel_date')),
+            '交通方式': _first_present(item, 'travel_type', default='火车'),
+            '车次': _first_present(item, 'train_no', 'transport_no', default=''),
+            **_extract_source_columns(item),
+        })
+    _write_excel_sheet(writer, '同行分析-铁路', rail_rows)
+
+    travel_fund_rows = []
+    for item in _get_collection(travel, 'fund_correlations', default=[]) or []:
+        travel_fund_rows.append({
+            '核心人员': item.get('person', ''),
+            '同行人': _first_present(item, 'companion', 'companion_name', default=''),
+            '同行日期': _safe_format_date(_first_present(item, '_travel_dt', 'travel_date')),
+            '交通方式': _first_present(item, 'travel_type', default=''),
+            '交易日期': _safe_format_datetime(item.get('transaction_date')),
+            '相差天数': item.get('days_diff', ''),
+            '时序说明': item.get('timing', ''),
+            '金额(元)': item.get('amount', 0),
+            '方向': _normalize_direction(item.get('direction')),
+            '交易对手原文': item.get('counterparty_raw', ''),
+            '摘要': item.get('description', ''),
+            '风险等级': _normalize_risk_level(item.get('risk_level', '')),
+        })
+    _write_excel_sheet(writer, '同行分析-资金关联', travel_fund_rows)
+
+    hotel_rows = []
+    for item in _get_collection(hotel, 'cohabitants', default=[]) or []:
+        hotel_rows.append({
+            '核心人员': item.get('person', ''),
+            '同住人': item.get('cohabitant', ''),
+            '入住日期': _safe_format_date(_first_present(item, '_stay_dt', 'stay_date')),
+            '酒店名称': item.get('hotel', ''),
+        })
+    _write_excel_sheet(writer, '同住宿分析-明细', hotel_rows)
+
+    hotel_fund_rows = []
+    for item in _get_collection(hotel, 'fund_correlations', default=[]) or []:
+        hotel_fund_rows.append({
+            '核心人员': item.get('person', ''),
+            '同住人': item.get('cohabitant', ''),
+            '入住日期': _safe_format_date(_first_present(item, '_stay_dt', 'stay_date')),
+            '交易日期': _safe_format_datetime(item.get('transaction_date')),
+            '相差天数': item.get('days_diff', ''),
+            '时序说明': item.get('timing', ''),
+            '金额(元)': item.get('amount', 0),
+            '方向': _normalize_direction(item.get('direction')),
+            '交易对手原文': item.get('counterparty_raw', ''),
+            '摘要': item.get('description', ''),
+            '风险等级': _normalize_risk_level(item.get('risk_level', '')),
+        })
+    _write_excel_sheet(writer, '同住宿分析-资金关联', hotel_fund_rows)
+
+    express_rows = []
+    for item in _get_collection(express, 'express_contacts', default=[]) or []:
+        express_rows.append({
+            '核心人员': item.get('person', ''),
+            '联系对象': item.get('contact', ''),
+            '联系类型': item.get('type', ''),
+        })
+    _write_excel_sheet(writer, '快递联系-明细', express_rows)
+
+    frequent_address_rows = []
+    for item in _get_collection(express, 'frequent_addresses', default=[]) or []:
+        frequent_address_rows.append({
+            '高频地址/联系人': item.get('name', ''),
+            '出现次数': item.get('count', 0),
+            '涉及人员': '; '.join(item.get('persons', [])) if isinstance(item.get('persons'), list) else '',
+        })
+    _write_excel_sheet(writer, '快递联系-高频地址', frequent_address_rows)
+
+    express_fund_rows = []
+    for item in _get_collection(express, 'fund_correlations', default=[]) or []:
+        express_fund_rows.append({
+            '核心人员': item.get('person', ''),
+            '快递联系人': item.get('contact', ''),
+            '交易日期': _safe_format_datetime(item.get('transaction_date')),
+            '金额(元)': item.get('amount', 0),
+            '方向': _normalize_direction(item.get('direction')),
+            '交易摘要': item.get('description', ''),
+            '发生次数': _first_present(item, 'frequency', 'count', default=0),
+            '风险等级': _normalize_risk_level(item.get('risk_level', '')),
+        })
+    _write_excel_sheet(writer, '快递联系-资金关联', express_fund_rows)
+
 
 def _generate_income_classification_sheet(writer, derived_data):
     """
@@ -1163,11 +1668,12 @@ def _generate_income_classification_sheet(writer, derived_data):
             classification_data.append({
                 '人员': person,
                 '收入类型': '合法收入',
-                '日期': item.get('date'),
+                '日期': _safe_format_date(item.get('date')),
                 '金额(元)': item.get('amount', 0),
                 '对手方': item.get('counterparty', ''),
                 '摘要': item.get('description', ''),
-                '判断依据': item.get('reason', '')
+                '判断依据': item.get('reason', ''),
+                **_extract_source_columns(item),
             })
 
         # 未知收入明细
@@ -1175,11 +1681,12 @@ def _generate_income_classification_sheet(writer, derived_data):
             classification_data.append({
                 '人员': person,
                 '收入类型': '未知收入',
-                '日期': item.get('date'),
+                '日期': _safe_format_date(item.get('date')),
                 '金额(元)': item.get('amount', 0),
                 '对手方': item.get('counterparty', ''),
                 '摘要': item.get('description', ''),
-                '判断依据': item.get('reason', '')
+                '判断依据': item.get('reason', ''),
+                **_extract_source_columns(item),
             })
 
         # 可疑收入明细
@@ -1187,16 +1694,15 @@ def _generate_income_classification_sheet(writer, derived_data):
             classification_data.append({
                 '人员': person,
                 '收入类型': '可疑收入',
-                '日期': item.get('date'),
+                '日期': _safe_format_date(item.get('date')),
                 '金额(元)': item.get('amount', 0),
                 '对手方': item.get('counterparty', ''),
                 '摘要': item.get('description', ''),
-                '判断依据': item.get('reason', '')
+                '判断依据': item.get('reason', ''),
+                **_extract_source_columns(item),
             })
 
-        if classification_data:
-            df = pd.DataFrame(classification_data)
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
+        _write_excel_sheet(writer, sheet_name, classification_data)
 
 
 def _generate_income_summary_sheet(writer, derived_data):
@@ -1228,9 +1734,7 @@ def _generate_income_summary_sheet(writer, derived_data):
             '总收入(元)': classification.get('legitimate_income', 0) + classification.get('unknown_income', 0) + classification.get('suspicious_income', 0)
         })
 
-    if summary_data:
-        df = pd.DataFrame(summary_data)
-        df.to_excel(writer, sheet_name='收入分类汇总', index=False)
+    _write_excel_sheet(writer, '收入分类汇总', summary_data)
 
 
 def _generate_total_assets_sheet(writer, derived_data):
@@ -1241,35 +1745,39 @@ def _generate_total_assets_sheet(writer, derived_data):
         writer: ExcelWriter对象
         derived_data: 派生数据字典（包含total_assets）
     """
-    if not derived_data or not derived_data.get('total_assets'):
+    if not derived_data:
         return
+    assets_data = []
+    family_summaries = _resolve_family_summaries(derived_data)
 
-    total_assets = derived_data['total_assets']
+    for family_name, summary in family_summaries.items():
+        total_assets = summary.get('total_assets', {})
+        assets_data.append({
+            '分析单元': family_name,
+            '银行存款(元)': total_assets.get('bank_balance', 0),
+            '房产价值(元)': total_assets.get('property_value', 0),
+            '车辆价值(元)': total_assets.get('vehicle_value', 0),
+            '理财持仓(元)': total_assets.get('wealth_balance', 0),
+            '总资产(元)': total_assets.get('total', 0),
+            '房产数量': total_assets.get('property_count', 0),
+            '车辆数量': total_assets.get('vehicle_count', 0),
+        })
 
-    assets_data = [{
-        '资产类型': '银行存款',
-        '金额(元)': total_assets.get('bank_balance', 0),
-        '金额(万元)': round(total_assets.get('bank_balance', 0) / 10000, 2)
-    }, {
-        '资产类型': '房产价值',
-        '金额(元)': total_assets.get('property_value', 0),
-        '金额(万元)': round(total_assets.get('property_value', 0) / 10000, 2)
-    }, {
-        '资产类型': '车辆价值',
-        '金额(元)': total_assets.get('vehicle_value', 0),
-        '金额(万元)': round(total_assets.get('vehicle_value', 0) / 10000, 2)
-    }, {
-        '资产类型': '理财持仓',
-        '金额(元)': total_assets.get('wealth_balance', 0),
-        '金额(万元)': round(total_assets.get('wealth_balance', 0) / 10000, 2)
-    }, {
-        '资产类型': '总资产',
-        '金额(元)': total_assets.get('total', 0),
-        '金额(万元)': round(total_assets.get('total', 0) / 10000, 2)
-    }]
+    if not assets_data:
+        total_assets = _get_collection(derived_data, 'total_assets', default={})
+        if isinstance(total_assets, dict) and total_assets:
+            assets_data.append({
+                '分析单元': '总体',
+                '银行存款(元)': total_assets.get('bank_balance', 0),
+                '房产价值(元)': total_assets.get('property_value', 0),
+                '车辆价值(元)': total_assets.get('vehicle_value', 0),
+                '理财持仓(元)': total_assets.get('wealth_balance', 0),
+                '总资产(元)': total_assets.get('total', 0),
+                '房产数量': total_assets.get('property_count', 0),
+                '车辆数量': total_assets.get('vehicle_count', 0),
+            })
 
-    df = pd.DataFrame(assets_data)
-    df.to_excel(writer, sheet_name='总资产汇总', index=False)
+    _write_excel_sheet(writer, '家庭总资产汇总', assets_data)
 
 
 def _generate_member_transfers_sheet(writer, derived_data):
@@ -1280,23 +1788,51 @@ def _generate_member_transfers_sheet(writer, derived_data):
         writer: ExcelWriter对象
         derived_data: 派生数据字典（包含member_transfers）
     """
-    if not derived_data or not derived_data.get('member_transfers'):
+    if not derived_data:
         return
-
-    member_transfers = derived_data['member_transfers']
     transfer_data = []
+    family_summaries = _resolve_family_summaries(derived_data)
 
-    for person, transfers in member_transfers.items():
-        transfer_data.append({
-            '人员': person,
-            '转给家庭(元)': transfers.get('to_family', 0),
-            '从家庭转入(元)': transfers.get('from_family', 0),
-            '净流入(元)': transfers.get('net', 0)
-        })
+    for family_name, summary in family_summaries.items():
+        member_transfers = summary.get('member_transfers', {}) or {}
+        for person, transfers in member_transfers.items():
+            details = transfers.get('transfer_details', []) if isinstance(transfers, dict) else []
+            first_date = _safe_format_date(details[0].get('date')) if details else ''
+            last_date = _safe_format_date(details[-1].get('date')) if details else ''
+            main_counterparties = []
+            if details:
+                main_counterparties = sorted(
+                    { _clean_excel_text(detail.get('counterparty')) for detail in details if _clean_excel_text(detail.get('counterparty')) }
+                )
+            transfer_data.append({
+                '分析单元': family_name,
+                '成员': person,
+                '转给家庭(元)': transfers.get('to_family', 0),
+                '从家庭转入(元)': transfers.get('from_family', 0),
+                '净流入(元)': transfers.get('net', 0),
+                '转账明细数': len(details),
+                '首笔日期': first_date,
+                '末笔日期': last_date,
+                '主要家庭对手方': '; '.join(main_counterparties[:5]),
+            })
 
-    if transfer_data:
-        df = pd.DataFrame(transfer_data)
-        df.to_excel(writer, sheet_name='成员间转账', index=False)
+    if not transfer_data:
+        member_transfers = _get_collection(derived_data, 'member_transfers', default={})
+        if isinstance(member_transfers, dict):
+            for person, transfers in member_transfers.items():
+                transfer_data.append({
+                    '分析单元': '总体',
+                    '成员': person,
+                    '转给家庭(元)': transfers.get('to_family', 0),
+                    '从家庭转入(元)': transfers.get('from_family', 0),
+                    '净流入(元)': transfers.get('net', 0),
+                    '转账明细数': len(transfers.get('transfer_details', [])),
+                    '首笔日期': '',
+                    '末笔日期': '',
+                    '主要家庭对手方': '',
+                })
+
+    _write_excel_sheet(writer, '成员间转账明细', transfer_data)
 
 
 def generate_excel_workbook(profiles: Dict,
@@ -1333,6 +1869,8 @@ def generate_excel_workbook(profiles: Dict,
         output_path = config.OUTPUT_EXCEL_FILE
 
     logger.info(f'正在生成Excel底稿: {output_path}')
+    if not family_tree and isinstance(derived_data, dict):
+        family_tree = _get_collection(derived_data, 'family_tree', default={}) or {}
 
     with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
 
@@ -1388,14 +1926,17 @@ def generate_excel_workbook(profiles: Dict,
         # 14. 资金闭环/过账通道（新增）
         _generate_fund_cycle_sheets(writer, penetration_results)
 
-        # 15. 收入分类分析（新增）
+        # 15. 关联分析底稿（新增）
+        _generate_correlation_sheets(writer, derived_data)
+
+        # 16. 收入分类分析（新增）
         _generate_income_summary_sheet(writer, derived_data)
         _generate_income_classification_sheet(writer, derived_data)
 
-        # 16. 总资产汇总（新增）
+        # 17. 总资产汇总（新增）
         _generate_total_assets_sheet(writer, derived_data)
 
-        # 17. 成员间转账（新增）
+        # 18. 成员间转账（新增）
         _generate_member_transfers_sheet(writer, derived_data)
 
     logger.info(f'Excel底稿生成完成: {output_path}')

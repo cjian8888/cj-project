@@ -3025,8 +3025,10 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             "loan": analysis_results.get("loan", {}),
             "income": analysis_results.get("income", {}),
             "time_series": analysis_results.get("timeSeries", {}),
+            "timeSeries": analysis_results.get("timeSeries", {}),
             "aggregation": analysis_results.get("aggregation", {}),
             "large_transactions": analysis_results.get("large_transactions", []),
+            "family_tree": analysis_results.get("family_tree", {}),
             "family_summary": {
                 "family_units": analysis_results.get("family_units_v2", []),
                 "family_relations": analysis_results.get("family_relations", {}),
@@ -3197,6 +3199,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                 output_path=os.path.join(
                     output_dirs["analysis_results"], config.OUTPUT_EXCEL_FILE
                 ),
+                family_tree=analysis_results.get("family_tree", {}),
                 family_assets=family_assets,
                 penetration_results=analysis_results.get("penetration", {}),
                 loan_results=analysis_results.get("loan", {}),
