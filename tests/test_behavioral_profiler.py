@@ -103,7 +103,9 @@ def test_fast_in_out_detection():
             'description': '转账',
             'income': 100000,
             'expense': 0,
-            'balance': 100000
+            'balance': 100000,
+            'source_file': '收入流水.xlsx',
+            'source_row_index': 12,
         },
         {
             'date': pd.Timestamp('2024-01-15 14:00:00'),
@@ -111,7 +113,9 @@ def test_fast_in_out_detection():
             'description': '转账',
             'income': 0,
             'expense': 99000,
-            'balance': 1000
+            'balance': 1000,
+            'source_file': '支出流水.xlsx',
+            'source_row_index': 18,
         }
     ]
     
@@ -121,6 +125,12 @@ def test_fast_in_out_detection():
     assert len(patterns) == 1
     assert patterns[0]['type'] == 'fast_in_out'
     assert patterns[0]['hours_diff'] == 4.0
+    assert patterns[0]['source_file'] == '收入流水.xlsx'
+    assert patterns[0]['source_row_index'] == 12
+    assert patterns[0]['income_source_file'] == '收入流水.xlsx'
+    assert patterns[0]['income_source_row_index'] == 12
+    assert patterns[0]['expense_source_file'] == '支出流水.xlsx'
+    assert patterns[0]['expense_source_row_index'] == 18
 
 
 def test_fast_in_out_with_financial_filter():

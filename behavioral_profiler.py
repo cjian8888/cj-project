@@ -25,6 +25,27 @@ import utils
 
 logger = utils.setup_logger(__name__)
 
+
+def _extract_source_file(row: pd.Series) -> str:
+    """统一提取交易来源文件，兼容中英文列名。"""
+    return str(
+        row.get("source_file")
+        or row.get("数据来源")
+        or row.get("来源文件")
+        or ""
+    ).strip()
+
+
+def _extract_source_row_index(row: pd.Series):
+    """统一提取原始 Excel 物理行号，避免落成 DataFrame 内部索引。"""
+    value = row.get("source_row_index")
+    if pd.isna(value):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
 # ============================================================
 # 【2026-03-04 优化】性能优化配置
 # ============================================================
@@ -325,6 +346,13 @@ def detect_fast_in_out(
                 'balance_zeroed': balance_zeroed,
                 'income_row_idx': idx,
                 'expense_row_idx': exp_idx,
+                'income_source_file': _extract_source_file(income_row),
+                'income_source_row_index': _extract_source_row_index(income_row),
+                'expense_source_file': _extract_source_file(expense_row),
+                'expense_source_row_index': _extract_source_row_index(expense_row),
+                # 保留统一字段供前端/报告通用展示，默认指向触发模式的收入行
+                'source_file': _extract_source_file(income_row),
+                'source_row_index': _extract_source_row_index(income_row),
                 'description': f"资金停留{hours_diff:.1f}小时后转出，{'余额归零' if balance_zeroed else '余额未归零'}"
             })
     
@@ -410,6 +438,8 @@ def detect_structuring(
                     'split_total': total_expense,
                     'split_ratio': round(ratio, 2),
                     'time_window_days': time_window_days,
+                    'source_file': _extract_source_file(income_row),
+                    'source_row_index': _extract_source_row_index(income_row),
                     'description': f"大额收入{income_amount/10000:.1f}万后，{len(small_expenses)}笔分散支出共{total_expense/10000:.1f}万"
                 })
     
@@ -452,6 +482,8 @@ def detect_structuring(
                     'split_total': total_income,
                     'split_ratio': round(ratio, 2),
                     'time_window_days': time_window_days,
+                    'source_file': _extract_source_file(expense_row),
+                    'source_row_index': _extract_source_row_index(expense_row),
                     'description': f"{len(small_incomes)}笔分散收入共{total_income/10000:.1f}万后，大额支出{expense_amount/10000:.1f}万"
                 })
     
@@ -527,6 +559,8 @@ def detect_dormant_activation(
                     'counterparty': str(row.get('counterparty', '')),
                     'prev_transaction_date': row['prev_date'],
                     'row_idx': idx,
+                    'source_file': _extract_source_file(row),
+                    'source_row_index': _extract_source_row_index(row),
                     'description': f"账户休眠{int(days_gap)}天后，突发{direction}{amount/10000:.1f}万"
                 })
     
@@ -906,4 +940,3 @@ def analyze_fund_sedimentation(
     logger.info(f"  - 可疑高频对手方: {len(results['suspicious_counterparties'])} 个")
     
     return results
-

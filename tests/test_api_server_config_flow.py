@@ -705,6 +705,34 @@ def test_save_html_report_refreshes_report_index(tmp_path):
         api_server._current_config.update(previous_config)
 
 
+def test_collect_family_assets_for_summary_deduplicates_properties_and_vehicles():
+    profiles = {
+        "张三": {
+            "properties_precise": [{"location": "测试路1号101室"}],
+            "vehicles": [{"号牌号码": "沪A12345"}],
+        },
+        "李四": {
+            "properties": [{"房地坐落": "测试路1号101室"}],
+            "vehicles": [{"号牌号码": "沪A12345"}],
+        },
+    }
+
+    assets = api_server._collect_family_assets_for_summary(["张三", "李四"], profiles)
+
+    assert len(assets["properties"]) == 1
+    assert len(assets["vehicles"]) == 1
+
+
+def test_family_unit_has_profile_members_only_accepts_units_with_profile_overlap():
+    profiles = {"候海焱": {"summary": {}}}
+
+    assert api_server._family_unit_has_profile_members(["候海焱"], profiles) is True
+    assert (
+        api_server._family_unit_has_profile_members(["侯海焱", "周伟", "周天健"], profiles)
+        is False
+    )
+
+
 def test_serialize_profiles_calculates_max_transaction_from_detail_records():
     profiles = {
         "张三": {

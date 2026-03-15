@@ -18,6 +18,7 @@ import sys
 import warnings
 import os
 import json
+import re
 import shutil
 import logging
 from pathlib import Path
@@ -939,6 +940,84 @@ def serialize_for_json(obj):
         return obj_dict
 
     return obj
+
+
+def _collect_family_assets_for_summary(
+    members: List[str], profiles: Dict[str, Dict[str, Any]]
+) -> Dict[str, List[Dict[str, Any]]]:
+    """聚合家庭成员资产，供 family_finance.calculate_family_summary 复用。"""
+    properties: List[Dict[str, Any]] = []
+    vehicles: List[Dict[str, Any]] = []
+    seen_properties = set()
+    seen_vehicles = set()
+
+    def _normalize_property_key(prop: Dict[str, Any]) -> str:
+        address = (
+            prop.get("房地坐落")
+            or prop.get("location")
+            or prop.get("address")
+            or prop.get("坐落")
+            or ""
+        )
+        address_key = re.sub(r"\s+", "", str(address))
+        if address_key:
+            return address_key
+        return str(
+            prop.get("property_number")
+            or prop.get("certificate_number")
+            or prop.get("source_file")
+            or ""
+        ).strip()
+
+    def _normalize_vehicle_key(vehicle: Dict[str, Any]) -> str:
+        return str(
+            vehicle.get("号牌号码")
+            or vehicle.get("plate_number")
+            or vehicle.get("vehicle_identification_number")
+            or vehicle.get("车辆识别代号")
+            or vehicle.get("source_file")
+            or ""
+        ).strip()
+
+    for member in members:
+        profile = profiles.get(member, {}) or {}
+        property_sources = (profile.get("properties_precise", []) or []) + (
+            profile.get("properties", []) or []
+        )
+
+        for prop in property_sources:
+            normalized = dict(prop)
+            normalized.setdefault(
+                "价格",
+                prop.get("不动产价格")
+                or prop.get("estimated_value")
+                or prop.get("value")
+                or prop.get("transaction_price")
+                or 0,
+            )
+            normalized.setdefault(
+                "房地坐落",
+                prop.get("location") or prop.get("address") or prop.get("坐落") or "",
+            )
+            identifier = _normalize_property_key(normalized)
+            if identifier and identifier not in seen_properties:
+                seen_properties.add(identifier)
+                properties.append(normalized)
+
+        for vehicle in profile.get("vehicles", []) or []:
+            identifier = _normalize_vehicle_key(vehicle)
+            if identifier and identifier not in seen_vehicles:
+                seen_vehicles.add(identifier)
+                vehicles.append(dict(vehicle))
+
+    return {"properties": properties, "vehicles": vehicles}
+
+
+def _family_unit_has_profile_members(
+    members: List[str], profiles: Dict[str, Dict[str, Any]]
+) -> bool:
+    """判断家庭单元是否至少包含一个可分析画像成员。"""
+    return any(member in profiles for member in members or [])
 
 
 def create_output_directories(base_dir: str) -> Dict[str, str]:
@@ -2854,9 +2933,18 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                 householder = unit.get("householder", "") or unit.get("anchor", "")
                 members = unit.get("members", [])
                 if members:
+                    if not _family_unit_has_profile_members(members, profiles):
+                        logger.info(f"  · 跳过无画像家庭单元: {householder}")
+                        continue
                     try:
+                        family_assets = _collect_family_assets_for_summary(
+                            members, profiles
+                        )
                         unit_summary = family_finance.calculate_family_summary(
-                            profiles, members
+                            profiles,
+                            members,
+                            properties=family_assets["properties"],
+                            vehicles=family_assets["vehicles"],
                         )
                         unit_summary["householder"] = householder
                         unit_summary["extended_relatives"] = unit.get(
@@ -2874,8 +2962,12 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                 analysis_results["all_family_summaries"] = all_family_summaries
                 logger.info(f"  ✓ 家庭分析完成: {len(effective_family_units)} 个分析单元")
             else:
+                family_assets = _collect_family_assets_for_summary(all_persons, profiles)
                 family_summary_result = family_finance.calculate_family_summary(
-                    profiles, all_persons
+                    profiles,
+                    all_persons,
+                    properties=family_assets["properties"],
+                    vehicles=family_assets["vehicles"],
                 )
                 analysis_results["family_summary"] = family_summary_result
                 logger.info(f"  ✓ 家庭汇总完成(fallback): {len(all_persons)} 人")

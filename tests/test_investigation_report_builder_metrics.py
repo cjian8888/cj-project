@@ -473,6 +473,47 @@ def test_build_report_v4_prefers_injected_primary_config_over_disk_fallback():
     assert report["person_sections"][0]["name"] == "张三"
 
 
+def test_build_family_data_from_config_includes_external_property_and_vehicle_assets():
+    builder = InvestigationReportBuilder(
+        {
+            "profiles": {
+                "张三": {
+                    "has_data": True,
+                    "summary": {"net_flow": 0},
+                    "wealth_management": {"estimated_holding": 0},
+                    "vehicles": [{"号牌号码": "沪A12345"}],
+                }
+            },
+            "derived_data": {},
+            "suspicions": {},
+            "graph_data": {},
+            "metadata": {"id_to_name_map": {"310101199001010011": "张三"}},
+            "precisePropertyData": {
+                "310101199001010011": [{"location": "测试路1号101室"}]
+            },
+            "vehicleData": {
+                "310101199001010011": [{"号牌号码": "沪A12345"}]
+            },
+        },
+        output_dir="output",
+    )
+    config = PrimaryTargetsConfig(
+        analysis_units=[
+            AnalysisUnit(
+                anchor="张三",
+                members=["张三"],
+                unit_type="family",
+            )
+        ]
+    )
+
+    family_data = builder._build_family_data_from_config(config)
+    summary = family_data["all_family_summaries"]["张三"]["total_assets"]
+
+    assert summary["property_count"] == 1
+    assert summary["vehicle_count"] == 1
+
+
 def test_load_builder_keeps_valid_profiles_when_first_entity_has_no_income(tmp_path):
     cache_dir = tmp_path / "analysis_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -725,6 +766,46 @@ def test_family_section_keeps_pending_members_without_profiles():
     assert family_section["members"] == ["张三", "李四", "王五"]
     assert [m["name"] for m in family_section["pending_members"]] == ["李四", "王五"]
     assert family_section["pending_members"][0]["relation"] == "配偶"
+
+
+def test_get_effective_family_units_filters_ghost_units_without_profile_overlap():
+    builder = InvestigationReportBuilder(
+        {
+            "profiles": {
+                "候海焱": {"summary": {"real_income": 1000, "real_expense": 500}},
+            },
+            "derived_data": {
+                "family_units_v2": [
+                    {
+                        "anchor": "侯海焱",
+                        "householder": "侯海焱",
+                        "members": ["侯海焱", "周伟", "周天健"],
+                    },
+                    {
+                        "anchor": "候海焱",
+                        "householder": "候海焱",
+                        "members": ["候海焱"],
+                    },
+                ],
+                "all_family_summaries": {
+                    "候海焱": {
+                        "householder": "候海焱",
+                        "family_members": ["候海焱"],
+                    }
+                },
+            },
+            "suspicions": {},
+            "graph_data": {},
+            "metadata": {},
+        },
+        output_dir="output",
+    )
+
+    effective_units = builder._get_effective_family_units()
+
+    assert len(effective_units) == 1
+    assert effective_units[0]["anchor"] == "候海焱"
+    assert effective_units[0]["members"] == ["候海焱"]
 
 
 def test_complete_txt_report_marks_real_metrics_and_pending_members(tmp_path):

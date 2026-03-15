@@ -464,6 +464,7 @@ class InvestigationReportBuilder:
 
         # 核查底稿Excel缓存（延迟加载）
         self._workbook_cache = {}
+        self._effective_family_units_cache: Optional[List[Dict[str, Any]]] = None
         self.profiles = analysis_cache.get("profiles", {})
         # 缓存核心人员列表
         self._core_persons = self._extract_core_persons()
@@ -704,6 +705,108 @@ class InvestigationReportBuilder:
             return confusable_hits[0]
 
         return None
+
+    def _normalize_family_units_payload(self, payload: Any) -> List[Dict[str, Any]]:
+        """统一规整 family_units/family_units_v2 结构，便于后续集中过滤。"""
+        if isinstance(payload, dict):
+            units = list(payload.values())
+        elif isinstance(payload, list):
+            units = payload
+        else:
+            return []
+
+        normalized_units: List[Dict[str, Any]] = []
+        for unit in units:
+            if not isinstance(unit, dict):
+                continue
+            normalized = dict(unit)
+            anchor = self._clean_report_value(
+                unit.get("anchor") or unit.get("householder"), ""
+            )
+            householder = self._clean_report_value(
+                unit.get("householder") or anchor, anchor
+            )
+            members_raw = unit.get("members", []) or []
+            members: List[str] = []
+            for member in members_raw:
+                clean_member = self._clean_report_value(member, "")
+                if clean_member and clean_member not in members:
+                    members.append(clean_member)
+
+            normalized["anchor"] = anchor
+            normalized["householder"] = householder
+            normalized["members"] = members
+            normalized["member_details"] = unit.get("member_details", []) or []
+            normalized["relations"] = unit.get("relations", []) or []
+            normalized["extended_relatives"] = unit.get("extended_relatives", []) or []
+            normalized_units.append(normalized)
+
+        return normalized_units
+
+    def _family_unit_has_profile_overlap(self, unit: Dict[str, Any]) -> bool:
+        """仅保留与真实画像或已生成家庭汇总有交集的家庭单元。"""
+        if not isinstance(self.profiles, dict) or not self.profiles:
+            return True
+
+        all_family_summaries = self.derived_data.get("all_family_summaries", {})
+        summary_keys = (
+            set(all_family_summaries.keys())
+            if isinstance(all_family_summaries, dict)
+            else set()
+        )
+        anchor = self._clean_report_value(unit.get("anchor"), "")
+        householder = self._clean_report_value(unit.get("householder"), anchor)
+        members = unit.get("members", []) or []
+
+        if summary_keys and (anchor in summary_keys or householder in summary_keys):
+            return True
+
+        candidate_names = [anchor, householder] + [
+            self._clean_report_value(member, "") for member in members
+        ]
+        return any(name and name in self.profiles for name in candidate_names)
+
+    def _get_effective_family_units(self) -> List[Dict[str, Any]]:
+        """
+        获取报告阶段允许使用的有效家庭单元。
+
+        规则：
+        1. 优先读取 family_units_v2，其次回退 family_units
+        2. 过滤掉与真实画像、all_family_summaries 均无交集的幽灵家庭
+        3. 统一返回规整后的列表，避免各处再直接读取原始 family_units_v2
+        """
+        if self._effective_family_units_cache is not None:
+            return list(self._effective_family_units_cache)
+
+        payload_candidates = [
+            ("family_units_v2", self.derived_data.get("family_units_v2", [])),
+            ("family_units", self.derived_data.get("family_units", [])),
+        ]
+
+        for source_name, payload in payload_candidates:
+            normalized_units = self._normalize_family_units_payload(payload)
+            if not normalized_units:
+                continue
+
+            filtered_units = [
+                unit
+                for unit in normalized_units
+                if self._family_unit_has_profile_overlap(unit)
+            ]
+            if filtered_units:
+                filtered_count = len(normalized_units) - len(filtered_units)
+                if filtered_count > 0:
+                    logger.info(
+                        f"[初查报告] {source_name} 已过滤 {filtered_count} 个无画像交集家庭单元，保留 {len(filtered_units)} 个"
+                    )
+                self._effective_family_units_cache = filtered_units
+                return list(filtered_units)
+
+            self._effective_family_units_cache = normalized_units
+            return list(normalized_units)
+
+        self._effective_family_units_cache = []
+        return []
 
     def _normalize_property_address(self, address: str) -> str:
         """
@@ -1607,7 +1710,7 @@ class InvestigationReportBuilder:
                     )
 
         # 六、关联分析
-        family_units = self.derived_data.get("family_units_v2", [])
+        family_units = self._get_effective_family_units()
         family_members = []
         for unit in family_units:
             if unit.get("anchor") == name or name in unit.get("members", []):
@@ -2275,9 +2378,13 @@ class InvestigationReportBuilder:
 
         for unit in config.analysis_units:
             if unit.unit_type == "family":
+                family_assets = self._collect_family_assets_for_summary(unit.members)
                 # 计算家庭汇总
                 unit_summary = family_finance.calculate_family_summary(
-                    self.profiles, unit.members
+                    self.profiles,
+                    unit.members,
+                    properties=family_assets["properties"],
+                    vehicles=family_assets["vehicles"],
                 )
                 all_family_summaries[unit.anchor] = unit_summary
 
@@ -2321,7 +2428,107 @@ class InvestigationReportBuilder:
             "overview": overview,
             "yearly_salary": family_yearly_salary,
             "financial_profile": family_financial_profile,
+            "all_family_summaries": all_family_summaries,
+            "family_units_v2": family_units_list,
         }
+
+    def _collect_family_assets_for_summary(self, members: List[str]) -> Dict[str, List[Dict]]:
+        """聚合家庭成员资产，供 family_finance 汇总口径复用。"""
+        properties: List[Dict] = []
+        vehicles: List[Dict] = []
+        seen_properties = set()
+        seen_vehicles = set()
+
+        for name in members:
+            profile = self.profiles.get(name, {}) or {}
+
+            for prop in profile.get("properties", []) or []:
+                normalized = dict(prop)
+                if "价格" not in normalized:
+                    normalized["价格"] = (
+                        prop.get("estimated_value")
+                        or prop.get("value")
+                        or prop.get("不动产价格")
+                        or prop.get("transaction_price")
+                        or 0
+                    )
+                if "房地坐落" not in normalized:
+                    normalized["房地坐落"] = (
+                        prop.get("location")
+                        or prop.get("address")
+                        or prop.get("坐落")
+                        or ""
+                    )
+
+                identifier = self._normalize_property_address(
+                    normalized.get("房地坐落", "")
+                ) or self._clean_report_value(
+                    normalized.get("property_number")
+                    or normalized.get("certificate_number")
+                    or normalized.get("source_file"),
+                    "",
+                )
+                if identifier and identifier not in seen_properties:
+                    seen_properties.add(identifier)
+                    properties.append(normalized)
+
+            for prop in self._get_external_property_data(name):
+                normalized = dict(prop)
+                if "价格" not in normalized:
+                    normalized["价格"] = (
+                        prop.get("不动产价格")
+                        or prop.get("estimated_value")
+                        or prop.get("value")
+                        or prop.get("transaction_price")
+                        or 0
+                    )
+                if "房地坐落" not in normalized:
+                    normalized["房地坐落"] = (
+                        prop.get("location")
+                        or prop.get("address")
+                        or prop.get("坐落")
+                        or ""
+                    )
+
+                identifier = self._normalize_property_address(
+                    normalized.get("房地坐落", "")
+                ) or self._clean_report_value(
+                    normalized.get("property_number")
+                    or normalized.get("certificate_number")
+                    or normalized.get("source_file"),
+                    "",
+                )
+                if identifier and identifier not in seen_properties:
+                    seen_properties.add(identifier)
+                    properties.append(normalized)
+
+            for vehicle in profile.get("vehicles", []) or []:
+                identifier = self._clean_report_value(
+                    vehicle.get("号牌号码")
+                    or vehicle.get("plate_number")
+                    or vehicle.get("vehicle_identification_number")
+                    or vehicle.get("车辆识别代号")
+                    or vehicle.get("source_file"),
+                    "",
+                )
+                if identifier and identifier not in seen_vehicles:
+                    seen_vehicles.add(identifier)
+                    vehicles.append(dict(vehicle))
+
+            for vehicle in self._get_external_vehicle_data(name):
+                identifier = self._clean_report_value(
+                    vehicle.get("号牌号码")
+                    or vehicle.get("plate_number")
+                    or vehicle.get("vehicle_identification_number")
+                    or vehicle.get("车辆识别代号")
+                    or vehicle.get("source_file"),
+                    "",
+                )
+                if identifier and identifier not in seen_vehicles:
+                    seen_vehicles.add(identifier)
+                    vehicles.append(dict(vehicle))
+
+        return {"properties": properties, "vehicles": vehicles}
 
     def _build_family_data_from_cache(self) -> Dict:
         """从缓存构建家庭数据"""
@@ -2329,7 +2536,7 @@ class InvestigationReportBuilder:
         family_summary_data = self.derived_data.get("family_summary", {})
 
         family_yearly_salary = []
-        family_units = self.derived_data.get("family_units_v2", [])
+        family_units = self._get_effective_family_units()
         if family_units:
             first_unit = family_units[0]
             family_yearly_salary = self._aggregate_family_yearly_salary(
@@ -2859,7 +3066,7 @@ class InvestigationReportBuilder:
     def _build_family_roster(self, anchor: str, members: List[str]) -> FamilyRoster:
         """构建家庭成员清单（含关系证据）"""
         # 从 family_units_v2 获取户籍信息
-        family_units_v2 = self.derived_data.get("family_units_v2", [])
+        family_units_v2 = self._get_effective_family_units()
 
         # 查找匹配的家庭单元
         matched_unit = None
@@ -4575,7 +4782,7 @@ class InvestigationReportBuilder:
         # 获取家庭数据
         family_summary_data = self.derived_data.get("family_summary", {})
         # 【修复】family_units_v2 在 derived_data 顶层，不在 family_summary 里
-        family_units = self.derived_data.get("family_units_v2", [])
+        family_units = self._get_effective_family_units()
         family_relations = self.derived_data.get("family_relations", {})
 
         members = []
@@ -6700,10 +6907,8 @@ class InvestigationReportBuilder:
                 return families
 
         # ========== 优先级2: 未分配人员使用 family_units_v2 / family_units ==========
-        family_units_v2 = self.derived_data.get("family_units_v2", [])
-        family_units = self.derived_data.get("family_units", [])
-        effective_units = family_units_v2 if family_units_v2 else family_units
-        source_name = "family_units_v2" if family_units_v2 else "family_units"
+        effective_units = self._get_effective_family_units()
+        source_name = "effective_family_units"
 
         if effective_units:
             added_units = 0
@@ -7251,7 +7456,7 @@ class InvestigationReportBuilder:
             return "本人"
 
         # ========== 优先级1: 从 family_units_v2 获取真实户籍关系 ==========
-        family_units_v2 = self.derived_data.get("family_units_v2", [])
+        family_units_v2 = self._get_effective_family_units()
         for unit in family_units_v2:
             unit_anchor = unit.get("anchor", "") or unit.get("householder", "")
             # 找到包含 anchor 的家庭单元

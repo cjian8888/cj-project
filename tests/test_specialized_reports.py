@@ -5,6 +5,7 @@
 import json
 import os
 import sys
+import pandas as pd
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -131,6 +132,79 @@ def test_asset_report_dedupes_analysis_units_in_auto_config(tmp_path):
     report = generator._generate_asset_report()
 
     assert "家庭单元数: 1 个" in report
+
+
+def test_primary_analysis_units_filters_units_without_profile_members(tmp_path):
+    generator = _make_generator(
+        tmp_path,
+        analysis_results={
+            "family_units_v2": [
+                {"anchor": "侯海焱", "members": ["侯海焱", "周伟", "周天健"]},
+                {"anchor": "候海焱", "members": ["候海焱"]},
+            ]
+        },
+        profiles={"候海焱": {"summary": {}}},
+    )
+
+    units = generator._load_primary_analysis_units()
+
+    assert [unit["anchor"] for unit in units] == ["候海焱"]
+
+
+def test_behavior_report_backfills_traceability_from_cleaned_data(tmp_path):
+    generator = _make_generator(
+        tmp_path,
+        analysis_results={
+            "behavioral": {
+                "fast_in_out": [
+                    {
+                        "entity": "张三",
+                        "income_date": "2024-01-15T10:00:00",
+                        "income_amount": 100000,
+                        "income_counterparty": "甲方公司",
+                        "expense_date": "2024-01-15T14:00:00",
+                        "expense_amount": 95000,
+                        "expense_counterparty": "李四",
+                        "hours_diff": 4.0,
+                        "income_row_idx": 0,
+                        "expense_row_idx": 1,
+                    }
+                ],
+                "structuring": [],
+                "dormant_activation": [],
+            }
+        },
+    )
+
+    cleaned_dir = tmp_path / "output" / "cleaned_data" / "个人"
+    cleaned_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "交易时间": "2024-01-15 10:00:00",
+                "收入(元)": 100000,
+                "支出(元)": 0,
+                "交易对手": "甲方公司",
+                "来源文件": "收入原始.xlsx",
+                "source_row_index": 12,
+            },
+            {
+                "交易时间": "2024-01-15 14:00:00",
+                "收入(元)": 0,
+                "支出(元)": 95000,
+                "交易对手": "李四",
+                "来源文件": "支出原始.xlsx",
+                "source_row_index": 18,
+            },
+        ]
+    ).to_excel(cleaned_dir / "张三_合并流水.xlsx", index=False)
+
+    report = generator._generate_behavioral_report()
+
+    assert "📁 收入溯源: 收入原始.xlsx" in report
+    assert "📍 收入行号: 第12行" in report
+    assert "📁 支出溯源: 支出原始.xlsx" in report
+    assert "📍 支出行号: 第18行" in report
 
 
 def test_penetration_report_marks_missing_amount_instead_of_zero(tmp_path):

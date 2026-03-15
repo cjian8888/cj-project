@@ -99,6 +99,7 @@ class SpecializedReportGenerator:
         self.output_dir = output_dir
         self.input_dir = input_dir or os.path.join(os.getcwd(), "data")
         self._person_flow_df_cache: Dict[str, pd.DataFrame] = {}
+        self._person_flow_raw_df_cache: Dict[str, pd.DataFrame] = {}
         self._day_transaction_cache: Dict[tuple, List[Dict]] = {}
 
         logger.info(
@@ -277,6 +278,18 @@ class SpecializedReportGenerator:
                 )
             return deduped
 
+        def _filter_units_with_profiles(units: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            if not isinstance(self.profiles, dict) or not self.profiles:
+                return units
+            filtered: List[Dict[str, Any]] = []
+            for unit in units:
+                anchor = self._clean_text(unit.get("anchor"), default="")
+                members = unit.get("members", []) or []
+                candidate_names = [anchor] + members
+                if any(self._clean_text(name, default="") in self.profiles for name in candidate_names):
+                    filtered.append(unit)
+            return filtered
+
         cache_dir = self._get_cache_dir()
         config_candidates = [
             os.path.join(self.input_dir, "primary_targets.json"),
@@ -290,7 +303,7 @@ class SpecializedReportGenerator:
                     payload = json.load(f)
                 units = payload.get("analysis_units", [])
                 if isinstance(units, list) and units:
-                    normalized = _dedupe_units(units)
+                    normalized = _filter_units_with_profiles(_dedupe_units(units))
                     if normalized:
                         return normalized
             except Exception as exc:
@@ -299,7 +312,7 @@ class SpecializedReportGenerator:
         fallback_units = self.analysis_results.get("family_units_v2", [])
         if not isinstance(fallback_units, list):
             return []
-        return _dedupe_units(fallback_units)
+        return _filter_units_with_profiles(_dedupe_units(fallback_units))
 
     def _format_property_area(self, value: Any) -> str:
         """统一房产面积显示，避免“平方米㎡”重复单位。"""
@@ -310,6 +323,48 @@ class SpecializedReportGenerator:
             text = text.replace(suffix, "")
         text = text.strip()
         return f"{text}平方米" if text else "暂无数据"
+
+    def _get_cleaned_row_trace(self, person: str, row_index: Any) -> Dict[str, Any]:
+        """根据 cleaned_data 中的行位置回补真实源文件和 Excel 物理行号。"""
+        try:
+            idx = int(row_index)
+        except (TypeError, ValueError):
+            return {}
+
+        if idx < 0:
+            return {}
+
+        if person not in self._person_flow_raw_df_cache:
+            file_path = self._resolve_cleaned_person_flow_path(person)
+            if not os.path.exists(file_path):
+                self._person_flow_raw_df_cache[person] = pd.DataFrame()
+            else:
+                try:
+                    self._person_flow_raw_df_cache[person] = pd.read_excel(file_path)
+                except Exception as exc:
+                    logger.warning(f"[专项报告] 加载 cleaned_data 失败 {file_path}: {exc}")
+                    self._person_flow_raw_df_cache[person] = pd.DataFrame()
+
+        df = self._person_flow_raw_df_cache.get(person, pd.DataFrame())
+        if df.empty or idx >= len(df):
+            return {}
+
+        row = df.iloc[idx]
+        source_file = self._clean_text(
+            row.get("来源文件", row.get("source_file")), default=""
+        )
+        source_row_index = row.get("source_row_index")
+        try:
+            source_row_index = (
+                int(source_row_index) if pd.notna(source_row_index) else None
+            )
+        except (TypeError, ValueError):
+            source_row_index = None
+
+        return {
+            "source_file": source_file,
+            "source_row_index": source_row_index,
+        }
 
     def _is_material_periodic_income(self, item: Dict[str, Any]) -> bool:
         """过滤明显无审计价值的周期性小额入账。"""
@@ -2538,9 +2593,42 @@ class SpecializedReportGenerator:
                 expense_cp = self._clean_text(pattern.get('expense_counterparty'), default='对手方不明')
                 lines.append(f"  收入方: {income_cp}")
                 lines.append(f"  支出方: {expense_cp}")
+                income_source_file = self._clean_text(
+                    pattern.get("income_source_file"), default=""
+                )
+                income_source_row = pattern.get("income_source_row_index")
+                expense_source_file = self._clean_text(
+                    pattern.get("expense_source_file"), default=""
+                )
+                expense_source_row = pattern.get("expense_source_row_index")
 
-                # 添加溯源
-                self._add_traceability(lines, pattern)
+                if not income_source_file and pattern.get("income_row_idx") is not None:
+                    income_trace = self._get_cleaned_row_trace(
+                        entity, pattern.get("income_row_idx")
+                    )
+                    income_source_file = self._clean_text(
+                        income_trace.get("source_file"), default=""
+                    )
+                    income_source_row = income_trace.get("source_row_index")
+                if not expense_source_file and pattern.get("expense_row_idx") is not None:
+                    expense_trace = self._get_cleaned_row_trace(
+                        entity, pattern.get("expense_row_idx")
+                    )
+                    expense_source_file = self._clean_text(
+                        expense_trace.get("source_file"), default=""
+                    )
+                    expense_source_row = expense_trace.get("source_row_index")
+
+                if income_source_file:
+                    lines.append(f"  📁 收入溯源: {income_source_file}")
+                if income_source_row is not None:
+                    lines.append(f"  📍 收入行号: 第{income_source_row}行")
+                if expense_source_file:
+                    lines.append(f"  📁 支出溯源: {expense_source_file}")
+                if expense_source_row is not None:
+                    lines.append(f"  📍 支出行号: 第{expense_source_row}行")
+                if not income_source_file and not expense_source_file:
+                    self._add_traceability(lines, pattern)
                 lines.append("")
 
             # 通用审计提示

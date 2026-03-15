@@ -372,17 +372,27 @@ def extract_precise_property_info(data_dir: str, person_id: str = None) -> Dict[
     result = {}
     
     # 查找目录
-    precise_dir = _find_precise_property_dir(data_dir)
-    if not precise_dir:
+    precise_dirs = _find_precise_property_dirs(data_dir)
+    if not precise_dirs:
         logger.warning(f"未找到自然资源部精准查询目录: {PRECISE_PROPERTY_DIR_NAME}")
         return result
     
-    logger.info(f"开始解析自然资源部精准查询数据: {precise_dir}")
+    logger.info(
+        f"开始解析自然资源部精准查询数据: {len(precise_dirs)} 个目录"
+    )
     
     # 遍历所有xlsx文件
-    precise_path = Path(precise_dir)
-    xlsx_files = [f for f in precise_path.glob("*.xlsx") if not f.name.startswith("~$")]
-    
+    xlsx_files = []
+    for precise_dir in precise_dirs:
+        precise_path = Path(precise_dir)
+        xlsx_files.extend(
+            [
+                f
+                for f in precise_path.glob("*.xlsx")
+                if not f.name.startswith("~$")
+            ]
+        )
+
     for file_path in xlsx_files:
         try:
             # 从文件名提取身份证号
@@ -407,7 +417,9 @@ def extract_precise_property_info(data_dir: str, person_id: str = None) -> Dict[
     for pid in result:
         result[pid] = _deduplicate_properties(result[pid])
     
-    logger.info(f"自然资源部精准查询解析完成: {len(result)} 个主体")
+    logger.info(
+        f"自然资源部精准查询解析完成: {len(result)} 个主体, {len(xlsx_files)} 个文件"
+    )
     return result
 
 
@@ -496,16 +508,19 @@ def _parse_precise_property_row(row, source_file: str) -> Optional[Dict]:
         return None
 
 
-def _find_precise_property_dir(data_dir: str) -> Optional[str]:
-    """查找自然资源部精准查询目录"""
+def _find_precise_property_dirs(data_dir: str) -> List[str]:
+    """查找所有自然资源部精准查询目录。"""
     from pathlib import Path
+
     data_path = Path(data_dir)
-    
-    for path in data_path.rglob("*"):
-        if path.is_dir() and PRECISE_PROPERTY_DIR_NAME in path.name:
-            return str(path)
-    
-    return None
+    matched_dirs = sorted(
+        {
+            str(path)
+            for path in data_path.rglob("*")
+            if path.is_dir() and PRECISE_PROPERTY_DIR_NAME in path.name
+        }
+    )
+    return matched_dirs
 
 
 def _extract_id_from_filename_precise(filename: str) -> Optional[str]:
