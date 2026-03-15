@@ -441,6 +441,7 @@ class InvestigationReportBuilder:
         self._external_flight_cache = analysis_cache.get("flightData", {})
         self._external_coaddress_cache = analysis_cache.get("coaddressData", {})
         self._external_coviolation_cache = analysis_cache.get("coviolationData", {})
+        self._wallet_cache = analysis_cache.get("walletData", {})
 
         # 【2026-03-03 新增】加载风险等级阈值配置
         try:
@@ -511,6 +512,12 @@ class InvestigationReportBuilder:
         )
         logger.info(
             f"[初查报告构建器] 外部数据缓存: 房产{len(self._external_property_cache)}, 车辆{len(self._external_vehicle_cache)}, 理财{len(self._external_wealth_cache)}, 证券{len(self._external_securities_cache)}"
+        )
+        logger.info(
+            "[初查报告构建器] 电子钱包补充主体: %s",
+            (self._wallet_cache.get("summary", {}) or {}).get("subjectCount", 0)
+            if isinstance(self._wallet_cache, dict)
+            else 0,
         )
         logger.info(f"[初查报告构建器] 身份证号映射: {len(self._id_to_name_map)} 条")
 
@@ -665,6 +672,192 @@ class InvestigationReportBuilder:
                 break
 
         return highlights
+
+    def _get_wallet_subject_summary(
+        self, name: str, profile: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """获取指定人员的电子钱包补充摘要。"""
+        profile = profile or {}
+        wallet_summary = profile.get("wallet_summary", {})
+        if isinstance(wallet_summary, dict) and wallet_summary:
+            return wallet_summary
+
+        wallet_cache = self._wallet_cache if isinstance(self._wallet_cache, dict) else {}
+        by_id = wallet_cache.get("subjectsById", {})
+        by_name = wallet_cache.get("subjectsByName", {})
+        person_id = str(self._name_to_id_map.get(name, "") or "").strip()
+
+        if person_id and isinstance(by_id, dict):
+            subject = by_id.get(person_id)
+            if isinstance(subject, dict) and subject:
+                return subject
+
+        if isinstance(by_name, dict):
+            subject = by_name.get(name)
+            if isinstance(subject, dict) and subject:
+                return subject
+
+            target_norm = normalize_for_matching(name)
+            for candidate_name, candidate_summary in by_name.items():
+                if normalize_for_matching(str(candidate_name or "")) == target_norm:
+                    if isinstance(candidate_summary, dict) and candidate_summary:
+                        return candidate_summary
+
+        return {}
+
+    def _build_wallet_analysis_v4(self, name: str, profile: Dict) -> Dict[str, Any]:
+        """构建电子钱包补充核查摘要。"""
+        wallet_cache = self._wallet_cache if isinstance(self._wallet_cache, dict) else {}
+        wallet_available = bool(wallet_cache.get("available"))
+        wallet_summary = self._get_wallet_subject_summary(name, profile)
+
+        if not wallet_summary:
+            if wallet_available:
+                narrative = (
+                    f"本次已补充调取电子钱包数据，但暂未在当前批次中识别到可直接归并至{name}名下的支付宝、微信或财付通账户。"
+                )
+                status_text = "已补充数据，当前人员未归并到账户"
+                recommendations = [
+                    "结合手机号、微信别名、绑定银行卡继续核对主体映射。",
+                    "如银行流水显示第三方支付占比较高，可追加核对该人员配偶或近亲属的电子钱包账号。",
+                ]
+            else:
+                narrative = (
+                    "本次尚未补充电子钱包明细，第三方支付部分仍以银行流水中的支付宝/微信/财付通通道摘要为主。"
+                )
+                status_text = "未补充电子钱包数据"
+                recommendations = [
+                    "后续如取得微信、支付宝或财付通明细，建议作为补充层单独接入，不回写银行主清洗链。",
+                ]
+
+            return {
+                "has_data": False,
+                "status_text": status_text,
+                "narrative": narrative,
+                "third_party_total_wan": 0.0,
+                "alipay_tx_count": 0,
+                "tenpay_tx_count": 0,
+                "wechat_account_count": 0,
+                "tenpay_account_count": 0,
+                "login_event_count": 0,
+                "match_basis": [],
+                "signals": [],
+                "counterparties": [],
+                "recommendations": recommendations,
+            }
+
+        platforms = wallet_summary.get("platforms", {}) if isinstance(wallet_summary, dict) else {}
+        alipay = platforms.get("alipay", {}) if isinstance(platforms, dict) else {}
+        wechat = platforms.get("wechat", {}) if isinstance(platforms, dict) else {}
+        cross_signals = wallet_summary.get("crossSignals", {}) or {}
+        if not isinstance(cross_signals, dict):
+            cross_signals = {}
+
+        alipay_income = self._safe_float_value(alipay.get("incomeTotalYuan"), 0.0)
+        alipay_expense = self._safe_float_value(alipay.get("expenseTotalYuan"), 0.0)
+        tenpay_income = self._safe_float_value(wechat.get("incomeTotalYuan"), 0.0)
+        tenpay_expense = self._safe_float_value(wechat.get("expenseTotalYuan"), 0.0)
+        third_party_total = alipay_income + alipay_expense + tenpay_income + tenpay_expense
+
+        alipay_tx_count = int(self._safe_float_value(alipay.get("transactionCount"), 0.0))
+        tenpay_tx_count = int(self._safe_float_value(wechat.get("tenpayTransactionCount"), 0.0))
+        wechat_account_count = int(self._safe_float_value(wechat.get("wechatAccountCount"), 0.0))
+        tenpay_account_count = int(self._safe_float_value(wechat.get("tenpayAccountCount"), 0.0))
+        login_event_count = int(self._safe_float_value(wechat.get("loginEventCount"), 0.0))
+        latest_login_at = str(wechat.get("latestLoginAt") or "").strip()
+
+        counterparties: List[Dict[str, Any]] = []
+        for platform_name, items in (
+            ("支付宝", alipay.get("topCounterparties", [])),
+            ("财付通", wechat.get("topCounterparties", [])),
+        ):
+            if not isinstance(items, list):
+                continue
+            for item in items[:5]:
+                if not isinstance(item, dict):
+                    continue
+                amount_yuan = self._safe_float_value(item.get("totalAmountYuan"), 0.0)
+                counterparties.append(
+                    {
+                        "platform": platform_name,
+                        "name": str(item.get("name") or "未知对手方"),
+                        "count": int(self._safe_float_value(item.get("count"), 0.0)),
+                        "total_amount_yuan": round(amount_yuan, 2),
+                        "total_amount_wan": round(amount_yuan / 10000, 2),
+                    }
+                )
+
+        counterparties.sort(
+            key=lambda item: (
+                item.get("total_amount_yuan", 0.0),
+                item.get("count", 0),
+                item.get("name", ""),
+            ),
+            reverse=True,
+        )
+        counterparties = counterparties[:6]
+
+        match_basis = cross_signals.get("matchBasis", [])
+        if not isinstance(match_basis, list):
+            match_basis = []
+        match_basis = [str(item).strip() for item in match_basis if str(item).strip()]
+
+        signals = wallet_summary.get("signals", [])
+        if not isinstance(signals, list):
+            signals = []
+        signals = [str(item).strip() for item in signals if str(item).strip()]
+
+        narrative_parts = [
+            (
+                f"已补充核查{name}名下电子钱包数据，识别支付宝账户"
+                f"{int(self._safe_float_value(alipay.get('accountCount'), 0.0))}个、微信账号{wechat_account_count}个、"
+                f"财付通账号{tenpay_account_count}个。"
+            ),
+            (
+                f"支付宝交易{alipay_tx_count}笔、财付通交易{tenpay_tx_count}笔，"
+                f"累计收支规模约{third_party_total / 10000:.2f}万元。"
+            ),
+        ]
+        if match_basis:
+            narrative_parts.append(f"主体归并依据主要包括：{'、'.join(match_basis[:4])}。")
+        if latest_login_at:
+            narrative_parts.append(
+                f"微信登录轨迹共{login_event_count}条，最近登录时间为{latest_login_at}。"
+            )
+        elif login_event_count > 0:
+            narrative_parts.append(f"微信登录轨迹共{login_event_count}条。")
+        if counterparties:
+            top_names = "、".join(
+                item["name"] for item in counterparties[:3] if item.get("name")
+            )
+            if top_names:
+                narrative_parts.append(f"主要电子钱包对手方包括{top_names}。")
+
+        recommendations = []
+        if third_party_total >= 300000:
+            recommendations.append("电子钱包累计交易规模较大，建议与银行流水第三方支付通道金额逐笔勾稽。")
+        if counterparties:
+            recommendations.append("对高频或大额电子钱包对手方进一步核对交易用途、订单凭证或聊天记录。")
+        if login_event_count > 0:
+            recommendations.append("结合登录时间与IP轨迹核查是否存在异地登录或他人控制账号情形。")
+        if not recommendations:
+            recommendations.append("当前电子钱包补充数据量较小，可作为主体映射与第三方支付通道说明的辅助证据。")
+
+        return {
+            "has_data": True,
+            "status_text": "已归并到账户并生成补充摘要",
+            "narrative": "".join(narrative_parts),
+            "third_party_total_wan": round(third_party_total / 10000, 2),
+            "alipay_tx_count": alipay_tx_count,
+            "tenpay_tx_count": tenpay_tx_count,
+            "wechat_account_count": wechat_account_count,
+            "tenpay_account_count": tenpay_account_count,
+            "login_event_count": login_event_count,
+            "match_basis": match_basis,
+            "signals": signals,
+            "counterparties": counterparties,
+            "recommendations": recommendations,
+        }
 
     def _resolve_profile_person_name(
         self, raw_name: str, candidate_names: set
@@ -6622,6 +6815,15 @@ class InvestigationReportBuilder:
                 "version": "4.1.0",  # 版本升级
                 "generator": "穿云审计初查报告引擎 v4.1.0（家庭优先）",
                 "title_subject": title_subject,
+                "wallet_data_summary": (
+                    self._wallet_cache.get("summary", {})
+                    if isinstance(self._wallet_cache, dict)
+                    else {}
+                ),
+                "wallet_data_available": bool(
+                    isinstance(self._wallet_cache, dict)
+                    and self._wallet_cache.get("available")
+                ),
             },
             "preface": preface,
             "family_sections": family_sections,  # 新增：家庭分组结构
@@ -6706,6 +6908,12 @@ class InvestigationReportBuilder:
                 "title_subject": base_report.get("meta", {}).get("title_subject", ""),
                 "core_persons": self._core_persons,
                 "companies": self._companies,
+                "wallet_data_summary": base_report.get("meta", {}).get(
+                    "wallet_data_summary", {}
+                ),
+                "wallet_data_available": base_report.get("meta", {}).get(
+                    "wallet_data_available", False
+                ),
             },
             "preface": base_report.get("preface", {}),
             "family_sections": base_report.get("family_sections", []),
@@ -9847,6 +10055,7 @@ class InvestigationReportBuilder:
                 "large_transfer_analysis": self._build_large_transfer_analysis_v4(
                     name, profile
                 ),
+                "wallet_analysis": self._build_wallet_analysis_v4(name, profile),
                 "aml_analysis": self._build_aml_analysis_v4(name, profile),
                 "tax_analysis": self._build_tax_analysis_v4(name, profile),
                 "travel_analysis": self._build_travel_analysis_v4(name, profile),
@@ -12941,6 +13150,11 @@ class InvestigationReportBuilder:
         lines.append(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
         metadata = self.metadata if isinstance(self.metadata, dict) else {}
+        wallet_cache = self._wallet_cache if isinstance(self._wallet_cache, dict) else {}
+        wallet_summary = wallet_cache.get("summary", {}) if isinstance(wallet_cache, dict) else {}
+        if not isinstance(wallet_summary, dict):
+            wallet_summary = {}
+        wallet_data_available = bool(wallet_cache.get("available"))
         cache_version = self._clean_report_value(metadata.get("version"), "")
         cache_generated_at = self._clean_report_value(metadata.get("generatedAt"), "")
         cache_manager_version = self._clean_report_value(
@@ -12979,14 +13193,29 @@ class InvestigationReportBuilder:
         lines.append("【数据来源】")
         lines.append(f"  • 银行流水: 共{total_transactions:,}条交易记录")
         lines.append(f"  • 核查对象: {person_count}名被核查人")
+        if wallet_data_available:
+            lines.append(
+                "  • 电子钱包补充数据: 已接入微信/支付宝/财付通，"
+                f"覆盖{wallet_summary.get('subjectCount', 0)}个主体"
+            )
         lines.append("")
         lines.append("【数据完整性】")
         lines.append("  • 已调取被核查人名下主要银行账户流水")
         lines.append("  • 房产信息来源于不动产登记查询回执")
+        if wallet_data_available:
+            lines.append(
+                "  • 已补充第三方支付明细摘要: "
+                f"支付宝{wallet_summary.get('alipayTransactionCount', 0)}笔，"
+                f"财付通{wallet_summary.get('tenpayTransactionCount', 0)}笔，"
+                f"微信登录轨迹{wallet_summary.get('loginEventCount', 0)}条"
+            )
         lines.append("")
         lines.append("【待补充数据】")
         lines.append("  • 房产交易价格: 需调取不动产登记中心交易档案")
-        lines.append("  • 第三方支付: 建议调取微信、支付宝账户流水")
+        if wallet_data_available:
+            lines.append("  • 第三方支付: 本次已补充调取微信、支付宝、财付通数据，后续可继续补充订单/聊天凭证")
+        else:
+            lines.append("  • 第三方支付: 建议调取微信、支付宝账户流水")
         lines.append("  • 配偶资产: 建议调取配偶银行流水及资产信息")
         lines.append("")
 
@@ -13921,6 +14150,7 @@ def load_investigation_report_builder(
         "flightData": "flightData.json",
         "coaddressData": "coaddressData.json",
         "coviolationData": "coviolationData.json",
+        "walletData": "walletData.json",
     }
 
     for key, filename in external_data_files.items():

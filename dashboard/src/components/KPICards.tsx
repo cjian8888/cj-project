@@ -50,11 +50,16 @@ export function KPICards() {
         );
         return sum + pairAmount;
     }, 0);
-    const highRiskFunds = directTransferRiskFunds + cashCollisionRiskFunds + cashTimingRiskFunds;
+    const walletRiskFunds = (data.suspicions.walletAlerts || []).reduce(
+        (sum, item) => sum + toAmount(item.amount),
+        0
+    );
+    const highRiskFunds = directTransferRiskFunds + cashCollisionRiskFunds + cashTimingRiskFunds + walletRiskFunds;
 
     const suspicionCount = (data.suspicions.directTransfers || []).length +
         (data.suspicions.cashCollisions || []).length +
-        (data.suspicions.cashTimingPatterns || []).length;
+        (data.suspicions.cashTimingPatterns || []).length +
+        (data.suspicions.walletAlerts || []).length;
 
     const kpis = [
         {

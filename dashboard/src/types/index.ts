@@ -75,6 +75,7 @@ export interface SuspicionResult {
     cashTimingPatterns: CashTimingPattern[];
     holidayTransactions: Record<string, HolidayTransaction[]>;
     amountPatterns: Record<string, AmountPattern[]>;
+    walletAlerts: WalletAlert[];
 }
 
 export interface SuspiciousTransaction {
@@ -89,6 +90,21 @@ export interface SuspiciousTransaction {
     sourceFile?: string;    // 数据来源文件
     riskLevel?: string;     // 风险等级
     riskReason?: string;    // 风险原因
+}
+
+export interface WalletAlert {
+    person: string;
+    counterparty: string;
+    amount: number;
+    date: string;
+    description?: string;
+    riskLevel?: string;
+    riskReason?: string;
+    alertType?: string;
+    riskScore?: number;
+    confidence?: number;
+    ruleCode?: string;
+    evidenceSummary?: string;
 }
 
 export interface CashCollision {
@@ -345,12 +361,107 @@ export interface AggregationEvidencePack {
 
 // ==================== Data Types ====================
 
+export interface WalletCounterpartySummary {
+    name: string;
+    count: number;
+    totalAmountYuan: number;
+}
+
+export interface WalletAlipayPlatformSummary {
+    accountCount: number;
+    transactionCount: number;
+    rawTransactionCount: number;
+    incomeTotalYuan: number;
+    expenseTotalYuan: number;
+    linkedBankCardCount: number;
+    firstTransactionAt?: string | null;
+    lastTransactionAt?: string | null;
+    topCounterparties: WalletCounterpartySummary[];
+}
+
+export interface WalletWechatPlatformSummary {
+    wechatAccountCount: number;
+    tenpayAccountCount: number;
+    tenpayTransactionCount: number;
+    incomeTotalYuan: number;
+    expenseTotalYuan: number;
+    linkedBankCardCount: number;
+    loginEventCount: number;
+    firstTransactionAt?: string | null;
+    lastTransactionAt?: string | null;
+    latestLoginAt?: string | null;
+    topCounterparties: WalletCounterpartySummary[];
+}
+
+export interface WalletCrossSignal {
+    phoneOverlapCount: number;
+    bankCardOverlapCount: number;
+    aliasMatchCount: number;
+    matchBasis: string[];
+}
+
+export interface WalletSubjectSummary {
+    subjectId: string;
+    subjectName: string;
+    matchedToCore: boolean;
+    phones: string[];
+    crossSignals: WalletCrossSignal;
+    signals: string[];
+    platforms: {
+        alipay: WalletAlipayPlatformSummary;
+        wechat: WalletWechatPlatformSummary;
+    };
+}
+
+export interface WalletDataState {
+    available: boolean;
+    directoryPolicy: {
+        recommendedPath: string;
+        lateArrivalSupported: boolean;
+        mainChainUnaffected: boolean;
+        scanExclusionEnabled: boolean;
+    };
+    sourceStats: {
+        alipayRegistrationFiles: number;
+        alipayTransactionFiles: number;
+        wechatRegistrationFiles: number;
+        wechatLoginFiles: number;
+        tenpayRegistrationFiles: number;
+        tenpayTransactionFiles: number;
+    };
+    summary: {
+        subjectCount: number;
+        coreMatchedSubjectCount: number;
+        alipayAccountCount: number;
+        alipayTransactionCount: number;
+        wechatAccountCount: number;
+        tenpayAccountCount: number;
+        tenpayTransactionCount: number;
+        loginEventCount: number;
+        unmatchedWechatCount: number;
+    };
+    subjects: WalletSubjectSummary[];
+    subjectsByName: Record<string, WalletSubjectSummary>;
+    subjectsById: Record<string, WalletSubjectSummary>;
+    unmatchedWechatAccounts: Array<{
+        phone: string;
+        wxid: string;
+        alias: string;
+        nickname: string;
+        registeredAt?: string | null;
+        latestLoginAt?: string | null;
+        loginEventCount: number;
+    }>;
+    notes: string[];
+}
+
 export interface DataState {
     persons: string[];
     companies: string[];
     profiles: Record<string, Profile>;
     suspicions: SuspicionResult;
     analysisResults: AnalysisResults;
+    walletData: WalletDataState;
     categorizedFiles: CategorizedFiles;
 }
 
@@ -362,7 +473,7 @@ export interface CategorizedFiles {
 
 // ==================== UI Types ====================
 
-export type TabType = 'overview' | 'risk' | 'graph' | 'report';
+export type TabType = 'overview' | 'risk' | 'graph' | 'supplement' | 'report';
 
 export type ThemeType = 'dark' | 'light';
 
@@ -409,6 +520,7 @@ export interface AnalysisResultsResponse {
     profiles: Record<string, Profile>;
     suspicions: SuspicionResult;
     analysisResults: AnalysisResults;
+    walletData: WalletDataState;
 }
 
 // ==================== Component Props Types ====================

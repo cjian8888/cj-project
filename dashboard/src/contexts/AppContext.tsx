@@ -52,6 +52,40 @@ const defaultAnalysis: AnalysisState = {
     isLoading: false, // 数据加载状态
 };
 
+const defaultWalletData: DataState['walletData'] = {
+    available: false,
+    directoryPolicy: {
+        recommendedPath: '补充数据/电子钱包/批次_YYYYMMDD/',
+        lateArrivalSupported: true,
+        mainChainUnaffected: true,
+        scanExclusionEnabled: true,
+    },
+    sourceStats: {
+        alipayRegistrationFiles: 0,
+        alipayTransactionFiles: 0,
+        wechatRegistrationFiles: 0,
+        wechatLoginFiles: 0,
+        tenpayRegistrationFiles: 0,
+        tenpayTransactionFiles: 0,
+    },
+    summary: {
+        subjectCount: 0,
+        coreMatchedSubjectCount: 0,
+        alipayAccountCount: 0,
+        alipayTransactionCount: 0,
+        wechatAccountCount: 0,
+        tenpayAccountCount: 0,
+        tenpayTransactionCount: 0,
+        loginEventCount: 0,
+        unmatchedWechatCount: 0,
+    },
+    subjects: [],
+    subjectsByName: {},
+    subjectsById: {},
+    unmatchedWechatAccounts: [],
+    notes: ['暂无电子钱包补充数据'],
+};
+
 const defaultData: DataState = {
     persons: [],
     companies: [],
@@ -64,6 +98,7 @@ const defaultData: DataState = {
         cashTimingPatterns: [],
         holidayTransactions: {},
         amountPatterns: {},
+        walletAlerts: [],
     },
     analysisResults: {
         loan: { summary: { 双向往来关系数: 0, 网贷平台交易数: 0, 规律还款模式数: 0 }, details: [] },
@@ -89,6 +124,7 @@ const defaultData: DataState = {
             analysisMetadata: {},
         },
     },
+    walletData: defaultWalletData,
     categorizedFiles: {
         persons: {},
         companies: {},
@@ -216,6 +252,7 @@ export function AppProvider({ children }: AppProviderProps) {
             cashTimingPatterns: backendData.suspicions?.cashTimingPatterns || [],
             holidayTransactions: backendData.suspicions?.holidayTransactions || {},
             amountPatterns: backendData.suspicions?.amountPatterns || {},
+            walletAlerts: backendData.suspicions?.walletAlerts || [],
         };
 
         const ar = backendData.analysisResults || {};
@@ -270,6 +307,7 @@ export function AppProvider({ children }: AppProviderProps) {
             profiles: backendData.profiles || {},
             suspicions: safeSuspicions,
             analysisResults: safeAnalysisResults,
+            walletData: backendData.walletData || defaultWalletData,
             categorizedFiles: defaultData.categorizedFiles,
         };
     }, []);

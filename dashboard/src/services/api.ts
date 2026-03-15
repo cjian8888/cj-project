@@ -58,6 +58,21 @@ export interface CashCollision {
     amount2: number;
 }
 
+export interface WalletAlert {
+    person: string;
+    counterparty: string;
+    amount: number;
+    date: string;
+    description?: string;
+    riskLevel?: string;
+    riskReason?: string;
+    alertType?: string;
+    riskScore?: number;
+    confidence?: number;
+    ruleCode?: string;
+    evidenceSummary?: string;
+}
+
 export interface Suspicions {
     directTransfers: SuspiciousTransaction[];
     cashCollisions: CashCollision[];
@@ -66,6 +81,7 @@ export interface Suspicions {
     cashTimingPatterns: unknown[];
     holidayTransactions: Record<string, unknown>;
     amountPatterns: Record<string, unknown>;
+    walletAlerts: WalletAlert[];
 }
 
 export interface AnalysisResults {
@@ -74,6 +90,7 @@ export interface AnalysisResults {
     profiles: Record<string, Profile>;
     suspicions: Suspicions;
     analysisResults: Record<string, unknown>;
+    walletData?: Record<string, unknown>;
 }
 
 export interface Report {

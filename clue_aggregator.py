@@ -347,6 +347,8 @@ class ClueAggregator:
             'third_party_relays': '第三方中转',
             'discovered_nodes': '外围节点',
             'relationship_clusters': '关系簇',
+            'wallet_summaries': '电子钱包补充摘要',
+            'wallet_alerts': '电子钱包预警',
         }
         label = label_mapping.get(bucket, bucket)
 
@@ -478,7 +480,9 @@ class ClueAggregator:
                 'third_party_relays': [],    # 第三方中转
                 'discovered_nodes': [],      # 外围节点
                 'relationship_clusters': [], # 关系簇
-                'loans': []                  # 借贷关系
+                'loans': [],                 # 借贷关系
+                'wallet_summaries': [],      # 电子钱包主体摘要
+                'wallet_alerts': [],         # 电子钱包预警
             },
             'statistics': {
                 'total_inflow': 0,
@@ -667,6 +671,182 @@ class ClueAggregator:
             entity = relation.get('person')
             if entity in self.evidence_packs:
                 self.evidence_packs[entity]['evidence']['loans'].append(relation)
+
+    def _normalize_wallet_summary_record(self, summary: Dict) -> Optional[Dict]:
+        """标准化电子钱包主体摘要，用于聚合评分。"""
+        if not isinstance(summary, dict):
+            return None
+
+        platforms = summary.get('platforms', {}) or {}
+        if not isinstance(platforms, dict):
+            platforms = {}
+        alipay = platforms.get('alipay', {}) or {}
+        wechat = platforms.get('wechat', {}) or {}
+        cross = summary.get('crossSignals', {}) or {}
+        if not isinstance(cross, dict):
+            cross = {}
+
+        third_party_total = (
+            self._safe_float(alipay.get('incomeTotalYuan'))
+            + self._safe_float(alipay.get('expenseTotalYuan'))
+            + self._safe_float(wechat.get('incomeTotalYuan'))
+            + self._safe_float(wechat.get('expenseTotalYuan'))
+        )
+        transaction_count = int(self._safe_float(alipay.get('transactionCount'))) + int(
+            self._safe_float(wechat.get('tenpayTransactionCount'))
+        )
+        bank_overlap = int(self._safe_float(cross.get('bankCardOverlapCount')))
+        alias_overlap = int(self._safe_float(cross.get('aliasMatchCount')))
+        phone_overlap = int(self._safe_float(cross.get('phoneOverlapCount')))
+        login_event_count = int(self._safe_float(wechat.get('loginEventCount')))
+
+        risk_score = 0.0
+        if third_party_total >= 1_000_000:
+            risk_score += 34
+        elif third_party_total >= 300_000:
+            risk_score += 24
+        elif third_party_total >= 100_000:
+            risk_score += 14
+        elif third_party_total > 0:
+            risk_score += 6
+
+        if transaction_count >= 200:
+            risk_score += 12
+        elif transaction_count >= 100:
+            risk_score += 8
+        elif transaction_count >= 30:
+            risk_score += 4
+
+        risk_score += min(bank_overlap * 6, 12)
+        risk_score += min(alias_overlap * 6, 12)
+        risk_score += min(phone_overlap * 4, 8)
+        if login_event_count >= 20:
+            risk_score += 4
+
+        confidence = 0.68
+        if summary.get('matchedToCore'):
+            confidence += 0.08
+        if bank_overlap or alias_overlap or phone_overlap:
+            confidence += 0.08
+
+        evidence = []
+        if third_party_total > 0:
+            evidence.append(f"电子钱包累计收支约{third_party_total / 10000:.2f}万元")
+        if transaction_count > 0:
+            evidence.append(f"电子钱包交易共{transaction_count}笔")
+        if bank_overlap:
+            evidence.append(f"跨平台银行卡重叠{bank_overlap}张")
+        if alias_overlap:
+            evidence.append(f"微信别名与财付通账号重叠{alias_overlap}组")
+        if phone_overlap:
+            evidence.append(f"跨平台手机号重叠{phone_overlap}组")
+
+        top_counterparties = []
+        for source_items in (
+            alipay.get('topCounterparties', []) or [],
+            wechat.get('topCounterparties', []) or [],
+        ):
+            if not isinstance(source_items, list):
+                continue
+            for item in source_items[:3]:
+                if isinstance(item, dict) and item.get('name'):
+                    top_counterparties.append(str(item.get('name')).strip())
+
+        return {
+            'person': summary.get('subjectName') or summary.get('subjectId') or '',
+            'subject_id': summary.get('subjectId', ''),
+            'matched_to_core': bool(summary.get('matchedToCore')),
+            'third_party_total': round(third_party_total, 2),
+            'transaction_count': transaction_count,
+            'alipay_tx_count': int(self._safe_float(alipay.get('transactionCount'))),
+            'tenpay_tx_count': int(self._safe_float(wechat.get('tenpayTransactionCount'))),
+            'login_event_count': login_event_count,
+            'bank_card_overlap_count': bank_overlap,
+            'alias_match_count': alias_overlap,
+            'phone_overlap_count': phone_overlap,
+            'top_counterparties': top_counterparties[:5],
+            'risk_score': min(risk_score, 62.0),
+            'risk_level': self._normalize_risk_level(None, risk_score),
+            'confidence': risk_scoring.normalize_confidence(confidence),
+            'evidence': evidence,
+        }
+
+    def _normalize_wallet_alert_record(self, alert: Dict) -> Optional[Dict]:
+        """标准化电子钱包预警记录。"""
+        if not isinstance(alert, dict):
+            return None
+
+        level = str(alert.get('risk_level', 'medium') or 'medium').strip().lower()
+        amount = self._safe_float(alert.get('amount'))
+        derived_score = {
+            'high': 58.0,
+            'medium': 40.0,
+            'low': 20.0,
+        }.get(level, 32.0)
+        if amount >= 1_000_000:
+            derived_score += 8
+        elif amount >= 300_000:
+            derived_score += 5
+        elif amount >= 100_000:
+            derived_score += 3
+
+        source_score = self._safe_float(alert.get('risk_score'))
+        base_score = source_score if source_score > 0 else derived_score
+
+        derived_confidence = {
+            'high': 0.84,
+            'medium': 0.76,
+            'low': 0.62,
+        }.get(level, 0.68)
+        source_confidence = self._safe_float(alert.get('confidence'))
+        confidence = source_confidence if source_confidence > 0 else derived_confidence
+
+        evidence = []
+        if alert.get('description'):
+            evidence.append(str(alert.get('description')))
+        if alert.get('risk_reason'):
+            evidence.append(str(alert.get('risk_reason')))
+        if alert.get('evidence_summary'):
+            evidence.append(str(alert.get('evidence_summary')))
+
+        return {
+            **alert,
+            'person': alert.get('person', ''),
+            'counterparty': alert.get('counterparty', ''),
+            'amount': round(amount, 2),
+            'risk_score': min(base_score, 72.0),
+            'risk_level': self._normalize_risk_level(level, base_score),
+            'confidence': risk_scoring.normalize_confidence(confidence),
+            'evidence': evidence[:3],
+        }
+
+    def aggregate_wallet_results(self, wallet_results: Dict):
+        """聚合电子钱包补充数据。"""
+        logger.info('聚合电子钱包补充数据...')
+        if not isinstance(wallet_results, dict):
+            return
+
+        for summary in wallet_results.get('subjects', []) or []:
+            normalized = self._normalize_wallet_summary_record(summary)
+            if not normalized:
+                continue
+            self._append_to_entities(
+                'wallet_summaries',
+                normalized,
+                summary.get('subjectName'),
+                summary.get('subjectId'),
+                normalized.get('person'),
+            )
+
+        for alert in wallet_results.get('alerts', []) or []:
+            normalized = self._normalize_wallet_alert_record(alert)
+            if not normalized:
+                continue
+            self._append_to_entities(
+                'wallet_alerts',
+                normalized,
+                normalized.get('person'),
+            )
     
     def calculate_entity_risk_scores(self):
         """
@@ -746,6 +926,8 @@ class ClueAggregator:
                 'relationship_clusters': evidence.get('relationship_clusters', []),
                 'discovered_nodes': evidence.get('discovered_nodes', []),
                 'direct_relations': evidence.get('related_party', []),
+                'wallet_summaries': evidence.get('wallet_summaries', []),
+                'wallet_alerts': evidence.get('wallet_alerts', []),
                 'related_entities': [x for x in (hub_entities + community_members) if x],
                 'ml_anomalies': evidence.get('high_risk_transactions', []),
                 'total_records': stats.get('total_records', stats.get('transaction_count', 0)),
@@ -762,6 +944,11 @@ class ClueAggregator:
                     + discovered_entities
                     + cluster_entities
                     + direct_relation_entities
+                    + [
+                        alert.get('counterparty')
+                        for alert in evidence.get('wallet_alerts', [])
+                        if isinstance(alert, dict)
+                    ]
                 )
                 if item and item != entity
             ]
@@ -1029,7 +1216,8 @@ def aggregate_all_results(
     ml_results: Dict = None,
     ts_results: Dict = None,
     related_party_results: Dict = None,
-    loan_results: Dict = None
+    loan_results: Dict = None,
+    wallet_results: Dict = None,
 ) -> ClueAggregator:
     """
     聚合所有分析结果
@@ -1042,6 +1230,7 @@ def aggregate_all_results(
         ts_results: 时序分析结果
         related_party_results: 关联方分析结果
         loan_results: 借贷分析结果
+        wallet_results: 电子钱包补充结果
         
     Returns:
         ClueAggregator 实例
@@ -1066,6 +1255,9 @@ def aggregate_all_results(
     
     if loan_results:
         aggregator.aggregate_loan_results(loan_results)
+
+    if wallet_results:
+        aggregator.aggregate_wallet_results(wallet_results)
     
     # 计算综合风险分
     aggregator.calculate_entity_risk_scores()
@@ -1256,6 +1448,36 @@ def _write_relationship_clusters_section(f, clusters: List[Dict]) -> None:
     f.write('\n')
 
 
+def _write_wallet_summaries_section(f, summaries: List[Dict]) -> None:
+    """写入电子钱包主体摘要部分。"""
+    f.write('    ▶ 电子钱包补充摘要:\n')
+    for j, item in enumerate(summaries[:3], 1):
+        f.write(
+            f'      {j}. 累计收支: {item.get("third_party_total", 0)/10000:.2f}万 | '
+            f'交易笔数: {item.get("transaction_count", 0)} | '
+            f'银行卡/别名重叠: {item.get("bank_card_overlap_count", 0)}/{item.get("alias_match_count", 0)} | '
+            f'证据分: {item.get("risk_score", 0):.1f}\n'
+        )
+    if len(summaries) > 3:
+        f.write(f'      ... 共{len(summaries)}条\n')
+    f.write('\n')
+
+
+def _write_wallet_alerts_section(f, alerts: List[Dict]) -> None:
+    """写入电子钱包预警部分。"""
+    f.write('    ▶ 电子钱包预警:\n')
+    for j, item in enumerate(alerts[:3], 1):
+        f.write(
+            f'      {j}. {item.get("person", "未知")} → {item.get("counterparty", "未知")} | '
+            f'金额: {item.get("amount", 0)/10000:.2f}万 | '
+            f'等级: {str(item.get("risk_level", "medium")).upper()} | '
+            f'证据分: {item.get("risk_score", 0):.1f}\n'
+        )
+    if len(alerts) > 3:
+        f.write(f'      ... 共{len(alerts)}条\n')
+    f.write('\n')
+
+
 def _write_communities_section(f, communities: List[Dict]) -> None:
     """写入团伙部分"""
     # 只显示有意义的团伙
@@ -1320,6 +1542,14 @@ def _write_entity_evidence_pack(f, aggregator: ClueAggregator, entity_info: Dict
     # 关系簇
     if evidence['relationship_clusters']:
         _write_relationship_clusters_section(f, evidence['relationship_clusters'])
+
+    # 电子钱包摘要
+    if evidence['wallet_summaries']:
+        _write_wallet_summaries_section(f, evidence['wallet_summaries'])
+
+    # 电子钱包预警
+    if evidence['wallet_alerts']:
+        _write_wallet_alerts_section(f, evidence['wallet_alerts'])
     
     # 团伙
     if evidence['communities']:

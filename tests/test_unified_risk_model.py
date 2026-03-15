@@ -76,3 +76,48 @@ def test_unified_risk_model_confidence_penalizes_truncated_search():
     )
 
     assert 0.6 <= result.confidence <= 0.95
+
+
+def test_unified_risk_model_scores_wallet_summaries_and_alerts():
+    model = UnifiedRiskModel()
+    result = model.calculate_score(
+        entity_name="张三",
+        evidence={
+            "money_loops": [],
+            "transit_channel": {},
+            "transit_channels": [],
+            "relay_chains": [],
+            "relationship_clusters": [],
+            "discovered_nodes": [],
+            "direct_relations": [],
+            "wallet_summaries": [
+                {
+                    "risk_score": 42,
+                    "third_party_total": 520000,
+                    "transaction_count": 130,
+                    "bank_card_overlap_count": 2,
+                    "alias_match_count": 1,
+                    "phone_overlap_count": 1,
+                    "confidence": 0.82,
+                }
+            ],
+            "wallet_alerts": [
+                {
+                    "risk_score": 58,
+                    "risk_level": "high",
+                    "amount": 320000,
+                    "confidence": 0.84,
+                }
+            ],
+            "related_entities": ["李四"],
+            "ml_anomalies": [],
+            "total_records": 500,
+        },
+        financial_ratio=0.0,
+        family_ratio=0.0,
+    )
+
+    assert result.total_score > 30
+    assert "电子钱包" in result.reason
+    assert result.details["wallet_summary_score"] > 0
+    assert result.details["wallet_alert_score"] > 0

@@ -20,6 +20,14 @@ import utils
 
 logger = utils.setup_logger(__name__)
 
+WALLET_SUPPLEMENT_DIR_MARKERS = ("电子钱包", "wallet", "ewallet", "zfb+wx", "wx+zfb")
+
+
+def _is_wallet_supplement_path(path: str) -> bool:
+    """识别电子钱包补充目录，避免被主链扫描器误处理。"""
+    lower_path = str(path).lower()
+    return any(marker in lower_path for marker in WALLET_SUPPLEMENT_DIR_MARKERS)
+
 
 def extract_clues_from_pdf(pdf_path: str) -> Tuple[List[str], List[str]]:
     """
@@ -477,6 +485,8 @@ def load_all_transactions(
 
     try:
         for root, dirs, files in os.walk(directory):
+            if _is_wallet_supplement_path(root):
+                continue
             for filename in files:
                 # 【修复】添加文件名验证
                 if not filename.endswith((".xlsx", ".xls")):
@@ -564,6 +574,8 @@ def find_clue_files(directory: str) -> List[str]:
 
     try:
         for root, dirs, files in os.walk(directory):
+            if _is_wallet_supplement_path(root):
+                continue
             for filename in files:
                 # 【修复】添加文件名验证
                 if not filename.endswith(".pdf"):

@@ -41,6 +41,7 @@ import { formatDate, formatCurrency, formatAmountInWan, truncate, getRiskLevelBa
 import { EmptyState } from './common/EmptyState';
 import NetworkGraph from './NetworkGraph';
 import { ReportBuilder } from './ReportBuilder';
+import { WalletSupplementTab } from './WalletSupplementTab';
 
 export function TabContent() {
     const { ui, setActiveTab } = useApp();
@@ -68,6 +69,12 @@ export function TabContent() {
                     onClick={() => setActiveTab('graph')}
                 />
                 <TabButton
+                    label="补充数据"
+                    icon={Wallet}
+                    active={ui.activeTab === 'supplement'}
+                    onClick={() => setActiveTab('supplement')}
+                />
+                <TabButton
                     label="审计报告"
                     icon={FileText}
                     active={ui.activeTab === 'report'}
@@ -80,6 +87,7 @@ export function TabContent() {
                 {ui.activeTab === 'overview' && <OverviewTab />}
                 {ui.activeTab === 'risk' && <RiskIntelTab />}
                 {ui.activeTab === 'graph' && <GraphViewTab />}
+                {ui.activeTab === 'supplement' && <WalletSupplementTab />}
                 {ui.activeTab === 'report' && <AuditReportTab />}
             </div>
         </div>
@@ -1981,18 +1989,19 @@ function OverviewTab() {
 
 function RiskIntelTab() {
     const { data } = useApp();
-    const [filter, setFilter] = useState<'all' | 'direct' | 'cash' | 'timing'>('all');
+    const [filter, setFilter] = useState<'all' | 'direct' | 'cash' | 'timing' | 'wallet'>('all');
 
     const riskFilters = [
-        { id: 'all', label: '全部风险', count: data.suspicions.directTransfers.length + data.suspicions.cashCollisions.length + data.suspicions.cashTimingPatterns.length },
+        { id: 'all', label: '全部风险', count: data.suspicions.directTransfers.length + data.suspicions.cashCollisions.length + data.suspicions.cashTimingPatterns.length + data.suspicions.walletAlerts.length },
         { id: 'direct', label: '直接转账', count: data.suspicions.directTransfers.length },
         { id: 'cash', label: '现金碰撞', count: data.suspicions.cashCollisions.length },
         { id: 'timing', label: '时序异常', count: data.suspicions.cashTimingPatterns.length },
+        { id: 'wallet', label: '电子钱包预警', count: data.suspicions.walletAlerts.length },
     ] as const;
 
     // 定义联合类型来处理不同数据类型的属性差异
     type SuspiciousActivity = {
-        type: 'direct' | 'cash' | 'timing';
+        type: 'direct' | 'cash' | 'timing' | 'wallet';
         date: string;
         from: string;
         to: string;
@@ -2036,6 +2045,16 @@ function RiskIntelTab() {
             riskLevel: pattern.riskLevel || pattern.risk_level || '中风险',
         }));
 
+        const walletAlerts = data.suspicions.walletAlerts.map((alert: any): SuspiciousActivity => ({
+            type: 'wallet' as const,
+            date: alert.date || '-',
+            from: alert.person || '-',
+            to: alert.counterparty || '-',
+            amount: alert.amount || 0,
+            description: alert.description || '电子钱包补充数据命中预警规则',
+            riskLevel: alert.riskLevel || alert.risk_level || '中风险',
+        }));
+
         switch (filter) {
             case 'direct':
                 return directTransfers;
@@ -2043,22 +2062,26 @@ function RiskIntelTab() {
                 return cashCollisions;
             case 'timing':
                 return timingPatterns;
+            case 'wallet':
+                return walletAlerts;
             case 'all':
             default:
-                return [...directTransfers, ...cashCollisions, ...timingPatterns];
+                return [...directTransfers, ...cashCollisions, ...timingPatterns, ...walletAlerts];
         }
     };
 
     const filteredData = getFilteredData();
     const hasAnyData = data.suspicions.directTransfers.length > 0 ||
         data.suspicions.cashCollisions.length > 0 ||
-        data.suspicions.cashTimingPatterns.length > 0;
+        data.suspicions.cashTimingPatterns.length > 0 ||
+        data.suspicions.walletAlerts.length > 0;
 
-    const getTypeLabel = (type: 'direct' | 'cash' | 'timing') => {
+    const getTypeLabel = (type: 'direct' | 'cash' | 'timing' | 'wallet') => {
         switch (type) {
             case 'direct': return '直接转账';
             case 'cash': return '现金碰撞';
             case 'timing': return '时序异常';
+            case 'wallet': return '电子钱包预警';
         }
     };
 

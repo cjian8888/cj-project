@@ -102,6 +102,9 @@ import hotel_extractor
 import cohabitation_extractor
 import railway_extractor
 import flight_extractor
+import wallet_data_extractor
+import wallet_risk_analyzer
+import wallet_report_builder
 
 # 导入辅助模块
 import family_assets_helper
@@ -1230,6 +1233,7 @@ def serialize_profiles(profiles: Dict) -> Dict:
                 "personal_fund_feature_analysis": profile_dict.get(
                     "personal_fund_feature_analysis", {}
                 ),
+                "wallet_summary": profile_dict.get("wallet_summary", {}),
             }
 
             result[name] = frontend_profile
@@ -1725,6 +1729,23 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
             "riskReason": record.get("risk_reason", ""),
         }
 
+    def convert_wallet_alert(record: Dict) -> Dict:
+        """转换单条电子钱包预警记录。"""
+        return {
+            "person": record.get("person", ""),
+            "counterparty": record.get("counterparty", ""),
+            "date": _format_date(record.get("date")),
+            "amount": record.get("amount", 0),
+            "description": record.get("description", ""),
+            "riskLevel": record.get("risk_level", "medium"),
+            "riskReason": record.get("risk_reason", ""),
+            "alertType": record.get("alert_type", ""),
+            "riskScore": record.get("risk_score"),
+            "confidence": record.get("confidence"),
+            "ruleCode": record.get("rule_code", ""),
+            "evidenceSummary": record.get("evidence_summary", ""),
+        }
+
     def _format_date(date_val) -> str:
         """格式化日期为 ISO 字符串"""
         if date_val is None:
@@ -1748,6 +1769,7 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
         "credit_alerts": "creditAlerts",
         "hidden_assets_with_context": "hiddenAssetsWithContext",
         "timeSeriesAlerts": "timeSeriesAlerts",
+        "wallet_alerts": "walletAlerts",
     }
 
     result = {}
@@ -1766,10 +1788,224 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
                 entity: [convert_holiday_transaction(r) for r in records]
                 for entity, records in value.items()
             }
+        elif key == "wallet_alerts" and isinstance(value, list):
+            result[new_key] = [convert_wallet_alert(r) for r in value]
         else:
             result[new_key] = value
 
     return result
+
+
+def _wallet_graph_node_group(node_name: str, core_persons: List[str], companies: List[str]) -> str:
+    """为电子钱包图谱节点选择分组。"""
+    if node_name in core_persons:
+        return "core"
+    if node_name in companies:
+        return "involved_company"
+    return "wallet_counterparty"
+
+
+def _create_wallet_graph_additions(
+    wallet_data: Dict[str, Any],
+    core_persons: List[str],
+    companies: List[str],
+    existing_node_ids: Optional[set] = None,
+    existing_edge_keys: Optional[set] = None,
+    max_subjects: int = 12,
+    max_counterparties_per_subject: int = 4,
+) -> Dict[str, Any]:
+    """基于电子钱包补充摘要生成图谱增量节点、边和报告区块。"""
+    if not isinstance(wallet_data, dict):
+        return {"nodes": [], "edges": [], "report": {"wallet_alerts": [], "wallet_counterparties": []}}
+
+    existing_node_ids = set(existing_node_ids or set())
+    existing_edge_keys = set(existing_edge_keys or set())
+    nodes: List[Dict[str, Any]] = []
+    edges: List[Dict[str, Any]] = []
+    wallet_counterparties: List[Dict[str, Any]] = []
+
+    subjects = wallet_data.get("subjects", []) or []
+    def _wallet_subject_total(item: Dict[str, Any]) -> float:
+        platforms = item.get("platforms", {}) or {}
+        alipay = platforms.get("alipay", {}) or {}
+        wechat = platforms.get("wechat", {}) or {}
+        return float(alipay.get("incomeTotalYuan", 0) or 0) + float(
+            alipay.get("expenseTotalYuan", 0) or 0
+        ) + float(wechat.get("incomeTotalYuan", 0) or 0) + float(
+            wechat.get("expenseTotalYuan", 0) or 0
+        )
+
+    ranked_subjects = sorted(
+        [item for item in subjects if isinstance(item, dict) and item.get("matchedToCore")],
+        key=lambda item: (-_wallet_subject_total(item), str(item.get("subjectName", ""))),
+    )[:max_subjects]
+
+    for subject in ranked_subjects:
+        person = str(subject.get("subjectName") or subject.get("subjectId") or "").strip()
+        if not person:
+            continue
+        if person not in existing_node_ids:
+            nodes.append(
+                {
+                    "id": person,
+                    "label": person,
+                    "group": _wallet_graph_node_group(person, core_persons, companies),
+                    "size": 34 if person in core_persons else 18,
+                }
+            )
+            existing_node_ids.add(person)
+
+        platforms = subject.get("platforms", {}) or {}
+        counterparty_map: Dict[str, Dict[str, Any]] = {}
+        for platform_key, platform_label in (("alipay", "支付宝"), ("wechat", "财付通")):
+            platform_summary = platforms.get(platform_key, {}) or {}
+            for item in (platform_summary.get("topCounterparties", []) or [])[:max_counterparties_per_subject]:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if not name:
+                    continue
+                stat = counterparty_map.setdefault(
+                    name,
+                    {"platforms": set(), "amount": 0.0, "count": 0},
+                )
+                stat["platforms"].add(platform_label)
+                try:
+                    stat["amount"] += float(item.get("totalAmountYuan", 0) or 0)
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    stat["count"] += int(item.get("count", 0) or 0)
+                except (TypeError, ValueError):
+                    pass
+
+        ranked_counterparties = sorted(
+            counterparty_map.items(),
+            key=lambda kv: (kv[1]["amount"], kv[1]["count"], kv[0]),
+            reverse=True,
+        )[:max_counterparties_per_subject]
+
+        for counterparty, stat in ranked_counterparties:
+            if counterparty not in existing_node_ids:
+                nodes.append(
+                    {
+                        "id": counterparty,
+                        "label": counterparty,
+                        "group": _wallet_graph_node_group(counterparty, core_persons, companies),
+                        "size": 22 if counterparty in companies else 18,
+                    }
+                )
+                existing_node_ids.add(counterparty)
+
+            edge_key = (person, counterparty, "wallet")
+            if edge_key in existing_edge_keys:
+                continue
+            existing_edge_keys.add(edge_key)
+
+            amount_wan = round(stat["amount"] / 10000, 2)
+            platforms_text = " / ".join(sorted(stat["platforms"])) or "电子钱包"
+            edges.append(
+                {
+                    "from": person,
+                    "to": counterparty,
+                    "value": max(amount_wan, 0.2),
+                    "type": "wallet",
+                    "title": (
+                        f"[电子钱包] {person} → {counterparty}\n"
+                        f"平台: {platforms_text}\n"
+                        f"累计金额: {amount_wan:.2f}万元 ({stat['count']}笔)"
+                    ),
+                }
+            )
+            wallet_counterparties.append(
+                {
+                    "person": person,
+                    "counterparty": counterparty,
+                    "platforms": sorted(stat["platforms"]),
+                    "amount": round(stat["amount"], 2),
+                    "count": stat["count"],
+                }
+            )
+
+    wallet_alerts = []
+    for alert in (wallet_data.get("alerts", []) or [])[:30]:
+        if not isinstance(alert, dict):
+            continue
+        wallet_alerts.append(
+            {
+                "person": alert.get("person", ""),
+                "counterparty": alert.get("counterparty", ""),
+                "amount": alert.get("amount", 0),
+                "date": alert.get("date", ""),
+                "description": alert.get("description", ""),
+                "risk_level": alert.get("risk_level", "medium"),
+                "alert_type": alert.get("alert_type", ""),
+                "risk_reason": alert.get("risk_reason", ""),
+            }
+        )
+
+    wallet_counterparties.sort(
+        key=lambda item: (
+            -(float(item.get("amount", 0) or 0)),
+            -int(item.get("count", 0) or 0),
+            str(item.get("counterparty", "")),
+        )
+    )
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "report": {
+            "wallet_alerts": wallet_alerts,
+            "wallet_counterparties": wallet_counterparties[:20],
+        },
+    }
+
+
+def _augment_graph_cache_with_wallet_data(
+    graph_cache: Optional[Dict[str, Any]],
+    wallet_data: Dict[str, Any],
+    core_persons: List[str],
+    companies: List[str],
+) -> Dict[str, Any]:
+    """把电子钱包补充边增量并入图谱缓存。"""
+    base = dict(graph_cache or {})
+    nodes = list(base.get("nodes", []) or [])
+    edges = list(base.get("edges", []) or [])
+    existing_node_ids = {
+        str(node.get("id"))
+        for node in nodes
+        if isinstance(node, dict) and node.get("id")
+    }
+    existing_edge_keys = {
+        (
+            str(edge.get("from") or edge.get("source") or ""),
+            str(edge.get("to") or edge.get("target") or ""),
+            str(edge.get("type") or "base"),
+        )
+        for edge in edges
+        if isinstance(edge, dict)
+    }
+
+    additions = _create_wallet_graph_additions(
+        wallet_data,
+        core_persons=core_persons,
+        companies=companies,
+        existing_node_ids=existing_node_ids,
+        existing_edge_keys=existing_edge_keys,
+    )
+
+    if additions["nodes"]:
+        nodes.extend(additions["nodes"])
+    if additions["edges"]:
+        edges.extend(additions["edges"])
+
+    base["nodes"] = nodes
+    base["edges"] = edges
+    wallet_report = additions.get("report", {})
+    if wallet_report:
+        base["walletReport"] = wallet_report
+    return base
 
 
 def serialize_analysis_results(results: Dict) -> Dict:
@@ -2192,7 +2428,9 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             "p1": {},  # P1: 资产数据
             "p2": {},  # P2: 行为数据
             "id_to_name_map": {},  # 身份证号到人名的映射
+            "wallet": {},  # 电子钱包补充数据
         }
+        wallet_artifact_bundle = wallet_data_extractor.empty_wallet_artifact_bundle()
 
         # ========== P0: 核心上下文 ==========
         logger.info("  [P0] 提取核心上下文数据...")
@@ -2350,6 +2588,26 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         # P2.4/P2.5: 铁路/航班出行
         _populate_transport_external_data(data_dir, external_data["p2"], logger)
 
+        # 电子钱包补充数据（微信 / 支付宝 / 财付通）
+        try:
+            wallet_artifact_bundle = wallet_data_extractor.extract_wallet_artifact_bundle(
+                data_dir,
+                known_person_names=all_persons,
+            )
+            wallet_data = wallet_artifact_bundle.get("walletData", {})
+            external_data["wallet"] = wallet_data
+            wallet_summary = wallet_data.get("summary", {}) if isinstance(wallet_data, dict) else {}
+            logger.info(
+                "    ✓ 电子钱包补充数据: %s 个主体, %s 条财付通交易, %s 条支付宝交易",
+                wallet_summary.get("subjectCount", 0),
+                wallet_summary.get("tenpayTransactionCount", 0),
+                wallet_summary.get("alipayTransactionCount", 0),
+            )
+        except Exception as e:
+            logger.warning(f"    ✗ 电子钱包补充数据提取失败: {e}")
+            external_data["wallet"] = wallet_data_extractor.empty_wallet_data()
+            wallet_artifact_bundle = wallet_data_extractor.empty_wallet_artifact_bundle()
+
         phase4_duration = (time.time() - phase4_start) * 1000
         logging_config.log_performance(
             logger, "Phase 4-外部数据提取(全部)", phase4_duration
@@ -2401,6 +2659,24 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                 id_to_name_map[id_part] = name
 
         logger.info(f"身份证号映射表构建完成: {len(id_to_name_map)} 个人员")
+        try:
+            external_data["wallet"] = wallet_data_extractor.reconcile_wallet_data(
+                external_data.get("wallet", {}),
+                id_to_name_map=id_to_name_map,
+                known_person_names=all_persons,
+            )
+        except Exception as exc:
+            logger.warning(f"电子钱包补充数据主体映射修正失败: {exc}")
+            external_data["wallet"] = external_data.get("wallet", {})
+        try:
+            external_data["wallet"] = wallet_risk_analyzer.enhance_wallet_alerts(
+                external_data.get("wallet", {}),
+                wallet_artifact_bundle.get("artifacts", {}),
+                cleaned_data,
+                id_to_name_map=id_to_name_map,
+            )
+        except Exception as exc:
+            logger.warning(f"电子钱包高级风险增强失败: {exc}")
 
         # 企业登记信息按人员聚合（company_info 以 uscc 为 key，需要转换为按姓名索引）
         person_company_map = {}
@@ -2532,6 +2808,19 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                     (person_id for person_id, person_name in id_to_name_map.items() if person_name == entity),
                     None,
                 )
+                wallet_subject = None
+                wallet_data = external_data.get("wallet", {})
+                if isinstance(wallet_data, dict):
+                    wallet_subject = (
+                        wallet_data.get("subjectsByName", {}).get(entity)
+                        or (
+                            wallet_data.get("subjectsById", {}).get(entity_id)
+                            if entity_id
+                            else None
+                        )
+                    )
+                if wallet_subject:
+                    profile["wallet_summary"] = wallet_subject
 
                 # P2.1: 保险
                 insurance_data = external_data["p2"].get("insurance_data", {})
@@ -2887,6 +3176,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                     ts_results=analysis_results.get("timeSeries"),
                     related_party_results=analysis_results.get("relatedParty"),
                     loan_results=analysis_results.get("loan"),
+                    wallet_results=external_data.get("wallet"),
                 )
                 logger.info("  ✓ 线索聚合完成")
             except Exception as e:
@@ -3082,6 +3372,11 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         if credit_alerts:
             suspicions["credit_alerts"] = credit_alerts
 
+        # 电子钱包补充预警
+        wallet_alerts = external_data.get("wallet", {}).get("alerts", [])
+        if wallet_alerts:
+            suspicions["wallet_alerts"] = wallet_alerts
+
         # 7.3 🔄 隐形资产检测 (现在有房产/车辆数据可以对比!)
         try:
             hidden_assets = _detect_hidden_assets_with_context(
@@ -3181,6 +3476,20 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                     "loanPairCount": len(loan_results.get("bidirectional_flows", [])),
                 },
             }
+            graph_data_cache = _augment_graph_cache_with_wallet_data(
+                graph_data_cache,
+                external_data.get("wallet", {}),
+                core_persons=all_persons,
+                companies=all_companies,
+            )
+            wallet_report = graph_data_cache.get("walletReport", {}) if isinstance(graph_data_cache, dict) else {}
+            if isinstance(wallet_report, dict):
+                graph_data_cache.setdefault("stats", {})["walletAlertCount"] = len(
+                    wallet_report.get("wallet_alerts", []) or []
+                )
+                graph_data_cache["stats"]["walletCounterpartyCount"] = len(
+                    wallet_report.get("wallet_counterparties", []) or []
+                )
             logger.info(
                 f"  ✓ 图谱缓存: {len(sampled_nodes)} 节点, {len(sampled_edges)} 边"
             )
@@ -3247,6 +3556,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             "suspicions": serialize_suspicions(enhanced_suspicions),
             "analysisResults": serialize_analysis_results(analysis_results),
             "graphData": graph_data_cache,
+            "walletData": external_data.get("wallet", {}),
             "externalData": external_data,
             "runtimeLogPaths": _get_last_analysis_log_paths(),
             "_profiles_raw": profiles,
@@ -3307,7 +3617,29 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
 
         # 8.5 生成专项txt报告
         try:
-            logger.info("  8.5 开始生成专项txt报告...")
+            logger.info("  8.5 开始生成电子钱包专项产物...")
+            wallet_output_files = wallet_report_builder.generate_wallet_artifacts(
+                output_dirs["analysis_results"],
+                external_data.get("wallet", {}),
+                wallet_artifact_bundle.get("artifacts", {}),
+            )
+            if wallet_output_files:
+                logger.info(
+                    "  ✓ 电子钱包专项产物已生成: %s, %s, %s",
+                    wallet_output_files.get("txt"),
+                    wallet_output_files.get("excel"),
+                    wallet_output_files.get("focus_txt"),
+                )
+                broadcast_log("INFO", "  ✓ 电子钱包专项产物生成成功")
+            else:
+                logger.info("  - 未检测到可生成的电子钱包专项产物")
+        except Exception as e:
+            logger.warning(f"  ✗ 电子钱包专项产物生成失败: {e}")
+            broadcast_log("WARN", f"  ✗ 电子钱包专项产物生成失败: {str(e)[:50]}")
+
+        # 8.6 生成专项txt报告
+        try:
+            logger.info("  8.6 开始生成专项txt报告...")
             if report_builder:
                 specialized_gen = SpecializedReportGenerator(
                     analysis_results=analysis_results,
@@ -4976,6 +5308,7 @@ async def get_graph_data():
     results = analysis_state.results
     persons = results.get("persons", [])
     companies = results.get("companies", [])
+    wallet_data = results.get("walletData", {})
     analysis_results = results.get("analysisResults", {})
     related_party = analysis_results.get("relatedParty", {}) if isinstance(analysis_results, dict) else {}
     penetration = analysis_results.get("penetration", {}) if isinstance(analysis_results, dict) else {}
@@ -4992,9 +5325,15 @@ async def get_graph_data():
     )
 
     # 从缓存结果中获取图谱数据
-    graph_cache = results.get("graphData", {})
+    graph_cache = _augment_graph_cache_with_wallet_data(
+        results.get("graphData", {}),
+        wallet_data,
+        core_persons=persons,
+        companies=companies,
+    )
     nodes = graph_cache.get("nodes", [])
     edges = graph_cache.get("edges", [])
+    wallet_report = graph_cache.get("walletReport", {}) if isinstance(graph_cache, dict) else {}
     focus_entities = annotate_focus_entities_with_graph(
         aggregation_overview.get("highlights", []),
         graph_nodes=nodes,
@@ -5017,6 +5356,8 @@ async def get_graph_data():
         "noRepayCount": 0,
         "discoveredNodeCount": len(related_party.get("discovered_nodes", [])),
         "relationshipClusterCount": len(related_party.get("relationship_clusters", [])),
+        "walletAlertCount": len(wallet_report.get("wallet_alerts", []) or []) if isinstance(wallet_report, dict) else 0,
+        "walletCounterpartyCount": len(wallet_report.get("wallet_counterparties", []) or []) if isinstance(wallet_report, dict) else 0,
         "coreEdgeCount": 0,
         "companyEdgeCount": 0,
         "otherEdgeCount": len(edges),
@@ -5038,6 +5379,8 @@ async def get_graph_data():
         "focus_entities": focus_entities,
         "aggregation_summary": aggregation_summary,
         "aggregation_metadata": aggregation_overview.get("analysis_metadata", {}),
+        "wallet_alerts": wallet_report.get("wallet_alerts", []) if isinstance(wallet_report, dict) else [],
+        "wallet_counterparties": wallet_report.get("wallet_counterparties", []) if isinstance(wallet_report, dict) else [],
     }
 
     # 构建采样信息

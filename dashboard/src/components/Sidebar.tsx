@@ -92,6 +92,7 @@ export function Sidebar() {
         { id: 'overview', label: '数据概览', icon: TrendingUp },
         { id: 'risk', label: '风险情报', icon: AlertTriangle },
         { id: 'graph', label: '关系图谱', icon: Network },
+        { id: 'supplement', label: '补充数据', icon: Wallet },
         { id: 'report', label: '审计报告', icon: FileText },
     ];
 

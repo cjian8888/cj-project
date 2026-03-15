@@ -727,7 +727,101 @@ tax_analysis, travel_analysis
             </table>
             {% endif %}
 
-            {# 【新增】6. 借贷往来分析 #}
+            {# 6. 电子钱包补充核查 #}
+            {% set ns.idx = ns.idx + 1 %}
+            {% set wallet = analysis.wallet_analysis %}
+            <h3 class="item-title">{{ ns.idx }}、电子钱包补充核查</h3>
+            <p>{{ wallet.narrative or '本次尚未补充电子钱包数据。' }}</p>
+            {% if wallet.has_data %}
+            <table>
+                <tr>
+                    <th class="seq-col">序号</th>
+                    <th>核查指标</th>
+                    <th>结果</th>
+                    <th>说明</th>
+                </tr>
+                <tr>
+                    <td class="seq-col">1</td>
+                    <td>核查状态</td>
+                    <td class="text-center">{{ wallet.status_text or '已补充' }}</td>
+                    <td>作为银行流水之外的补充层摘要，不回写主清洗链。</td>
+                </tr>
+                <tr>
+                    <td class="seq-col">2</td>
+                    <td>累计收支规模</td>
+                    <td class="money-col">{{ wallet.third_party_total_wan|round(2) }}万元</td>
+                    <td>支付宝与财付通收入、支出合计口径。</td>
+                </tr>
+                <tr>
+                    <td class="seq-col">3</td>
+                    <td>支付宝交易</td>
+                    <td class="text-center">{{ wallet.alipay_tx_count or 0 }}笔</td>
+                    <td>实名账户交易明细。</td>
+                </tr>
+                <tr>
+                    <td class="seq-col">4</td>
+                    <td>财付通交易</td>
+                    <td class="text-center">{{ wallet.tenpay_tx_count or 0 }}笔</td>
+                    <td>微信支付/财付通交易明细。</td>
+                </tr>
+                <tr>
+                    <td class="seq-col">5</td>
+                    <td>微信账号 / 财付通账号</td>
+                    <td class="text-center">{{ wallet.wechat_account_count or 0 }} / {{ wallet.tenpay_account_count or 0 }}</td>
+                    <td>用于判断账号控制范围及跨平台映射关系。</td>
+                </tr>
+                <tr>
+                    <td class="seq-col">6</td>
+                    <td>微信登录轨迹</td>
+                    <td class="text-center">{{ wallet.login_event_count or 0 }}条</td>
+                    <td>可用于补充时间异常与账号控制分析。</td>
+                </tr>
+            </table>
+            {% endif %}
+            {% if wallet.match_basis and wallet.match_basis|length > 0 %}
+            <p><strong>主体归并依据：</strong>{{ wallet.match_basis | join('；') }}</p>
+            {% endif %}
+            {% if wallet.signals and wallet.signals|length > 0 %}
+            <p><strong>交叉信号：</strong>{{ wallet.signals | join('；') }}</p>
+            {% endif %}
+            {% if wallet.counterparties and wallet.counterparties|length > 0 %}
+            <p><strong>主要电子钱包对手方：</strong></p>
+            <table>
+                <tr>
+                    <th class="seq-col">序号</th>
+                    <th>平台</th>
+                    <th>对手方</th>
+                    <th>交易笔数</th>
+                    <th>累计金额 (万元)</th>
+                </tr>
+                {% for item in wallet.counterparties %}
+                <tr>
+                    <td class="seq-col">{{ loop.index }}</td>
+                    <td class="text-center">{{ item.platform or '—' }}</td>
+                    <td>{{ item.name or '—' }}</td>
+                    <td class="text-center">{{ item.count or 0 }}</td>
+                    <td class="money-col">{{ item.total_amount_wan|round(2) }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% endif %}
+            {% if wallet.recommendations and wallet.recommendations|length > 0 %}
+            <p><strong>后续核查建议：</strong></p>
+            <table>
+                <tr>
+                    <th class="seq-col">序号</th>
+                    <th>建议</th>
+                </tr>
+                {% for item in wallet.recommendations %}
+                <tr>
+                    <td class="seq-col">{{ loop.index }}</td>
+                    <td>{{ item }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+            {% endif %}
+
+            {# 【新增】7. 借贷往来分析 #}
             {% set ns.idx = ns.idx + 1 %}
             {% set lending = analysis.lending_analysis %}
             {% if lending and lending.total_platforms > 0 %}

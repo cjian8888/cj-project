@@ -6,6 +6,7 @@ import {
   AlertTriangle,
   CreditCard,
   Landmark,
+  Wallet,
   Info,
   X,
   ExternalLink,
@@ -19,7 +20,7 @@ import { formatPartyName, formatRiskLevel, getRiskLevelBadgeStyle } from '../uti
 
 // 交易详情接口
 interface TransactionDetail {
-  type: 'loan_pair' | 'no_repayment' | 'high_risk_income' | 'online_loan';
+  type: 'loan_pair' | 'no_repayment' | 'high_risk_income' | 'online_loan' | 'wallet_alert';
   person: string;
   counterparty: string;
   amount: number;
@@ -35,6 +36,7 @@ interface TransactionDetail {
   sourceRow?: number;
   detail?: string;  // 原始交易详细信息
   incomeType?: string; // 收入类型
+  riskReason?: string;
 }
 
 interface TransactionRef {
@@ -180,6 +182,8 @@ interface GraphData {
     noRepayCount: number;
     discoveredNodeCount: number;
     relationshipClusterCount: number;
+    walletAlertCount?: number;
+    walletCounterpartyCount?: number;
     coreEdgeCount: number;
     companyEdgeCount: number;
     otherEdgeCount: number;
@@ -215,6 +219,23 @@ interface GraphData {
     online_loans: Array<{
       platform: string;
       amount: number;
+    }>;
+    wallet_alerts: Array<{
+      person: string;
+      counterparty: string;
+      amount: number;
+      date?: string;
+      description?: string;
+      risk_level?: string;
+      alert_type?: string;
+      risk_reason?: string;
+    }>;
+    wallet_counterparties: Array<{
+      person: string;
+      counterparty: string;
+      platforms: string[];
+      amount: number;
+      count: number;
     }>;
     third_party_relays: Array<{
       from: string;
@@ -1013,6 +1034,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
           case 'core': return '🔴 核心人员';
           case 'company': return '🏢 关联企业';
           case 'involved_company': return '⚠️ 涉案企业';
+          case 'wallet_counterparty': return '💳 电子钱包对手方';
           case 'other': return '🔵 其他关联方';
           default: return group;
         }
@@ -1025,6 +1047,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
         if (node.group === 'core') nodeSize = Math.max(nodeSize, 35);
         else if (node.group === 'involved_company') nodeSize = Math.max(nodeSize, 40);
         else if (node.group === 'company') nodeSize = Math.max(nodeSize, 25);
+        else if (node.group === 'wallet_counterparty') nodeSize = Math.max(nodeSize, 20);
         else nodeSize = Math.max(nodeSize, 18);
 
         return {
@@ -1040,16 +1063,23 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
       const nodes = new DataSet<Node>(processedNodes);
 
       // 处理边数据
-      const processedEdges = graphData.edges.map((edge, edgeIdx) => ({
-        id: `${edge.from}->${edge.to}->${edgeIdx}`,
-        from: edge.from,
-        to: edge.to,
-        value: edge.value || 1,
-        title: edge.title || `${edge.from} → ${edge.to}`,
-        arrows: 'to',
-        color: { color: '#00d2ff', opacity: 0.8 },
-        smooth: { enabled: true, type: 'curvedCW', roundness: 0.2 }
-      }));
+      const processedEdges = graphData.edges.map((edge, edgeIdx) => {
+        const edgeType = (edge as any).type || 'base';
+        const isWalletEdge = edgeType === 'wallet';
+        return {
+          id: `${edge.from}->${edge.to}->${edgeIdx}`,
+          from: edge.from,
+          to: edge.to,
+          value: edge.value || 1,
+          title: edge.title || `${edge.from} → ${edge.to}`,
+          arrows: 'to',
+          color: isWalletEdge
+            ? { color: '#f59e0b', opacity: 0.85 }
+            : { color: '#00d2ff', opacity: 0.8 },
+          dashes: isWalletEdge,
+          smooth: { enabled: true, type: 'curvedCW', roundness: 0.2 }
+        };
+      });
 
       const edges = new DataSet<Edge>(processedEdges);
 
@@ -1137,7 +1167,8 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                   <p className="text-xs theme-text-muted">
                     {transactionDetail.type === 'loan_pair' ? '借贷配对' :
                       transactionDetail.type === 'no_repayment' ? '无还款借贷' :
-                        transactionDetail.type === 'high_risk_income' ? '高风险收入' : '网贷交易'}
+                        transactionDetail.type === 'high_risk_income' ? '高风险收入' :
+                          transactionDetail.type === 'wallet_alert' ? '电子钱包预警' : '网贷交易'}
                   </p>
                 </div>
               </div>
@@ -1154,28 +1185,46 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
               {/* 交易双方信息（P1修复: 明确标注方向） */}
               <div className="grid grid-cols-2 gap-4">
                 <div className="bg-white/5 rounded-lg p-3">
-                  <div className="text-xs theme-text-dim mb-1">付款方</div>
+                  <div className="text-xs theme-text-dim mb-1">
+                    {transactionDetail.type === 'wallet_alert' ? '核查主体' : '付款方'}
+                  </div>
                   <div className="text-white font-medium">
-                    {transactionDetail.counterparty &&
-                     transactionDetail.counterparty !== '未知' &&
-                     transactionDetail.counterparty !== '(未知)' &&
-                     transactionDetail.counterparty !== 'nan' ?
-                      formatPartyName(transactionDetail.counterparty) :
-                      <span className="text-orange-400">⚠ 来源不明</span>
-                    }
+                    {transactionDetail.type === 'wallet_alert'
+                      ? formatPartyName(transactionDetail.person)
+                      : (transactionDetail.counterparty &&
+                        transactionDetail.counterparty !== '未知' &&
+                        transactionDetail.counterparty !== '(未知)' &&
+                        transactionDetail.counterparty !== 'nan' ?
+                          formatPartyName(transactionDetail.counterparty) :
+                          <span className="text-orange-400">⚠ 来源不明</span>
+                      )}
                   </div>
                 </div>
                 <div className="bg-white/5 rounded-lg p-3">
-                  <div className="text-xs theme-text-dim mb-1">收款方</div>
-                  <div className="text-cyan-400 font-medium">{transactionDetail.person}</div>
+                  <div className="text-xs theme-text-dim mb-1">
+                    {transactionDetail.type === 'wallet_alert' ? '对手方' : '收款方'}
+                  </div>
+                  <div className="text-cyan-400 font-medium">
+                    {transactionDetail.type === 'wallet_alert'
+                      ? formatCounterpartyWithWarning(transactionDetail.counterparty)
+                      : transactionDetail.person}
+                  </div>
                 </div>
               </div>
 
               {/* 资金方向指示 */}
               <div className="flex items-center justify-center theme-text-dim text-sm">
-                <span className="theme-text-muted">{formatPartyName(transactionDetail.counterparty || '付款方')}</span>
+                <span className="theme-text-muted">
+                  {transactionDetail.type === 'wallet_alert'
+                    ? formatPartyName(transactionDetail.person || '核查主体')
+                    : formatPartyName(transactionDetail.counterparty || '付款方')}
+                </span>
                 <span className="mx-2 text-cyan-400">→</span>
-                <span className="text-cyan-400">{transactionDetail.person}</span>
+                <span className="text-cyan-400">
+                  {transactionDetail.type === 'wallet_alert'
+                    ? formatPartyName(transactionDetail.counterparty || '对手方')
+                    : transactionDetail.person}
+                </span>
               </div>
 
               {/* 金额信息 */}
@@ -1235,6 +1284,13 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                   <div className="text-sm theme-text-secondary font-mono whitespace-pre-line">
                     {transactionDetail.detail}
                   </div>
+                </div>
+              )}
+
+              {transactionDetail.riskReason && (
+                <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3">
+                  <div className="text-xs text-amber-300 mb-1">预警原因</div>
+                  <div className="text-sm text-amber-200 leading-relaxed">{transactionDetail.riskReason}</div>
                 </div>
               )}
 
@@ -2203,6 +2259,114 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                   ) : (
                     <div className="text-sm theme-text-dim">当前未形成可展示的关系簇</div>
                   )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 电子钱包预警 */}
+          {graphData && graphData.report.wallet_alerts.length > 0 && (
+            <div className="stat-card bg-white/10 rounded-lg overflow-hidden border-l-4 border-amber-500">
+              <button
+                onClick={() => toggleSection('walletAlerts')}
+                className="w-full p-4 hover:bg-white/5 transition-colors text-left flex items-center justify-between"
+              >
+                <div className="flex items-center gap-3">
+                  <Wallet className="w-5 h-5 text-amber-400" />
+                  <div>
+                    <h4 className="text-white text-sm font-medium">电子钱包预警</h4>
+                    <div className="text-2xl font-bold text-amber-400">
+                      {graphData.report.wallet_alerts.length}
+                    </div>
+                    <div className="text-xs theme-text-muted">补充层风险命中</div>
+                  </div>
+                </div>
+                {expandedSections['walletAlerts'] ?
+                  <ChevronUp className="w-5 h-5 theme-text-muted" /> :
+                  <ChevronDown className="w-5 h-5 theme-text-muted" />
+                }
+              </button>
+              {expandedSections['walletAlerts'] && (
+                <div className="px-4 pb-4 border-t border-white/10 pt-3 max-h-56 overflow-y-auto">
+                  <div className="space-y-2">
+                    {graphData.report.wallet_alerts.map((item, idx) => (
+                      <button
+                        key={idx}
+                        onClick={() => {
+                          focusGraphNodes([item.person, item.counterparty], `${item.person} → ${item.counterparty}`);
+                          setTransactionDetail({
+                            type: 'wallet_alert',
+                            person: item.person,
+                            counterparty: item.counterparty,
+                            amount: item.amount || 0,
+                            riskLevel: item.risk_level || 'medium',
+                            detail: item.description,
+                            riskReason: item.risk_reason || item.alert_type,
+                            date: item.date,
+                          });
+                        }}
+                        className="w-full text-left p-2 rounded bg-white/5 hover:bg-white/10 transition-colors"
+                      >
+                        <div className="flex justify-between items-center text-sm">
+                          <span className="theme-text-secondary">{item.person} → {formatPartyName(item.counterparty || '未知对手方')}</span>
+                          <span className={getRiskLevelBadgeStyle(item.risk_level || 'medium')}>
+                            {formatRiskLevel(item.risk_level || 'medium')}
+                          </span>
+                        </div>
+                        <div className="flex justify-between items-center text-xs mt-1">
+                          <span className="theme-text-dim">{item.date || '日期待补充'}</span>
+                          <span className="text-amber-400 font-mono">{formatAmount(item.amount || 0)}</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 电子钱包对手方 */}
+          {graphData && graphData.report.wallet_counterparties.length > 0 && (
+            <div className="stat-card bg-white/10 rounded-lg overflow-hidden border-l-4 border-yellow-500">
+              <button
+                onClick={() => toggleSection('walletCounterparties')}
+                className="w-full p-4 hover:bg-white/5 transition-colors text-left flex items-center justify-between"
+              >
+                <div className="flex items-center gap-3">
+                  <Wallet className="w-5 h-5 text-yellow-400" />
+                  <div>
+                    <h4 className="text-white text-sm font-medium">电子钱包对手方</h4>
+                    <div className="text-2xl font-bold text-yellow-400">
+                      {graphData.report.wallet_counterparties.length}
+                    </div>
+                    <div className="text-xs theme-text-muted">已入图的补充关系边</div>
+                  </div>
+                </div>
+                {expandedSections['walletCounterparties'] ?
+                  <ChevronUp className="w-5 h-5 theme-text-muted" /> :
+                  <ChevronDown className="w-5 h-5 theme-text-muted" />
+                }
+              </button>
+              {expandedSections['walletCounterparties'] && (
+                <div className="px-4 pb-4 border-t border-white/10 pt-3 max-h-56 overflow-y-auto">
+                  <div className="space-y-2">
+                    {graphData.report.wallet_counterparties.map((item, idx) => (
+                      <button
+                        key={idx}
+                        onClick={() => focusGraphNodes([item.person, item.counterparty], `${item.person} → ${item.counterparty}`)}
+                        className="w-full text-left p-2 rounded bg-white/5 hover:bg-white/10 transition-colors"
+                      >
+                        <div className="flex justify-between items-center text-sm">
+                          <span className="theme-text-secondary">{item.person} → {formatPartyName(item.counterparty)}</span>
+                          <span className="text-yellow-400 font-mono">{formatAmount(item.amount || 0)}</span>
+                        </div>
+                        <div className="flex justify-between items-center text-xs mt-1">
+                          <span className="theme-text-dim">{(item.platforms || []).join(' / ') || '电子钱包'}</span>
+                          <span className="theme-text-muted">{item.count || 0}笔</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>

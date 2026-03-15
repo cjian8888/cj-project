@@ -8,6 +8,8 @@
 {% set show_assets = enabled_sections|length == 0 or 'assets' in enabled_sections %}
 {% set show_risks = enabled_sections|length == 0 or 'risks' in enabled_sections %}
 {% set title_subject = report.get('_title_subject', '相关人员') %}
+{% set wallet_summary = report.meta.wallet_data_summary if report.meta and report.meta.wallet_data_summary else {} %}
+{% set wallet_available = report.meta.wallet_data_available if report.meta else false %}
 {# 报告标题 #}
 <div class="report-title">关于{{ title_subject }}等信息查询结果分析报告</div>
 
@@ -27,6 +29,9 @@
         <li>房产信息: 不动产登记中心查询回执</li>
         <li>车辆信息: 车辆管理所查询回执</li>
         <li>理财信息: 银行理财账户对账单</li>
+        {% if wallet_available %}
+        <li>电子钱包补充数据: 已结构化接入微信、支付宝及财付通，覆盖{{ wallet_summary.subjectCount or 0 }}个主体</li>
+        {% endif %}
     </ul>
     
     <h4 style="margin: 15px 0 10px 0;">【数据完整性】</h4>
@@ -34,12 +39,19 @@
         <li>已调取被核查人名下主要银行账户流水</li>
         <li>房产信息来源于不动产登记查询回执</li>
         <li>车辆信息来源于车辆管理所查询回执</li>
+        {% if wallet_available %}
+        <li>已补充第三方支付明细摘要: 支付宝{{ wallet_summary.alipayTransactionCount or 0 }}笔、财付通{{ wallet_summary.tenpayTransactionCount or 0 }}笔、微信登录轨迹{{ wallet_summary.loginEventCount or 0 }}条</li>
+        {% endif %}
     </ul>
     
     <h4 style="margin: 15px 0 10px 0;">【待补充数据】</h4>
     <ul style="margin: 0; padding-left: 20px; line-height: 1.8;">
         <li><strong style="color: #dc3545;">房产交易价格</strong>: 需调取不动产登记中心交易档案</li>
+        {% if wallet_available %}
+        <li><strong style="color: #28a745;">第三方支付</strong>: 本次已补充调取电子钱包数据，覆盖{{ wallet_summary.subjectCount or 0 }}个主体，可继续补充订单、聊天及凭证材料</li>
+        {% else %}
         <li><strong style="color: #ffc107;">第三方支付</strong>: 建议调取微信、支付宝账户流水</li>
+        {% endif %}
         <li><strong style="color: #ffc107;">配偶资产</strong>: 建议调取配偶银行流水及资产信息</li>
     </ul>
 </div>

@@ -322,3 +322,96 @@ def test_aggregator_risk_score_consumes_relays_clusters_and_discovered_nodes(mon
     assert pack["risk_details"]["relay_score"] > 0
     assert pack["risk_details"]["cluster_score"] > 0
     assert pack["risk_details"]["external_node_score"] > 0
+
+
+def test_aggregator_consumes_wallet_results_and_emits_wallet_evidence(monkeypatch):
+    _stub_ratio_calculators(monkeypatch)
+
+    aggregator = ClueAggregator(["张三"], [])
+    aggregator.aggregate_wallet_results(
+        {
+            "subjects": [
+                {
+                    "subjectId": "110101199001010011",
+                    "subjectName": "张三",
+                    "matchedToCore": True,
+                    "crossSignals": {
+                        "phoneOverlapCount": 1,
+                        "bankCardOverlapCount": 2,
+                        "aliasMatchCount": 1,
+                    },
+                    "platforms": {
+                        "alipay": {
+                            "transactionCount": 60,
+                            "incomeTotalYuan": 220000,
+                            "expenseTotalYuan": 150000,
+                            "topCounterparties": [{"name": "李四", "count": 6, "totalAmountYuan": 62000}],
+                        },
+                        "wechat": {
+                            "tenpayTransactionCount": 40,
+                            "incomeTotalYuan": 120000,
+                            "expenseTotalYuan": 100000,
+                            "loginEventCount": 18,
+                            "topCounterparties": [{"name": "王五", "count": 5, "totalAmountYuan": 58000}],
+                        },
+                    },
+                }
+            ],
+            "alerts": [
+                {
+                    "person": "张三",
+                    "counterparty": "李四",
+                    "amount": 62000,
+                    "risk_level": "medium",
+                    "description": "与李四电子钱包往来密集",
+                    "risk_reason": "高频对手方",
+                    "alert_type": "wallet_dense_counterparty",
+                }
+            ],
+        }
+    )
+
+    aggregator.calculate_entity_risk_scores()
+    result = aggregator.to_dict()
+    pack = result["evidencePacks"]["张三"]
+
+    assert len(pack["evidence"]["wallet_summaries"]) == 1
+    assert len(pack["evidence"]["wallet_alerts"]) == 1
+    assert result["rankedEntities"][0]["aggregationExplainability"]["top_clues"][0]["bucket"] in {
+        "wallet_alerts",
+        "wallet_summaries",
+    }
+
+
+def test_aggregator_wallet_alert_prefers_source_risk_score_and_confidence(monkeypatch):
+    _stub_ratio_calculators(monkeypatch)
+
+    aggregator = ClueAggregator(["张三"], [])
+    aggregator.aggregate_wallet_results(
+        {
+            "subjects": [],
+            "alerts": [
+                {
+                    "person": "张三",
+                    "counterparty": "待确认电子钱包主体",
+                    "amount": 1_280_000,
+                    "risk_level": "high",
+                    "description": "张三尚未归并到主链主体，但电子钱包规模较大。",
+                    "risk_reason": "补充数据中存在规模较大的未映射电子钱包主体。",
+                    "alert_type": "wallet_unmapped_large_scale",
+                    "rule_code": "WALLET-UNMAPPED-LARGE-001",
+                    "risk_score": 88.5,
+                    "confidence": 0.72,
+                    "evidence_summary": "未命中主链，电子钱包累计320笔，累计128.0万元。",
+                }
+            ],
+        }
+    )
+
+    pack = aggregator.to_dict()["evidencePacks"]["张三"]
+    alert = pack["evidence"]["wallet_alerts"][0]
+
+    assert alert["risk_score"] == 72.0
+    assert alert["confidence"] == 0.72
+    assert alert["rule_code"] == "WALLET-UNMAPPED-LARGE-001"
+    assert any("未命中主链" in item for item in alert["evidence"])

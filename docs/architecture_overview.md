@@ -7,11 +7,13 @@ graph TD
     A[原始 Excel 流水] -->|file_categorizer| B[分类识别]
     B -->|data_cleaner| C[清洗/标准化]
     C --> D[output/cleaned_data/]
+    A2[补充电子钱包数据\n微信/支付宝/财付通] -->|wallet_data_extractor| W[walletData.json]
     D -->|financial_profiler| E[资金画像]
     D -->|income_analyzer| F[收入分析]
     D -->|loan_analyzer| G[借贷分析]
     D -->|suspicion_detector| H[可疑交易检测]
     E & F & G & H --> I[analysis_cache/]
+    W --> I
     I -->|api_server| J[前端展示]
     I -->|report_service| K[报告生成]
 ```
@@ -23,6 +25,7 @@ graph TD
 | 模块 | 职责 | 输入 | 输出 |
 |------|------|------|------|
 | `data_cleaner.py` | 数据清洗/去重/标准化 | 原始 Excel | `cleaned_data/*.xlsx` |
+| `wallet_data_extractor.py` | 电子钱包补充数据解析 | 微信/支付宝/财付通协查包 | `walletData.json` |
 | `financial_profiler.py` | 资金画像生成 | cleaned_data | profiles.json |
 | `income_analyzer.py` | 异常收入检测 | cleaned_data | income 分析结果 |
 | `loan_analyzer.py` | 借贷行为分析 | cleaned_data | loan 分析结果 |
@@ -65,9 +68,57 @@ validate_data_quality(df)
 
 ---
 
-## 四、后端计算模块
+## 四、补充电子钱包数据链路
 
-### 4.1 资金画像 (`financial_profiler.py`)
+### 4.1 定位
+
+微信 / 支付宝 / 财付通数据不是银行主流水，而是“晚到的补充协查数据”。
+
+- 不进入 `output/cleaned_data/`
+- 不改写银行清洗链
+- 只在 `analysis_cache/` 中形成独立补充缓存
+
+### 4.2 当前样本的结构规律
+
+- 支付宝：`注册信息.xlsx` + `账户明细.xlsx`
+- 微信：`regInfobasicInfo（公开）.txt` + `WX登录轨迹（公开）.txt`
+- 财付通：`TenpayRegInfo（公开）.txt` + `TenpayTrades（公开）.txt`
+
+### 4.3 推荐目录
+
+```text
+<inputDirectory>/
+  补充数据/
+    电子钱包/
+      批次_YYYYMMDD/
+        ...
+```
+
+### 4.4 当前输出
+
+当前电子钱包补充层已经形成四类输出：
+
+- `analysis_cache/walletData.json`
+  - 主体数、账号数、交易笔数、登录记录数
+  - 主体维度的支付宝/微信/财付通摘要
+  - 手机号、实名、别名、银行卡重叠等跨平台匹配信号
+- `profiles[*].wallet_summary`
+  - 个人画像中的电子钱包补充摘要
+- `suspicions.wallet_alerts`
+  - 电子钱包补充预警，供前端风险页统一消费
+- `aggregation.evidencePacks[*].wallet_summaries / wallet_alerts`
+  - 电子钱包补充证据进入实体聚合包和综合风险评分
+- `graph_data.json`
+  - 在原有银行资金图谱基础上补充电子钱包对手方边
+- 报告正文
+  - “数据来源及完整性声明”中的第三方支付状态
+  - 个人章节中的“电子钱包补充核查”
+
+---
+
+## 五、后端计算模块
+
+### 5.1 资金画像 (`financial_profiler.py`)
 
 | 计算项 | 方法 | 说明 |
 |--------|------|------|
@@ -77,7 +128,7 @@ validate_data_quality(df)
 | **现金交易** | `analyze_fund_flow()` | ATM取现/存现汇总 |
 | **理财持仓** | `analyze_wealth_holdings()` | 购买-赎回=持仓估算 |
 
-### 4.2 异常收入检测 (`income_analyzer.py`)
+### 5.2 异常收入检测 (`income_analyzer.py`)
 
 | 检测类型 | 函数 | 判断逻辑 |
 |----------|------|----------|
@@ -87,7 +138,7 @@ validate_data_quality(df)
 | **大额单笔收入** | `_detect_large_single_income()` | 单笔 ≥10万, 非理财赎回 |
 | **同源多次收入** | `_detect_same_source_multi()` | 同一对手 ≥5次, 累计 ≥10万 |
 
-### 4.3 借贷行为分析 (`loan_analyzer.py`)
+### 5.3 借贷行为分析 (`loan_analyzer.py`)
 
 | 检测类型 | 函数 | 判断逻辑 |
 |----------|------|----------|
@@ -97,7 +148,7 @@ validate_data_quality(df)
 | **借贷配对** | `_detect_loan_pairs()` | 时间窗口内的借入-还款匹配 |
 | **无还款借贷** | `_detect_no_repayment_loans()` | 大额收入180天内无对应还款 |
 
-### 4.4 可疑交易检测 (`suspicion_detector.py`)
+### 5.4 可疑交易检测 (`suspicion_detector.py`)
 
 | 检测类型 | 函数 | 判断逻辑 |
 |----------|------|----------|
@@ -107,7 +158,7 @@ validate_data_quality(df)
 
 ---
 
-## 五、缓存文件结构
+## 六、缓存文件结构
 
 ```
 output/
@@ -122,12 +173,13 @@ output/
     ├── profiles.json      # 所有画像数据 (扁平结构)
     ├── suspicions.json    # 可疑交易检测结果
     ├── derived_data.json  # income/loan 分析结果
-    └── graph_data.json    # 图谱节点/边数据
+    ├── graph_data.json    # 图谱节点/边数据
+    └── walletData.json    # 电子钱包补充摘要
 ```
 
 ---
 
-## 六、数据复用铁律
+## 七、数据复用铁律
 
 > **核心原则**: 下游模块严禁重新读取原始 Excel，必须复用上游已清洗/已计算的结果。
 

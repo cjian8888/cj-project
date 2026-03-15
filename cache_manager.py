@@ -57,6 +57,7 @@ class CacheManager:
         "flightData": "flightData.json",
         "coaddressData": "coaddressData.json",
         "coviolationData": "coviolationData.json",
+        "walletData": "walletData.json",
         "external_p0": "external_p0.json",
         "external_p1": "external_p1.json",
         "external_p2": "external_p2.json",
@@ -262,6 +263,9 @@ class CacheManager:
         if "graphData" in results:
             self.save_cache("graph_data", results["graphData"])
 
+        if "walletData" in results:
+            self.save_cache("walletData", results["walletData"])
+
         # 【修复】保存外部数据（P0和P1）
         if "externalData" in results:
             external_data = results["externalData"]
@@ -375,6 +379,7 @@ class CacheManager:
             "flightData": self.load_cache("flightData"),
             "coaddressData": self.load_cache("coaddressData"),
             "coviolationData": self.load_cache("coviolationData"),
+            "walletData": self.load_cache("walletData"),
             "external_p0": self.load_cache("external_p0"),
             "external_p1": self.load_cache("external_p1"),
             "external_p2": self.load_cache("external_p2"),

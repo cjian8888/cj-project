@@ -46,6 +46,8 @@ class UnifiedRiskModel:
             'direct_relation': 8,       # 直接往来
             'multi_entity': 8,          # 多实体关联
             'ml_anomaly': 12,           # ML异常
+            'wallet_summary': 8,        # 电子钱包补充摘要
+            'wallet_alert': 14,         # 电子钱包预警
             'financial_products': -50,  # 理财产品（负分，降低风险）
             'family_transfer': -20,     # 家庭转账（负分，降低风险）
         }
@@ -104,6 +106,14 @@ class UnifiedRiskModel:
         direct_relation_score = self._score_direct_relations(
             evidence.get('direct_relations', [])
         )
+
+        # 电子钱包补充评分
+        wallet_summary_score = self._score_wallet_summaries(
+            evidence.get('wallet_summaries', [])
+        )
+        wallet_alert_score = self._score_wallet_alerts(
+            evidence.get('wallet_alerts', [])
+        )
         
         # 多实体关联评分
         entity_score = self._score_multi_entity(evidence.get('related_entities', []))
@@ -132,6 +142,8 @@ class UnifiedRiskModel:
             + cluster_score
             + external_node_score
             + direct_relation_score
+            + wallet_summary_score
+            + wallet_alert_score
             + entity_score
             + ml_score
             + financial_adjust
@@ -158,6 +170,10 @@ class UnifiedRiskModel:
             reasons.append(f"发现{len(evidence.get('discovered_nodes', []))}个外围节点")
         if direct_relation_score > 0:
             reasons.append(f"存在{len(evidence.get('direct_relations', []))}笔直接往来")
+        if wallet_summary_score > 0:
+            reasons.append(f"已补充{len(evidence.get('wallet_summaries', []))}个电子钱包摘要")
+        if wallet_alert_score > 0:
+            reasons.append(f"命中{len(evidence.get('wallet_alerts', []))}条电子钱包预警")
         if financial_adjust < 0:
             reasons.append(f"理财交易占比{financial_ratio:.1%}，降低风险")
         if family_adjust < 0:
@@ -180,6 +196,8 @@ class UnifiedRiskModel:
                 'cluster_score': cluster_score,
                 'external_node_score': external_node_score,
                 'direct_relation_score': direct_relation_score,
+                'wallet_summary_score': wallet_summary_score,
+                'wallet_alert_score': wallet_alert_score,
                 'entity_score': entity_score,
                 'ml_score': ml_score,
                 'financial_adjust': financial_adjust,
@@ -190,6 +208,8 @@ class UnifiedRiskModel:
                     'relationship_cluster_count': len(evidence.get('relationship_clusters', [])),
                     'discovered_node_count': len(evidence.get('discovered_nodes', [])),
                     'direct_relation_count': len(evidence.get('direct_relations', [])),
+                    'wallet_summary_count': len(evidence.get('wallet_summaries', [])),
+                    'wallet_alert_count': len(evidence.get('wallet_alerts', [])),
                 },
             }
         )
@@ -348,6 +368,63 @@ class UnifiedRiskModel:
         elif total_amount >= 100_000:
             score += 2.0
         return min(score, 12.0)
+
+    def _score_wallet_summaries(self, wallet_summaries: List[Dict]) -> float:
+        """电子钱包主体摘要评分。"""
+        if not wallet_summaries:
+            return 0.0
+
+        summary_scores = self._extract_numeric(wallet_summaries, 'risk_score')
+        totals = self._extract_numeric(wallet_summaries, 'third_party_total')
+        tx_counts = self._extract_numeric(wallet_summaries, 'transaction_count')
+        overlaps = []
+        for item in wallet_summaries:
+            if not isinstance(item, dict):
+                continue
+            overlaps.append(
+                float(item.get('bank_card_overlap_count', 0) or 0)
+                + float(item.get('alias_match_count', 0) or 0)
+                + float(item.get('phone_overlap_count', 0) or 0)
+            )
+
+        score = min(len(wallet_summaries) * 1.5, float(self.weights['wallet_summary']))
+        if summary_scores:
+            score += min(6.0, max(summary_scores) / 15.0)
+        if totals:
+            if max(totals) >= 1_000_000:
+                score += 4.0
+            elif max(totals) >= 300_000:
+                score += 2.5
+        if tx_counts and max(tx_counts) >= 100:
+            score += 1.5
+        if overlaps:
+            score += min(3.0, max(overlaps))
+        return min(score, 15.0)
+
+    def _score_wallet_alerts(self, wallet_alerts: List[Dict]) -> float:
+        """电子钱包预警评分。"""
+        if not wallet_alerts:
+            return 0.0
+
+        alert_scores = self._extract_numeric(wallet_alerts, 'risk_score')
+        alert_amounts = self._extract_numeric(wallet_alerts, 'amount')
+        high_count = sum(
+            1
+            for item in wallet_alerts
+            if isinstance(item, dict) and str(item.get('risk_level', '')).lower() == 'high'
+        )
+
+        score = min(len(wallet_alerts) * 2.0, float(self.weights['wallet_alert']))
+        if alert_scores:
+            score += min(8.0, max(alert_scores) / 10.0)
+        if high_count:
+            score += min(4.0, high_count * 1.5)
+        if alert_amounts:
+            if max(alert_amounts) >= 1_000_000:
+                score += 3.0
+            elif max(alert_amounts) >= 300_000:
+                score += 1.5
+        return min(score, 20.0)
     
     def _score_multi_entity(self, related_entities: List[str]) -> float:
         """
@@ -429,6 +506,8 @@ class UnifiedRiskModel:
             'relationship_clusters',
             'discovered_nodes',
             'transit_channels',
+            'wallet_summaries',
+            'wallet_alerts',
         ):
             for item in evidence.get(key, []) or []:
                 if not isinstance(item, dict):
@@ -454,7 +533,7 @@ class UnifiedRiskModel:
 
         strong_signal_count = sum(
             1
-            for key in ('money_loops', 'relay_chains', 'relationship_clusters', 'discovered_nodes')
+            for key in ('money_loops', 'relay_chains', 'relationship_clusters', 'discovered_nodes', 'wallet_alerts')
             if len(evidence.get(key, []) or []) > 0
         )
         if strong_signal_count >= 3:

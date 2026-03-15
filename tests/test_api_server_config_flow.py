@@ -398,6 +398,74 @@ def test_get_graph_data_exposes_phase1_related_party_outputs_and_prefers_penetra
     assert len(response["data"]["report"]["third_party_relays"][0]["path_explainability"]["time_axis"]) == 2
 
 
+def test_get_graph_data_augments_wallet_edges_and_report_sections():
+    previous_status = api_server.analysis_state.status
+    previous_results = api_server.analysis_state.results
+
+    api_server.analysis_state.status = "completed"
+    api_server.analysis_state.results = {
+        "persons": ["张三"],
+        "companies": [],
+        "walletData": {
+            "subjects": [
+                {
+                    "subjectId": "110101199001010011",
+                    "subjectName": "张三",
+                    "matchedToCore": True,
+                    "platforms": {
+                        "alipay": {
+                            "topCounterparties": [
+                                {"name": "李四", "count": 6, "totalAmountYuan": 62000}
+                            ]
+                        },
+                        "wechat": {
+                            "topCounterparties": [
+                                {"name": "王五", "count": 5, "totalAmountYuan": 58000}
+                            ]
+                        },
+                    },
+                }
+            ],
+            "alerts": [
+                {
+                    "person": "张三",
+                    "counterparty": "李四",
+                    "amount": 62000,
+                    "risk_level": "medium",
+                    "description": "电子钱包往来密集",
+                    "alert_type": "wallet_dense_counterparty",
+                }
+            ],
+        },
+        "analysisResults": {
+            "aggregation": {"summary": {}, "rankedEntities": []},
+            "relatedParty": {
+                "discovered_nodes": [],
+                "third_party_relays": [],
+                "relationship_clusters": [],
+                "fund_loops": [],
+            },
+            "penetration": {"summary": {}, "fund_cycles": []},
+        },
+        "graphData": {
+            "nodes": [{"id": "张三", "label": "张三", "group": "core"}],
+            "edges": [],
+        },
+    }
+
+    try:
+        response = asyncio.run(get_graph_data())
+    finally:
+        api_server.analysis_state.status = previous_status
+        api_server.analysis_state.results = previous_results
+
+    assert response["message"] == "success"
+    assert response["data"]["stats"]["walletAlertCount"] == 1
+    assert response["data"]["stats"]["walletCounterpartyCount"] >= 1
+    assert response["data"]["report"]["wallet_alerts"][0]["counterparty"] == "李四"
+    assert any(edge.get("type") == "wallet" for edge in response["data"]["edges"])
+
+
 def test_sync_active_paths_restores_selected_output_cache_and_graph_data(tmp_path):
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"
