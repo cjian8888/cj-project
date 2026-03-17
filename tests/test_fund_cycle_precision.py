@@ -109,3 +109,67 @@ def test_fund_cycles_exclude_salary_edges_globally():
 
     assert penetration_results["fund_cycles"] == []
     assert related_party_results["fund_loops"] == []
+
+
+def test_penetration_and_related_party_accept_categorical_text_columns():
+    personal_data = {
+        "张三": pd.DataFrame(
+            [
+                {
+                    "date": "2026-01-01 10:00:00",
+                    "income": 0,
+                    "expense": 50000,
+                    "counterparty": "李四",
+                    "description": "转账",
+                    "transaction_id": None,
+                    "account_number": "62170001",
+                    "数据来源": "zhangsan.xlsx",
+                    "source_row_index": 1,
+                },
+                {
+                    "date": "2026-01-02 10:00:00",
+                    "income": 52000,
+                    "expense": 0,
+                    "counterparty": None,
+                    "description": "回款",
+                    "transaction_id": "TX-2",
+                    "account_number": None,
+                    "数据来源": "zhangsan.xlsx",
+                    "source_row_index": 2,
+                },
+            ]
+        ),
+        "李四": pd.DataFrame(
+            [
+                {
+                    "date": "2026-01-01 10:02:00",
+                    "income": 50000,
+                    "expense": 0,
+                    "counterparty": "张三",
+                    "description": "转账",
+                    "transaction_id": None,
+                    "account_number": "62170002",
+                    "数据来源": "lisi.xlsx",
+                    "source_row_index": 3,
+                }
+            ]
+        ),
+    }
+
+    for df in personal_data.values():
+        for column in ("counterparty", "description", "transaction_id", "account_number"):
+            df[column] = pd.Categorical(df[column])
+
+    penetration_results = fund_penetration.analyze_fund_penetration(
+        personal_data=personal_data,
+        company_data={},
+        core_persons=["张三", "李四"],
+        companies=[],
+    )
+    related_party_results = related_party_analyzer.analyze_related_party_flows(
+        personal_data,
+        ["张三", "李四"],
+    )
+
+    assert isinstance(penetration_results["fund_cycles"], list)
+    assert isinstance(related_party_results["fund_loops"], list)

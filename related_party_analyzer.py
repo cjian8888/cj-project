@@ -128,7 +128,7 @@ def _analyze_direct_flows(
                 person_dfs[entity_name] = df
     
     for person, df in person_dfs.items():
-        counterparty_series = df['counterparty'].astype(str).fillna('')
+        counterparty_series = utils.normalize_text_series(df['counterparty'])
         
         for other_person in core_persons:
             if other_person == person:
@@ -241,7 +241,7 @@ def _collect_person_flows(
             continue
             
         # 预先过滤核心人员之间的直接转账
-        counterparty_series = full_df['counterparty'].astype(str).fillna('')
+        counterparty_series = utils.normalize_text_series(full_df['counterparty'])
         core_person_pattern = '|'.join([p for p in core_persons if p != person_name])
         is_direct = counterparty_series.str.contains(core_person_pattern, na=False)
         

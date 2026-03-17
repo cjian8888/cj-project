@@ -50,6 +50,11 @@ from utils.aggregation_view import (
     annotate_focus_entities_with_graph,
     build_aggregation_overview,
 )
+from utils.suspicion_text import (
+    build_serialized_direct_transfer_dedupe_key,
+    normalize_direct_transfer_description_text,
+    score_direct_transfer_record,
+)
 
 # 【修复】Python 3.14 导入路径修复：utils 导入后项目目录可能从 sys.path 消失
 project_dir = str(APP_ROOT)
@@ -514,6 +519,12 @@ def _sync_analysis_state_with_active_output(force_reload: bool = False) -> bool:
     if not results_data:
         return False
 
+    if isinstance(results_data, dict) and isinstance(results_data.get("suspicions"), dict):
+        results_data = dict(results_data)
+        results_data["suspicions"] = _normalize_serialized_suspicions_payload(
+            results_data["suspicions"]
+        )
+
     analysis_state.results = results_data
     if not analysis_state.end_time:
         analysis_state.end_time = datetime.now()
@@ -916,6 +927,8 @@ def serialize_for_json(obj):
         return {k: serialize_for_json(v) for k, v in obj.items()}
     elif isinstance(obj, list):
         return [serialize_for_json(v) for v in obj]
+    elif isinstance(obj, (set, frozenset)):
+        return [serialize_for_json(v) for v in sorted(obj, key=repr)]
     elif isinstance(obj, tuple):
         return tuple(serialize_for_json(v) for v in obj)
     elif isinstance(obj, np.integer):
@@ -1633,6 +1646,81 @@ def _refresh_profile_real_metrics(
     )
 
 
+def _normalize_direct_transfer_description_text(
+    raw_description: Any, bank: str = ""
+) -> tuple[str, str]:
+    return normalize_direct_transfer_description_text(raw_description, bank)
+
+
+def _normalize_serialized_suspicions_payload(suspicions: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(suspicions, dict):
+        return suspicions
+
+    direct_transfers = suspicions.get("directTransfers")
+    if not isinstance(direct_transfers, list):
+        return suspicions
+
+    normalized_records_by_key: Dict[tuple, Dict[str, Any]] = {}
+    ordered_keys: List[tuple] = []
+    for record in direct_transfers:
+        if not isinstance(record, dict):
+            continue
+
+        normalized_record = dict(record)
+        normalized_description, raw_description = _normalize_direct_transfer_description_text(
+            normalized_record.get("description", ""),
+            normalized_record.get("bank", ""),
+        )
+        normalized_record["description"] = (
+            normalized_description or "核心人员与涉案企业直接资金往来"
+        )
+
+        if raw_description and raw_description != normalized_description:
+            evidence_refs = normalized_record.get("evidenceRefs", {})
+            if not isinstance(evidence_refs, dict):
+                evidence_refs = {}
+            else:
+                evidence_refs = dict(evidence_refs)
+            evidence_refs.setdefault("rawDescription", raw_description)
+            normalized_record["evidenceRefs"] = evidence_refs
+
+        dedupe_key = build_serialized_direct_transfer_dedupe_key(normalized_record)
+        existing = normalized_records_by_key.get(dedupe_key)
+        if existing is None:
+            normalized_records_by_key[dedupe_key] = normalized_record
+            ordered_keys.append(dedupe_key)
+            continue
+
+        direction = str(normalized_record.get("direction", "") or "")
+        person = (
+            str(normalized_record.get("to", "") or "")
+            if direction == "receive"
+            else str(normalized_record.get("from", "") or "")
+        )
+        company = (
+            str(normalized_record.get("from", "") or "")
+            if direction == "receive"
+            else str(normalized_record.get("to", "") or "")
+        )
+
+        if score_direct_transfer_record(
+            normalized_record,
+            person=person,
+            company=company,
+        ) > score_direct_transfer_record(
+            existing,
+            person=person,
+            company=company,
+        ):
+            normalized_records_by_key[dedupe_key] = normalized_record
+
+    normalized_suspicions = dict(suspicions)
+    normalized_suspicions["directTransfers"] = [
+        normalized_records_by_key[key] for key in ordered_keys
+    ]
+    return normalized_suspicions
+
+
 def serialize_suspicions(suspicions: Dict) -> Dict:
     """
     序列化疑点数据
@@ -1691,16 +1779,30 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
         transaction_id = record.get("transaction_id", "")
         if not transaction_id:
             transaction_id = evidence_refs.get("transaction_id", "")
+        direction = record.get("direction", "")
+        bank = record.get("bank", "")
+        normalized_description, raw_description = _normalize_direct_transfer_description_text(
+            record.get("description", ""), bank
+        )
+        if raw_description and raw_description != normalized_description:
+            evidence_refs = dict(evidence_refs)
+            evidence_refs.setdefault("rawDescription", raw_description)
+        if direction == "receive":
+            from_party = record.get("company", "")
+            to_party = record.get("person", "")
+        else:
+            from_party = record.get("person", "")
+            to_party = record.get("company", "")
         return {
-            # 核心字段映射 (后端 person -> 前端 from)
-            "from": record.get("person", ""),
-            "to": record.get("company", ""),
+            # 直接往来日志按真实资金方向展示 from/to
+            "from": from_party,
+            "to": to_party,
             "amount": record.get("amount", 0),
             "date": _format_date(record.get("date")),
-            "description": record.get("description", ""),
+            "description": normalized_description or "核心人员与涉案企业直接资金往来",
             # 扩展字段 (camelCase)
-            "direction": record.get("direction", ""),
-            "bank": record.get("bank", ""),
+            "direction": direction,
+            "bank": bank,
             "sourceFile": record.get("source_file", ""),
             "sourceRowIndex": source_row_index,
             "transactionId": transaction_id,
@@ -3975,6 +4077,13 @@ async def get_results():
             results_data = serialize_for_json(analysis_state.results)
             results_data = to_camel_case(results_data)
             results_data = serialize_for_json(results_data)
+            if isinstance(results_data, dict) and isinstance(
+                results_data.get("suspicions"), dict
+            ):
+                results_data = dict(results_data)
+                results_data["suspicions"] = _normalize_serialized_suspicions_payload(
+                    results_data["suspicions"]
+                )
             response_body = json.dumps(
                 {"message": "分析结果获取成功", "data": results_data},
                 ensure_ascii=False,

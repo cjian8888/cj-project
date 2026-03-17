@@ -98,6 +98,9 @@ const defaultData: DataState = {
         cashTimingPatterns: [],
         holidayTransactions: {},
         amountPatterns: {},
+        amlAlerts: [],
+        creditAlerts: [],
+        timeSeriesAlerts: [],
         walletAlerts: [],
     },
     analysisResults: {
@@ -252,6 +255,9 @@ export function AppProvider({ children }: AppProviderProps) {
             cashTimingPatterns: backendData.suspicions?.cashTimingPatterns || [],
             holidayTransactions: backendData.suspicions?.holidayTransactions || {},
             amountPatterns: backendData.suspicions?.amountPatterns || {},
+            amlAlerts: backendData.suspicions?.amlAlerts || [],
+            creditAlerts: backendData.suspicions?.creditAlerts || [],
+            timeSeriesAlerts: backendData.suspicions?.timeSeriesAlerts || [],
             walletAlerts: backendData.suspicions?.walletAlerts || [],
         };
 

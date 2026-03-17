@@ -80,6 +80,72 @@ def test_serialize_suspicions_converts_holiday_transaction_fields():
     assert record["date"].startswith("2024-02-10")
 
 
+def test_serialize_suspicions_uses_actual_transfer_direction_for_parties():
+    serialized = serialize_suspicions(
+        {
+            "direct_transfers": [
+                {
+                    "person": "张三",
+                    "company": "某公司",
+                    "amount": 5000.0,
+                    "date": datetime(2024, 1, 1, 9, 0, 0),
+                    "direction": "receive",
+                    "description": "工资发放",
+                },
+                {
+                    "person": "张三",
+                    "company": "某公司",
+                    "amount": 100000.0,
+                    "date": datetime(2024, 1, 2, 10, 0, 0),
+                    "direction": "payment",
+                    "description": "往来款支付",
+                },
+            ]
+        }
+    )
+
+    receive_record, payment_record = serialized["directTransfers"]
+    assert receive_record["from"] == "某公司"
+    assert receive_record["to"] == "张三"
+    assert payment_record["from"] == "张三"
+    assert payment_record["to"] == "某公司"
+
+
+def test_serialize_suspicions_normalizes_bank_system_transfer_memo():
+    serialized = serialize_suspicions(
+        {
+            "direct_transfers": [
+                {
+                    "person": "赵峰",
+                    "company": "贵州锐晶科技有限公司",
+                    "amount": 7000.0,
+                    "date": datetime(2024, 5, 23, 10, 4, 14),
+                    "direction": "receive",
+                    "description": "CPSP051045 US2390 156342405230341291480",
+                    "bank": "中国银行",
+                    "evidence_refs": {"channel": "其他"},
+                },
+                {
+                    "person": "金琳",
+                    "company": "某对手方",
+                    "amount": 120000.0,
+                    "date": datetime(2023, 2, 8, 17, 3, 45),
+                    "direction": "receive",
+                    "description": "网银跨行汇款 / /CHN",
+                    "bank": "中国银行",
+                    "evidence_refs": {"channel": "网银"},
+                },
+            ]
+        }
+    )
+
+    cpsp_record, chn_record = serialized["directTransfers"]
+    assert cpsp_record["description"] == "中行系统跨行转账附言（原始流水码已省略）"
+    assert cpsp_record["evidenceRefs"]["rawDescription"].startswith("CPSP051045")
+    assert chn_record["description"] == "网银跨行汇款"
+    assert "rawDescription" in chn_record["evidenceRefs"]
+
+
 def test_score_transaction_adds_holiday_time_weight():
     row = pd.Series(
         {

@@ -59,7 +59,9 @@ def classify_accounts(df: pd.DataFrame) -> Dict:
     
     # 【修复】将 account_id 转换为字符串类型，避免 Categorical 类型比较问题
     if 'account_id' in df.columns:
-        df['account_id'] = df['account_id'].astype(str)
+        df['account_id'] = utils.normalize_text_series(df['account_id'])
+    if 'description' in df.columns:
+        df['description'] = utils.normalize_text_series(df['description'])
     accounts = df['account_id'].dropna().unique()
     classification = {
         'physical_cards': [],
@@ -84,7 +86,7 @@ def classify_accounts(df: pd.DataFrame) -> Dict:
         # 规则2: 交易特征增强
         # 如果是虚拟卡格式，但有POS消费、ATM取款，可能是旧式卡或特殊卡
         sub_df = df[df['account_id'] == acct]
-        desc_text = ' '.join(sub_df['description'].fillna('').astype(str).tolist())
+        desc_text = ' '.join(utils.normalize_text_series(sub_df['description']).tolist())
         
         if account_type == 'virtual':
             if any(k in desc_text for k in ['POS', 'ATM', '消费', '支付宝', '微信']):

@@ -26,6 +26,7 @@ from api_server import (
     _refresh_profile_real_metrics,
     _save_external_report_caches,
     get_graph_data,
+    serialize_for_json,
     serialize_analysis_results,
 )
 from cache_manager import CacheManager
@@ -172,6 +173,36 @@ def test_cache_manager_save_and_load_results_preserves_phase2_external_data(tmp_
     )
     assert loaded["coaddressData"]["310101199001010011"][0]["name"] == "李四"
     assert loaded["external_p2"]["hotel_data"]["310101199001010011"][0]["hotel_name"] == "某酒店"
+
+
+def test_cache_manager_save_cache_serializes_set_values(tmp_path):
+    cache_dir = tmp_path / "analysis_cache"
+    cache_mgr = CacheManager(str(cache_dir))
+
+    cache_mgr.save_cache(
+        "profiles",
+        {"张三": {"aliases": {"A", "B"}, "summary": {"tags": {"高风险", "闭环"}}}},
+    )
+
+    with open(cache_dir / "profiles.json", "r", encoding="utf-8") as f:
+        saved = json.load(f)
+
+    assert saved["张三"]["aliases"] == ["A", "B"]
+    assert saved["张三"]["summary"]["tags"] == ["闭环", "高风险"]
+
+
+def test_cache_manager_save_cache_keeps_old_file_when_serialization_fails(tmp_path):
+    cache_dir = tmp_path / "analysis_cache"
+    cache_mgr = CacheManager(str(cache_dir))
+    cache_mgr.save_cache("profiles", {"张三": {"totalIncome": 1000}})
+
+    with pytest.raises(TypeError):
+        cache_mgr.save_cache("profiles", {"bad": object()})
+
+    with open(cache_dir / "profiles.json", "r", encoding="utf-8") as f:
+        saved = json.load(f)
+
+    assert saved == {"张三": {"totalIncome": 1000}}
 
 
 def test_populate_transport_external_data_keeps_base_data_when_timeline_fails(monkeypatch):
@@ -605,6 +636,127 @@ def test_sync_active_paths_resets_stale_completed_state_when_output_has_no_cache
         api_server._current_config.update(previous_config)
 
 
+def test_get_results_normalizes_cached_direct_transfer_descriptions():
+    previous_state = {
+        "status": api_server.analysis_state.status,
+        "progress": api_server.analysis_state.progress,
+        "phase": api_server.analysis_state.phase,
+        "start_time": api_server.analysis_state.start_time,
+        "end_time": api_server.analysis_state.end_time,
+        "results": api_server.analysis_state.results,
+        "error": api_server.analysis_state.error,
+    }
+
+    api_server.analysis_state.status = "completed"
+    api_server.analysis_state.progress = 100
+    api_server.analysis_state.phase = "已从缓存恢复"
+    api_server.analysis_state.results = {
+        "persons": ["赵峰"],
+        "companies": ["贵州锐晶科技有限公司"],
+        "suspicions": {
+            "directTransfers": [
+                {
+                    "from": "贵州锐晶科技有限公司",
+                    "to": "赵峰",
+                    "amount": 7000.0,
+                    "date": "2024-05-23T10:04:14",
+                    "description": "CPSP051045 US2390 156342405230341291480",
+                    "direction": "receive",
+                    "bank": "中国银行",
+                    "evidenceRefs": {"channel": "其他"},
+                }
+            ]
+        },
+        "analysisResults": {},
+        "graphData": {"nodes": [], "edges": []},
+    }
+
+    try:
+        response = asyncio.run(api_server.get_results())
+        payload = json.loads(response.body.decode("utf-8"))
+    finally:
+        api_server.analysis_state.status = previous_state["status"]
+        api_server.analysis_state.progress = previous_state["progress"]
+        api_server.analysis_state.phase = previous_state["phase"]
+        api_server.analysis_state.start_time = previous_state["start_time"]
+        api_server.analysis_state.end_time = previous_state["end_time"]
+        api_server.analysis_state.results = previous_state["results"]
+        api_server.analysis_state.error = previous_state["error"]
+
+    record = payload["data"]["suspicions"]["directTransfers"][0]
+    assert record["description"] == "中行系统跨行转账附言（原始流水码已省略）"
+    assert record["evidenceRefs"]["rawDescription"].startswith("CPSP051045")
+
+
+def test_get_results_deduplicates_cached_direct_transfer_mirror_rows():
+    previous_state = {
+        "status": api_server.analysis_state.status,
+        "progress": api_server.analysis_state.progress,
+        "phase": api_server.analysis_state.phase,
+        "start_time": api_server.analysis_state.start_time,
+        "end_time": api_server.analysis_state.end_time,
+        "results": api_server.analysis_state.results,
+        "error": api_server.analysis_state.error,
+    }
+
+    api_server.analysis_state.status = "completed"
+    api_server.analysis_state.progress = 100
+    api_server.analysis_state.phase = "已从缓存恢复"
+    api_server.analysis_state.results = {
+        "persons": ["赵峰"],
+        "companies": ["贵州锐晶科技有限公司"],
+        "suspicions": {
+            "directTransfers": [
+                {
+                    "from": "贵州锐晶科技有限公司",
+                    "to": "赵峰",
+                    "amount": 7000.0,
+                    "date": "2024-05-23T10:04:14",
+                    "description": "CPSP051045 US2390 156342405230341291480",
+                    "direction": "receive",
+                    "bank": "中国银行",
+                    "sourceFile": "赵峰_中国银行交易流水.xlsx",
+                    "sourceRowIndex": 11,
+                    "transactionId": "P-7000",
+                    "evidenceRefs": {"channel": "其他"},
+                },
+                {
+                    "from": "贵州锐晶科技有限公司",
+                    "to": "赵峰",
+                    "amount": 7000.0,
+                    "date": "2024-05-23T10:04:14",
+                    "description": "CPSP051045 US2390 156342405230341291480 US",
+                    "direction": "receive",
+                    "bank": "中国银行",
+                    "sourceFile": "贵州锐晶科技有限公司_中国银行交易流水.xlsx",
+                    "sourceRowIndex": 91,
+                    "transactionId": "C-7000",
+                    "evidenceRefs": {"channel": "其他"},
+                },
+            ]
+        },
+        "analysisResults": {},
+        "graphData": {"nodes": [], "edges": []},
+    }
+
+    try:
+        response = asyncio.run(api_server.get_results())
+        payload = json.loads(response.body.decode("utf-8"))
+    finally:
+        api_server.analysis_state.status = previous_state["status"]
+        api_server.analysis_state.progress = previous_state["progress"]
+        api_server.analysis_state.phase = previous_state["phase"]
+        api_server.analysis_state.start_time = previous_state["start_time"]
+        api_server.analysis_state.end_time = previous_state["end_time"]
+        api_server.analysis_state.results = previous_state["results"]
+        api_server.analysis_state.error = previous_state["error"]
+
+    records = payload["data"]["suspicions"]["directTransfers"]
+    assert len(records) == 1
+    assert records[0]["sourceFile"] == "赵峰_中国银行交易流水.xlsx"
+    assert records[0]["description"] == "中行系统跨行转账附言（原始流水码已省略）"
+
+
 def test_preview_report_file_supports_head_requests_for_html(tmp_path):
     output_dir = tmp_path / "output"
     results_dir = output_dir / "analysis_results"
@@ -1010,3 +1162,24 @@ def test_refresh_profile_real_metrics_preserves_salary_reference_income():
         income_classification["salary_reference_basis"]
         == "yearly_salary_summary_total"
     )
+
+
+def test_serialize_for_json_converts_nested_sets():
+    payload = {
+        "profiles": {
+            "朱明": {
+                "wealth_management": {
+                    "wealth_accounts": {"A002", "A001"},
+                    "tags": frozenset({"x", "y"}),
+                }
+            }
+        }
+    }
+
+    result = serialize_for_json(payload)
+
+    assert result["profiles"]["朱明"]["wealth_management"]["wealth_accounts"] == [
+        "A001",
+        "A002",
+    ]
+    assert result["profiles"]["朱明"]["wealth_management"]["tags"] == ["x", "y"]

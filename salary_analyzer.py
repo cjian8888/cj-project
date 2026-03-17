@@ -118,14 +118,25 @@ def identify_salary_transactions(
         salary_by_regular = pd.DataFrame()
 
     # 合并所有工资收入
-    all_salary_transactions = pd.concat(
-        [salary_by_strong, salary_by_payer, salary_by_regular]
-    )
-
-    # 重新排序
-    all_salary_transactions = all_salary_transactions.sort_values("date").reset_index(
-        drop=True
-    )
+    salary_frames = [
+        frame
+        for frame in (salary_by_strong, salary_by_payer, salary_by_regular)
+        if not frame.empty
+    ]
+    if salary_frames:
+        all_salary_transactions = pd.concat(salary_frames, sort=False)
+        raw_salary_count = len(all_salary_transactions)
+        # 同一笔交易可能同时命中强关键词、发薪主体和规律性模式，需按原始索引去重。
+        all_salary_transactions = all_salary_transactions[
+            ~all_salary_transactions.index.duplicated(keep="first")
+        ]
+        deduplicated_overlap = raw_salary_count - len(all_salary_transactions)
+        all_salary_transactions = all_salary_transactions.sort_values("date").reset_index(
+            drop=True
+        )
+    else:
+        all_salary_transactions = df.iloc[0:0].copy()
+        deduplicated_overlap = 0
 
     # 生成统计
     stats = {
@@ -134,8 +145,11 @@ def identify_salary_transactions(
         "by_strong_keyword": len(salary_by_strong),
         "by_payer": len(salary_by_payer),
         "by_regular_pattern": len(salary_by_regular),
+        "deduplicated_overlap": deduplicated_overlap,
     }
 
+    if deduplicated_overlap:
+        logger.info("工资识别去重: 移除 %s 笔重复命中交易", deduplicated_overlap)
     logger.info(
         f"✓ 识别到工资交易 {len(all_salary_transactions)} 笔 (总计: {utils.format_currency(stats['total_amount'])})"
     )

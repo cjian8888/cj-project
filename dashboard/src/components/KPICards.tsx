@@ -2,6 +2,7 @@ import React from 'react';
 import { Users, Activity, ShieldAlert, TrendingUp, TrendingDown, Minus, Banknote } from 'lucide-react';
 import { useApp } from '../contexts/AppContext';
 import { formatAmountInWan } from '../utils/formatters';
+import { calculateRiskDashboardMetrics } from '../utils/suspicionUtils';
 
 export function KPICards() {
     const { data } = useApp();
@@ -22,44 +23,7 @@ export function KPICards() {
         (sum, p) => sum + (p.cashTotal || 0), 0
     );
 
-    const toAmount = (value: unknown): number => {
-        const n = Number(value);
-        return Number.isFinite(n) ? n : 0;
-    };
-
-    const directTransferRiskFunds = (data.suspicions.directTransfers || []).reduce(
-        (sum, tx) => sum + (tx.amount || 0), 0
-    );
-    const cashCollisionRiskFunds = (data.suspicions.cashCollisions || []).reduce((sum, item) => {
-        const pairAmount = Math.max(
-            toAmount(item.amount1),
-            toAmount(item.amount2),
-            toAmount((item as any).withdrawalAmount),
-            toAmount((item as any).depositAmount),
-            toAmount((item as any).amount),
-        );
-        return sum + pairAmount;
-    }, 0);
-    const cashTimingRiskFunds = (data.suspicions.cashTimingPatterns || []).reduce((sum, item) => {
-        const pairAmount = Math.max(
-            toAmount(item.amount1),
-            toAmount(item.amount2),
-            toAmount((item as any).withdrawalAmount),
-            toAmount((item as any).depositAmount),
-            toAmount((item as any).amount),
-        );
-        return sum + pairAmount;
-    }, 0);
-    const walletRiskFunds = (data.suspicions.walletAlerts || []).reduce(
-        (sum, item) => sum + toAmount(item.amount),
-        0
-    );
-    const highRiskFunds = directTransferRiskFunds + cashCollisionRiskFunds + cashTimingRiskFunds + walletRiskFunds;
-
-    const suspicionCount = (data.suspicions.directTransfers || []).length +
-        (data.suspicions.cashCollisions || []).length +
-        (data.suspicions.cashTimingPatterns || []).length +
-        (data.suspicions.walletAlerts || []).length;
+    const { suspicionCount, transactionRiskAmount, transactionClueCount } = calculateRiskDashboardMetrics(data.suspicions);
 
     const kpis = [
         {
@@ -104,11 +68,11 @@ export function KPICards() {
         {
             id: 'risk',
             label: '风险研判',
-            value: formatAmountInWan(highRiskFunds),
-            subLabel: `${suspicionCount} 条异常线索`,
+            value: formatAmountInWan(transactionRiskAmount),
+            subLabel: `${suspicionCount} 条异常线索 / ${transactionClueCount} 条核心交易风险`,
             icon: ShieldAlert,
-            trend: (highRiskFunds > 0 ? 'down' : 'neutral') as 'up' | 'neutral' | 'down',
-            trendValue: highRiskFunds > 0 ? '❗ 需核查' : '✅ 无异常',
+            trend: (transactionRiskAmount > 0 ? 'down' : 'neutral') as 'up' | 'neutral' | 'down',
+            trendValue: transactionRiskAmount > 0 ? '需核查' : '未见异常',
             gradient: 'from-red-500 to-orange-500',
             glowColor: 'shadow-red-500/20',
             iconBg: 'bg-red-500/10',

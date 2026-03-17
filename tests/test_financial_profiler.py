@@ -18,7 +18,7 @@ from financial_profiler import (
     analyze_fund_flow, analyze_wealth_management,
     generate_profile_report, extract_large_cash,
     categorize_transactions, analyze_wealth_holdings,
-    extract_bank_accounts, calculate_yearly_salary,  # Phase 1.2/2.1 新增
+    extract_bank_accounts, calculate_yearly_salary, recalculate_income_metrics,  # Phase 1.2/2.1 新增
     build_company_profile, _calculate_real_income_expense  # Phase 2.3 新增
 )
 
@@ -269,6 +269,24 @@ class TestAnalyzeWealthManagement:
         result = analyze_wealth_management(df, '张伟')
         assert 'category_stats' in result
         assert 'yearly_stats' in result
+
+    def test_analyze_wealth_management_accepts_categorical_text_columns(self):
+        """测试清洗后 category 文本列不会导致理财分析崩溃"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02']),
+            'income': [0, 10500],
+            'expense': [10000, 0],
+            'counterparty': pd.Categorical(['银行理财', None]),
+            'description': pd.Categorical(['理财购买', '理财赎回']),
+            'account': pd.Categorical(['62170001', None]),
+            'account_type': pd.Categorical(['理财账户', None]),
+            'account_category': pd.Categorical(['个人账户', None]),
+        })
+
+        result = analyze_wealth_management(df, '张伟')
+
+        assert result['wealth_purchase'] >= 0
+        assert result['wealth_redemption'] >= 0
 
     def test_analyze_wealth_separates_business_reimbursement(self):
         """测试将单位报销/业务往来款从理财赎回中剥离"""
@@ -961,6 +979,51 @@ class TestBuildCompanyProfile:
         assert 'real_expense' in summary
         assert summary['total_income'] == 100000
         assert summary['total_expense'] == 30000
+
+
+def test_recalculate_income_metrics_logs_pre_and_post_alignment(caplog):
+    """真实收入日志应明确区分初算与对齐后口径"""
+    df = pd.DataFrame({
+        'date': pd.to_datetime(['2024-01-15']),
+        'amount': [10000.0],
+        'income': [10000.0],
+        'expense': [0.0],
+        'counterparty': ['测试单位'],
+        'description': ['工资']
+    })
+    income_structure = {
+        'total_income': 10000.0,
+        'total_expense': 0.0,
+        'salary_income': 10000.0
+    }
+    wealth_management = {
+        'self_transfer_income': 0.0,
+        'self_transfer_expense': 0.0,
+        'wealth_purchase': 0.0,
+        'wealth_redemption': 0.0,
+        'wealth_income': 0.0,
+        'business_reimbursement_income': 0.0,
+        'loan_inflow': 0.0,
+        'refund_inflow': 0.0,
+        'deposit_purchase': 0.0,
+        'deposit_redemption': 0.0,
+    }
+
+    with caplog.at_level('INFO'):
+        result = recalculate_income_metrics(
+            df=df,
+            entity_name='测试人员',
+            income_structure=income_structure,
+            wealth_management=wealth_management,
+            fund_flow={},
+            yearly_salary={},
+            family_members=[],
+        )
+
+    messages = [record.message for record in caplog.records]
+    assert any('真实收入(初算)' in message for message in messages)
+    assert any('真实收入(对齐后)' in message for message in messages)
+    assert result['real_income'] == 10000.0
 
 
 if __name__ == "__main__":

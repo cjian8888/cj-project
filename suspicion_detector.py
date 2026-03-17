@@ -13,6 +13,10 @@ from itertools import combinations
 import config
 import utils
 from holiday_service import build_holiday_window
+from utils.suspicion_text import (
+    build_direct_transfer_dedupe_key,
+    score_direct_transfer_record,
+)
 
 logger = utils.setup_logger(__name__)
 
@@ -59,6 +63,59 @@ def _extract_tx_direction(row: pd.Series) -> str:
     if amount < 0:
         return "expense"
     return ""
+
+
+def _extract_direct_transfer_direction(row: pd.Series, account_role: str) -> str:
+    """将账户视角方向统一换算为人员视角方向。"""
+    tx_direction = _extract_tx_direction(row)
+    if tx_direction == "income":
+        return "receive" if account_role == "person" else "payment"
+    if tx_direction == "expense":
+        return "payment" if account_role == "person" else "receive"
+    return ""
+
+
+def _build_direct_transfer_record(
+    row: pd.Series,
+    person: str,
+    company: str,
+    account_role: str,
+) -> Dict:
+    """构造统一的直接往来记录。"""
+    amount = _extract_tx_amount(row)
+    direction = _extract_direct_transfer_direction(row, account_role)
+    if amount <= 0 or not direction:
+        return {}
+
+    source_row_index = row.get("source_row_index", row.name)
+    if source_row_index is None:
+        source_row_index = int(row.name) + 2
+
+    return {
+        "person": person,
+        "company": company,
+        "date": row.get("date", row.get("交易时间")),
+        "amount": amount,
+        "direction": direction,
+        "description": _safe_text(row.get("description", row.get("交易摘要", ""))),
+        "bank": _safe_text(row.get("银行来源", row.get("bank", ""))),
+        "source_file": _safe_text(row.get("数据来源", row.get("source_file", ""))),
+        "risk_level": "high"
+        if amount > config.INCOME_HIGH_RISK_MIN
+        else "medium"
+        if amount > config.SUSPICION_MEDIUM_HIGH_AMOUNT
+        else "low",
+        "evidence_refs": {
+            "source_row_index": int(source_row_index),
+            "transaction_id": _safe_text(
+                row.get("transaction_id", row.get("流水号", ""))
+            ),
+            "balance_after": _safe_float(row.get("balance", row.get("余额(元)", 0))),
+            "channel": _safe_text(
+                row.get("transaction_channel", row.get("交易渠道", ""))
+            ),
+        },
+    }
 
 
 def detect_holiday_transactions(cleaned_data: Dict[str, pd.DataFrame]) -> Dict[str, List[Dict]]:
@@ -599,23 +656,20 @@ def run_all_detections(
     # 2. 直接资金往来检测 (修复：适配 report_generator 需求)
     # ============================
     logger.info("  -> 正在分析直接资金往来...")
+    seen_direct_transfers: Dict[
+        Tuple[str, str, str, float, str, str], Dict
+    ] = {}
+    direct_transfer_roles: Dict[Tuple[str, str, str, float, str, str], str] = {}
+    direct_transfer_order: List[Tuple[str, str, str, float, str, str]] = []
 
     # 检测核心人员与涉案公司之间的直接资金往来
     for person in all_persons:
         for company in all_companies:
             if person in cleaned_data and company in cleaned_data:
-                # 检测：人员 -> 公司 (支出)
+                # 个人账户视角
                 df_person = cleaned_data[person]
-                # 列名映射（中文列名兼容）
                 counterparty_col = (
                     "交易对手" if "交易对手" in df_person.columns else "counterparty"
-                )
-                expense_col = (
-                    "支出(元)" if "支出(元)" in df_person.columns else "expense"
-                )
-                income_col = "收入(元)" if "收入(元)" in df_person.columns else "income"
-                description_col = (
-                    "交易摘要" if "交易摘要" in df_person.columns else "description"
                 )
                 transfers_out = df_person[
                     df_person[counterparty_col].astype(str).str.contains(
@@ -624,70 +678,45 @@ def run_all_detections(
                 ]
                 if not transfers_out.empty:
                     for _, row in transfers_out.iterrows():
-                        amount = _safe_float(row.get(expense_col, 0))
-                        # 简单的风险定级
-                        if amount > config.INCOME_HIGH_RISK_MIN:
-                            risk = "high"
-                        elif amount > config.SUSPICION_MEDIUM_HIGH_AMOUNT:
-                            risk = "medium"
-                        else:
-                            risk = "low"
-
-                        # 提取上下文信息 (处理 category 类型和 NaN)
-                        bank_val = row.get("银行来源", None)
-                        source_val = row.get("数据来源", None)
-                        bank = (
-                            str(bank_val)
-                            if bank_val is not None and str(bank_val) != "nan"
-                            else ""
+                        record = _build_direct_transfer_record(
+                            row, person, company, "person"
                         )
-                        source_file = (
-                            str(source_val)
-                            if source_val is not None and str(source_val) != "nan"
-                            else ""
+                        if not record:
+                            continue
+                        dedupe_key = build_direct_transfer_dedupe_key(
+                            person,
+                            company,
+                            record["direction"],
+                            record["amount"],
+                            _safe_text(record.get("date")),
+                            record.get("description", ""),
+                            record.get("bank", ""),
                         )
+                        existing = seen_direct_transfers.get(dedupe_key)
+                        if existing is None:
+                            seen_direct_transfers[dedupe_key] = record
+                            direct_transfer_roles[dedupe_key] = "person"
+                            direct_transfer_order.append(dedupe_key)
+                            continue
 
-                        results["direct_transfers"].append(
-                            {
-                                "person": person,
-                                "company": company,
-                                "date": row["date"],
-                                "amount": amount,
-                                "direction": "payment",  # 付款
-                                "description": row.get(description_col, ""),
-                                "bank": bank,
-                                "source_file": source_file,
-                                "risk_level": risk,
-                                # Phase 0.2: 证据追溯字段
-                                "evidence_refs": {
-                                    "source_row_index": int(
-                                        row.get("source_row_index", row.name)
-                                    )
-                                    if row.get("source_row_index") is not None
-                                    else int(row.name) + 2,
-                                    "transaction_id": str(row.get("transaction_id", ""))
-                                    if row.get("transaction_id")
-                                    else "",
-                                    "balance_after": _safe_float(
-                                        row.get("balance", 0)
-                                    ),
-                                    "channel": str(row.get("transaction_channel", ""))
-                                    if row.get("transaction_channel")
-                                    else "",
-                                },
-                            }
-                        )
+                        if score_direct_transfer_record(
+                            record,
+                            person=person,
+                            company=company,
+                            account_role="person",
+                        ) > score_direct_transfer_record(
+                            existing,
+                            person=person,
+                            company=company,
+                            account_role=direct_transfer_roles.get(dedupe_key, ""),
+                        ):
+                            seen_direct_transfers[dedupe_key] = record
+                            direct_transfer_roles[dedupe_key] = "person"
 
-                # 检测：公司 -> 人员 (收入)
+                # 公司账户视角
                 df_company = cleaned_data[company]
                 company_counterparty_col = (
                     "交易对手" if "交易对手" in df_company.columns else "counterparty"
-                )
-                company_expense_col = (
-                    "支出(元)" if "支出(元)" in df_company.columns else "expense"
-                )
-                company_description_col = (
-                    "交易摘要" if "交易摘要" in df_company.columns else "description"
                 )
                 transfers_in = df_company[
                     df_company[company_counterparty_col].astype(str).str.contains(
@@ -696,61 +725,44 @@ def run_all_detections(
                 ]
                 if not transfers_in.empty:
                     for _, row in transfers_in.iterrows():
-                        amount = _safe_float(row.get(company_expense_col, 0))
-                        if not amount or amount <= 0:
+                        record = _build_direct_transfer_record(
+                            row, person, company, "company"
+                        )
+                        if not record:
                             continue
-                        # 简单的风险定级
-                        if amount > config.INCOME_HIGH_RISK_MIN:
-                            risk = "high"
-                        elif amount > config.SUSPICION_MEDIUM_HIGH_AMOUNT:
-                            risk = "medium"
-                        else:
-                            risk = "low"
+                        dedupe_key = build_direct_transfer_dedupe_key(
+                            person,
+                            company,
+                            record["direction"],
+                            record["amount"],
+                            _safe_text(record.get("date")),
+                            record.get("description", ""),
+                            record.get("bank", ""),
+                        )
+                        existing = seen_direct_transfers.get(dedupe_key)
+                        if existing is None:
+                            seen_direct_transfers[dedupe_key] = record
+                            direct_transfer_roles[dedupe_key] = "company"
+                            direct_transfer_order.append(dedupe_key)
+                            continue
 
-                        # 提取上下文信息 (处理 category 类型和 NaN)
-                        bank_val = row.get("银行来源", None)
-                        source_val = row.get("数据来源", None)
-                        bank = (
-                            str(bank_val)
-                            if bank_val is not None and str(bank_val) != "nan"
-                            else ""
-                        )
-                        source_file = (
-                            str(source_val)
-                            if source_val is not None and str(source_val) != "nan"
-                            else ""
-                        )
+                        if score_direct_transfer_record(
+                            record,
+                            person=person,
+                            company=company,
+                            account_role="company",
+                        ) > score_direct_transfer_record(
+                            existing,
+                            person=person,
+                            company=company,
+                            account_role=direct_transfer_roles.get(dedupe_key, ""),
+                        ):
+                            seen_direct_transfers[dedupe_key] = record
+                            direct_transfer_roles[dedupe_key] = "company"
 
-                        results["direct_transfers"].append(
-                            {
-                                "person": person,
-                                "company": company,
-                                "date": row["date"],
-                                "amount": amount,
-                                "direction": "receive",  # 收款
-                                "description": row.get(company_description_col, ""),
-                                "bank": bank,
-                                "source_file": source_file,
-                                "risk_level": risk,
-                                # Phase 0.2: 证据追溯字段
-                                "evidence_refs": {
-                                    "source_row_index": int(
-                                        row.get("source_row_index", row.name)
-                                    )
-                                    if row.get("source_row_index") is not None
-                                    else int(row.name) + 2,
-                                    "transaction_id": str(row.get("transaction_id", ""))
-                                    if row.get("transaction_id")
-                                    else "",
-                                    "balance_after": _safe_float(
-                                        row.get("balance", 0)
-                                    ),
-                                    "channel": str(row.get("transaction_channel", ""))
-                                    if row.get("transaction_channel")
-                                    else "",
-                                },
-                            }
-                        )
+    results["direct_transfers"] = [
+        seen_direct_transfers[key] for key in direct_transfer_order
+    ]
 
     # ============================
     # 3. 节假日/特殊时段大额交易检测

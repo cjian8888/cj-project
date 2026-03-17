@@ -948,13 +948,15 @@ def build_money_graph(
 
         # 按对手方聚合累计金额
         df_copy = df.copy()
-        df_copy["counterparty"] = df_copy["counterparty"].astype(str).fillna("")
+        df_copy["_counterparty_key"] = utils.normalize_text_series(
+            df_copy["counterparty"]
+        )
 
         # 过滤无效对手方
         df_copy = df_copy[
-            (df_copy["counterparty"] != "")
-            & (df_copy["counterparty"] != "nan")
-            & (df_copy["counterparty"].str.len() >= 2)
+            (df_copy["_counterparty_key"] != "")
+            & (df_copy["_counterparty_key"] != "nan")
+            & (df_copy["_counterparty_key"].str.len() >= 2)
         ]
 
         if df_copy.empty:
@@ -990,7 +992,7 @@ def build_money_graph(
             else:
                 descriptions = income_rows.get("description")
                 if descriptions is not None:
-                    salary_like_count = descriptions.fillna("").astype(str).map(
+                    salary_like_count = utils.normalize_text_series(descriptions).map(
                         lambda value: _is_salary_like_ref(counterparty, value)
                     ).sum()
                     if salary_like_count and salary_like_count / max(len(income_rows), 1) >= 0.6:
@@ -998,7 +1000,7 @@ def build_money_graph(
             return semantic_roles
 
         # 按对手方聚合并保留原始交易引用
-        for cp, cp_group in df_copy.groupby("counterparty", sort=False):
+        for cp, cp_group in df_copy.groupby("_counterparty_key", sort=False):
             working_group = cp_group
             if is_payment_platform_counterparty(cp):
                 if "description" in cp_group.columns:

@@ -36,6 +36,7 @@ try:
     normalize_amount_series = utils_module.normalize_amount_series
     normalize_column_token = utils_module.normalize_column_token
     normalize_datetime_series = utils_module.normalize_datetime_series
+    normalize_text_series = utils_module.normalize_text_series
     detect_account_identifier_column = utils_module.detect_account_identifier_column
     build_transaction_order_columns = utils_module.build_transaction_order_columns
     sort_transactions_strict = utils_module.sort_transactions_strict
@@ -80,6 +81,7 @@ __all__ = [
     "normalize_amount_series",
     "normalize_column_token",
     "normalize_datetime_series",
+    "normalize_text_series",
     "detect_account_identifier_column",
     "build_transaction_order_columns",
     "sort_transactions_strict",

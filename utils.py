@@ -275,6 +275,18 @@ def normalize_datetime_series(series: pd.Series) -> pd.Series:
     return pd.to_datetime(normalized, errors="coerce")
 
 
+def normalize_text_series(series: pd.Series, empty: str = "") -> pd.Series:
+    """安全归一化文本列，兼容 category/string/object 并消除空值占位。"""
+    if series is None:
+        return pd.Series(dtype="object")
+
+    normalized = pd.Series(series, copy=True, dtype="object")
+    normalized = normalized.where(pd.notna(normalized), empty).astype(str)
+    return normalized.replace({"nan": empty, "None": empty, "<NA>": empty}).fillna(
+        empty
+    )
+
+
 def detect_account_identifier_column(df: pd.DataFrame) -> Optional[str]:
     """识别可用于稳定排序的账户标识列。"""
     if df is None or df.empty:
@@ -327,16 +339,16 @@ def build_transaction_order_columns(
         normalized["_strict_source_row"] = fallback_rows
 
     if transaction_id_col in normalized.columns:
-        normalized["_strict_transaction_id"] = (
-            normalized[transaction_id_col].fillna("").astype(str)
+        normalized["_strict_transaction_id"] = normalize_text_series(
+            normalized[transaction_id_col]
         )
     else:
         normalized["_strict_transaction_id"] = ""
 
     resolved_account_col = account_col or detect_account_identifier_column(normalized)
     if resolved_account_col and resolved_account_col in normalized.columns:
-        normalized["_strict_account_id"] = (
-            normalized[resolved_account_col].fillna("").astype(str)
+        normalized["_strict_account_id"] = normalize_text_series(
+            normalized[resolved_account_col]
         )
     else:
         normalized["_strict_account_id"] = ""

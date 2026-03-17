@@ -191,9 +191,23 @@ class CacheManager:
                 self.logger.warning(f"[缓存保存] {cache_name} 数据为空，跳过保存")
             return
 
-        # 使用自定义编码器处理特殊类型
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2, cls=CustomJSONEncoder)
+        serialized = json.dumps(
+            data,
+            ensure_ascii=False,
+            indent=2,
+            cls=CustomJSONEncoder,
+        )
+        temp_path = cache_path.with_suffix(f"{cache_path.suffix}.tmp")
+        try:
+            with open(temp_path, "w", encoding="utf-8") as f:
+                f.write(serialized)
+            os.replace(temp_path, cache_path)
+        finally:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
 
         self.logger.info(
             f"[缓存保存] {cache_name} -> {cache_path.name} ({len(str(data))} 字符)"
@@ -430,6 +444,9 @@ class CustomJSONEncoder(json.JSONEncoder):
     """
 
     def default(self, obj):
+        if isinstance(obj, (set, frozenset)):
+            return sorted(obj, key=lambda item: str(item))
+
         # 处理时间戳
         if hasattr(obj, "isoformat"):
             return obj.isoformat()

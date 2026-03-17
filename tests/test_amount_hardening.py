@@ -16,6 +16,7 @@ from detectors.direct_transfer_detector import DirectTransferDetector
 from detectors.frequency_anomaly_detector import FrequencyAnomalyDetector
 from real_salary_income_analyzer import RealSalaryIncomeAnalyzer
 from specialized_reports import SpecializedReportGenerator
+from suspicion_detector import run_all_detections
 
 
 def _make_generator(tmp_path):
@@ -143,6 +144,136 @@ def test_direct_transfer_detector_handles_dirty_amount_strings():
     assert len(results) == 2
     assert results[0]["amount"] in {100000.0, 50000.0}
     assert results[0]["evidence_refs"]["balance_after"] in {200000.0, 500000.0}
+
+
+def test_direct_transfer_detector_detects_real_direction_and_deduplicates_ledgers():
+    detector = DirectTransferDetector()
+    cleaned_data = {
+        "张三": pd.DataFrame(
+            {
+                "counterparty": ["某公司", "某公司"],
+                "income": [5000.0, 0.0],
+                "expense": [0.0, 100000.0],
+                "balance": [20000.0, 120000.0],
+                "date": ["2024-01-01 09:00:00", "2024-01-02 10:00:00"],
+                "description": ["工资发放", "往来款支付"],
+                "source_row_index": [11, 12],
+                "transaction_id": ["P-1", "P-2"],
+            }
+        ),
+        "某公司": pd.DataFrame(
+            {
+                "counterparty": ["张三", "张三"],
+                "income": [0.0, 100000.0],
+                "expense": [5000.0, 0.0],
+                "balance": [500000.0, 600000.0],
+                "date": ["2024-01-01 09:00:00", "2024-01-02 10:00:00"],
+                "description": ["工资发放", "往来款支付"],
+                "source_row_index": [101, 102],
+                "transaction_id": ["C-1", "C-2"],
+            }
+        ),
+    }
+
+    results = detector.detect(
+        {
+            "cleaned_data": cleaned_data,
+            "all_persons": ["张三"],
+            "all_companies": ["某公司"],
+        },
+        {"income_high_risk_min": 50000, "suspicion_medium_high_amount": 20000},
+    )
+
+    assert len(results) == 2
+    by_direction = {item["direction"]: item for item in results}
+    assert by_direction["receive"]["amount"] == 5000.0
+    assert by_direction["receive"]["evidence_refs"]["source_row_index"] == 11
+    assert by_direction["payment"]["amount"] == 100000.0
+    assert by_direction["payment"]["evidence_refs"]["source_row_index"] == 12
+
+
+def test_direct_transfer_detector_deduplicates_mirrored_bank_memos():
+    detector = DirectTransferDetector()
+    cleaned_data = {
+        "赵峰": pd.DataFrame(
+            {
+                "counterparty": ["贵州锐晶科技有限公司"],
+                "income": [7000.0],
+                "expense": [0.0],
+                "balance": [120000.0],
+                "date": ["2024-05-23 10:04:14"],
+                "description": ["CPSP051045 US2390 156342405230341291480"],
+                "bank": ["中国银行"],
+                "source_file": ["赵峰_中国银行交易流水.xlsx"],
+                "source_row_index": [11],
+                "transaction_id": ["P-7000"],
+            }
+        ),
+        "贵州锐晶科技有限公司": pd.DataFrame(
+            {
+                "counterparty": ["赵峰"],
+                "income": [0.0],
+                "expense": [7000.0],
+                "balance": [800000.0],
+                "date": ["2024-05-23 10:04:14"],
+                "description": ["CPSP051045 US2390 156342405230341291480 US"],
+                "bank": ["中国银行"],
+                "source_file": ["贵州锐晶科技有限公司_中国银行交易流水.xlsx"],
+                "source_row_index": [91],
+                "transaction_id": ["C-7000"],
+            }
+        ),
+    }
+
+    results = detector.detect(
+        {
+            "cleaned_data": cleaned_data,
+            "all_persons": ["赵峰"],
+            "all_companies": ["贵州锐晶科技有限公司"],
+        },
+        {"income_high_risk_min": 50000, "suspicion_medium_high_amount": 20000},
+    )
+
+    assert len(results) == 1
+    assert results[0]["amount"] == 7000.0
+    assert results[0]["direction"] == "receive"
+    assert results[0]["evidence_refs"]["source_row_index"] == 11
+
+
+def test_run_all_detections_direct_transfer_fallback_keeps_non_zero_amounts():
+    cleaned_data = {
+        "张三": pd.DataFrame(
+            {
+                "counterparty": ["某公司", "某公司"],
+                "income": [5000.0, 0.0],
+                "expense": [0.0, 100000.0],
+                "balance": [20000.0, 120000.0],
+                "date": ["2024-01-01 09:00:00", "2024-01-02 10:00:00"],
+                "description": ["工资发放", "往来款支付"],
+                "source_row_index": [11, 12],
+                "transaction_id": ["P-1", "P-2"],
+            }
+        ),
+        "某公司": pd.DataFrame(
+            {
+                "counterparty": ["张三", "张三"],
+                "income": [0.0, 100000.0],
+                "expense": [5000.0, 0.0],
+                "balance": [500000.0, 600000.0],
+                "date": ["2024-01-01 09:00:00", "2024-01-02 10:00:00"],
+                "description": ["工资发放", "往来款支付"],
+                "source_row_index": [101, 102],
+                "transaction_id": ["C-1", "C-2"],
+            }
+        ),
+    }
+
+    results = run_all_detections(cleaned_data, ["张三"], ["某公司"])
+
+    direct_transfers = results["direct_transfers"]
+    assert len(direct_transfers) == 2
+    assert {item["amount"] for item in direct_transfers} == {5000.0, 100000.0}
+    assert {item["direction"] for item in direct_transfers} == {"receive", "payment"}
 
 
 def test_database_manager_normalizes_dirty_amounts_before_persist(tmp_path):

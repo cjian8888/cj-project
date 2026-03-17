@@ -47,6 +47,14 @@ export interface SuspiciousTransaction {
     to: string;
     amount: number;
     date: string;
+    description?: string;
+    direction?: string;
+    bank?: string;
+    sourceFile?: string;
+    sourceRowIndex?: number;
+    transactionId?: string;
+    riskLevel?: string;
+    riskReason?: string;
 }
 
 export interface CashCollision {
@@ -73,6 +81,54 @@ export interface WalletAlert {
     evidenceSummary?: string;
 }
 
+export interface AmlAlert {
+    name?: string;
+    personId?: string;
+    person_id?: string;
+    alertType?: string;
+    alert_type?: string;
+    paymentAccountCount?: number;
+    payment_account_count?: number;
+    paymentTransactionCount?: number;
+    payment_transaction_count?: number;
+    suspiciousTransactionCount?: number;
+    suspicious_transaction_count?: number;
+    largeTransactionCount?: number;
+    large_transaction_count?: number;
+    source?: string;
+    riskLevel?: string;
+    riskReason?: string;
+}
+
+export interface CreditAlert {
+    name?: string;
+    alertType?: string;
+    alert_type?: string;
+    count?: number;
+    source?: string;
+    riskLevel?: string;
+    riskReason?: string;
+}
+
+export interface TimeSeriesAlert {
+    name?: string;
+    person?: string;
+    entity?: string;
+    counterparty?: string;
+    date?: string;
+    timestamp?: string;
+    amount?: number | null;
+    description?: string;
+    alertType?: string;
+    alert_type?: string;
+    riskLevel?: string;
+    risk_level?: string;
+    riskReason?: string;
+    risk_reason?: string;
+    anomalyType?: string;
+    anomaly_type?: string;
+}
+
 export interface Suspicions {
     directTransfers: SuspiciousTransaction[];
     cashCollisions: CashCollision[];
@@ -81,6 +137,9 @@ export interface Suspicions {
     cashTimingPatterns: unknown[];
     holidayTransactions: Record<string, unknown>;
     amountPatterns: Record<string, unknown>;
+    amlAlerts: AmlAlert[];
+    creditAlerts: CreditAlert[];
+    timeSeriesAlerts: TimeSeriesAlert[];
     walletAlerts: WalletAlert[];
 }
 

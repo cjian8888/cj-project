@@ -233,9 +233,11 @@ class WealthAccountAnalyzer:
         """【新增】数据预处理"""
         # 处理账号格式（科学计数法、浮点数）
         if 'account_id' in self.df.columns:
-            self.df['account_id'] = self.df['account_id'].apply(
+            self.df['account_id'] = utils.normalize_text_series(self.df['account_id']).map(
                 lambda x: self._normalize_account_id(x)
             )
+        if 'description' in self.df.columns:
+            self.df['description'] = utils.normalize_text_series(self.df['description'])
         
         # 处理日期格式
         if 'date' in self.df.columns:
@@ -363,7 +365,7 @@ class WealthAccountAnalyzer:
             return ('internal', 0.5, '短账号(<=15位)')
         
         # 方法3: 交易特征分析
-        all_descs = ' '.join(sub_df['description'].fillna('').astype(str).tolist())
+        all_descs = ' '.join(utils.normalize_text_series(sub_df['description']).tolist())
         
         # 检查理财关键词
         for pattern in WEALTH_DESC_PATTERNS:
@@ -393,7 +395,7 @@ class WealthAccountAnalyzer:
     
     def _has_wealth_transaction_feature(self, sub_df: pd.DataFrame) -> bool:
         """【新增】检查是否有理财交易特征"""
-        all_descs = ' '.join(sub_df['description'].fillna('').astype(str).tolist())
+        all_descs = ' '.join(utils.normalize_text_series(sub_df['description']).tolist())
         
         for pattern in WEALTH_DESC_PATTERNS:
             if re.search(pattern, all_descs):

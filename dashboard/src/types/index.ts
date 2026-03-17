@@ -75,6 +75,9 @@ export interface SuspicionResult {
     cashTimingPatterns: CashTimingPattern[];
     holidayTransactions: Record<string, HolidayTransaction[]>;
     amountPatterns: Record<string, AmountPattern[]>;
+    amlAlerts: AmlAlert[];
+    creditAlerts: CreditAlert[];
+    timeSeriesAlerts: TimeSeriesAlert[];
     walletAlerts: WalletAlert[];
 }
 
@@ -88,6 +91,8 @@ export interface SuspiciousTransaction {
     direction?: string;     // 交易方向 (payment/receive/突变/延迟转账等)
     bank?: string;          // 银行来源
     sourceFile?: string;    // 数据来源文件
+    sourceRowIndex?: number;
+    transactionId?: string;
     riskLevel?: string;     // 风险等级
     riskReason?: string;    // 风险原因
 }
@@ -151,6 +156,9 @@ export interface CashTimingPattern {
     amount1: number;
     amount2: number;
     timeDiff: number;
+    riskLevel?: string;
+    riskReason?: string;
+    description?: string;
 }
 
 export interface HolidayTransaction {
@@ -158,6 +166,63 @@ export interface HolidayTransaction {
     amount: number;
     description: string;
     holidayName: string;
+    holidayPeriod?: string;
+    counterparty?: string;
+    direction?: string;
+    bank?: string;
+    sourceFile?: string;
+    sourceRowIndex?: number;
+    transactionId?: string;
+    riskLevel?: string;
+    riskReason?: string;
+}
+
+export interface AmlAlert {
+    name?: string;
+    personId?: string;
+    person_id?: string;
+    alertType?: string;
+    alert_type?: string;
+    paymentAccountCount?: number;
+    payment_account_count?: number;
+    paymentTransactionCount?: number;
+    payment_transaction_count?: number;
+    suspiciousTransactionCount?: number;
+    suspicious_transaction_count?: number;
+    largeTransactionCount?: number;
+    large_transaction_count?: number;
+    source?: string;
+    riskLevel?: string;
+    riskReason?: string;
+}
+
+export interface CreditAlert {
+    name?: string;
+    alertType?: string;
+    alert_type?: string;
+    count?: number;
+    source?: string;
+    riskLevel?: string;
+    riskReason?: string;
+}
+
+export interface TimeSeriesAlert {
+    name?: string;
+    person?: string;
+    entity?: string;
+    counterparty?: string;
+    date?: string;
+    timestamp?: string;
+    amount?: number | null;
+    description?: string;
+    alertType?: string;
+    alert_type?: string;
+    riskLevel?: string;
+    risk_level?: string;
+    riskReason?: string;
+    risk_reason?: string;
+    anomalyType?: string;
+    anomaly_type?: string;
 }
 
 export interface AmountPattern {

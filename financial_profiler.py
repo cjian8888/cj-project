@@ -2728,8 +2728,8 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
         df_remaining["confidence"] = wealth_info["confidence"].values
 
         # 账号属性特征（隐形理财户）- 向量化处理
-        wealth_accounts = set(acct_info.get("wealth_accounts", []))
-        if wealth_accounts:
+        wealth_account_set = set(acct_info.get("wealth_accounts", []))
+        if wealth_account_set:
             account_col = (
                 "本方账号" if "本方账号" in df_remaining.columns else "account_number"
             )
@@ -2738,7 +2738,7 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
                     ~df_remaining["is_wealth"]
                     & (df_remaining["income"] > 0)
                     & df_remaining["counterparty"].isin(["", "-", "nan", "NaN"])
-                    & df_remaining[account_col].astype(str).isin(wealth_accounts)
+                    & df_remaining[account_col].astype(str).isin(wealth_account_set)
                 )
                 df_remaining.loc[hidden_wealth_mask, "is_wealth"] = True
                 df_remaining.loc[hidden_wealth_mask, "wealth_type"] = "银行理财"
@@ -3239,7 +3239,7 @@ def _calculate_real_income_expense(
         logger.info(f"  - 家庭转入: {family_transfer_in / 10000:.2f}万 (已从收入剔除)")
         logger.info(f"  - 家庭转出: {family_transfer_out / 10000:.2f}万 (已从支出剔除)")
     logger.info(
-        f"真实收入: {real_income / 10000:.2f}万, 真实支出: {real_expense / 10000:.2f}万"
+        f"真实收入(初算): {real_income / 10000:.2f}万, 真实支出(初算): {real_expense / 10000:.2f}万"
     )
 
     return real_income, real_expense, offset_detail
@@ -3400,6 +3400,12 @@ def recalculate_income_metrics(
             adjustment,
         )
 
+    logger.info(
+        "真实收入(对齐后): %.2f万, 真实支出(对齐后): %.2f万",
+        real_income / 10000,
+        real_expense / 10000,
+    )
+
     return {
         "real_income": real_income,
         "real_expense": real_expense,
@@ -3514,7 +3520,7 @@ def generate_profile_report(df: pd.DataFrame, entity_name: str, family_members: 
 
     for text_col in ["counterparty", "description"]:
         if text_col in df.columns:
-            df[text_col] = df[text_col].fillna("")
+            df[text_col] = utils.normalize_text_series(df[text_col])
 
     logger.info(f"数据准备完成: {len(df)} 行, 列: {list(df.columns)}")
 

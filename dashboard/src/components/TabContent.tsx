@@ -38,6 +38,7 @@ import {
 } from 'recharts';
 import { useApp } from '../contexts/AppContext';
 import { formatDate, formatCurrency, formatAmountInWan, truncate, getRiskLevelBadgeStyle, formatFileSize, formatRiskLevel, formatRiskDescription, formatPartyName, formatAnalysisType, formatAuditDateTime, sanitizeValue } from '../utils/formatters';
+import { buildRiskActivityGroups, dedupeDirectTransfers, type RiskActivity, type RiskActivityType } from '../utils/suspicionUtils';
 import { EmptyState } from './common/EmptyState';
 import NetworkGraph from './NetworkGraph';
 import { ReportBuilder } from './ReportBuilder';
@@ -523,7 +524,8 @@ function OverviewTab() {
     const aggregationEvidencePacks = data.analysisResults?.aggregation?.evidencePacks || {};
 
     // 直接从 suspicions 计算实际数据条数
-    const directTransfersCount = (data.suspicions.directTransfers || []).length;
+    const directTransfers = dedupeDirectTransfers(data.suspicions.directTransfers || []);
+    const directTransfersCount = directTransfers.length;
     const cashCollisionsCount = (data.suspicions.cashCollisions || []).length;
 
     // 从 profiles 中提取所有现金交易明细
@@ -923,7 +925,7 @@ function OverviewTab() {
 
             case 'related_direct':
                 // 核心人员往来 - 使用 suspicions.directTransfers
-                const transfers = data.suspicions.directTransfers || [];
+                const transfers = directTransfers;
                 if (transfers.length > 0) {
                     return transfers.map((tx: any) => ({
                         name: tx.from || '未知',
@@ -1989,99 +1991,54 @@ function OverviewTab() {
 
 function RiskIntelTab() {
     const { data } = useApp();
-    const [filter, setFilter] = useState<'all' | 'direct' | 'cash' | 'timing' | 'wallet'>('all');
+    const [filter, setFilter] = useState<'all' | RiskActivityType>('all');
+
+    const riskGroups = useMemo(() => buildRiskActivityGroups(data.suspicions), [data.suspicions]);
 
     const riskFilters = [
-        { id: 'all', label: '全部风险', count: data.suspicions.directTransfers.length + data.suspicions.cashCollisions.length + data.suspicions.cashTimingPatterns.length + data.suspicions.walletAlerts.length },
-        { id: 'direct', label: '直接转账', count: data.suspicions.directTransfers.length },
-        { id: 'cash', label: '现金碰撞', count: data.suspicions.cashCollisions.length },
-        { id: 'timing', label: '时序异常', count: data.suspicions.cashTimingPatterns.length },
-        { id: 'wallet', label: '电子钱包预警', count: data.suspicions.walletAlerts.length },
+        { id: 'all', label: '全部风险', count: riskGroups.all.length },
+        { id: 'direct', label: '直接转账', count: riskGroups.direct.length },
+        { id: 'cash', label: '现金碰撞', count: riskGroups.cash.length },
+        { id: 'timing', label: '时序异常', count: riskGroups.timing.length },
+        { id: 'holiday', label: '节假日交易', count: riskGroups.holiday.length },
+        { id: 'wallet', label: '电子钱包预警', count: riskGroups.wallet.length },
+        { id: 'aml', label: 'AML预警', count: riskGroups.aml.length },
+        { id: 'credit', label: '征信预警', count: riskGroups.credit.length },
     ] as const;
 
-    // 定义联合类型来处理不同数据类型的属性差异
-    type SuspiciousActivity = {
-        type: 'direct' | 'cash' | 'timing' | 'wallet';
-        date: string;
-        from: string;
-        to: string;
-        amount: number;
-        description: string;
-        riskLevel: string;
-        timeDiff?: number | null;
-    };
-
-    // 根据过滤器获取要显示的数据
-    const getFilteredData = () => {
-        const directTransfers = data.suspicions.directTransfers.map((tx: any): SuspiciousActivity => ({
-            type: 'direct' as const,
-            date: tx.date,
-            from: tx.from,
-            to: tx.to,
-            amount: tx.amount,
-            description: tx.description || '核心人员与涉案企业直接资金往来',
-            riskLevel: tx.riskLevel || tx.risk_level || '高风险',
-        }));
-
-        const cashCollisions = data.suspicions.cashCollisions.map((collision: any): SuspiciousActivity => ({
-            type: 'cash' as const,
-            date: collision.time1,
-            from: collision.person1,
-            to: collision.person2,
-            amount: (collision.amount1 || 0) + (collision.amount2 || 0),
-            timeDiff: collision.timeDiff || null,
-            description: collision.description || `现金取存时间差异常，疑似绕开银行转账监控`,
-            riskLevel: collision.riskLevel || collision.risk_level || '高风险',
-        }));
-
-        const timingPatterns = data.suspicions.cashTimingPatterns.map((pattern: any): SuspiciousActivity => ({
-            type: 'timing' as const,
-            date: pattern.time1 || pattern.date || '-',
-            from: pattern.person1 || '-',
-            to: pattern.person2 || '-',
-            amount: (pattern.amount1 || 0) + (pattern.amount2 || 0),
-            timeDiff: pattern.timeDiff || null,
-            description: pattern.description || `取现与存入存在时间规律，需进一步核查`,
-            riskLevel: pattern.riskLevel || pattern.risk_level || '中风险',
-        }));
-
-        const walletAlerts = data.suspicions.walletAlerts.map((alert: any): SuspiciousActivity => ({
-            type: 'wallet' as const,
-            date: alert.date || '-',
-            from: alert.person || '-',
-            to: alert.counterparty || '-',
-            amount: alert.amount || 0,
-            description: alert.description || '电子钱包补充数据命中预警规则',
-            riskLevel: alert.riskLevel || alert.risk_level || '中风险',
-        }));
-
+    const filteredData = useMemo((): RiskActivity[] => {
         switch (filter) {
             case 'direct':
-                return directTransfers;
+                return riskGroups.direct;
             case 'cash':
-                return cashCollisions;
+                return riskGroups.cash;
             case 'timing':
-                return timingPatterns;
+                return riskGroups.timing;
+            case 'holiday':
+                return riskGroups.holiday;
             case 'wallet':
-                return walletAlerts;
+                return riskGroups.wallet;
+            case 'aml':
+                return riskGroups.aml;
+            case 'credit':
+                return riskGroups.credit;
             case 'all':
             default:
-                return [...directTransfers, ...cashCollisions, ...timingPatterns, ...walletAlerts];
+                return riskGroups.all;
         }
-    };
+    }, [filter, riskGroups]);
 
-    const filteredData = getFilteredData();
-    const hasAnyData = data.suspicions.directTransfers.length > 0 ||
-        data.suspicions.cashCollisions.length > 0 ||
-        data.suspicions.cashTimingPatterns.length > 0 ||
-        data.suspicions.walletAlerts.length > 0;
+    const hasAnyData = riskGroups.all.length > 0;
 
-    const getTypeLabel = (type: 'direct' | 'cash' | 'timing' | 'wallet') => {
+    const getTypeLabel = (type: RiskActivityType) => {
         switch (type) {
             case 'direct': return '直接转账';
             case 'cash': return '现金碰撞';
             case 'timing': return '时序异常';
+            case 'holiday': return '节假日交易';
             case 'wallet': return '电子钱包预警';
+            case 'aml': return 'AML预警';
+            case 'credit': return '征信预警';
         }
     };
 
@@ -2135,15 +2092,15 @@ function RiskIntelTab() {
                                 <tr className="border-b theme-border">
                                     <th className="pb-3 text-left text-xs font-semibold theme-text-dim uppercase tracking-wider">类型</th>
                                     <th className="pb-3 text-left text-xs font-semibold theme-text-dim uppercase tracking-wider">日期</th>
-                                    <th className="pb-3 text-left text-xs font-semibold theme-text-dim uppercase tracking-wider">转出方/当事人</th>
-                                    <th className="pb-3 text-left text-xs font-semibold theme-text-dim uppercase tracking-wider">转入方/关联方</th>
+                                    <th className="pb-3 text-left text-xs font-semibold theme-text-dim uppercase tracking-wider">主体/转出方</th>
+                                    <th className="pb-3 text-left text-xs font-semibold theme-text-dim uppercase tracking-wider">对手方/来源</th>
                                     <th className="pb-3 text-right text-xs font-semibold theme-text-dim uppercase tracking-wider">金额</th>
                                     <th className="pb-3 text-left text-xs font-semibold theme-text-dim uppercase tracking-wider">说明</th>
                                     <th className="pb-3 text-center text-xs font-semibold theme-text-dim uppercase tracking-wider">风险等级</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                {filteredData.map((item: SuspiciousActivity, idx: number) => (
+                                {filteredData.map((item: RiskActivity, idx: number) => (
                                     <tr key={idx} className="border-b theme-border/50 hover:bg-red-500/5 transition-colors">
                                         <td className="py-4">
                                             <span className={getRiskLevelBadgeStyle(item.riskLevel)}>
@@ -2163,7 +2120,9 @@ function RiskIntelTab() {
                                             {truncate(formatPartyName(item.to), 12)}
                                         </td>
                                         <td className="py-4 text-right">
-                                            <span className="text-red-400 font-bold">{formatCurrency(item.amount)}</span>
+                                            <span className="text-red-400 font-bold">
+                                                {item.amount === null ? '--' : formatCurrency(item.amount)}
+                                            </span>
                                         </td>
                                         <td className="py-4 max-w-[200px]" title={formatRiskDescription(item.description)}>
                                             <span className="text-xs theme-text-muted truncate block">{truncate(formatRiskDescription(item.description), 20)}</span>
