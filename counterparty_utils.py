@@ -10,7 +10,7 @@
 """
 
 import re
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Any
 from dataclasses import dataclass
 from enum import Enum
 
@@ -36,6 +36,51 @@ class WealthIdentificationResult:
     confidence: str = "low"  # low, medium, high
 
 
+PAYMENT_PLATFORM_EXTRA_KEYWORDS = [
+    "网银在线",
+    "支付宝（中国）网络技术有限公司",
+    "深圳市财付通支付科技有限公司",
+    "财付通-微信转账",
+    "财付通-微信支付-微信转账",
+]
+
+PAYMENT_PLATFORM_DIRECT_TRANSFER_KEYWORDS = [
+    "转账",
+    "转入",
+    "转出",
+    "收款",
+    "收款码",
+    "红包",
+    "扫码转账",
+]
+
+PAYMENT_PLATFORM_NON_TRANSFER_KEYWORDS = [
+    "消费",
+    "商家",
+    "虚拟商品",
+    "还款",
+    "退款",
+    "充值",
+    "理财",
+    "基金",
+    "保险",
+    "缴费",
+    "代扣",
+    "自动扣款",
+    "购买",
+    "付款",
+    "快捷支付",
+    "扫码支付",
+    "花呗",
+    "借呗",
+    "信用购",
+    "信用卡",
+    "申购",
+    "赎回",
+    "税",
+]
+
+
 def _get_base_exclusion_keywords() -> List[str]:
     """
     获取所有场景通用的基础排除关键词
@@ -47,6 +92,39 @@ def _get_base_exclusion_keywords() -> List[str]:
         config.THIRD_PARTY_PAYMENT_KEYWORDS +
         config.KNOWN_SALARY_PAYERS +
         config.USER_DEFINED_SALARY_PAYERS
+    )
+
+
+def get_payment_platform_keywords() -> List[str]:
+    """获取支付平台/清算通道关键词。"""
+    return config.THIRD_PARTY_PAYMENT_KEYWORDS + PAYMENT_PLATFORM_EXTRA_KEYWORDS
+
+
+def is_payment_platform_counterparty(counterparty: Any) -> bool:
+    """判断对手方是否属于支付平台/清算通道语义。"""
+    cp = str(counterparty or "").strip()
+    if not cp or cp.lower() == "nan":
+        return False
+    return utils.contains_keywords(cp, get_payment_platform_keywords())
+
+
+def is_payment_platform_direct_transfer(counterparty: Any, description: Any = "") -> bool:
+    """判断支付平台相关记录是否具备直接转账语义。"""
+    cp = str(counterparty or "").strip()
+    if not is_payment_platform_counterparty(cp):
+        return False
+
+    text = f"{cp} {str(description or '').strip()}"
+    direct_hit = utils.contains_keywords(text, PAYMENT_PLATFORM_DIRECT_TRANSFER_KEYWORDS)
+    non_transfer_hit = utils.contains_keywords(text, PAYMENT_PLATFORM_NON_TRANSFER_KEYWORDS)
+    return direct_hit and not non_transfer_hit
+
+
+def should_skip_payment_platform_counterparty(counterparty: Any, description: Any = "") -> bool:
+    """判断该支付平台对手方记录是否应从关系/图分析中跳过。"""
+    cp = str(counterparty or "").strip()
+    return is_payment_platform_counterparty(cp) and not is_payment_platform_direct_transfer(
+        cp, description
     )
 
 

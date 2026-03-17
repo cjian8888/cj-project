@@ -184,6 +184,7 @@ def extract_wallet_artifact_bundle(
         file_groups,
         known_name_set,
     )
+    _normalize_artifact_source_paths(data_dir, artifact_details)
     return {
         "walletData": wallet_data,
         "artifacts": artifact_details,
@@ -313,20 +314,72 @@ def _build_wallet_source_file_rows(
     for group_name, paths in file_groups.items():
         for path in sorted(paths):
             file_path = Path(path)
-            try:
-                relative_path = str(file_path.relative_to(root))
-            except ValueError:
-                relative_path = str(file_path)
+            relative_path = _to_wallet_relative_path(root, file_path)
             rows.append(
                 {
                     "dataType": data_type_map.get(group_name, group_name),
                     "groupKey": group_name,
                     "fileName": file_path.name,
                     "relativePath": relative_path,
-                    "filePath": str(file_path),
+                    "filePath": relative_path,
                 }
             )
     return rows
+
+
+def _normalize_artifact_source_paths(
+    data_dir: str,
+    artifact_details: Dict[str, List[Dict[str, Any]]],
+) -> None:
+    """将专项产物中的来源路径统一归一为相对输入目录的相对路径。"""
+    root = Path(data_dir)
+
+    for item in artifact_details.get("sourceFiles", []) or []:
+        if not isinstance(item, dict):
+            continue
+        relative_path = _to_wallet_relative_path(
+            root,
+            item.get("relativePath") or item.get("filePath") or item.get("fileName"),
+        )
+        item["relativePath"] = relative_path
+        item["filePath"] = relative_path
+
+    for bucket, rows in artifact_details.items():
+        if bucket == "sourceFiles" or not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            source_file = row.get("sourceFile")
+            if source_file:
+                row["sourceFile"] = _to_wallet_relative_path(root, source_file)
+
+
+def _to_wallet_relative_path(root: Path, value: Any) -> str:
+    """将文件路径转换为相对输入目录的路径文本。"""
+    text = safe_str(value)
+    if not text:
+        return ""
+
+    path = Path(text)
+    if not path.is_absolute():
+        if not root.is_absolute():
+            try:
+                if path.parts[: len(root.parts)] == root.parts:
+                    return str(path)
+            except AttributeError:
+                pass
+            return str(root / path)
+        return str(path)
+
+    root_abs = root if root.is_absolute() else (Path.cwd() / root).resolve()
+    try:
+        relative_path = path.resolve().relative_to(root_abs)
+    except ValueError:
+        return path.name if path.name else text
+    if root.is_absolute():
+        return str(relative_path)
+    return str(root / relative_path)
 
 
 def _append_artifact_row(

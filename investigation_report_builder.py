@@ -24,9 +24,10 @@ from typing import Dict, List, Optional, Any
 from dataclasses import asdict
 
 # 导入统一路径管理器
-from paths import OUTPUT_DIR, APP_ROOT
+from paths import CONFIG_DIR, OUTPUT_DIR, TEMPLATES_DIR
 
 import config
+import family_assets_helper
 import utils
 import yaml
 from utils.phrase_loader import PhraseLoader
@@ -408,7 +409,7 @@ class InvestigationReportBuilder:
         self.derived_data = analysis_cache.get("derived_data", {})
         # Initialize phrase loader for configurable phrases in analysis descriptions
         try:
-            phrase_config = os.path.join(str(APP_ROOT), "config", "report_phrases.yaml")
+            phrase_config = str(CONFIG_DIR / "report_phrases.yaml")
             self.phrase_loader = PhraseLoader(phrase_config)
             self.phrase_loader.load_config()
             logger.info(f"PhraseLoader 初始化成功: {phrase_config}")
@@ -1008,7 +1009,7 @@ class InvestigationReportBuilder:
         处理规则：
         1. 去除首尾空格
         2. 统一全角/半角括号
-        3. 车位地址：去除末尾的"室"字（车位不应该有"室"）
+        3. 去除末尾的"室"字，统一 "604" / "604室" 这类轻微差异
         4. 统一"地下1层"为"地下一层"
         5. 去除多余空格
 
@@ -1026,9 +1027,8 @@ class InvestigationReportBuilder:
         # 1. 统一全角/半角括号 -> 全角
         normalized = normalized.replace("(", "（").replace(")", "）")
 
-        # 2. 车位特殊处理：如果包含"车位"，去除末尾的"室"
-        if "车位" in normalized:
-            normalized = re.sub(r"室$", "", normalized)
+        # 2. 统一末尾"室"字，兼容"604" / "604室"等轻微差异
+        normalized = re.sub(r"室$", "", normalized)
 
         # 3. 统一"地下1层"等数字层为中文
         floor_map = {"1": "一", "2": "二", "3": "三", "4": "四", "5": "五"}
@@ -1040,6 +1040,10 @@ class InvestigationReportBuilder:
         normalized = re.sub(r"\s+", "", normalized)
 
         return normalized
+
+    def _build_property_identity_key(self, prop: Dict[str, Any]) -> str:
+        """构建房产唯一键，优先使用登记侧稳定标识。"""
+        return family_assets_helper.build_property_identity_key(prop)
 
     def _build_id_name_mapping(self, analysis_cache: Dict):
         """
@@ -2653,14 +2657,7 @@ class InvestigationReportBuilder:
                         or ""
                     )
 
-                identifier = self._normalize_property_address(
-                    normalized.get("房地坐落", "")
-                ) or self._clean_report_value(
-                    normalized.get("property_number")
-                    or normalized.get("certificate_number")
-                    or normalized.get("source_file"),
-                    "",
-                )
+                identifier = self._build_property_identity_key(normalized)
                 if identifier and identifier not in seen_properties:
                     seen_properties.add(identifier)
                     properties.append(normalized)
@@ -2683,14 +2680,7 @@ class InvestigationReportBuilder:
                         or ""
                     )
 
-                identifier = self._normalize_property_address(
-                    normalized.get("房地坐落", "")
-                ) or self._clean_report_value(
-                    normalized.get("property_number")
-                    or normalized.get("certificate_number")
-                    or normalized.get("source_file"),
-                    "",
-                )
+                identifier = self._build_property_identity_key(normalized)
                 if identifier and identifier not in seen_properties:
                     seen_properties.add(identifier)
                     properties.append(normalized)
@@ -2959,30 +2949,17 @@ class InvestigationReportBuilder:
                 "properties_precise", []
             )
             for prop in properties:
-                location = (
-                    prop.get("location", "")
-                    or prop.get("address", "")
-                    or prop.get("房地坐落", "")
-                    or prop.get("坐落", "")
-                )
-                if location:
-                    # 【修复】使用标准化地址去重
-                    normalized_loc = self._normalize_property_address(location)
-                    if normalized_loc and normalized_loc not in unique_properties:
-                        unique_properties[normalized_loc] = prop
+                property_key = self._build_property_identity_key(prop)
+                if property_key and property_key not in unique_properties:
+                    unique_properties[property_key] = prop
 
             # 2. 从外部缓存查找
             person_id = self._name_to_id_map.get(name)
             if person_id and person_id in self._external_property_cache:
                 for prop in self._external_property_cache[person_id]:
-                    location = (
-                        prop.get("房地坐落", "")
-                        or prop.get("location", "")
-                        or prop.get("坐落", "")
-                        or prop.get("address", "")
-                    )
-                    if location and location not in unique_properties:
-                        unique_properties[location] = prop
+                    property_key = self._build_property_identity_key(prop)
+                    if property_key and property_key not in unique_properties:
+                        unique_properties[property_key] = prop
 
             # 【修复】聚合车辆数据 - 从 profile 或外部缓存
             vehicles = profile.get("vehicles", [])
@@ -3582,14 +3559,9 @@ class InvestigationReportBuilder:
             # 1. 从 profile.properties 读取
             properties = profile.get("properties", []) or []
             for prop in properties:
-                location = (
-                    prop.get("location", "")
-                    or prop.get("address", "")
-                    or prop.get("房地坐落", "")
-                    or prop.get("坐落", "")
-                )
-                if location and location not in unique_properties:
-                    unique_properties[location] = prop
+                property_key = self._build_property_identity_key(prop)
+                if property_key and property_key not in unique_properties:
+                    unique_properties[property_key] = prop
                     value = prop.get("estimated_value", 0) or prop.get("value", 0) or 0
                     property_value += value
 
@@ -3598,17 +3570,9 @@ class InvestigationReportBuilder:
             if person_id and person_id in self._external_property_cache:
                 external_props = self._external_property_cache[person_id]
                 for prop in external_props:
-                    location = (
-                        prop.get("房地坐落", "")
-                        or prop.get("location", "")
-                        or prop.get("坐落", "")
-                        or prop.get("address", "")
-                    )
-                    if location:
-                        # 【修复】使用标准化地址去重
-                        normalized_loc = self._normalize_property_address(location)
-                        if normalized_loc and normalized_loc not in unique_properties:
-                            unique_properties[normalized_loc] = prop
+                    property_key = self._build_property_identity_key(prop)
+                    if property_key and property_key not in unique_properties:
+                        unique_properties[property_key] = prop
                         value = prop.get("不动产价格", 0) or prop.get("value", 0) or 0
                         property_value += value
 
@@ -3838,6 +3802,62 @@ class InvestigationReportBuilder:
         except Exception:
             return fallback
 
+    def _resolve_salary_total(self, profile: Dict, total_income: float = 0.0) -> float:
+        """统一收敛工资口径，兼顾年度工资、分类结果和增强工资识别。"""
+
+        def _as_float(value: Any) -> float:
+            try:
+                return float(value or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        candidates: List[float] = []
+
+        salary_total = _as_float(profile.get("salaryTotal", 0))
+        if salary_total > 0:
+            candidates.append(salary_total)
+
+        yearly_salary_obj = profile.get("yearly_salary", {}) or profile.get(
+            "yearlySalary", {}
+        )
+        if isinstance(yearly_salary_obj, dict):
+            salary_summary = yearly_salary_obj.get("summary", {})
+            if isinstance(salary_summary, dict):
+                official_salary = _as_float(salary_summary.get("total", 0))
+                if official_salary > 0:
+                    candidates.append(official_salary)
+
+        income_classification = profile.get("income_classification", {})
+        if not isinstance(income_classification, dict):
+            income_classification = {}
+        classified_salary = _as_float(
+            income_classification.get("salary_classified_income", 0)
+        )
+        reference_salary = _as_float(
+            income_classification.get("salary_reference_income", 0)
+        )
+        if classified_salary > 0:
+            candidates.append(classified_salary)
+        if reference_salary > 0:
+            candidates.append(reference_salary)
+
+        salary_enhanced = profile.get("salary_enhanced_analysis", {})
+        if isinstance(salary_enhanced, dict):
+            enhanced_salary = _as_float(salary_enhanced.get("salary_income", 0))
+            if enhanced_salary > 0:
+                candidates.append(enhanced_salary)
+
+        if not candidates:
+            return 0.0
+
+        resolved_salary = max(candidates)
+        legitimate_income = _as_float(income_classification.get("legitimate_income", 0))
+        upper_bounds = [value for value in (legitimate_income, total_income) if value > 0]
+        if upper_bounds:
+            resolved_salary = min(resolved_salary, min(upper_bounds))
+
+        return float(resolved_salary)
+
     def _get_salary_metrics(self, profile: Dict, total_income: float) -> tuple[float, float]:
         """
         统一获取工资总额与工资占比（百分比）。
@@ -3845,7 +3865,7 @@ class InvestigationReportBuilder:
         Returns:
             (salary_total, salary_ratio_percent)
         """
-        salary_total = profile.get("salaryTotal", 0) or 0
+        salary_total = self._resolve_salary_total(profile, total_income)
         income_structure = profile.get("income_structure", {})
         if (
             (not salary_total)
@@ -3853,14 +3873,6 @@ class InvestigationReportBuilder:
             and income_structure.get("salary_income")
         ):
             salary_total = income_structure.get("salary_income", 0) or 0
-        if not salary_total and isinstance(profile, dict):
-            yearly_salary_obj = profile.get("yearly_salary", {}) or profile.get(
-                "yearlySalary", {}
-            )
-            if isinstance(yearly_salary_obj, dict):
-                salary_summary = yearly_salary_obj.get("summary", {})
-                if isinstance(salary_summary, dict):
-                    salary_total = salary_summary.get("total", 0) or 0
 
         salary_ratio = (salary_total / total_income * 100) if total_income > 0 else 0.0
 
@@ -5158,17 +5170,9 @@ class InvestigationReportBuilder:
             person_id = self._name_to_id_map.get(name)
             if person_id and person_id in self._external_property_cache:
                 for prop in self._external_property_cache[person_id]:
-                    location = (
-                        prop.get("房地坐落", "")
-                        or prop.get("location", "")
-                        or prop.get("坐落", "")
-                        or prop.get("address", "")
-                    )
-                    if location:
-                        # 【修复】使用标准化地址去重
-                        normalized_loc = self._normalize_property_address(location)
-                        if normalized_loc and normalized_loc not in unique_properties:
-                            unique_properties[normalized_loc] = prop
+                    property_key = self._build_property_identity_key(prop)
+                    if property_key and property_key not in unique_properties:
+                        unique_properties[property_key] = prop
 
             # 【修复】从外部缓存获取车辆
             if person_id and person_id in self._external_vehicle_cache:
@@ -7447,20 +7451,10 @@ class InvestigationReportBuilder:
                 property_data = self._get_external_property_data(member)
                 if isinstance(property_data, list):
                     for prop in property_data:
-                        # 【修复】使用标准化地址去重
-                        location = (
-                            prop.get("房地坐落", "")
-                            or prop.get("location", "")
-                            or prop.get("坐落", "")
-                            or prop.get("address", "")
-                        )
-                        normalized_loc = (
-                            self._normalize_property_address(location) if location else ""
-                        )
                         fallback_key = (
                             f"{member}|{prop.get('产权证号', '')}|{prop.get('登记时间', '')}"
                         )
-                        property_key = normalized_loc or fallback_key
+                        property_key = self._build_property_identity_key(prop) or fallback_key
                         if property_key in unique_properties:
                             continue
 
@@ -9822,7 +9816,7 @@ class InvestigationReportBuilder:
 
         if template_dir is None:
             # 使用 paths 模块获取模板目录
-            template_dir = os.path.join(str(APP_ROOT), "templates", "report_v3")
+            template_dir = str(TEMPLATES_DIR / "report_v3")
 
         # 配置Jinja2环境
         env = jinja2.Environment(
@@ -10314,7 +10308,11 @@ class InvestigationReportBuilder:
         )
 
         # 计算总额
-        total_salary = summary.get("total", 0) or profile.get("salaryTotal", 0)
+        total_salary = (
+            self._resolve_salary_total(profile, 0.0)
+            or summary.get("total", 0)
+            or profile.get("salaryTotal", 0)
+        )
         years_count = len(years_with_data)
         avg_yearly = (total_salary / years_count) if years_count > 0 else 0
         avg_monthly = summary.get("avg_monthly", 0) or (
@@ -11325,12 +11323,6 @@ class InvestigationReportBuilder:
         summary = profile.get("summary", {}) if isinstance(profile, dict) else {}
         real_income = _as_float(summary.get("real_income", 0))
 
-        yearly_salary = profile.get("yearly_salary", {}) or profile.get(
-            "yearlySalary", {}
-        )
-        salary_summary = yearly_salary.get("summary", {}) if isinstance(yearly_salary, dict) else {}
-        strict_salary = _as_float(salary_summary.get("total", 0))
-
         income_classification = profile.get("income_classification", {})
         if not isinstance(income_classification, dict):
             income_classification = {}
@@ -11353,6 +11345,9 @@ class InvestigationReportBuilder:
             else {}
         )
 
+        legitimate_total = _as_float(income_classification.get("legitimate_income", 0))
+        if legitimate_total <= 0 and legitimate_map:
+            legitimate_total = sum(_as_float(v) for v in legitimate_map.values())
         unknown_total = _as_float(income_classification.get("unknown_income", 0))
         if unknown_total <= 0 and unknown_map:
             unknown_total = sum(_as_float(v) for v in unknown_map.values())
@@ -11369,33 +11364,27 @@ class InvestigationReportBuilder:
             ["利息", "分红", "结息"],
         )
 
-        salary_component = min(strict_salary, real_income)
+        salary_component = min(
+            self._resolve_salary_total(profile, real_income),
+            max(0.0, legitimate_total - wealth_income - interest_income),
+        )
 
         personal_transfer_income = _sum_reason_matches(unknown_map, ["个人转账"])
         third_party_small_income = _sum_reason_matches(
             unknown_map, ["第三方支付小额转入"]
         )
         unknown_source_income = _sum_reason_matches(unknown_map, ["来源不明"])
-        raw_other_unknown = max(
+        other_unknown = max(
             0.0,
             unknown_total
             - personal_transfer_income
             - third_party_small_income
             - unknown_source_income,
         )
-        residual_after_known = max(
+        other_legitimate = max(
             0.0,
-            real_income
-            - salary_component
-            - wealth_income
-            - interest_income
-            - personal_transfer_income
-            - third_party_small_income
-            - unknown_source_income
-            - suspicious_total,
+            legitimate_total - salary_component - wealth_income - interest_income,
         )
-        other_unknown = min(raw_other_unknown, residual_after_known)
-        other_legitimate = max(0.0, residual_after_known - other_unknown)
 
         rows = []
 
@@ -11417,7 +11406,7 @@ class InvestigationReportBuilder:
         _append_row(
             "工资性收入",
             salary_component,
-            "严格工资口径，来自年度工资识别结果。",
+            "综合工资口径，优先使用年度工资识别，并吸收稳定代发/机构工资结果。",
         )
         _append_row(
             "理财/定存/证券收益",

@@ -5,6 +5,21 @@ import pandas as pd
 import wallet_data_extractor
 
 
+def test_to_wallet_relative_path_keeps_selected_root_prefix_for_relative_and_absolute_inputs():
+    root = Path("data")
+    absolute_value = (Path.cwd() / "data" / "CB" / "wallet" / "sample.xlsx").resolve()
+
+    assert wallet_data_extractor._to_wallet_relative_path(root, absolute_value) == str(
+        Path("data") / "CB" / "wallet" / "sample.xlsx"
+    )
+    assert wallet_data_extractor._to_wallet_relative_path(
+        root, Path("data") / "CB" / "wallet" / "sample.xlsx"
+    ) == str(Path("data") / "CB" / "wallet" / "sample.xlsx")
+    assert wallet_data_extractor._to_wallet_relative_path(
+        root, Path("CB") / "wallet" / "sample.xlsx"
+    ) == str(Path("data") / "CB" / "wallet" / "sample.xlsx")
+
+
 def test_extract_wallet_data_merges_alipay_wechat_and_tenpay(tmp_path: Path):
     root = tmp_path / "data" / "补充数据" / "电子钱包" / "批次_20260315"
     root.mkdir(parents=True, exist_ok=True)

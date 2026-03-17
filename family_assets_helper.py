@@ -22,7 +22,7 @@ def _normalize_property_address(address: str) -> str:
     处理规则：
     1. 去除首尾空格
     2. 统一全角/半角括号
-    3. 车位地址：去除末尾的"室"字（车位不应该有"室"）
+    3. 去除末尾的"室"字，统一 "604" / "604室" 这类轻微差异
     4. 统一"地下1层"为"地下一层"
     5. 去除多余空格
     """
@@ -34,9 +34,8 @@ def _normalize_property_address(address: str) -> str:
     # 1. 统一全角/半角括号 -> 全角
     normalized = normalized.replace("(", "（").replace(")", "）")
 
-    # 2. 车位特殊处理：如果包含"车位"，去除末尾的"室"
-    if "车位" in normalized:
-        normalized = re.sub(r"室$", "", normalized)
+    # 2. 统一末尾"室"字，兼容"604" / "604室"等轻微差异
+    normalized = re.sub(r"室$", "", normalized)
 
     # 3. 统一"地下1层"等数字层为中文
     floor_map = {"1": "一", "2": "二", "3": "三", "4": "四", "5": "五"}
@@ -101,6 +100,40 @@ def _extract_property_location(prop: Dict) -> str:
     )
 
 
+def build_property_identity_key(prop: Dict) -> str:
+    """
+    构建房产唯一键。
+
+    优先使用登记侧稳定标识（如 property_number / certificate_number），
+    地址仅作为兜底，避免同一套房因 "604" / "604室" 等轻微差异被重复统计。
+    """
+    if not isinstance(prop, dict):
+        return ""
+
+    for key in (
+        "property_number",
+        "不动产单元号",
+        "property_id",
+        "certificate_number",
+        "不动产权证号",
+        "产权证号",
+        "不动产权属证书号",
+        "source_file",
+    ):
+        value = str(prop.get(key) or "").strip()
+        if value:
+            normalized = re.sub(r"\s+", "", value)
+            if normalized:
+                return f"id:{normalized}"
+
+    location = _extract_property_location(prop)
+    normalized_location = _normalize_property_address(location)
+    if normalized_location:
+        return f"loc:{normalized_location}"
+
+    return ""
+
+
 def _collect_unique_properties(
     precise_property_data: Dict, person: str, family_members: List[str]
 ) -> List[Dict]:
@@ -117,28 +150,24 @@ def _collect_unique_properties(
     Returns:
         去重后的房产列表
     """
-    unique_properties = {}  # 用于去重：标准化地址 -> property
+    unique_properties = {}  # 用于去重：房产唯一键 -> property
 
     # 添加本人的房产
     if person in precise_property_data:
         for prop in precise_property_data[person]:
             mapped_prop = _map_property_fields(prop)
-            location = _extract_property_location(mapped_prop)
-            if location:
-                normalized_loc = _normalize_property_address(location)
-                if normalized_loc and normalized_loc not in unique_properties:
-                    unique_properties[normalized_loc] = mapped_prop
+            property_key = build_property_identity_key(mapped_prop)
+            if property_key and property_key not in unique_properties:
+                unique_properties[property_key] = mapped_prop
 
     # 添加家族成员的房产（排除核心人员自身）
     for member in family_members:
         if member in precise_property_data and member != person:
             for prop in precise_property_data[member]:
                 mapped_prop = _map_property_fields(prop)
-                location = _extract_property_location(mapped_prop)
-                if location:
-                    normalized_loc = _normalize_property_address(location)
-                    if normalized_loc and normalized_loc not in unique_properties:
-                        unique_properties[normalized_loc] = mapped_prop
+                property_key = build_property_identity_key(mapped_prop)
+                if property_key and property_key not in unique_properties:
+                    unique_properties[property_key] = mapped_prop
 
     return list(unique_properties.values())
 

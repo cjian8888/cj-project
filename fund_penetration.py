@@ -17,18 +17,85 @@
 import os
 import re
 import pandas as pd
-from typing import Dict, List, Set, Tuple
-from datetime import datetime
+from typing import Any, Dict, List, Optional, Set, Tuple
+from datetime import datetime, timedelta
 from collections import defaultdict
 
 import config
 import utils
 import risk_scoring
+from counterparty_utils import (
+    is_payment_platform_counterparty,
+    should_skip_payment_platform_counterparty,
+)
 from utils.path_explainability import build_cycle_path_explainability
 
 logger = utils.setup_logger(__name__)
 
 TRANSACTION_REF_RETURN_LIMIT = 200
+GRAPH_MIRROR_MATCH_WINDOW = timedelta(
+    minutes=float(getattr(config, "GRAPH_MIRROR_MATCH_MINUTES", 10) or 10)
+)
+FUND_CYCLE_STEP_WINDOW = timedelta(
+    days=float(getattr(config, "FUND_CYCLE_STEP_WINDOW_DAYS", 90) or 90)
+)
+FUND_CYCLE_TOTAL_WINDOW = timedelta(
+    days=float(getattr(config, "FUND_CYCLE_TOTAL_WINDOW_DAYS", 180) or 180)
+)
+SALARY_EDGE_EXCLUDE_FROM_CYCLE = bool(
+    getattr(config, "FUND_CYCLE_EXCLUDE_SALARY_EDGES", True)
+)
+
+
+def _parse_ref_datetime(value: Any) -> Optional[datetime]:
+    """解析流水时间，失败返回 None。"""
+    if value in (None, "", "nan"):
+        return None
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    if hasattr(parsed, "to_pydatetime"):
+        return parsed.to_pydatetime()
+    return parsed
+
+
+def _build_salary_pattern() -> str:
+    salary_keywords = list(getattr(config, "SALARY_STRONG_KEYWORDS", []) or []) + [
+        "工资",
+        "奖金",
+        "代发",
+        "薪资",
+        "薪酬",
+        "补贴",
+        "津贴",
+        "安家费",
+        "年终奖",
+        "绩效",
+    ]
+    unique_keywords = [kw for kw in dict.fromkeys(salary_keywords) if kw]
+    return "|".join(re.escape(keyword) for keyword in unique_keywords)
+
+
+SALARY_PATTERN = _build_salary_pattern()
+
+
+def _is_salary_like_counterparty(counterparty: str) -> bool:
+    cp = str(counterparty or "").strip()
+    if not cp or cp.lower() == "nan":
+        return False
+    known_payers = list(getattr(config, "KNOWN_SALARY_PAYERS", []) or []) + list(
+        getattr(config, "USER_DEFINED_SALARY_PAYERS", []) or []
+    )
+    return utils.contains_keywords(cp, known_payers)
+
+
+def _is_salary_like_ref(counterparty: str, description: str) -> bool:
+    text = f"{str(counterparty or '').strip()} {str(description or '').strip()}"
+    if _is_salary_like_counterparty(counterparty):
+        return True
+    if not SALARY_PATTERN:
+        return False
+    return bool(re.search(SALARY_PATTERN, text))
 
 
 # ============================================================
@@ -71,6 +138,8 @@ class MoneyGraph:
         supporting_transactions_total: int = 0,
         supporting_transactions_truncated: bool = False,
         supporting_transactions_limit: int = TRANSACTION_REF_RETURN_LIMIT,
+        owner_entity: str = "",
+        semantic_roles: List[str] = None,
     ):
         """添加资金边"""
         self.nodes.add(source)
@@ -86,6 +155,10 @@ class MoneyGraph:
                 "supporting_transactions_total": int(supporting_transactions_total or transaction_count or 0),
                 "supporting_transactions_truncated": bool(supporting_transactions_truncated),
                 "supporting_transactions_limit": int(supporting_transactions_limit or TRANSACTION_REF_RETURN_LIMIT),
+                "owner_entity": str(owner_entity or "").strip(),
+                "semantic_roles": sorted(
+                    {str(role).strip() for role in list(semantic_roles or []) if str(role).strip()}
+                ),
             }
         )
         # 更新流量统计
@@ -172,7 +245,6 @@ class MoneyGraph:
 
         # 公共节点排除列表（这些节点连接太多人，不是真正的闭环）
         # 【优化 2026-01-11】使用更精确的匹配规则
-        PUBLIC_NODES_EXACT = ["支付宝", "微信", "财付通", "银联"]  # 完整匹配
         PUBLIC_NODES_CONTAINS = ["理财产品", "余额宝", "零钱通"]  # 包含匹配
 
         def is_public_node(node: str) -> bool:
@@ -187,8 +259,8 @@ class MoneyGraph:
             if not node:
                 return False
 
-            # 完整匹配支付平台
-            if node in PUBLIC_NODES_EXACT:
+            # 支付平台/清算通道节点不能作为闭环中介
+            if is_payment_platform_counterparty(node):
                 return True
 
             # 包含匹配理财产品
@@ -329,6 +401,8 @@ class MoneyGraph:
         channels = []
 
         for node, flows in self.node_flows.items():
+            if is_payment_platform_counterparty(node):
+                continue
             inflow = flows["inflow"]
             outflow = flows["outflow"]
 
@@ -374,6 +448,8 @@ class MoneyGraph:
         """
         hubs = []
         for node in self.nodes:
+            if is_payment_platform_counterparty(node):
+                continue
             in_deg, out_deg = self.get_node_degree(node)
             total_deg = in_deg + out_deg
             if total_deg >= min_degree:
@@ -393,28 +469,12 @@ class MoneyGraph:
 
 def _estimate_cycle_amount(money_graph: MoneyGraph, cycle: List[str]) -> float:
     """按闭环路径的最小边额估算可回流金额。"""
-    if not cycle:
-        return 0.0
-
-    nodes = list(cycle)
-    if len(nodes) > 1 and nodes[0] == nodes[-1]:
-        nodes = nodes[:-1]
-    if len(nodes) < 2:
-        return 0.0
-
-    edge_amounts = []
-    path_nodes = nodes + [nodes[0]]
-    for idx in range(len(path_nodes) - 1):
-        source = path_nodes[idx]
-        target = path_nodes[idx + 1]
-        amount = sum(
-            float(edge.get("amount", 0) or 0)
-            for edge in money_graph.edges.get(source, [])
-            if edge.get("target") == target
-        )
-        if amount > 0:
-            edge_amounts.append(amount)
-
+    edge_segments = _build_cycle_edge_segments(money_graph, cycle)
+    edge_amounts = [
+        float(segment.get("amount", 0) or 0)
+        for segment in edge_segments
+        if float(segment.get("amount", 0) or 0) > 0
+    ]
     return round(min(edge_amounts), 2) if edge_amounts else 0.0
 
 
@@ -428,6 +488,176 @@ def _supporting_ref_sort_key(ref: Dict) -> Tuple[float, str]:
         amount,
         str(ref.get("date", "") or ""),
     )
+
+
+def _dedupe_segment_events(matched_edges: List[Dict], source: str, target: str) -> Tuple[List[Dict], List[Dict], List[str]]:
+    """
+    对同一方向的边做镜像流水去重。
+
+    返回:
+    - deduped_events: 唯一转账事件（用于金额和时间判断）
+    - raw_refs: 原始流水样本（用于报告展示）
+    - semantic_roles: 汇总后的语义标签
+    """
+    raw_refs = []
+    semantic_roles = set()
+    candidates = []
+
+    for edge in matched_edges:
+        semantic_roles.update(
+            str(role).strip() for role in list(edge.get("semantic_roles", []) or []) if str(role).strip()
+        )
+        for ref in list(edge.get("supporting_transactions", []) or []):
+            if not isinstance(ref, dict):
+                continue
+            raw_ref = dict(ref)
+            raw_ref.setdefault("owner_entity", edge.get("owner_entity", ""))
+            raw_ref["date_dt"] = _parse_ref_datetime(raw_ref.get("date"))
+            raw_ref["salary_like"] = _is_salary_like_ref(source, raw_ref.get("description", ""))
+            raw_refs.append(raw_ref)
+            candidates.append(raw_ref)
+
+    raw_refs = sorted(raw_refs, key=_supporting_ref_sort_key, reverse=True)
+    if not candidates:
+        return [], raw_refs[:TRANSACTION_REF_RETURN_LIMIT], sorted(semantic_roles)
+
+    candidates = sorted(
+        candidates,
+        key=lambda item: (
+            item.get("date_dt") or datetime.max,
+            abs(float(item.get("amount", 0) or 0)),
+            str(item.get("owner_entity", "") or ""),
+        ),
+    )
+    used = set()
+    deduped_events = []
+
+    for idx, candidate in enumerate(candidates):
+        if idx in used:
+            continue
+        used.add(idx)
+
+        amount = abs(float(candidate.get("amount", 0) or 0))
+        owner_entity = str(candidate.get("owner_entity", "") or "").strip()
+        candidate_date = candidate.get("date_dt")
+        matched_index = None
+
+        # 仅在“源账户/目标账户双方都在数据内”时做镜像去重
+        if owner_entity in {source, target}:
+            expected_owner = target if owner_entity == source else source
+            for other_idx in range(idx + 1, len(candidates)):
+                if other_idx in used:
+                    continue
+                other = candidates[other_idx]
+                other_owner = str(other.get("owner_entity", "") or "").strip()
+                if other_owner != expected_owner:
+                    continue
+                other_amount = abs(float(other.get("amount", 0) or 0))
+                if abs(other_amount - amount) > 0.01:
+                    continue
+                other_date = other.get("date_dt")
+                if candidate_date and other_date:
+                    if abs(other_date - candidate_date) > GRAPH_MIRROR_MATCH_WINDOW:
+                        continue
+                matched_index = other_idx
+                break
+
+        owner_entities = [owner_entity] if owner_entity else []
+        mirrored_refs = [candidate]
+        if matched_index is not None:
+            used.add(matched_index)
+            mirror_ref = candidates[matched_index]
+            mirrored_refs.append(mirror_ref)
+            other_owner = str(mirror_ref.get("owner_entity", "") or "").strip()
+            if other_owner:
+                owner_entities.append(other_owner)
+
+        deduped_events.append(
+            {
+                "date_dt": candidate_date,
+                "date": str(candidate.get("date", "") or "")[:19],
+                "amount": amount,
+                "owner_entities": sorted({owner for owner in owner_entities if owner}),
+                "salary_like": bool(
+                    any(bool(ref.get("salary_like")) for ref in mirrored_refs)
+                    or "salary_income" in semantic_roles
+                ),
+                "mirrored": matched_index is not None,
+                "raw_ref_count": len(mirrored_refs),
+            }
+        )
+
+    deduped_events.sort(key=lambda item: (item.get("date_dt") or datetime.max, item.get("amount", 0)))
+    return deduped_events, raw_refs[:TRANSACTION_REF_RETURN_LIMIT], sorted(semantic_roles)
+
+
+def _select_temporal_cycle_sequence(edge_segments: List[Dict]) -> Optional[Dict]:
+    """为闭环寻找一组时间单调、窗口内可串联的事件序列。"""
+    if not edge_segments:
+        return None
+
+    segment_candidates = []
+    for segment in edge_segments:
+        events = [
+            event
+            for event in list(segment.get("deduped_events", []) or [])
+            if event.get("date_dt") is not None and float(event.get("amount", 0) or 0) > 0
+        ]
+        if not events:
+            return None
+        segment_candidates.append(events)
+
+    def _search_segment(
+        rotated_segments: List[Dict],
+        rotated_candidates: List[List[Dict]],
+        index: int,
+        previous_dt: Optional[datetime],
+        first_dt: Optional[datetime],
+        selected: List[Dict],
+    ) -> Optional[List[Dict]]:
+        if index >= len(rotated_segments):
+            return selected
+
+        for event in rotated_candidates[index]:
+            current_dt = event.get("date_dt")
+            if current_dt is None:
+                continue
+            if previous_dt and current_dt < previous_dt:
+                continue
+            if previous_dt and current_dt - previous_dt > FUND_CYCLE_STEP_WINDOW:
+                continue
+            if first_dt and current_dt - first_dt > FUND_CYCLE_TOTAL_WINDOW:
+                continue
+            picked = dict(event)
+            picked["segment"] = rotated_segments[index]
+            result = _search_segment(
+                rotated_segments,
+                rotated_candidates,
+                index + 1,
+                current_dt,
+                first_dt or current_dt,
+                selected + [picked],
+            )
+            if result:
+                return result
+        return None
+
+    for rotation in range(len(edge_segments)):
+        rotated_segments = edge_segments[rotation:] + edge_segments[:rotation]
+        rotated_candidates = segment_candidates[rotation:] + segment_candidates[:rotation]
+        selected = _search_segment(rotated_segments, rotated_candidates, 0, None, None, [])
+        if selected:
+            dates = [item["date_dt"] for item in selected if item.get("date_dt") is not None]
+            matched_amount = min(float(item.get("amount", 0) or 0) for item in selected)
+            return {
+                "rotation": rotation,
+                "selected_events": selected,
+                "matched_amount": round(matched_amount, 2),
+                "start_date": min(dates) if dates else None,
+                "end_date": max(dates) if dates else None,
+                "span_days": (max(dates) - min(dates)).days if len(dates) >= 2 else 0,
+            }
+    return None
 
 
 def _build_cycle_edge_segments(money_graph: MoneyGraph, cycle: List[str]) -> List[Dict]:
@@ -450,8 +680,11 @@ def _build_cycle_edge_segments(money_graph: MoneyGraph, cycle: List[str]) -> Lis
             edge for edge in money_graph.edges.get(source, [])
             if edge.get("target") == target
         ]
+        deduped_events, matched_refs, semantic_roles = _dedupe_segment_events(
+            matched_edges, source, target
+        )
         amount = round(
-            sum(float(edge.get("amount", 0) or 0) for edge in matched_edges),
+            sum(float(event.get("amount", 0) or 0) for event in deduped_events),
             2,
         )
         edge_types = sorted(
@@ -471,20 +704,11 @@ def _build_cycle_edge_segments(money_graph: MoneyGraph, cycle: List[str]) -> Lis
             )
             for edge in matched_edges
         )
-        matched_refs = [
-            ref
-            for edge in matched_edges
-            for ref in list(edge.get("supporting_transactions", []) or [])
-            if isinstance(ref, dict)
-        ]
-        matched_refs = sorted(
-            matched_refs,
-            key=_supporting_ref_sort_key,
-            reverse=True,
-        )
         transaction_refs = matched_refs[:TRANSACTION_REF_RETURN_LIMIT]
         transaction_refs_returned = len(transaction_refs)
         transaction_refs_total = max(transaction_refs_total, transaction_refs_returned)
+        deduped_event_count = len(deduped_events)
+        deduped_dates = [event.get("date_dt") for event in deduped_events if event.get("date_dt") is not None]
         segments.append(
             {
                 "index": idx + 1,
@@ -494,13 +718,21 @@ def _build_cycle_edge_segments(money_graph: MoneyGraph, cycle: List[str]) -> Lis
                 "edge_types": edge_types,
                 "date_available": any(edge.get("date") is not None for edge in matched_edges),
                 "time_basis": "aggregated_counterparty_total",
-                "transaction_count": transaction_refs_total,
+                "transaction_count": deduped_event_count or transaction_refs_total,
                 "transaction_refs_total": transaction_refs_total,
                 "transaction_ref_sample_count": transaction_refs_returned,
                 "transaction_refs_returned": transaction_refs_returned,
                 "transaction_refs_truncated": transaction_refs_total > transaction_refs_returned,
                 "transaction_refs_limit": TRANSACTION_REF_RETURN_LIMIT,
                 "transaction_refs": transaction_refs,
+                "deduped_event_count": deduped_event_count,
+                "deduped_events": deduped_events,
+                "semantic_roles": semantic_roles,
+                "has_salary_semantics": "salary_income" in semantic_roles
+                or any(bool(event.get("salary_like")) for event in deduped_events),
+                "earliest_event_date": min(deduped_dates) if deduped_dates else None,
+                "latest_event_date": max(deduped_dates) if deduped_dates else None,
+                "mirror_dedup_applied": any(bool(event.get("mirrored")) for event in deduped_events),
             }
         )
     return segments
@@ -522,18 +754,29 @@ def build_cycle_record(
     path = " → ".join(path_nodes) if path_nodes else "未知路径"
     unique_count = len(set(nodes))
     external_node_count = sum(1 for node in nodes if focus_set and node not in focus_set)
-    estimated_amount = _estimate_cycle_amount(money_graph, cycle)
     edge_segments = _build_cycle_edge_segments(money_graph, cycle)
+    temporal_match = _select_temporal_cycle_sequence(edge_segments)
+    salary_edge_segments = [
+        segment for segment in edge_segments if bool(segment.get("has_salary_semantics"))
+    ]
+    excluded_reasons = []
+    if temporal_match is None:
+        excluded_reasons.append("temporal_sequence_not_found")
+    if SALARY_EDGE_EXCLUDE_FROM_CYCLE and salary_edge_segments:
+        excluded_reasons.append("salary_edge_present")
+
+    if temporal_match:
+        estimated_amount = float(temporal_match.get("matched_amount", 0) or 0)
+        amount_basis_detail = "按满足时间窗口的一组闭环事件取最小金额，作为当前可匹配的回流金额上限"
+    else:
+        estimated_amount = _estimate_cycle_amount(money_graph, cycle)
+        amount_basis_detail = "按去重后的边级累计金额取最小边额，仅能说明图结构存在回路，不能证明同笔资金回流"
+
     positive_segments = [segment for segment in edge_segments if float(segment.get("amount", 0) or 0) > 0]
     bottleneck_edge = min(
         positive_segments,
         key=lambda item: float(item.get("amount", 0) or 0),
     ) if positive_segments else {}
-    amount_basis_detail = (
-        "按闭环每一跳的累计金额取最小边额，作为可稳定确认的回流金额上限"
-        if positive_segments
-        else "当前资金图仅稳定确认闭环路径，未形成可用边级金额口径"
-    )
 
     risk_score = 45 + max(0, unique_count - 2) * 8
     if estimated_amount >= 1_000_000:
@@ -558,6 +801,10 @@ def build_cycle_record(
         confidence += 0.10
     if search_metadata and search_metadata.get("truncated"):
         confidence -= 0.15
+    if temporal_match:
+        confidence += 0.05
+    if excluded_reasons:
+        confidence -= 0.20
 
     evidence = [
         f"形成闭环路径: {path}",
@@ -569,6 +816,17 @@ def build_cycle_record(
         evidence.append(f"最小边额估算 {utils.format_currency(estimated_amount)} 元")
     else:
         evidence.append("当前无法稳定估算闭环金额")
+    if temporal_match:
+        start_dt = temporal_match.get("start_date")
+        end_dt = temporal_match.get("end_date")
+        if start_dt and end_dt:
+            evidence.append(
+                f"时间匹配窗口 {start_dt.strftime('%Y-%m-%d')} 至 {end_dt.strftime('%Y-%m-%d')}，跨度 {temporal_match.get('span_days', 0)} 天"
+            )
+    if salary_edge_segments:
+        evidence.append(f"闭环中包含 {len(salary_edge_segments)} 条工资/发薪语义边")
+    if excluded_reasons:
+        evidence.append(f"当前按结构线索保留，未作为强回流证据: {','.join(excluded_reasons)}")
     if search_metadata and search_metadata.get("truncated"):
         reasons = ",".join(search_metadata.get("truncated_reasons", [])) or "搜索截断"
         evidence.append(f"闭环搜索存在截断: {reasons}")
@@ -597,6 +855,10 @@ def build_cycle_record(
         "confidence": risk_scoring.normalize_confidence(confidence),
         "evidence": evidence,
         "path_explainability": path_explainability,
+        "temporal_match": temporal_match,
+        "salary_edge_count": len(salary_edge_segments),
+        "excluded_reasons": excluded_reasons,
+        "is_valid_cycle": not excluded_reasons,
     }
 
 
@@ -714,19 +976,57 @@ def build_money_graph(
                         "source_row_index": tx.get("source_row_index"),
                         "direction": direction,
                         "counterparty_raw": str(tx.get("counterparty", "") or "").strip(),
+                        "owner_entity": entity_name,
                     }
                 )
             return refs
 
+        def _infer_income_edge_semantics(counterparty: str, income_rows: pd.DataFrame) -> List[str]:
+            if income_rows.empty:
+                return []
+            semantic_roles = []
+            if _is_salary_like_counterparty(counterparty):
+                semantic_roles.append("salary_income")
+            else:
+                descriptions = income_rows.get("description")
+                if descriptions is not None:
+                    salary_like_count = descriptions.fillna("").astype(str).map(
+                        lambda value: _is_salary_like_ref(counterparty, value)
+                    ).sum()
+                    if salary_like_count and salary_like_count / max(len(income_rows), 1) >= 0.6:
+                        semantic_roles.append("salary_income")
+            return semantic_roles
+
         # 按对手方聚合并保留原始交易引用
         for cp, cp_group in df_copy.groupby("counterparty", sort=False):
-            total_income = float(cp_group["income"].sum()) if "income" in cp_group.columns else 0.0
-            total_expense = float(cp_group["expense"].sum()) if "expense" in cp_group.columns else 0.0
+            working_group = cp_group
+            if is_payment_platform_counterparty(cp):
+                if "description" in cp_group.columns:
+                    platform_mask = cp_group["description"].map(
+                        lambda value: not should_skip_payment_platform_counterparty(cp, value)
+                    )
+                    working_group = cp_group[platform_mask]
+                else:
+                    working_group = cp_group.iloc[0:0]
+            if working_group.empty:
+                continue
+
+            total_income = (
+                float(working_group["income"].sum()) if "income" in working_group.columns else 0.0
+            )
+            total_expense = (
+                float(working_group["expense"].sum()) if "expense" in working_group.columns else 0.0
+            )
 
             # 累计金额超过阈值才添加边
             if total_income > config.GRAPH_EDGE_MIN_AMOUNT:
                 # 收入边：对手方 -> 当前实体
-                income_rows = cp_group[cp_group["income"] > 0] if "income" in cp_group.columns else cp_group.iloc[0:0]
+                income_rows = (
+                    working_group[working_group["income"] > 0]
+                    if "income" in working_group.columns
+                    else working_group.iloc[0:0]
+                )
+                income_semantic_roles = _infer_income_edge_semantics(cp, income_rows)
                 graph.add_edge(
                     cp,
                     entity_name,
@@ -738,11 +1038,17 @@ def build_money_graph(
                     supporting_transactions_total=len(income_rows),
                     supporting_transactions_truncated=len(income_rows) > TRANSACTION_REF_RETURN_LIMIT,
                     supporting_transactions_limit=TRANSACTION_REF_RETURN_LIMIT,
+                    owner_entity=entity_name,
+                    semantic_roles=income_semantic_roles,
                 )
 
             if total_expense > config.GRAPH_EDGE_MIN_AMOUNT:
                 # 支出边：当前实体 -> 对手方
-                expense_rows = cp_group[cp_group["expense"] > 0] if "expense" in cp_group.columns else cp_group.iloc[0:0]
+                expense_rows = (
+                    working_group[working_group["expense"] > 0]
+                    if "expense" in working_group.columns
+                    else working_group.iloc[0:0]
+                )
                 graph.add_edge(
                     entity_name,
                     cp,
@@ -754,6 +1060,7 @@ def build_money_graph(
                     supporting_transactions_total=len(expense_rows),
                     supporting_transactions_truncated=len(expense_rows) > TRANSACTION_REF_RETURN_LIMIT,
                     supporting_transactions_limit=TRANSACTION_REF_RETURN_LIMIT,
+                    owner_entity=entity_name,
                 )
 
     # 从个人数据添加边
@@ -823,7 +1130,7 @@ def _analyze_graph_deep_analysis(
         min_length=3, max_length=4, key_nodes=key_nodes, timeout_seconds=30
     )
     cycle_meta = dict(getattr(money_graph, "last_cycle_search_meta", {}) or {})
-    results["fund_cycles"] = [
+    built_cycles = [
         build_cycle_record(
             cycle,
             money_graph,
@@ -832,6 +1139,19 @@ def _analyze_graph_deep_analysis(
         )
         for cycle in raw_cycles
     ]
+    filtered_cycles = [
+        cycle_record for cycle_record in built_cycles if cycle_record.get("is_valid_cycle", True)
+    ]
+    cycle_meta["filtered_out_count"] = max(0, len(built_cycles) - len(filtered_cycles))
+    cycle_meta["filtered_reasons"] = sorted(
+        {
+            reason
+            for cycle_record in built_cycles
+            for reason in list(cycle_record.get("excluded_reasons", []) or [])
+            if reason
+        }
+    )
+    results["fund_cycles"] = filtered_cycles
     results["analysis_metadata"]["fund_cycles"] = cycle_meta
     logger.info(f"  发现 {len(results['fund_cycles'])} 个资金闭环")
 
@@ -1186,9 +1506,9 @@ def _write_transaction_details(f, items: List[Dict], title: str) -> None:
 
 def _write_fund_cycles_section(f, cycles: List[Dict], meta: Dict = None) -> None:
     """写入资金闭环部分"""
-    f.write("六、资金闭环（利益回流铁证）\n")
+    f.write("六、资金闭环（高疑似回流线索）\n")
     f.write("-" * 40 + "\n")
-    f.write("★ 资金闭环说明资金最终回流到起点，是典型的洗钱或利益输送结构\n")
+    f.write("★ 资金闭环说明图上存在回流结构，需结合时间、金额、角色语义进一步核实\n")
     f.write(f"共 {len(cycles)} 个闭环\n\n")
     if meta and meta.get("truncated"):
         reasons = "、".join(meta.get("truncated_reasons", [])) or "搜索截断"
@@ -1284,7 +1604,7 @@ def generate_penetration_report(results: Dict, output_dir: str) -> str:
         f.write("【报告用途】\n")
         f.write("本报告用于深度分析资金流动关系，包括：\n")
         f.write("• 个人与涉案公司的资金往来\n")
-        f.write("• 资金闭环（资金回流铁证）\n")
+        f.write("• 资金闭环（高疑似回流线索）\n")
         f.write("• 过账通道（疑似空壳公司）\n")
         f.write("• 资金枢纽节点（关键控制人）\n")
         f.write("• 多跳资金路径（复杂利益输送链）\n\n")

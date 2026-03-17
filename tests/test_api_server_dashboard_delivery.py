@@ -68,3 +68,15 @@ def test_dashboard_returns_404_when_build_is_missing(tmp_path, monkeypatch):
 
     assert exc_info.value.status_code == 404
     assert "npm run build" in str(exc_info.value.detail)
+
+
+def test_server_port_defaults_to_8000(monkeypatch):
+    monkeypatch.delenv("FPAS_PORT", raising=False)
+
+    assert api_server._get_server_port() == 8000
+
+
+def test_server_port_accepts_override(monkeypatch):
+    monkeypatch.setenv("FPAS_PORT", "8010")
+
+    assert api_server._get_server_port() == 8010

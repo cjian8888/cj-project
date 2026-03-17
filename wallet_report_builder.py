@@ -338,10 +338,9 @@ def _build_source_file_df(artifact_details: Dict[str, List[Dict[str, Any]]]) -> 
                 "数据类型": safe_str(item.get("dataType")) or "",
                 "相对路径": safe_str(item.get("relativePath")) or "",
                 "文件名": safe_str(item.get("fileName")) or "",
-                "原始路径": safe_str(item.get("filePath")) or "",
             }
         )
-    return _frame(rows, ["序号", "数据类型", "相对路径", "文件名", "原始路径"])
+    return _frame(rows, ["序号", "数据类型", "相对路径", "文件名"])
 
 
 def _build_subject_summary_df(wallet_data: Dict[str, Any]) -> pd.DataFrame:
@@ -790,7 +789,11 @@ def _enrich_subject_rows(
 def _frame(rows: List[Dict[str, Any]], columns: List[str]) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=columns)
-    return pd.DataFrame(rows, columns=columns)
+    frame = pd.DataFrame(rows, columns=columns)
+    object_columns = frame.select_dtypes(include=["object"]).columns
+    for column in object_columns:
+        frame[column] = frame[column].map(_sanitize_excel_text)
+    return frame
 
 
 def _yes_no(value: Any) -> str:
@@ -814,6 +817,15 @@ def _int_value(value: Any, default: int = 0) -> int:
 def _float_value(value: Any, default: float = 0.0) -> float:
     converted = safe_float(value)
     return converted if converted is not None else default
+
+
+def _sanitize_excel_text(value: Any) -> Any:
+    """避免原始文本以 '=' 开头时被 Excel 误判为公式。"""
+    if not isinstance(value, str):
+        return value
+    if value.startswith("="):
+        return f"'{value}"
+    return value
 
 
 def _format_worksheet(worksheet, column_count: int) -> None:

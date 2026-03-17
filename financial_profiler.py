@@ -522,6 +522,7 @@ def _identify_business_reimbursement_income(df: pd.DataFrame) -> pd.DataFrame:
         "绩效",
         "奖金",
         "年终奖",
+        "安家费",
         "补贴",
         "补助",
         "福利",
@@ -865,7 +866,15 @@ def _identify_salary_by_keywords(income_df: pd.DataFrame) -> pd.DataFrame:
 
     # 3. 向量化检查工资关键词
     desc_series = candidates_df["description"].astype(str).fillna("")
-    salary_pattern = "|".join(map(re.escape, config.SALARY_STRONG_KEYWORDS))
+    salary_keywords = config.SALARY_STRONG_KEYWORDS + [
+        "银联代付",
+        "代付工资",
+        "委托代发",
+        "批量代发",
+        "工资代发",
+        "代发入账",
+    ]
+    salary_pattern = "|".join(map(re.escape, salary_keywords))
     has_salary_keyword = desc_series.str.contains(salary_pattern, regex=True, na=False)
 
     # 4. 【P1-性能6优化】处理"分红"特殊情况：排除金融机构的分红
@@ -2142,6 +2151,67 @@ def _get_my_accounts(df: pd.DataFrame) -> tuple:
     return my_accounts, acct_info
 
 
+def _normalize_account_identifier(value: Any) -> str:
+    """标准化账号标识，避免 NaN/浮点格式影响账号匹配。"""
+    if value is None or pd.isna(value):
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    account = str(value).strip()
+    if account.lower() in {"", "nan", "none", "\\n"}:
+        return ""
+    return account
+
+
+def _extract_bank_product_account_signals(
+    wealth_result: Optional[Dict],
+) -> Dict[str, Set[str]]:
+    """从理财分析结果中提取账户级银行产品信号。"""
+    if not isinstance(wealth_result, dict):
+        return {
+            "internal_like_accounts": set(),
+            "long_unknown_accounts": set(),
+            "same_day_pair_accounts": set(),
+            "interest_tail_accounts": set(),
+        }
+
+    account_classification = wealth_result.get("account_classification", {})
+    if not isinstance(account_classification, dict):
+        account_classification = {}
+
+    internal_like_accounts: Set[str] = set()
+    long_unknown_accounts: Set[str] = set()
+    same_day_pair_accounts: Set[str] = set()
+    interest_tail_accounts: Set[str] = set()
+
+    for raw_account, info in account_classification.items():
+        account = _normalize_account_identifier(raw_account)
+        if not account or not isinstance(info, dict):
+            continue
+
+        account_type = str(info.get("type", "") or "").strip()
+        features = info.get("features", {})
+        if not isinstance(features, dict):
+            features = {}
+
+        if account_type in {"internal", "wealth"}:
+            internal_like_accounts.add(account)
+        elif account_type == "unknown" and len(account) >= 20:
+            long_unknown_accounts.add(account)
+
+        if features.get("has_same_day_pair"):
+            same_day_pair_accounts.add(account)
+        if features.get("has_interest_tail"):
+            interest_tail_accounts.add(account)
+
+    return {
+        "internal_like_accounts": internal_like_accounts,
+        "long_unknown_accounts": long_unknown_accounts,
+        "same_day_pair_accounts": same_day_pair_accounts,
+        "interest_tail_accounts": interest_tail_accounts,
+    }
+
+
 def _identify_self_transfer(row: pd.Series, entity_name: str, my_accounts: set) -> bool:
     """
     深度识别自我转账 (同名 or 账号在名下列表中)
@@ -2497,6 +2567,8 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
         # 统计账号分类结果
         wealth_accounts = [acc for acc, info in account_classification.items() 
                           if info['type'] in ('wealth', 'internal')]
+        internal_accounts = [acc for acc, info in account_classification.items()
+                            if info['type'] == 'internal']
         securities_accounts = [acc for acc, info in account_classification.items() 
                               if info['type'] == 'securities']
         
@@ -2513,7 +2585,9 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
     except Exception as e:
         logger.warning(f'[WealthAccountAnalyzer] 账户分类失败: {e}')
         df['_account_type'] = 'unknown'
+        account_classification = {}
         wealth_accounts = []
+        internal_accounts = []
         securities_accounts = []
 
     if df.empty:
@@ -2877,6 +2951,10 @@ def analyze_wealth_management(df: pd.DataFrame, entity_name: str = None) -> Dict
         # 【新增】定期存款单独统计
         "deposit_purchase": deposit_purchase,
         "deposit_redemption": deposit_redemption,
+        "account_classification": account_classification,
+        "wealth_accounts": wealth_accounts,
+        "internal_accounts": internal_accounts,
+        "securities_accounts": securities_accounts,
     }
 
     if result["total_transactions"] > 0:
@@ -3064,8 +3142,10 @@ def _calculate_real_income_expense(
         "wealth_historical": wealth_historical_redeem,  # 【恢复】
         "deposit_redemption": deposit_offset,
         "business_reimbursement": business_reimbursement_in,
+        "bank_product_adjustment": 0.0,
         "loan": loan_in,
         "refund": refund_in,
+        "installment_adjustment": 0.0,
         "family_transfer_in": family_transfer_in,  # 【2026-03-02 新增】家庭转入
         "family_transfer_out": family_transfer_out,  # 【2026-03-02 新增】家庭转出
         "family_transfer_in_count": family_transfer_in_count,
@@ -3102,6 +3182,13 @@ def _calculate_real_income_expense(
                 "expense_amount": 0.0,
                 "confidence": "high",
             },
+            "bank_product_adjustment": {
+                "bucket": "bank_product_adjustment",
+                "label": "银行卡产品回摆/还款冲销",
+                "income_amount": 0.0,
+                "expense_amount": 0.0,
+                "confidence": "high",
+            },
             "loan": {
                 "bucket": "loan",
                 "label": "贷款发放",
@@ -3113,6 +3200,13 @@ def _calculate_real_income_expense(
                 "bucket": "refund",
                 "label": "退款/冲正",
                 "income_amount": refund_in,
+                "expense_amount": 0.0,
+                "confidence": "high",
+            },
+            "installment_adjustment": {
+                "bucket": "installment_adjustment",
+                "label": "账单分期/银行产品冲销",
+                "income_amount": 0.0,
                 "expense_amount": 0.0,
                 "confidence": "high",
             },
@@ -3164,6 +3258,17 @@ def _attach_salary_reference_to_income_classification(
         official_salary_total = float(salary_summary.get("total", 0) or 0)
     except (TypeError, ValueError):
         official_salary_total = 0.0
+    try:
+        gross_salary_total = float(
+            salary_summary.get("gross_total_before_exclusion", official_salary_total)
+            or official_salary_total
+        )
+    except (TypeError, ValueError):
+        gross_salary_total = official_salary_total
+    try:
+        salary_excluded_overlap = float(salary_summary.get("excluded_overlap_total", 0) or 0)
+    except (TypeError, ValueError):
+        salary_excluded_overlap = 0.0
 
     reason_breakdown = income_classification.get("reason_breakdown", {})
     if not isinstance(reason_breakdown, dict):
@@ -3193,11 +3298,19 @@ def _attach_salary_reference_to_income_classification(
             salary_like_total += current_amount
 
     income_classification["salary_reference_income"] = float(official_salary_total)
+    income_classification["salary_reference_gross_income"] = float(gross_salary_total)
+    income_classification["salary_reference_excluded_overlap"] = float(
+        salary_excluded_overlap
+    )
     income_classification["salary_classified_income"] = float(salary_like_total)
     income_classification["salary_reference_delta"] = float(
         official_salary_total - salary_like_total
     )
-    income_classification["salary_reference_basis"] = "yearly_salary_summary_total"
+    income_classification["salary_reference_basis"] = (
+        "yearly_salary_summary_total_excluded_aligned"
+        if salary_summary.get("alignment_applied")
+        else "yearly_salary_summary_total"
+    )
     income_classification["salary_like_reasons"] = salary_like_reasons
 
     return income_classification
@@ -3229,18 +3342,28 @@ def recalculate_income_metrics(
         wealth_result=wealth_management,
         family_members=family_members,
     )
+    excluded_signature_counter = income_classification.pop("_excluded_signature_counter", Counter())
+    salary_alignment_meta = _align_salary_outputs_with_exclusions(
+        income_structure,
+        yearly_salary,
+        excluded_signature_counter,
+    )
     income_classification = _attach_salary_reference_to_income_classification(
         income_classification,
         yearly_salary,
     )
+    if any(salary_alignment_meta.values()):
+        income_classification["salary_alignment"] = salary_alignment_meta
 
     # 统一口径：真实收入剔除桶与分类剔除明细保持一致，避免同一笔交易在两条链路中各说各话。
     offset_bucket_map = {
         "self_transfer": "self_transfer",
         "wealth_redemption": ("wealth_principal", "wealth_historical", "deposit_redemption"),
         "business_reimbursement": "business_reimbursement",
+        "bank_product_adjustment": "bank_product_adjustment",
         "loan": "loan",
         "refund": "refund",
+        "installment_adjustment": "installment_adjustment",
         "family_transfer": "family_transfer_in",
     }
     excluded_breakdown = income_classification.get("excluded_breakdown", {}) or {}
@@ -3930,6 +4053,220 @@ def _build_income_tx_counter(
     return counter
 
 
+def _filter_salary_detail_records(
+    details: List[Dict],
+    excluded_signature_counter: Counter,
+    *,
+    date_key: str,
+    amount_key: str,
+    counterparty_key: str,
+    description_key: str,
+) -> Tuple[List[Dict], List[Dict]]:
+    """按已剔除交易签名过滤工资明细，避免同一笔交易跨链路重复入账。"""
+    if not details:
+        return [], []
+
+    match_counter = Counter(excluded_signature_counter or {})
+    kept_details: List[Dict] = []
+    removed_details: List[Dict] = []
+
+    for detail in details:
+        signature = _make_income_tx_signature(
+            detail.get(date_key),
+            detail.get(amount_key),
+            detail.get(counterparty_key, ""),
+            detail.get(description_key, ""),
+        )
+        if match_counter[signature] > 0:
+            match_counter[signature] -= 1
+            removed_details.append(detail)
+            continue
+        kept_details.append(detail)
+
+    return kept_details, removed_details
+
+
+def _align_salary_outputs_with_exclusions(
+    income_structure: Optional[Dict],
+    yearly_salary: Optional[Dict],
+    excluded_signature_counter: Optional[Counter],
+) -> Dict[str, float]:
+    """将工资识别结果与收入分类剔除明细对齐，消除链路不一致。"""
+    excluded_signature_counter = Counter(excluded_signature_counter or {})
+    if not excluded_signature_counter:
+        return {
+            "income_structure_removed_amount": 0.0,
+            "income_structure_removed_count": 0,
+            "yearly_salary_removed_amount": 0.0,
+            "yearly_salary_removed_count": 0,
+        }
+
+    alignment_meta = {
+        "income_structure_removed_amount": 0.0,
+        "income_structure_removed_count": 0,
+        "yearly_salary_removed_amount": 0.0,
+        "yearly_salary_removed_count": 0,
+    }
+
+    if isinstance(income_structure, dict):
+        salary_details = income_structure.get("salary_details", [])
+        if isinstance(salary_details, list) and salary_details:
+            filtered_details, removed_details = _filter_salary_detail_records(
+                salary_details,
+                excluded_signature_counter,
+                date_key="日期",
+                amount_key="金额",
+                counterparty_key="对手方",
+                description_key="摘要",
+            )
+            removed_amount = float(
+                sum(_safe_amount(item.get("金额", 0), "金额") for item in removed_details)
+            )
+            if removed_details:
+                total_income = float(income_structure.get("total_income", 0) or 0)
+                aligned_salary_income = max(
+                    0.0, float(income_structure.get("salary_income", 0) or 0) - removed_amount
+                )
+                income_structure["salary_details"] = filtered_details
+                income_structure["salary_income"] = aligned_salary_income
+                income_structure["salary_ratio"] = (
+                    aligned_salary_income / total_income if total_income > 0 else 0.0
+                )
+                income_structure["salary_alignment"] = {
+                    "removed_amount": removed_amount,
+                    "removed_count": len(removed_details),
+                    "removed_basis": "excluded_income_classification_overlap",
+                }
+                alignment_meta["income_structure_removed_amount"] = removed_amount
+                alignment_meta["income_structure_removed_count"] = len(removed_details)
+
+    if isinstance(yearly_salary, dict):
+        salary_details = yearly_salary.get("details", [])
+        if isinstance(salary_details, list) and salary_details:
+            filtered_details, removed_details = _filter_salary_detail_records(
+                salary_details,
+                excluded_signature_counter,
+                date_key="date",
+                amount_key="amount",
+                counterparty_key="counterparty",
+                description_key="description",
+            )
+            removed_amount = float(
+                sum(_safe_amount(item.get("amount", 0), "amount") for item in removed_details)
+            )
+            gross_total = float(
+                ((yearly_salary.get("summary") or {}).get("total", 0) or 0)
+            )
+            if removed_details:
+                raw_salary_details = [
+                    {
+                        "日期": detail.get("date"),
+                        "金额": detail.get("amount", 0),
+                        "对手方": detail.get("counterparty", ""),
+                        "摘要": detail.get("description", ""),
+                        "判定依据": detail.get("reason", ""),
+                    }
+                    for detail in filtered_details
+                ]
+                if raw_salary_details:
+                    yearly_stats, total_salary, all_months = _aggregate_yearly_salary_stats(
+                        raw_salary_details
+                    )
+                    summary = _calculate_salary_summary(
+                        yearly_stats, total_salary, all_months
+                    )
+                    rebuilt_yearly_salary = {
+                        "summary": summary,
+                        "yearly": yearly_stats,
+                        "details": _format_salary_details(raw_salary_details),
+                    }
+                else:
+                    rebuilt_yearly_salary = _create_empty_salary_result()
+                rebuilt_yearly_salary["summary"]["gross_total_before_exclusion"] = gross_total
+                rebuilt_yearly_salary["summary"]["excluded_overlap_total"] = removed_amount
+                rebuilt_yearly_salary["summary"]["excluded_overlap_count"] = len(removed_details)
+                rebuilt_yearly_salary["summary"]["alignment_applied"] = True
+                yearly_salary.clear()
+                yearly_salary.update(rebuilt_yearly_salary)
+                alignment_meta["yearly_salary_removed_amount"] = removed_amount
+                alignment_meta["yearly_salary_removed_count"] = len(removed_details)
+            elif gross_total:
+                yearly_salary.setdefault("summary", {})
+                yearly_salary["summary"].setdefault("gross_total_before_exclusion", gross_total)
+                yearly_salary["summary"].setdefault("excluded_overlap_total", 0.0)
+                yearly_salary["summary"].setdefault("excluded_overlap_count", 0)
+                yearly_salary["summary"].setdefault("alignment_applied", False)
+
+    return alignment_meta
+
+
+def _detect_bank_cross_transfer_adjustment_indices(df: pd.DataFrame) -> Set[int]:
+    """识别有银行系统伴随记账特征的网银跨行汇款，作为非真实收入剔除。"""
+    required_columns = {
+        "is_bank_cross_transfer_candidate",
+        "has_bank_cross_transfer_companion_signal",
+        "source_group_key",
+        "tx_datetime",
+    }
+    if df.empty or not required_columns.issubset(df.columns):
+        return set()
+
+    candidate_df = df[
+        df["is_bank_cross_transfer_candidate"]
+        & (df["source_group_key"] != "")
+        & df["tx_datetime"].notna()
+    ][["source_group_key", "tx_datetime"]].copy()
+    companion_df = df[
+        df["has_bank_cross_transfer_companion_signal"]
+        & (df["source_group_key"] != "")
+        & df["tx_datetime"].notna()
+    ][["source_group_key", "tx_datetime"]].copy()
+
+    if candidate_df.empty or companion_df.empty:
+        return set()
+
+    companion_by_group = (
+        companion_df.groupby("source_group_key")["tx_datetime"].apply(list).to_dict()
+    )
+    direct_match_indices: Set[int] = set()
+    direct_match_by_group: Counter = Counter()
+    time_window_seconds = 2 * 24 * 60 * 60
+
+    for idx, row in candidate_df.iterrows():
+        companion_dates = companion_by_group.get(row["source_group_key"], [])
+        if any(
+            abs((row["tx_datetime"] - companion_dt).total_seconds()) <= time_window_seconds
+            for companion_dt in companion_dates
+        ):
+            direct_match_indices.add(idx)
+            direct_match_by_group[row["source_group_key"]] += 1
+
+    if not direct_match_indices:
+        return set()
+
+    recurring_group_keys: Set[str] = set()
+    for group_key, group in candidate_df.groupby("source_group_key"):
+        month_count = (
+            group["tx_datetime"].dt.to_period("M").nunique()
+            if not group["tx_datetime"].empty
+            else 0
+        )
+        if (
+            len(group) >= 3
+            and month_count >= 3
+            and direct_match_by_group.get(group_key, 0) >= 2
+        ):
+            recurring_group_keys.add(group_key)
+
+    if not recurring_group_keys:
+        return direct_match_indices
+
+    recurring_indices = set(
+        candidate_df[candidate_df["source_group_key"].isin(recurring_group_keys)].index.tolist()
+    )
+    return direct_match_indices | recurring_indices
+
+
 def classify_income_sources(
     income_df: pd.DataFrame,
     entity_name: str = None,
@@ -4001,6 +4338,27 @@ def classify_income_sources(
     for column in ("description", "counterparty", "category", "account_type", "account_category"):
         if column not in df.columns:
             df[column] = ""
+    account_col = _find_first_matching_column(
+        df,
+        ["account_number", "account_id", "account", "本方账号", "账号"],
+    )
+    source_file_col = _find_first_matching_column(
+        df,
+        ["来源文件", "source_file", "source_path"],
+    )
+    if account_col:
+        df["account_str"] = df[account_col].apply(_normalize_account_identifier)
+    else:
+        df["account_str"] = ""
+    if source_file_col:
+        df["source_file_str"] = df[source_file_col].astype(str).fillna("").str.strip()
+    else:
+        df["source_file_str"] = ""
+    df["source_group_key"] = df["account_str"]
+    df.loc[
+        (df["source_group_key"] == "") & (df["source_file_str"] != ""),
+        "source_group_key",
+    ] = df["source_file_str"]
     df["desc_str"] = df["description"].astype(str).fillna("").str.strip()
     df["cp_str"] = df["counterparty"].astype(str).fillna("").str.strip()
     df["category_str"] = df["category"].astype(str).fillna("").str.strip()
@@ -4018,12 +4376,78 @@ def classify_income_sources(
         + df["account_category_str"]
     ).str.strip()
     df["amount"] = df["income"]
-    df["date_str"] = df["date"].apply(
+    tx_datetime = pd.to_datetime(df["date"], errors="coerce")
+    df["tx_datetime"] = tx_datetime
+    df["date_str"] = tx_datetime.apply(
         lambda x: x.strftime("%Y-%m-%d") if pd.notna(x) else "未知"
+    )
+    df["is_midnight_booking"] = (
+        tx_datetime.dt.hour.fillna(-1).eq(0)
+        & tx_datetime.dt.minute.fillna(-1).eq(0)
+        & tx_datetime.dt.second.fillna(-1).eq(0)
     )
     empty_markers = {"", "-", "nan", "None", "\\N"}
     df["is_blank_counterparty"] = df["cp_str"].isin(empty_markers)
     df["is_blank_description"] = df["desc_str"].isin(empty_markers)
+    bank_product_signals = _extract_bank_product_account_signals(wealth_result)
+    df["amount_round2"] = df["amount"].round(2)
+    blank_large_account_counts = (
+        df.loc[
+            df["is_blank_counterparty"]
+            & df["is_blank_description"]
+            & (df["amount"] >= 10000)
+            & (df["account_str"] != ""),
+            "account_str",
+        ]
+        .value_counts()
+        .to_dict()
+    )
+    blank_repeat_amount_counts = (
+        df.loc[
+            df["is_blank_counterparty"]
+            & df["is_blank_description"]
+            & (df["amount_round2"] >= 3000)
+            & (df["account_str"] != ""),
+            ["account_str", "amount_round2"],
+        ]
+        .assign(
+            amount_key=lambda items: items.apply(
+                lambda row: f"{row['account_str']}|{row['amount_round2']:.2f}",
+                axis=1,
+            )
+        )["amount_key"]
+        .value_counts()
+        .to_dict()
+    )
+    df["account_is_internal_like"] = df["account_str"].isin(
+        bank_product_signals["internal_like_accounts"]
+    )
+    df["account_is_long_unknown"] = df["account_str"].isin(
+        bank_product_signals["long_unknown_accounts"]
+    )
+    df["account_has_same_day_pair"] = df["account_str"].isin(
+        bank_product_signals["same_day_pair_accounts"]
+    )
+    df["account_has_interest_tail"] = df["account_str"].isin(
+        bank_product_signals["interest_tail_accounts"]
+    )
+    df["blank_large_account_count"] = (
+        df["account_str"].map(blank_large_account_counts).fillna(0).astype(int)
+    )
+    df["blank_repeat_amount_key"] = df.apply(
+        lambda row: (
+            f"{row['account_str']}|{row['amount_round2']:.2f}"
+            if row["account_str"] and row["amount_round2"] >= 3000
+            else ""
+        ),
+        axis=1,
+    )
+    df["blank_repeat_amount_count"] = (
+        df["blank_repeat_amount_key"]
+        .map(blank_repeat_amount_counts)
+        .fillna(0)
+        .astype(int)
+    )
     df = _identify_business_reimbursement_income(df)
     df["excluded_reason"] = ""
     df["excluded_bucket"] = ""
@@ -4075,6 +4499,23 @@ def classify_income_sources(
 
     loan_issue_keywords = ["放款", "贷款发放", "个贷发放"]
     refund_keywords = ["退款", "冲正", "退回", "撤销", "退货退款"]
+    installment_adjustment_keywords = [
+        "转分期",
+        "合并分期",
+        "账单分期成功",
+        "冲销原交易金额",
+        "全账分期",
+        "分期活动利息减免",
+        "消费分期",
+        "现金分期",
+    ]
+    bank_product_adjustment_keywords = [
+        "网银互联还款",
+        "跨行还款，谢谢",
+        "POS 消费还原",
+        "多渠道还款",
+        "消费还原",
+    ]
     wealth_redemption_keywords = [
         "理财赎回",
         "基金赎回",
@@ -4156,13 +4597,118 @@ def classify_income_sources(
         "现存",
         "自助存款",
     ]
+    severance_keywords = [
+        "离职补偿",
+        "离职补偿金",
+        "经济补偿金",
+        "解除劳动合同补偿",
+        "解除劳动关系补偿",
+    ]
+    payroll_channel_keywords = [
+        "银联代付",
+        "代付工资",
+        "委托代发",
+        "批量代发",
+        "工资代发",
+        "代发入账",
+    ]
+    payment_platform_keywords = [
+        "支付宝",
+        "支付宝（中国）网络技术有限公司",
+        "财付通",
+        "微信",
+        "微信支付",
+        "云闪付",
+        "京东支付",
+        "零钱通",
+        "理财通",
+    ]
+    payment_channel_alias_keywords = [
+        "微信转账",
+        "支付宝转账",
+        "财付通",
+        "云闪付",
+        "银联转账",
+        "网联自助转入",
+    ]
+    support_income_keywords = [
+        "抚养费",
+        "生活费",
+        "学费",
+        "学校费",
+        "教育费",
+        "赡养费",
+        "旅游费",
+    ]
+    gift_income_keywords = [
+        "新年快乐",
+        "生日快乐",
+        "红包",
+        "节日快乐",
+        "过节费",
+    ]
+    personal_equity_keywords = [
+        "入股",
+        "股权",
+        "投资款",
+        "合伙",
+        "合作款",
+    ]
+    personal_loan_keywords = [
+        "借款",
+        "还款",
+        "借我的",
+    ]
 
     insurance_pattern = "|".join(re.escape(kw) for kw in insurance_keywords)
     insurance_entity_pattern = "|".join(
         re.escape(kw) for kw in insurance_entity_keywords
     )
+    installment_adjustment_pattern = "|".join(
+        re.escape(kw) for kw in installment_adjustment_keywords
+    )
+    bank_product_adjustment_pattern = "|".join(
+        re.escape(kw) for kw in bank_product_adjustment_keywords
+    )
+    bank_system_adjustment_pattern = (
+        r"无法足额扣款，请补足账户余额|还款成功\s*,?\s*谢谢\s*!?"
+    )
+    bank_cross_transfer_pattern = r"网银跨行汇款(?:CHN| / /CHN)"
+    bank_cross_transfer_companion_pattern = (
+        r"无法足额扣款，请补足账户余额|还款成功\s*,?\s*谢谢\s*!?|"
+        r"BOCNET|网银互联还款|跨行还款|消费还原|活期转定期|定期转活期"
+    )
     wealth_signal_pattern = "|".join(re.escape(kw) for kw in wealth_signal_keywords)
     cash_deposit_pattern = "|".join(re.escape(kw) for kw in cash_deposit_keywords)
+    severance_pattern = "|".join(re.escape(kw) for kw in severance_keywords)
+    payroll_channel_pattern = "|".join(
+        re.escape(kw) for kw in payroll_channel_keywords
+    )
+    payment_platform_pattern = "|".join(
+        re.escape(kw) for kw in payment_platform_keywords
+    )
+    payment_channel_alias_pattern = "|".join(
+        re.escape(kw) for kw in payment_channel_alias_keywords
+    )
+    support_income_pattern = "|".join(re.escape(kw) for kw in support_income_keywords)
+    gift_income_pattern = "|".join(re.escape(kw) for kw in gift_income_keywords)
+    personal_equity_pattern = "|".join(
+        re.escape(kw) for kw in personal_equity_keywords
+    )
+    personal_loan_pattern = "|".join(re.escape(kw) for kw in personal_loan_keywords)
+    df["has_bank_system_adjustment_kw"] = df["desc_str"].str.contains(
+        bank_system_adjustment_pattern, case=False, na=False, regex=True
+    )
+    df["has_bank_cross_transfer_kw"] = df["desc_str"].str.contains(
+        bank_cross_transfer_pattern, case=False, na=False, regex=True
+    )
+    df["is_bank_cross_transfer_candidate"] = (
+        df["has_bank_cross_transfer_kw"] & df["is_blank_counterparty"]
+    )
+    df["has_bank_cross_transfer_companion_signal"] = df["text_str"].str.contains(
+        bank_cross_transfer_companion_pattern, case=False, na=False, regex=True
+    )
+    bank_cross_transfer_adjustment_indices = _detect_bank_cross_transfer_adjustment_indices(df)
 
     exclusion_conditions = [
         (
@@ -4195,6 +4741,34 @@ def classify_income_sources(
             "high",
         ),
         (
+            df["text_str"].str.contains(
+                installment_adjustment_pattern, case=False, na=False, regex=True
+            ),
+            "账单分期/银行产品冲销（已剔除）",
+            "installment_adjustment",
+            "high",
+        ),
+        (
+            df["text_str"].str.contains(
+                bank_product_adjustment_pattern, case=False, na=False, regex=True
+            ),
+            "银行卡产品回摆/还款冲销（已剔除）",
+            "bank_product_adjustment",
+            "high",
+        ),
+        (
+            df["has_bank_system_adjustment_kw"] & df["is_blank_counterparty"],
+            "银行系统还款/补款记账（已剔除）",
+            "bank_product_adjustment",
+            "high",
+        ),
+        (
+            df.index.isin(bank_cross_transfer_adjustment_indices),
+            "网银跨行汇款配套银行记账（已剔除）",
+            "bank_product_adjustment",
+            "medium",
+        ),
+        (
             df["tx_signature"].apply(lambda sig: _consume_counter_match(loan_counter, sig))
             | df["desc_str"].apply(lambda x: any(kw in x for kw in loan_issue_keywords)),
             "贷款发放（已剔除）",
@@ -4220,6 +4794,45 @@ def classify_income_sources(
         ),
     ]
 
+    suspected_bank_product_blank_mask = (
+        df["is_blank_counterparty"]
+        & df["is_blank_description"]
+        & (df["amount"] >= 10000)
+        & (
+            df["account_is_internal_like"]
+            | df["account_is_long_unknown"]
+            | (
+                (df["blank_large_account_count"] >= 2)
+                & df["account_has_same_day_pair"]
+                & (df["account_has_interest_tail"] | df["is_midnight_booking"])
+            )
+        )
+    )
+    exclusion_conditions.append(
+        (
+            suspected_bank_product_blank_mask,
+            "疑似银行产品空白记账（已剔除）",
+            "bank_product_adjustment",
+            "medium",
+        )
+    )
+    suspected_bank_product_repeat_mask = (
+        df["is_blank_counterparty"]
+        & df["is_blank_description"]
+        & (df["amount"] >= 3000)
+        & (df["blank_repeat_amount_count"] >= 3)
+        & df["account_has_same_day_pair"]
+        & (df["account_has_interest_tail"] | df["account_is_internal_like"])
+    )
+    exclusion_conditions.append(
+        (
+            suspected_bank_product_repeat_mask,
+            "疑似银行产品高频空白记账（已剔除）",
+            "bank_product_adjustment",
+            "medium",
+        )
+    )
+
     df["has_product_code"] = df["desc_str"].str.contains(
         r"(?:^|[^A-Za-z0-9])[A-Z]*\d{8,}[A-Z]*(?:[^A-Za-z0-9]|$)",
         case=False,
@@ -4238,6 +4851,30 @@ def classify_income_sources(
     df["has_insurance_signal"] = (
         df["text_str"].str.contains(insurance_pattern, case=False, na=False, regex=True)
         | df["has_insurance_entity"]
+    )
+    df["has_severance_kw"] = df["text_str"].str.contains(
+        severance_pattern, case=False, na=False, regex=True
+    )
+    df["has_payment_platform_entity"] = df["text_str"].str.contains(
+        payment_platform_pattern, case=False, na=False, regex=True
+    )
+    df["has_payment_channel_alias"] = df["text_str"].str.contains(
+        payment_channel_alias_pattern, case=False, na=False, regex=True
+    )
+    df["has_support_income_kw"] = df["desc_str"].str.contains(
+        support_income_pattern, case=False, na=False, regex=True
+    )
+    df["has_gift_income_kw"] = df["desc_str"].str.contains(
+        gift_income_pattern, case=False, na=False, regex=True
+    )
+    df["has_personal_equity_kw"] = df["desc_str"].str.contains(
+        personal_equity_pattern, case=False, na=False, regex=True
+    )
+    df["has_personal_loan_kw"] = df["desc_str"].str.contains(
+        personal_loan_pattern, case=False, na=False, regex=True
+    )
+    df["has_bank_payroll_marker"] = df["desc_str"].str.contains(
+        payroll_channel_pattern, case=False, na=False, regex=True
     )
     df["has_cash_deposit_marker"] = df["text_str"].str.contains(
         cash_deposit_pattern, case=False, na=False, regex=True
@@ -4444,13 +5081,37 @@ def classify_income_sources(
     )
 
     # 机构特征词
-    institution_pattern = r"(?:研究所|局|院|中心|部|集团|公司)"
-    bank_payroll_pattern = r"(?:代发工资|内部户|代发)"
+    institution_pattern = (
+        r"(?:研究所|研究院|医院|学校|大学|学院|中心|局|部|集团|"
+        r"有限公司|有限责任公司|股份有限公司|公司|事务所|协会|委员会|管理局)"
+    )
+    employer_pattern = r"(?:医院|学校|大学|学院|研究所|研究院|中心|协会|委员会|管理局|人力|劳务)"
+    bank_payroll_pattern = r"(?:代发工资|内部户|代发|薪资代发|工资代发)"
     df["has_institution"] = df["cp_str"].str.contains(
         institution_pattern, case=False, na=False, regex=True
     )
-    df["has_payroll_pattern"] = df["cp_str"].str.contains(
+    df["has_employer_like_cp"] = df["cp_str"].str.contains(
+        employer_pattern, case=False, na=False, regex=True
+    )
+    df["has_payroll_pattern"] = df["text_str"].str.contains(
         bank_payroll_pattern, case=False, na=False, regex=True
+    )
+    blank_or_normal_desc_mask = df["desc_str"].isin(empty_markers | {"正常"})
+    salary_institution_mask = (
+        (
+            df["has_institution"]
+            | df["has_payroll_pattern"]
+            | df["has_bank_payroll_marker"]
+        )
+        & (df["amount"] > 0)
+        & ~df["has_payment_platform_entity"]
+        & (
+            df["has_salary_kw"]
+            | df["has_severance_kw"]
+            | df["has_bank_payroll_marker"]
+            | df["is_time_pattern"]
+            | (blank_or_normal_desc_mask & df["has_employer_like_cp"])
+        )
     )
 
     # 向量化:合法收入分类
@@ -4459,11 +5120,18 @@ def classify_income_sources(
         (df["has_pension_kw"], "养老金/职业年金", "pension", "high"),
         (df["has_invest_kw"], "投资收益", "investment_income", "medium"),
         (df["has_insurance_kw"], "保险赔付/返还", "insurance_income", "high"),
+        (df["has_severance_kw"], "离职补偿/劳动补偿", "severance_income", "high"),
         (df["has_welfare_kw"], "福利补贴", "welfare", "medium"),
         (df["has_gov_kw"], "政府机关转账(社保/公积金)", "government_income", "high"),
+        (
+            df["has_bank_payroll_marker"] & ~df["has_insurance_kw"],
+            "工资性收入(代付工资渠道)",
+            "salary_payroll_channel",
+            "high",
+        ),
         (df["is_time_pattern"], "定期收入(时间模式识别)", "time_pattern_income", "medium"),
         (
-            (df["has_institution"] | df["has_payroll_pattern"]) & (df["amount"] > 0),
+            salary_institution_mask,
             "工资性收入(机构/代发单位)",
             "salary_institution",
             "high",
@@ -4530,6 +5198,9 @@ def classify_income_sources(
         lambda x: any(kw in x for kw in third_party_keywords)
     )
     df["has_cash_kw"] = df["has_cash_deposit_marker"]
+    df["is_channel_alias_counterparty"] = df["cp_str"].str.contains(
+        payment_channel_alias_pattern, case=False, na=False, regex=True
+    )
 
     # 大额阈值
     high_risk_min = getattr(config, "INCOME_HIGH_RISK_MIN", 50000)
@@ -4592,6 +5263,21 @@ def classify_income_sources(
     df.loc[cash_small_mask, "rule_bucket"] = "cash_small"
     df.loc[cash_small_mask, "confidence"] = "medium"
 
+    payment_platform_pending_mask = (
+        (df["category"] == "unknown")
+        & (df["has_payment_platform_entity"] | df["has_payment_channel_alias"])
+    )
+    df.loc[payment_platform_pending_mask, "reason"] = "支付平台渠道入账"
+    df.loc[payment_platform_pending_mask, "rule_bucket"] = "payment_platform_channel"
+    df.loc[payment_platform_pending_mask, "confidence"] = "medium"
+
+    bank_cross_transfer_mask = (
+        (df["category"] == "unknown") & df["has_bank_cross_transfer_kw"]
+    )
+    df.loc[bank_cross_transfer_mask, "reason"] = "银行跨行汇款待核实"
+    df.loc[bank_cross_transfer_mask, "rule_bucket"] = "bank_cross_transfer"
+    df.loc[bank_cross_transfer_mask, "confidence"] = "medium"
+
     blank_structured_mask = (
         df["is_blank_counterparty"] & df["is_blank_description"] & (df["category"] == "unknown")
     )
@@ -4615,6 +5301,46 @@ def classify_income_sources(
 
     # 个人转账识别(2-4个汉字)
     df["is_individual"] = df["cp_str"].str.match(r"^[\u4e00-\u9fa5]{2,4}$", na=False)
+    df["is_individual"] = df["is_individual"] & ~df["is_channel_alias_counterparty"]
+
+    personal_support_mask = (
+        df["is_individual"]
+        & df["has_support_income_kw"]
+        & (df["category"] == "unknown")
+    )
+    df.loc[personal_support_mask, "category"] = "legitimate"
+    df.loc[personal_support_mask, "reason"] = "亲友生活支持/抚养费"
+    df.loc[personal_support_mask, "rule_bucket"] = "personal_support_income"
+    df.loc[personal_support_mask, "confidence"] = "medium"
+
+    personal_gift_mask = (
+        df["is_individual"]
+        & df["has_gift_income_kw"]
+        & (df["category"] == "unknown")
+    )
+    df.loc[personal_gift_mask, "category"] = "legitimate"
+    df.loc[personal_gift_mask, "reason"] = "亲友赠与/节庆红包"
+    df.loc[personal_gift_mask, "rule_bucket"] = "personal_gift_income"
+    df.loc[personal_gift_mask, "confidence"] = "medium"
+
+    personal_equity_mask = (
+        df["is_individual"]
+        & df["has_personal_equity_kw"]
+        & (df["category"] == "unknown")
+    )
+    df.loc[personal_equity_mask, "reason"] = "个人投资/合作款待核实"
+    df.loc[personal_equity_mask, "rule_bucket"] = "personal_equity_pending"
+    df.loc[personal_equity_mask, "confidence"] = "medium"
+
+    personal_loan_mask = (
+        df["is_individual"]
+        & df["has_personal_loan_kw"]
+        & (df["category"] == "unknown")
+    )
+    df.loc[personal_loan_mask, "reason"] = "个人借款往来待核实"
+    df.loc[personal_loan_mask, "rule_bucket"] = "personal_loan_pending"
+    df.loc[personal_loan_mask, "confidence"] = "medium"
+
     individual_mask = df["is_individual"] & (df["category"] == "unknown")
     df.loc[individual_mask, "reason"] = "个人转账"
     df.loc[individual_mask, "rule_bucket"] = "individual_transfer"
@@ -4702,6 +5428,7 @@ def classify_income_sources(
         "excluded_details": excluded_details[:50],
         "excluded_breakdown": excluded_breakdown,
         "reason_breakdown": reason_breakdown,
+        "_excluded_signature_counter": Counter(excluded_df["tx_signature"].tolist()),
     }
 
 

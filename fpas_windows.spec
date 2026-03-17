@@ -6,14 +6,29 @@ from pathlib import Path
 project_root = Path(SPECPATH)
 
 datas = [
+    (str(project_root / "utils.py"), "."),
     (str(project_root / "config"), "config"),
     (str(project_root / "knowledge"), "knowledge"),
     (str(project_root / "report_config"), "report_config"),
     (str(project_root / "templates"), "templates"),
     (str(project_root / "dashboard" / "dist"), "dashboard/dist"),
+    (
+        str(
+            project_root
+            / "dashboard"
+            / "node_modules"
+            / "vis-network"
+            / "standalone"
+            / "umd"
+            / "vis-network.min.js"
+        ),
+        "dashboard/node_modules/vis-network/standalone/umd",
+    ),
 ]
 
 hiddenimports = [
+    "chinese_calendar",
+    "neo4j",
     "uvicorn.logging",
     "uvicorn.loops.auto",
     "uvicorn.protocols.http.auto",

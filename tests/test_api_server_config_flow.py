@@ -10,6 +10,7 @@ import sys
 from datetime import datetime
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 from starlette.requests import Request
 
@@ -22,6 +23,7 @@ from api_server import (
     _apply_report_generation_overrides,
     _get_effective_family_units_for_analysis,
     _populate_transport_external_data,
+    _refresh_profile_real_metrics,
     _save_external_report_caches,
     get_graph_data,
     serialize_analysis_results,
@@ -791,6 +793,31 @@ def test_collect_family_assets_for_summary_deduplicates_properties_and_vehicles(
     assert len(assets["vehicles"]) == 1
 
 
+def test_collect_family_assets_for_summary_prefers_property_identifier_over_address_variation():
+    profiles = {
+        "张三": {
+            "properties_precise": [
+                {
+                    "location": "灵石路1123弄23号604",
+                    "property_number": "310108013003GB00003F00150028",
+                }
+            ]
+        },
+        "李四": {
+            "properties": [
+                {
+                    "房地坐落": "灵石路1123弄23号604室",
+                    "property_number": "310108013003GB00003F00150028",
+                }
+            ]
+        },
+    }
+
+    assets = api_server._collect_family_assets_for_summary(["张三", "李四"], profiles)
+
+    assert len(assets["properties"]) == 1
+
+
 def test_family_unit_has_profile_members_only_accepts_units_with_profile_overlap():
     profiles = {"候海焱": {"summary": {}}}
 
@@ -945,3 +972,41 @@ def test_specialized_suspicion_report_keeps_hits_visible_and_supports_camel_case
     assert "未发现反洗钱预警" not in content
     assert "【预警】张三 - 欠税记录 (2 次)" in content
     assert "未发现征信预警" not in content
+
+
+def test_refresh_profile_real_metrics_preserves_salary_reference_income():
+    class _FakeIncomeExpenseAnalyzer:
+        def analyze(self, **kwargs):
+            return {"risk_level": "low", "metrics": kwargs}
+
+    df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-01-15", "2024-01-31"]),
+            "income": [10000.0, 12000.0],
+            "expense": [0.0, 0.0],
+            "counterparty": ["某医院", "某医院"],
+            "description": ["代发工资", "代发奖金"],
+        }
+    )
+    profile = {
+        "income_structure": {"salary_income": 22000.0},
+        "wealth_management": {},
+        "fund_flow": {},
+        "yearly_salary": {"summary": {"total": 22000.0}},
+        "summary": {},
+    }
+
+    _refresh_profile_real_metrics(
+        profile,
+        df,
+        "张三",
+        family_members=[],
+        income_expense_match_analyzer=_FakeIncomeExpenseAnalyzer(),
+    )
+
+    income_classification = profile["income_classification"]
+    assert income_classification["salary_reference_income"] == 22000.0
+    assert (
+        income_classification["salary_reference_basis"]
+        == "yearly_salary_summary_total"
+    )

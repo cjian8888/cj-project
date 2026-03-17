@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 import pandas as pd
 
@@ -29,6 +29,7 @@ def enhance_wallet_alerts(
     artifact_details: Dict[str, List[Dict[str, Any]]],
     cleaned_data: Dict[str, pd.DataFrame],
     id_to_name_map: Optional[Dict[str, str]] = None,
+    profiles: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """基于规范化明细和银行主链数据补充钱包高级预警。"""
     if not isinstance(wallet_data, dict) or not wallet_data.get("available"):
@@ -37,6 +38,7 @@ def enhance_wallet_alerts(
     artifact_details = artifact_details or {}
     cleaned_data = cleaned_data or {}
     id_to_name_map = id_to_name_map or {}
+    profiles = profiles or {}
 
     subjects = wallet_data.get("subjects", []) or []
     if not subjects:
@@ -44,6 +46,7 @@ def enhance_wallet_alerts(
 
     unified_wallet_rows = _build_unified_wallet_transactions(wallet_data, artifact_details)
     bank_rows_by_subject = _build_bank_rows_by_subject(subjects, cleaned_data, id_to_name_map)
+    subject_contexts = _build_subject_contexts(subjects, profiles, id_to_name_map)
 
     existing_alerts = list(wallet_data.get("alerts", []) or [])
     seen_keys = {
@@ -65,6 +68,11 @@ def enhance_wallet_alerts(
         subject_id = safe_str(subject.get("subjectId")) or ""
         subject_name = safe_str(subject.get("subjectName")) or subject_id
         matched_to_core = bool(subject.get("matchedToCore"))
+        subject_context = (
+            subject_contexts.get(subject_id)
+            or subject_contexts.get(subject_name)
+            or {}
+        )
         subject_rows = [
             row for row in unified_wallet_rows
             if row.get("subjectId") == subject_id
@@ -81,6 +89,7 @@ def enhance_wallet_alerts(
             _detect_transaction_level_alerts(
                 subject=subject,
                 transaction_rows=subject_rows,
+                subject_context=subject_context,
             )
         )
 
@@ -94,6 +103,7 @@ def enhance_wallet_alerts(
                         subject=subject,
                         transaction_rows=subject_rows,
                         bank_rows=bank_rows,
+                        subject_context=subject_context,
                     )
                 )
 
@@ -232,10 +242,109 @@ def _build_bank_rows_by_subject(
     return result
 
 
+def _build_subject_contexts(
+    subjects: Iterable[Dict[str, Any]],
+    profiles: Dict[str, Dict[str, Any]],
+    id_to_name_map: Dict[str, str],
+) -> Dict[str, Dict[str, Any]]:
+    contexts: Dict[str, Dict[str, Any]] = {}
+    if not profiles:
+        return contexts
+
+    for subject in subjects:
+        if not isinstance(subject, dict):
+            continue
+        subject_id = safe_str(subject.get("subjectId")) or ""
+        subject_name = safe_str(subject.get("subjectName")) or subject_id
+        profile = _resolve_profile_for_subject(subject_name, subject_id, profiles, id_to_name_map)
+        if not isinstance(profile, dict):
+            continue
+
+        context = {
+            "self_aliases": financial_profiler._build_name_alias_set([subject_name]),
+            "family_aliases": _collect_family_aliases(profile, subject_name),
+            "salary_payer_aliases": _collect_salary_payer_aliases(profile),
+        }
+        if subject_id:
+            contexts[subject_id] = context
+        if subject_name:
+            contexts[subject_name] = context
+    return contexts
+
+
+def _resolve_profile_for_subject(
+    subject_name: str,
+    subject_id: str,
+    profiles: Dict[str, Dict[str, Any]],
+    id_to_name_map: Dict[str, str],
+) -> Optional[Dict[str, Any]]:
+    candidate_names = [subject_name]
+    mapped_name = id_to_name_map.get(subject_id)
+    if mapped_name and mapped_name not in candidate_names:
+        candidate_names.append(mapped_name)
+
+    for candidate in candidate_names:
+        if candidate and candidate in profiles and isinstance(profiles[candidate], dict):
+            return profiles[candidate]
+    return None
+
+
+def _collect_family_aliases(profile: Dict[str, Any], subject_name: str) -> Set[str]:
+    family_aliases: Set[str] = set()
+    for name in _extract_person_names(profile.get("coaddress_persons", [])):
+        if name and not financial_profiler._matches_name(name, subject_name):
+            family_aliases.update(financial_profiler._build_name_alias_set([name]))
+    return family_aliases
+
+
+def _collect_salary_payer_aliases(profile: Dict[str, Any]) -> Set[str]:
+    aliases: Set[str] = set()
+
+    legitimate_details = profile.get("income_classification", {}).get("legitimate_details", [])
+    for row in legitimate_details if isinstance(legitimate_details, list) else []:
+        if not isinstance(row, dict):
+            continue
+        reason = safe_str(row.get("reason")) or ""
+        counterparty = safe_str(row.get("counterparty")) or ""
+        if counterparty and "工资性收入" in reason:
+            aliases.update(financial_profiler._build_name_alias_set([counterparty]))
+
+    yearly_details = profile.get("yearly_salary", {}).get("details", [])
+    for row in yearly_details if isinstance(yearly_details, list) else []:
+        if not isinstance(row, dict):
+            continue
+        counterparty = safe_str(row.get("counterparty")) or ""
+        if counterparty:
+            aliases.update(financial_profiler._build_name_alias_set([counterparty]))
+
+    return aliases
+
+
+def _extract_person_names(items: Any) -> List[str]:
+    names: List[str] = []
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, str):
+                value = safe_str(item) or ""
+            elif isinstance(item, dict):
+                value = (
+                    safe_str(item.get("name"))
+                    or safe_str(item.get("person_name"))
+                    or safe_str(item.get("related_name"))
+                    or ""
+                )
+            else:
+                value = ""
+            if value:
+                names.append(value)
+    return names
+
+
 def _detect_transaction_level_alerts(
     *,
     subject: Dict[str, Any],
     transaction_rows: List[Dict[str, Any]],
+    subject_context: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     alerts: List[Dict[str, Any]] = []
     subject_id = safe_str(subject.get("subjectId")) or ""
@@ -247,6 +356,9 @@ def _detect_transaction_level_alerts(
 
     tx_df["date_only"] = tx_df["occurredAt"].dt.strftime("%Y-%m-%d")
     tx_df["hour"] = tx_df["occurredAt"].dt.hour
+    tx_df["counterparty_role"] = tx_df["counterparty"].map(
+        lambda value: _classify_counterparty_role(safe_str(value) or "", subject_context or {})
+    )
 
     income_df = tx_df[tx_df["direction"] == "income"].copy()
     if not income_df.empty:
@@ -298,13 +410,18 @@ def _detect_transaction_level_alerts(
             ]
             expense_total = float(next_window.get("expense", pd.Series(dtype=float)).sum())
             if expense_total >= 80000 and expense_total >= income_total * 0.7:
+                window_rows = tx_df[
+                    (tx_df["occurredAt"] >= base_date)
+                    & (tx_df["occurredAt"] < base_date + pd.Timedelta(days=2))
+                ]
+                income_rows = window_rows[window_rows["direction"] == "income"]
+                expense_rows = window_rows[window_rows["direction"] == "expense"]
+                if _should_suppress_flow_alert(income_rows, "amountYuan") or _should_suppress_flow_alert(
+                    expense_rows, "amountYuan"
+                ):
+                    continue
                 transaction_count = int(
-                    len(
-                        tx_df[
-                            (tx_df["occurredAt"] >= base_date)
-                            & (tx_df["occurredAt"] < base_date + pd.Timedelta(days=2))
-                        ]
-                    )
+                    len(window_rows)
                 )
                 alerts.append(
                     wallet_data_extractor._build_wallet_alert_record(
@@ -355,6 +472,7 @@ def _detect_bank_linkage_alerts(
     subject: Dict[str, Any],
     transaction_rows: List[Dict[str, Any]],
     bank_rows: pd.DataFrame,
+    subject_context: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     alerts: List[Dict[str, Any]] = []
     subject_id = safe_str(subject.get("subjectId")) or ""
@@ -381,7 +499,33 @@ def _detect_bank_linkage_alerts(
                 }
             )
     overlaps.sort(key=lambda item: (item["combined_amount"], item["wallet_count"] + item["bank_count"]), reverse=True)
-    for overlap in overlaps[:3]:
+    contextualized_overlaps = []
+    for overlap in overlaps:
+        risk_level, risk_reason, counterparty_role = _evaluate_overlap_risk(
+            overlap,
+            subject_context or {},
+        )
+        overlap["risk_level"] = risk_level
+        overlap["risk_reason"] = risk_reason
+        overlap["counterparty_role"] = counterparty_role
+        contextualized_overlaps.append(overlap)
+
+    contextualized_overlaps.sort(
+        key=lambda item: (
+            {"high": 0, "medium": 1, "low": 2}.get(item.get("risk_level", "medium"), 3),
+            -float(item.get("combined_amount", 0.0) or 0.0),
+            -(int(item.get("wallet_count", 0)) + int(item.get("bank_count", 0))),
+        )
+    )
+    prioritized = [item for item in contextualized_overlaps if item.get("risk_level") != "low"]
+    deferred = [item for item in contextualized_overlaps if item.get("risk_level") == "low"]
+    selected_overlaps = (prioritized + deferred)[:3]
+
+    for overlap in selected_overlaps:
+        role_hint = overlap.get("counterparty_role")
+        if _exclude_overlap_from_alerts(role_hint):
+            continue
+        role_note = f"角色判定: {role_hint}。" if role_hint and role_hint != "external" else ""
         alerts.append(
             wallet_data_extractor._build_wallet_alert_record(
                 alert_type="wallet_bank_counterparty_overlap",
@@ -393,8 +537,8 @@ def _detect_bank_linkage_alerts(
                     f"{subject_name}的电子钱包与银行流水均与{overlap['counterparty']}存在集中往来，"
                     f"钱包{overlap['wallet_count']}笔、银行{overlap['bank_count']}笔。"
                 ),
-                risk_level="high" if overlap["combined_amount"] >= 300000 else "medium",
-                risk_reason="同一对手方同时出现在电子钱包和银行主链中，值得优先核查其真实关系与资金用途。",
+                risk_level=overlap["risk_level"],
+                risk_reason=overlap["risk_reason"],
                 subject_id=subject_id,
                 matched_to_core=True,
                 transaction_count=overlap["wallet_count"] + overlap["bank_count"],
@@ -402,6 +546,7 @@ def _detect_bank_linkage_alerts(
                 evidence_summary=(
                     f"钱包 {overlap['wallet_count']} 笔/{overlap['wallet_amount'] / 10000:.1f} 万元，"
                     f"银行 {overlap['bank_count']} 笔/{overlap['bank_amount'] / 10000:.1f} 万元。"
+                    f"{(' ' + role_note) if role_note else ''}"
                 ),
             )
         )
@@ -417,6 +562,9 @@ def _detect_bank_linkage_alerts(
         )
         bank_working = bank_rows.copy()
         bank_working["date_only"] = bank_working["date"].dt.normalize()
+        bank_working["counterparty_role"] = bank_working["counterparty"].map(
+            lambda value: _classify_counterparty_role(safe_str(value) or "", subject_context or {})
+        )
         bank_expense = (
             bank_working.groupby("date_only")["expense"]
             .sum()
@@ -434,6 +582,20 @@ def _detect_bank_linkage_alerts(
             ]
             bank_outflow = float(bank_window["bank_expense"].sum())
             if bank_outflow >= 80000 and bank_outflow >= income_total * 0.7:
+                wallet_income_rows = tx_df[
+                    (tx_df["occurredAt"] >= base_date)
+                    & (tx_df["occurredAt"] < base_date + pd.Timedelta(days=1))
+                    & (tx_df["direction"] == "income")
+                ]
+                bank_expense_rows = bank_working[
+                    (bank_working["date"] >= base_date)
+                    & (bank_working["date"] < base_date + pd.Timedelta(days=3))
+                    & (bank_working["expense"] > 0)
+                ]
+                if _should_suppress_flow_alert(wallet_income_rows, "amountYuan") or _should_suppress_flow_alert(
+                    bank_expense_rows, "expense"
+                ):
+                    continue
                 wallet_tx_count = int(
                     len(
                         tx_df[
@@ -443,15 +605,7 @@ def _detect_bank_linkage_alerts(
                         ]
                     )
                 )
-                bank_tx_count = int(
-                    len(
-                        bank_working[
-                            (bank_working["date"] >= base_date)
-                            & (bank_working["date"] < base_date + pd.Timedelta(days=3))
-                            & (bank_working["expense"] > 0)
-                        ]
-                    )
-                )
+                bank_tx_count = int(len(bank_expense_rows))
                 alerts.append(
                     wallet_data_extractor._build_wallet_alert_record(
                         alert_type="wallet_bank_quick_outflow",
@@ -478,6 +632,118 @@ def _detect_bank_linkage_alerts(
                 break
 
     return alerts
+
+
+def _exclude_overlap_from_alerts(counterparty_role: Any) -> bool:
+    normalized_role = safe_str(counterparty_role) or ""
+    return normalized_role in {"self", "salary_payer"}
+
+
+def _should_suppress_flow_alert(rows: pd.DataFrame, amount_column: str) -> bool:
+    excluded_roles = {"self", "family", "salary_payer"}
+    return _role_amount_share(rows, amount_column, excluded_roles) >= 0.7
+
+
+def _role_amount_share(rows: pd.DataFrame, amount_column: str, roles: Set[str]) -> float:
+    if (
+        rows is None
+        or rows.empty
+        or amount_column not in rows.columns
+        or "counterparty_role" not in rows.columns
+        or not roles
+    ):
+        return 0.0
+
+    amounts = pd.to_numeric(rows[amount_column], errors="coerce").fillna(0.0).clip(lower=0.0)
+    total_amount = float(amounts.sum())
+    if total_amount <= 0:
+        return 0.0
+
+    role_mask = rows["counterparty_role"].isin(roles)
+    role_amount = float(amounts[role_mask].sum())
+    return role_amount / total_amount
+
+
+def _evaluate_overlap_risk(
+    overlap: Dict[str, Any],
+    subject_context: Dict[str, Any],
+) -> tuple[str, str, str]:
+    counterparty = safe_str(overlap.get("counterparty")) or ""
+    counterparty_role = _classify_counterparty_role(counterparty, subject_context)
+    combined_amount = float(overlap.get("combined_amount") or 0.0)
+    wallet_amount = float(overlap.get("wallet_amount") or 0.0)
+    bank_amount = float(overlap.get("bank_amount") or 0.0)
+    wallet_share = wallet_amount / combined_amount if combined_amount > 0 else 0.0
+
+    if counterparty_role == "self":
+        return (
+            "low",
+            "对手方已识别为本人/同名账户，当前重叠更接近跨通道自有资金往来，不宜按外部高风险往来直接上提。",
+            counterparty_role,
+        )
+    if counterparty_role == "family":
+        return (
+            "low",
+            "对手方已识别为家庭成员/同住址成员，当前重叠应按家庭资金往来单独看待，不宜按外部高风险往来直接上提。",
+            counterparty_role,
+        )
+    if counterparty_role == "salary_payer":
+        risk_level = "low" if wallet_share <= 0.2 or bank_amount >= wallet_amount else "medium"
+        return (
+            risk_level,
+            "对手方已在工资识别中命中发薪单位，当前跨通道重叠更可能体现为工资、奖金或福利留痕，应先按工资语义核验后再决定是否上提风险。",
+            counterparty_role,
+        )
+    if counterparty_role in {"financial_platform", "public_institution"}:
+        return (
+            "low",
+            "对手方属于金融平台/公共机构语义，当前重叠更适合作为资金路径提示，不宜直接按高风险往来处理。",
+            counterparty_role,
+        )
+
+    return (
+        "high" if combined_amount >= 300000 else "medium",
+        "同一对手方同时出现在电子钱包和银行主链中，值得优先核查其真实关系与资金用途。",
+        counterparty_role,
+    )
+
+
+def _classify_counterparty_role(counterparty: str, subject_context: Dict[str, Any]) -> str:
+    self_aliases = subject_context.get("self_aliases") or set()
+    if financial_profiler._matches_alias_set(counterparty, self_aliases):
+        return "self"
+
+    family_aliases = subject_context.get("family_aliases") or set()
+    if financial_profiler._matches_alias_set(counterparty, family_aliases):
+        return "family"
+
+    salary_payer_aliases = subject_context.get("salary_payer_aliases") or set()
+    if financial_profiler._matches_alias_set(counterparty, salary_payer_aliases):
+        return "salary_payer"
+
+    lower_name = counterparty.lower()
+    financial_keywords = [
+        "支付宝",
+        "财付通",
+        "微信支付",
+        "银联",
+        "网联",
+        "基金",
+        "证券",
+        "保险",
+        "理财",
+        "花呗",
+        "信用购",
+        "支付",
+    ]
+    if any(keyword.lower() in lower_name for keyword in financial_keywords):
+        return "financial_platform"
+
+    public_keywords = ["财政局", "公积金", "社保", "医保", "税务", "人力资源和社会保障", "住房公积金"]
+    if any(keyword in counterparty for keyword in public_keywords):
+        return "public_institution"
+
+    return "external"
 
 
 def _frame_series(df: pd.DataFrame, column_name: str, default: Any) -> pd.Series:

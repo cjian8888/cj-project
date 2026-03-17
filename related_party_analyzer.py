@@ -11,6 +11,7 @@ from typing import Dict, List, Set
 from collections import defaultdict
 import config
 import utils
+from counterparty_utils import is_payment_platform_counterparty
 from name_normalizer import normalize_for_matching, is_same_person
 import fund_penetration
 import risk_scoring
@@ -194,6 +195,8 @@ def _is_excluded_relay(counterparty: str, excluded_keywords: List[str]) -> bool:
         是否应排除
     """
     if not counterparty:
+        return True
+    if is_payment_platform_counterparty(counterparty):
         return True
     cp_upper = counterparty.upper()
     return any(kw.upper() in cp_upper for kw in excluded_keywords)
@@ -586,6 +589,8 @@ def _detect_fund_loops(
                 'external_node_count': external_count,
             }
         )
+        if not loop_record.get('is_valid_cycle', True):
+            continue
         unique_loops.append(loop_record)
 
     logger.info(f'  发现 {len(unique_loops)} 个资金闭环')
@@ -691,6 +696,8 @@ def _extract_discovered_nodes(results: Dict, core_persons: List[str]) -> List[Di
         relay_name = str(relay.get('relay', '')).strip()
         if not relay_name:
             continue
+        if is_payment_platform_counterparty(relay_name):
+            continue
         key = normalize_for_matching(relay_name)
         if key in core_name_set:
             continue
@@ -715,6 +722,8 @@ def _extract_discovered_nodes(results: Dict, core_persons: List[str]) -> List[Di
         for node in participants:
             node_name = str(node).strip()
             if not node_name:
+                continue
+            if is_payment_platform_counterparty(node_name):
                 continue
             key = normalize_for_matching(node_name)
             if key in core_name_set:
@@ -925,7 +934,10 @@ def _build_relationship_clusters(results: Dict, core_persons: List[str]) -> List
             node for node in component if normalize_for_matching(node) in core_name_set
         )
         external_members = sorted(
-            node for node in component if normalize_for_matching(node) not in core_name_set
+            node
+            for node in component
+            if normalize_for_matching(node) not in core_name_set
+            and not is_payment_platform_counterparty(node)
         )
 
         if not core_members:

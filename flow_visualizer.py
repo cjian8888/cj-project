@@ -19,8 +19,9 @@ from collections import defaultdict
 import pandas as pd
 import config
 
+from counterparty_utils import should_skip_payment_platform_counterparty
 # 导入统一路径管理器
-from paths import APP_ROOT
+from paths import RESOURCE_ROOT
 import utils
 
 logger = utils.setup_logger(__name__)
@@ -444,11 +445,12 @@ def _generate_html_visualization(
     # 读取本地 vis-network.min.js（用于内联到 HTML，实现离线渲染）
     vis_js_paths = [
         os.path.join(
-            str(APP_ROOT),
+            str(RESOURCE_ROOT),
             "dashboard/node_modules/vis-network/standalone/umd/vis-network.min.js",
         ),
         os.path.join(
-            str(APP_ROOT), "node_modules/vis-network/standalone/umd/vis-network.min.js"
+            str(RESOURCE_ROOT),
+            "node_modules/vis-network/standalone/umd/vis-network.min.js",
         ),
     ]
     vis_js_content = ""
@@ -803,11 +805,12 @@ def _generate_fallback_html(
     # 尝试读取本地 vis-network.min.js
     vis_js_paths = [
         os.path.join(
-            str(APP_ROOT),
+            str(RESOURCE_ROOT),
             "dashboard/node_modules/vis-network/standalone/umd/vis-network.min.js",
         ),
         os.path.join(
-            str(APP_ROOT), "node_modules/vis-network/standalone/umd/vis-network.min.js"
+            str(RESOURCE_ROOT),
+            "node_modules/vis-network/standalone/umd/vis-network.min.js",
         ),
     ]
 
@@ -854,6 +857,7 @@ var network = new vis.Network(document.getElementById('network'),
 # 资金流向统计的列名映射（支持中英文）
 FLOW_STATS_COLUMN_MAP = {
     "counterparty": ["counterparty", "交易对手", "对手方", "对方户名"],
+    "description": ["description", "摘要", "交易摘要", "备注", "附言"],
     "income": ["income", "收入(元)", "收入", "贷方金额"],
     "expense": ["expense", "支出(元)", "支出", "借方金额"],
 }
@@ -963,6 +967,11 @@ def _process_transaction_row(
         _get_column_value_from_row(row, FLOW_STATS_COLUMN_MAP["counterparty"])
     )
     if not counterparty or counterparty == "nan":
+        return
+    description = str(
+        _get_column_value_from_row(row, FLOW_STATS_COLUMN_MAP["description"])
+    )
+    if should_skip_payment_platform_counterparty(counterparty, description):
         return
 
     # 获取收入金额

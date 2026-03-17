@@ -121,3 +121,22 @@ def test_holiday_service_normalizes_library_string_names_to_chinese(monkeypatch)
 
     ranges = service.get_holiday_ranges_for_year(2024)
     assert any(name == "春节" for _, _, name in ranges)
+
+
+def test_holiday_service_does_not_treat_plain_weekend_as_named_holiday(monkeypatch):
+    fake_calendar = SimpleNamespace(
+        is_holiday=lambda d: d.weekday() >= 5 or d == date(2024, 1, 1),
+        get_holiday_detail=lambda d: (
+            (True, "New Year's Day")
+            if d == date(2024, 1, 1)
+            else ((True, None) if d.weekday() >= 5 else (False, None))
+        ),
+        is_workday=lambda d: d.weekday() < 5 and d != date(2024, 1, 1),
+    )
+    monkeypatch.setitem(sys.modules, "chinese_calendar", fake_calendar)
+
+    service = HolidayService()
+
+    assert service.is_holiday(date(2024, 1, 13)) is False
+    assert service.get_holiday_name(date(2024, 1, 13)) is None
+    assert service.build_holiday_window(date(2024, 1, 15), date(2024, 1, 17)) == {}

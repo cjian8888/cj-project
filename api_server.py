@@ -44,7 +44,7 @@ from pydantic import BaseModel
 
 # 导入核心模块
 import config
-from paths import APP_ROOT, DATA_DIR, OUTPUT_DIR
+from paths import APP_ROOT, DASHBOARD_DIST_DIR, DATA_DIR, OUTPUT_DIR
 import utils
 from utils.aggregation_view import (
     annotate_focus_entities_with_graph,
@@ -217,7 +217,23 @@ _last_analysis_log_paths: Dict[str, str] = {}
 
 def _get_dashboard_dist_dir() -> Path:
     """返回前端生产构建目录。"""
-    return APP_ROOT / "dashboard" / "dist"
+    return DASHBOARD_DIST_DIR
+
+
+def _get_server_port() -> int:
+    """获取服务监听端口，默认保持 8000。"""
+    raw_port = os.environ.get("FPAS_PORT", "8000").strip()
+    try:
+        port = int(raw_port)
+    except (TypeError, ValueError):
+        logger.warning(f"无效 FPAS_PORT={raw_port!r}，回退到默认端口 8000")
+        return 8000
+
+    if 1 <= port <= 65535:
+        return port
+
+    logger.warning(f"越界 FPAS_PORT={raw_port!r}，回退到默认端口 8000")
+    return 8000
 
 
 def _resolve_dashboard_file(requested_path: str = "") -> Optional[Path]:
@@ -955,22 +971,7 @@ def _collect_family_assets_for_summary(
     seen_vehicles = set()
 
     def _normalize_property_key(prop: Dict[str, Any]) -> str:
-        address = (
-            prop.get("房地坐落")
-            or prop.get("location")
-            or prop.get("address")
-            or prop.get("坐落")
-            or ""
-        )
-        address_key = re.sub(r"\s+", "", str(address))
-        if address_key:
-            return address_key
-        return str(
-            prop.get("property_number")
-            or prop.get("certificate_number")
-            or prop.get("source_file")
-            or ""
-        ).strip()
+        return family_assets_helper.build_property_identity_key(prop)
 
     def _normalize_vehicle_key(vehicle: Dict[str, Any]) -> str:
         return str(
@@ -1603,6 +1604,11 @@ def _refresh_profile_real_metrics(
         profile.get("income_structure", {}) if isinstance(profile.get("income_structure", {}), dict) else {},
         profile.get("wealth_management", {}) if isinstance(profile.get("wealth_management", {}), dict) else {},
         profile.get("fund_flow", {}) if isinstance(profile.get("fund_flow", {}), dict) else {},
+        yearly_salary=(
+            profile.get("yearly_salary", {})
+            if isinstance(profile.get("yearly_salary", {}), dict)
+            else {}
+        ),
         family_members=family_members,
     )
 
@@ -2668,16 +2674,6 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         except Exception as exc:
             logger.warning(f"电子钱包补充数据主体映射修正失败: {exc}")
             external_data["wallet"] = external_data.get("wallet", {})
-        try:
-            external_data["wallet"] = wallet_risk_analyzer.enhance_wallet_alerts(
-                external_data.get("wallet", {}),
-                wallet_artifact_bundle.get("artifacts", {}),
-                cleaned_data,
-                id_to_name_map=id_to_name_map,
-            )
-        except Exception as exc:
-            logger.warning(f"电子钱包高级风险增强失败: {exc}")
-
         # 企业登记信息按人员聚合（company_info 以 uscc 为 key，需要转换为按姓名索引）
         person_company_map = {}
         company_info_map = external_data["p0"].get("company_info", {})
@@ -3004,6 +3000,17 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         logger.info(f"🔄 [重构] 融合画像生成完成: {len(profiles)} 个实体")
         broadcast_log("INFO", f"  ✓ 融合画像生成完成: {len(profiles)} 个实体")
         _raise_if_analysis_stopped("画像生成后收到停止请求")
+
+        try:
+            external_data["wallet"] = wallet_risk_analyzer.enhance_wallet_alerts(
+                external_data.get("wallet", {}),
+                wallet_artifact_bundle.get("artifacts", {}),
+                cleaned_data,
+                id_to_name_map=id_to_name_map,
+                profiles=profiles,
+            )
+        except Exception as exc:
+            logger.warning(f"电子钱包高级风险增强失败: {exc}")
 
         # ========================================================================
         # Phase 6: 全面分析 (70%) ← 🔄 有完整上下文后执行
@@ -5575,4 +5582,4 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=_get_server_port())

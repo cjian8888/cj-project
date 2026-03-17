@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+from openpyxl import load_workbook
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -49,7 +50,7 @@ def _create_wallet_sample(root: Path) -> Path:
                     "类型": "即时到账交易",
                     "用户信息": "2088412846264555(马尚德)",
                     "交易对方信息": "2088002020170361(王云)",
-                    "消费名称": "测试收入",
+                    "消费名称": "=169273935992423088=",
                     "金额（元）": 100.0,
                     "收/支": "收入",
                     "交易状态": "交易成功结束",
@@ -164,8 +165,13 @@ def test_extract_wallet_artifact_bundle_contains_normalized_rows(tmp_path: Path)
     assert wallet_data["available"] is True
     assert wallet_data["summary"]["subjectCount"] == 1
     assert len(artifacts["sourceFiles"]) == 6
+    assert all(not os.path.isabs(item["relativePath"]) for item in artifacts["sourceFiles"])
+    assert all(not os.path.isabs(item["filePath"]) for item in artifacts["sourceFiles"])
     assert len(artifacts["alipayRegistrationRows"]) == 1
     assert len(artifacts["alipayTransactionRows"]) == 2
+    assert all(
+        not os.path.isabs(row["sourceFile"]) for row in artifacts["alipayTransactionRows"]
+    )
     assert len(artifacts["wechatRegistrationRows"]) == 1
     assert len(artifacts["wechatLoginRows"]) == 1
     assert len(artifacts["tenpayRegistrationRows"]) == 1
@@ -246,9 +252,18 @@ def test_generate_wallet_artifacts_outputs_txt_and_excel(tmp_path: Path):
     source_df = pd.read_excel(excel_path, sheet_name="来源文件清单")
     subject_df = pd.read_excel(excel_path, sheet_name="主体汇总")
     wx_reg_df = pd.read_excel(excel_path, sheet_name="微信注册信息")
+    alipay_tx_df = pd.read_excel(excel_path, sheet_name="支付宝交易明细")
     tenpay_tx_df = pd.read_excel(excel_path, sheet_name="财付通交易明细")
 
     assert len(source_df) == 6
+    assert "原始路径" not in source_df.columns
+    assert all(not os.path.isabs(str(value)) for value in source_df["相对路径"].tolist())
     assert subject_df.iloc[0]["主体姓名"] == "马尚德"
     assert wx_reg_df.iloc[0]["匹配状态"] == "已归并"
+    assert all(not os.path.isabs(str(value)) for value in alipay_tx_df["来源文件"].tolist())
     assert len(tenpay_tx_df) == 2
+
+    workbook_obj = load_workbook(excel_path, data_only=False)
+    alipay_sheet = workbook_obj["支付宝交易明细"]
+    assert alipay_sheet["O2"].data_type != "f"
+    assert alipay_sheet["U2"].value == bundle["artifacts"]["alipayTransactionRows"][0]["sourceFile"]

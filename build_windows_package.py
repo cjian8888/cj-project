@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import shutil
 from pathlib import Path
 
 
@@ -20,6 +21,18 @@ def run(cmd: list[str], cwd: Path | None = None) -> None:
     workdir = cwd or PROJECT_ROOT
     print(f"[build] cwd={workdir} cmd={' '.join(cmd)}")
     subprocess.run(cmd, cwd=str(workdir), check=True)
+
+
+def _resolve_npm_command() -> list[str]:
+    """解析适用于当前平台的 npm 可执行文件。"""
+    candidates = ["npm.cmd", "npm"] if sys.platform == "win32" else ["npm"]
+    for candidate in candidates:
+        resolved = shutil.which(candidate)
+        if resolved:
+            return [resolved]
+    raise SystemExit(
+        "未检测到 npm，可先确认 Node.js 已安装且 npm 已加入 PATH。"
+    )
 
 
 def ensure_pyinstaller() -> None:
@@ -43,7 +56,7 @@ def ensure_dashboard_build() -> None:
     if not (DASHBOARD_DIR / "package.json").exists():
         raise SystemExit("缺少 dashboard/package.json，无法执行前端构建")
 
-    run(["npm", "run", "build"], cwd=DASHBOARD_DIR)
+    run([*_resolve_npm_command(), "run", "build"], cwd=DASHBOARD_DIR)
     index_file = DASHBOARD_DIST_DIR / "index.html"
     if not index_file.exists():
         raise SystemExit("前端构建未生成 dashboard/dist/index.html")

@@ -10,8 +10,10 @@ import os
 
 # Add parent directory to path temporarily to import utils.py
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+added_parent_dir = False
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
+    added_parent_dir = True
 
 # Import all functions from utils.py (the module, not this package)
 try:
@@ -60,7 +62,7 @@ try:
 
 finally:
     # Restore sys.path
-    if parent_dir in sys.path:
+    if added_parent_dir and parent_dir in sys.path:
         sys.path.remove(parent_dir)
 
 # Also export phrase_loader and safe_types from this package

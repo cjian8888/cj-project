@@ -462,6 +462,49 @@ class TestGenerateProfileReport:
         assert round(classified_total, 2) == 10000
         assert round(result['summary']['offset_detail']['business_reimbursement'], 2) == 4210
 
+    def test_generate_profile_blank_internal_bank_product_adjustment_aligns_real_income(self):
+        """测试内部账户的空白大额入账会从真实收入中剔除"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-11-22 00:00:00', '2024-11-23 09:00:00']),
+            'income': [104212.55, 10000],
+            'expense': [0, 0],
+            'counterparty': ['', '某公司'],
+            'description': ['', '工资'],
+            'account_number': ['103324757001001', '6222000011112222'],
+        })
+        result = generate_profile_report(df, '张伟')
+        income_classification = result['income_classification']
+        classified_total = (
+            income_classification['legitimate_income']
+            + income_classification['unknown_income']
+            + income_classification['suspicious_income']
+        )
+
+        assert round(result['summary']['real_income'], 2) == 10000
+        assert round(classified_total, 2) == 10000
+        assert round(income_classification['excluded_breakdown']['bank_product_adjustment'], 2) == 104212.55
+
+    def test_generate_profile_anjiafei_counts_as_real_income(self):
+        """测试安家费应计入真实收入而非单位报销"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-02-27', '2024-03-30']),
+            'income': [360000, 10000],
+            'expense': [0, 0],
+            'counterparty': ['上海空间电源研究所', '某公司'],
+            'description': ['代发报销 PAY02发放安家费', '代发工资']
+        })
+        result = generate_profile_report(df, '张伟')
+        income_classification = result['income_classification']
+        classified_total = (
+            income_classification['legitimate_income']
+            + income_classification['unknown_income']
+            + income_classification['suspicious_income']
+        )
+
+        assert round(result['summary']['real_income'], 2) == 370000
+        assert round(classified_total, 2) == 370000
+        assert round(result['summary']['offset_detail']['business_reimbursement'], 2) == 0
+
     def test_generate_profile_family_transfer_alias_aligns_with_real_income(self):
         """测试家庭成员别名互转会同步影响真实收入与剔除明细"""
         df = pd.DataFrame({
@@ -498,6 +541,30 @@ class TestGenerateProfileReport:
         assert income_classification['salary_classified_income'] > 0
         assert '工资性收入' in income_classification['salary_like_reasons']
         assert 'salary_reference_basis' in income_classification
+
+    def test_generate_profile_aligns_salary_reference_with_excluded_income(self):
+        """测试被剔除的伪工资交易不会继续留在工资参考口径中"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02']),
+            'income': [10000, 5000],
+            'expense': [0, 0],
+            'counterparty': ['某公司', '某公司'],
+            'description': ['代发工资', '网银互联还款 工资'],
+        })
+        result = generate_profile_report(df, '张伟')
+        income_classification = result['income_classification']
+        income_structure = result['income_structure']
+        yearly_salary = result['yearly_salary']
+
+        assert round(income_classification['excluded_breakdown']['bank_product_adjustment'], 2) == 5000
+        assert round(income_structure['salary_income'], 2) == 10000
+        assert len(income_structure['salary_details']) == 1
+        assert round(yearly_salary['summary']['total'], 2) == 10000
+        assert round(yearly_salary['summary']['gross_total_before_exclusion'], 2) == 15000
+        assert round(yearly_salary['summary']['excluded_overlap_total'], 2) == 5000
+        assert round(income_classification['salary_reference_income'], 2) == 10000
+        assert round(income_classification['salary_reference_gross_income'], 2) == 15000
+        assert income_classification['salary_reference_basis'] == 'yearly_salary_summary_total_excluded_aligned'
 
     def test_generate_profile_supports_wan_unit_columns_and_invalid_dates(self):
         """万元列头和脏日期不应导致画像流程崩溃"""
@@ -560,6 +627,22 @@ class TestExtractLargeCash:
         # 检查风险等级
         risk_levels = [r['risk_level'] for r in result]
         assert 'low' in risk_levels or 'medium' in risk_levels or 'high' in risk_levels
+
+
+def test_calculate_yearly_salary_recognizes_bank_payroll_channel():
+    """测试银联代付工资通道会进入年度工资统计"""
+    df = pd.DataFrame({
+        'date': pd.to_datetime(['2024-01-15']),
+        'income': [8050.19],
+        'expense': [0],
+        'counterparty': [''],
+        'description': ['银联入账/张伟/9558****5512-银联代付'],
+    })
+
+    result = calculate_yearly_salary(df, '张伟')
+
+    assert result['summary']['total'] == 8050.19
+    assert result['details'][0]['reason'] == '摘要含强工资关键词'
 
 
 class TestCategorizeTransactions:

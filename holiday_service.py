@@ -122,6 +122,23 @@ class HolidayService:
 
         return ENGLISH_HOLIDAY_NAME_MAP.get(normalized, normalized)
 
+    def _get_library_holiday_name(self, check_date: date) -> Optional[str]:
+        """从 chinese-calendar 中提取具名法定节假日，普通周末不视为节假日。"""
+        import chinese_calendar
+
+        detail = chinese_calendar.get_holiday_detail(check_date)
+        if isinstance(detail, tuple):
+            is_holiday = bool(detail[0]) if detail else False
+            raw_name = detail[1] if len(detail) > 1 else None
+        else:
+            is_holiday = bool(detail)
+            raw_name = detail
+
+        if not is_holiday or raw_name in (None, ""):
+            return None
+
+        return self._resolve_holiday_name(raw_name)
+
     def _build_ranges_from_library(self, year: int) -> List[HolidayRange]:
         """从 chinese-calendar 动态生成指定年份的节假日区间。"""
         import chinese_calendar
@@ -135,9 +152,9 @@ class HolidayService:
         range_name: Optional[str] = None
 
         while current <= year_end:
-            if chinese_calendar.is_holiday(current):
-                detail = chinese_calendar.get_holiday_detail(current)
-                name = self._resolve_holiday_name(detail)
+            holiday_name = self._get_library_holiday_name(current)
+            if holiday_name:
+                name = holiday_name
 
                 if (
                     range_start is not None
@@ -286,7 +303,7 @@ class HolidayService:
         if self._use_library:
             try:
                 import chinese_calendar
-                return chinese_calendar.is_holiday(check_date)
+                return self._get_library_holiday_name(check_date) is not None
             except Exception as e:
                 logger.warning(f'chinese-calendar 判断节假日失败，回退本地配置: {e}')
                 self._use_library = False
@@ -330,10 +347,7 @@ class HolidayService:
         """
         if self._use_library:
             try:
-                import chinese_calendar
-                if chinese_calendar.is_holiday(check_date):
-                    detail = chinese_calendar.get_holiday_detail(check_date)
-                    return self._resolve_holiday_name(detail)
+                return self._get_library_holiday_name(check_date)
             except Exception as e:
                 logger.warning(f'chinese-calendar 获取节假日名称失败，回退本地配置: {e}')
                 self._use_library = False

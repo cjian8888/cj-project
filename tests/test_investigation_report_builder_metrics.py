@@ -347,6 +347,46 @@ def test_real_income_composition_rows_sum_to_real_income():
     assert any(item["name"] == "第三方支付小额转入" for item in result["rows"])
 
 
+def test_real_income_composition_keeps_other_legitimate_income_visible():
+    profile = {
+        "summary": {
+            "real_income": 100_000,
+        },
+        "yearly_salary": {
+            "summary": {
+                "total": 30_000,
+            }
+        },
+        "income_classification": {
+            "legitimate_income": 50_000,
+            "unknown_income": 50_000,
+            "suspicious_income": 0,
+            "salary_classified_income": 42_000,
+            "reason_breakdown": {
+                "legitimate": {
+                    "工资性收入": 42_000,
+                    "离职补偿/劳动补偿": 8_000,
+                },
+                "unknown": {
+                    "来源不明": 40_000,
+                    "个人转账": 10_000,
+                },
+            },
+        },
+    }
+
+    builder = _make_builder(profile)
+    result = builder._build_real_income_composition_rows(profile)
+
+    salary_row = next(item for item in result["rows"] if item["name"] == "工资性收入")
+    other_legitimate_row = next(
+        item for item in result["rows"] if item["name"] == "其他已识别合法收入"
+    )
+
+    assert salary_row["amount"] == 42_000
+    assert other_legitimate_row["amount"] == 8_000
+
+
 def test_report_title_subject_prefers_first_family_anchor():
     builder = _make_builder({"summary": {}})
     preface = {"persons_queried": ["彭伟"]}
@@ -512,6 +552,121 @@ def test_build_family_data_from_config_includes_external_property_and_vehicle_as
 
     assert summary["property_count"] == 1
     assert summary["vehicle_count"] == 1
+
+
+def test_build_family_data_from_config_deduplicates_shared_property_by_identifier():
+    builder = InvestigationReportBuilder(
+        {
+            "profiles": {
+                "张三": {
+                    "has_data": True,
+                    "summary": {"net_flow": 0},
+                    "wealth_management": {"estimated_holding": 0},
+                },
+                "李四": {
+                    "has_data": True,
+                    "summary": {"net_flow": 0},
+                    "wealth_management": {"estimated_holding": 0},
+                },
+            },
+            "derived_data": {},
+            "suspicions": {},
+            "graph_data": {},
+            "metadata": {
+                "id_to_name_map": {
+                    "310101199001010011": "张三",
+                    "310101199001010022": "李四",
+                }
+            },
+            "precisePropertyData": {
+                "310101199001010011": [
+                    {
+                        "location": "灵石路1123弄23号604",
+                        "property_number": "310108013003GB00003F00150028",
+                    }
+                ],
+                "310101199001010022": [
+                    {
+                        "location": "灵石路1123弄23号604室",
+                        "property_number": "310108013003GB00003F00150028",
+                    }
+                ],
+            },
+            "vehicleData": {},
+        },
+        output_dir="output",
+    )
+    config = PrimaryTargetsConfig(
+        analysis_units=[
+            AnalysisUnit(
+                anchor="张三",
+                members=["张三", "李四"],
+                unit_type="family",
+            )
+        ]
+    )
+
+    family_data = builder._build_family_data_from_config(config)
+    summary = family_data["all_family_summaries"]["张三"]["total_assets"]
+
+    assert summary["property_count"] == 1
+
+
+def test_aggregate_family_unit_data_deduplicates_shared_property_by_identifier():
+    builder = InvestigationReportBuilder(
+        {
+            "profiles": {
+                "张三": {
+                    "has_data": True,
+                    "totalIncome": 100000,
+                    "totalExpense": 50000,
+                    "salaryTotal": 50000,
+                    "cashTotal": 0,
+                    "transactionCount": 10,
+                    "properties": [
+                        {
+                            "location": "灵石路1123弄23号604",
+                            "property_number": "310108013003GB00003F00150028",
+                        }
+                    ],
+                    "bank_accounts": [],
+                    "vehicles": [],
+                },
+                "李四": {
+                    "has_data": True,
+                    "totalIncome": 80000,
+                    "totalExpense": 30000,
+                    "salaryTotal": 40000,
+                    "cashTotal": 0,
+                    "transactionCount": 8,
+                    "properties": [
+                        {
+                            "房地坐落": "灵石路1123弄23号604室",
+                            "property_number": "310108013003GB00003F00150028",
+                        }
+                    ],
+                    "bank_accounts": [],
+                    "vehicles": [],
+                },
+            },
+            "derived_data": {},
+            "suspicions": {},
+            "graph_data": {},
+            "metadata": {
+                "id_to_name_map": {
+                    "310101199001010011": "张三",
+                    "310101199001010022": "李四",
+                }
+            },
+            "precisePropertyData": {},
+            "vehicleData": {},
+        },
+        output_dir="output",
+    )
+
+    summary = builder._aggregate_family_unit_data(["张三", "李四"])
+
+    assert summary["property_count"] == 1
 
 
 def test_load_builder_keeps_valid_profiles_when_first_entity_has_no_income(tmp_path):

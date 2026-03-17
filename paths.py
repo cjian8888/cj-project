@@ -13,7 +13,7 @@
 
 注意：
 - 所有模块应从此文件导入路径，禁止硬编码路径
-- 打包时需要将 data/ 和 output/ 目录包含在 exe 同级目录
+- 打包后可写目录位于 exe 同级目录，打包资源目录位于 PyInstaller 资源根
 """
 
 import os
@@ -37,6 +37,20 @@ def get_app_root() -> Path:
     else:
         # 开发环境，返回 paths.py 所在目录
         return Path(__file__).parent.resolve()
+
+
+def get_resource_root() -> Path:
+    """
+    获取打包资源根目录。
+
+    开发环境：返回项目根目录。
+    打包环境：优先返回 PyInstaller 的资源目录（通常为 one-folder 下的 `_internal`）。
+    """
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            return Path(meipass).resolve()
+    return get_app_root()
 
 
 def get_data_dir() -> Path:
@@ -66,7 +80,7 @@ def get_config_dir() -> Path:
     Returns:
         Path: config 目录路径
     """
-    return get_app_root() / "config"
+    return get_resource_root() / "config"
 
 
 def get_cache_path() -> Path:
@@ -86,7 +100,7 @@ def get_templates_dir() -> Path:
     Returns:
         Path: templates 目录路径
     """
-    return get_app_root() / "templates"
+    return get_resource_root() / "templates"
 
 
 def get_knowledge_dir() -> Path:
@@ -96,7 +110,17 @@ def get_knowledge_dir() -> Path:
     Returns:
         Path: knowledge 目录路径
     """
-    return get_app_root() / "knowledge"
+    return get_resource_root() / "knowledge"
+
+
+def get_dashboard_dist_dir() -> Path:
+    """
+    获取前端生产构建目录。
+
+    Returns:
+        Path: dashboard/dist 目录路径
+    """
+    return get_resource_root() / "dashboard" / "dist"
 
 
 def resolve_path(path_str: str, base_dir: Path = None) -> Path:
@@ -137,12 +161,14 @@ def ensure_dir(path: Path) -> Path:
 
 # 导出常量（方便其他模块导入使用）
 APP_ROOT = get_app_root()
+RESOURCE_ROOT = get_resource_root()
 DATA_DIR = get_data_dir()
 OUTPUT_DIR = get_output_dir()
 CONFIG_DIR = get_config_dir()
 CACHE_PATH = get_cache_path()
 TEMPLATES_DIR = get_templates_dir()
 KNOWLEDGE_DIR = get_knowledge_dir()
+DASHBOARD_DIST_DIR = get_dashboard_dist_dir()
 
 
 # 调试信息
@@ -151,13 +177,16 @@ if __name__ == "__main__":
     print("路径配置信息")
     print("=" * 60)
     print(f"APP_ROOT:     {APP_ROOT}")
+    print(f"RESOURCE_ROOT: {RESOURCE_ROOT}")
     print(f"DATA_DIR:     {DATA_DIR}")
     print(f"OUTPUT_DIR:   {OUTPUT_DIR}")
     print(f"CONFIG_DIR:   {CONFIG_DIR}")
     print(f"CACHE_PATH:   {CACHE_PATH}")
     print(f"TEMPLATES_DIR: {TEMPLATES_DIR}")
     print(f"KNOWLEDGE_DIR: {KNOWLEDGE_DIR}")
+    print(f"DASHBOARD_DIST_DIR: {DASHBOARD_DIST_DIR}")
     print("=" * 60)
     print(f"sys.frozen:   {getattr(sys, 'frozen', False)}")
+    print(f"sys._MEIPASS: {getattr(sys, '_MEIPASS', 'N/A')}")
     print(f"__file__:     {__file__}")
     print(f"sys.executable: {getattr(sys, 'executable', 'N/A')}")
