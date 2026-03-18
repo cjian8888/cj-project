@@ -424,6 +424,89 @@ export interface AggregationEvidencePack {
     aggregation_explainability?: Record<string, unknown>;
 }
 
+export interface ReportPriorityBoardItem {
+    entity_name: string;
+    entity_type?: string;
+    family_name?: string;
+    priority_score?: number;
+    risk_level?: string;
+    risk_label?: string;
+    top_reasons?: string[];
+    issue_refs?: string[];
+}
+
+export interface ReportIssueScope {
+    family?: string;
+    entity?: string;
+    company?: string;
+}
+
+export interface ReportIssueTimeRange {
+    start?: string;
+    end?: string;
+}
+
+export interface ReportIssue {
+    issue_id: string;
+    theme?: string;
+    category?: string;
+    scope?: ReportIssueScope;
+    entity_name?: string;
+    company_name?: string;
+    family_name?: string;
+    headline?: string;
+    narrative?: string;
+    severity?: number;
+    confidence?: number;
+    priority?: number;
+    risk_level?: string;
+    risk_label?: string;
+    status?: string;
+    amount_impact?: number;
+    time_range?: ReportIssueTimeRange;
+    why_flagged?: string[];
+    counter_indicators?: string[];
+    evidence_refs?: string[];
+    next_actions?: string[];
+}
+
+export interface ReportQualityCheck {
+    check_id?: string;
+    status?: string;
+    message?: string;
+}
+
+export interface ReportMainView {
+    title?: string;
+    summary_narrative?: string;
+    issue_count?: number;
+    high_risk_issue_count?: number;
+    top_priority_entities?: ReportPriorityBoardItem[];
+    issues?: ReportIssue[];
+    aggregation_summary?: Record<string, unknown>;
+}
+
+export interface ReportPackage {
+    meta?: Record<string, unknown>;
+    coverage?: Record<string, unknown>;
+    priority_board?: ReportPriorityBoardItem[];
+    issues?: ReportIssue[];
+    main_report_view?: ReportMainView;
+    qa_checks?: {
+        summary?: {
+            pass?: number;
+            warn?: number;
+            fail?: number;
+            total?: number;
+        };
+        checks?: ReportQualityCheck[];
+    };
+    appendix_views?: Record<string, unknown>;
+    family_dossiers?: Array<Record<string, unknown>>;
+    person_dossiers?: Array<Record<string, unknown>>;
+    company_dossiers?: Array<Record<string, unknown>>;
+}
+
 // ==================== Data Types ====================
 
 export interface WalletCounterpartySummary {
@@ -526,6 +609,7 @@ export interface DataState {
     profiles: Record<string, Profile>;
     suspicions: SuspicionResult;
     analysisResults: AnalysisResults;
+    reportPackage: ReportPackage | null;
     walletData: WalletDataState;
     categorizedFiles: CategorizedFiles;
 }
@@ -542,10 +626,19 @@ export type TabType = 'overview' | 'risk' | 'graph' | 'supplement' | 'report';
 
 export type ThemeType = 'dark' | 'light';
 
+export interface SemanticNavigationTarget {
+    tab: TabType;
+    entityName?: string;
+    issueId?: string;
+    source?: string;
+    requestKey: number;
+}
+
 export interface UIState {
     activeTab: TabType;
     sidebarCollapsed: boolean;
     theme: ThemeType;
+    semanticNavigation: SemanticNavigationTarget | null;
 }
 
 // ==================== App State ====================
@@ -585,6 +678,7 @@ export interface AnalysisResultsResponse {
     profiles: Record<string, Profile>;
     suspicions: SuspicionResult;
     analysisResults: AnalysisResults;
+    reportPackage?: ReportPackage | null;
     walletData: WalletDataState;
 }
 

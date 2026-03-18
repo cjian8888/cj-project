@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Network, DataSet } from 'vis-network/standalone';
 import type { Data, Node, Edge, Options } from 'vis-network/standalone';
 import { API_BASE_URL } from '../services/api';
@@ -17,6 +17,8 @@ import {
   Building2
 } from 'lucide-react';
 import { formatPartyName, formatRiskLevel, getRiskLevelBadgeStyle } from '../utils/formatters';
+import { useApp } from '../contexts/AppContext';
+import type { ReportIssue, ReportPackage, ReportPriorityBoardItem } from '../types';
 
 // 交易详情接口
 interface TransactionDetail {
@@ -324,7 +326,77 @@ interface GraphData {
   };
 }
 
+interface SemanticDossierSnapshot {
+  dossierType: 'family' | 'person' | 'company';
+  name: string;
+  familyName?: string;
+  summary?: string;
+  riskLevel?: string;
+  riskLabel?: string;
+  priorityScore?: number;
+  confidence?: number;
+  severity?: number;
+  issueCount?: number;
+  transactionCount?: number;
+  totalIncome?: number;
+  totalExpense?: number;
+  realIncome?: number;
+  realExpense?: number;
+  memberCount?: number;
+  issueRefs: string[];
+  members: string[];
+  relatedPersons: string[];
+  relatedCompanies: string[];
+  roleTags: string[];
+  keyIssueCards: Array<{
+    issueId: string;
+    category?: string;
+    headline?: string;
+    riskLevel?: string;
+    priority?: number;
+  }>;
+  keyIssueHeadlines: string[];
+}
+
+const normalizeSemanticName = (value: unknown): string => String(value || '').trim();
+const asSemanticNumber = (value: unknown): number | undefined => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : undefined;
+};
+const asSemanticTextList = (value: unknown): string[] => (
+  Array.isArray(value)
+    ? value.map((item) => String(item || '').trim()).filter(Boolean)
+    : []
+);
+const asKeyIssueCards = (value: unknown): SemanticDossierSnapshot['keyIssueCards'] => (
+  Array.isArray(value)
+    ? value.map((item) => {
+      const card = (item as Record<string, unknown>) || {};
+      return {
+        issueId: String(card.issue_id || '').trim(),
+        category: String(card.category || '').trim() || undefined,
+        headline: String(card.headline || '').trim() || undefined,
+        riskLevel: String(card.risk_level || '').trim() || undefined,
+        priority: asSemanticNumber(card.priority),
+      };
+    }).filter((card) => card.issueId || card.headline)
+    : []
+);
+
+const groupLabelForDisplay = (group: string) => {
+  switch (group) {
+    case 'core': return '核心人员';
+    case 'company': return '关联企业';
+    case 'involved_company': return '涉案企业';
+    case 'wallet_counterparty': return '电子钱包对手方';
+    case 'other': return '其他关联方';
+    default: return group || '未知分组';
+  }
+};
+
 function NetworkGraph({ onLog }: NetworkGraphProps) {
+  const { data: appData, ui, clearSemanticNavigation } = useApp();
+  const reportPackage = appData.reportPackage as ReportPackage | null;
   const htmlReportName = '资金流向可视化.html';
   const excelReportName = '资金核查底稿.xlsx';
   const htmlReportUrl = `${API_BASE_URL}/api/reports/preview/${encodeURIComponent(htmlReportName)}`;
@@ -334,7 +406,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedNode, setSelectedNode] = useState<{ label: string; group: string } | null>(null);
+  const [selectedNode, setSelectedNode] = useState<{ label: string; group: string; entityName: string } | null>(null);
   const [activeSelection, setActiveSelection] = useState<LinkedSelection | null>(null);
   const [viewMode, setViewMode] = useState<'graph' | 'report'>('graph');
   const [reportUrl, setReportUrl] = useState<string | null>(null);
@@ -350,6 +422,185 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
   const thirdPartyRelays = graphData?.report.third_party_relays || [];
   const focusEntities = graphData?.report.focus_entities || [];
   const aggregationSummary = graphData?.report.aggregation_summary || {};
+
+  const semanticPriorityLookup = useMemo(() => {
+    const lookup: Record<string, ReportPriorityBoardItem> = {};
+    const priorityBoard = Array.isArray(reportPackage?.priority_board) ? reportPackage.priority_board : [];
+    priorityBoard.forEach((item) => {
+      const name = normalizeSemanticName(item?.entity_name);
+      if (name) {
+        lookup[name] = item;
+      }
+    });
+    return lookup;
+  }, [reportPackage]);
+
+  const semanticIssuesByEntity = useMemo(() => {
+    const lookup: Record<string, ReportIssue[]> = {};
+    const issues = Array.isArray(reportPackage?.issues) ? reportPackage.issues : [];
+
+    const appendIssue = (name: string, issue: ReportIssue) => {
+      const key = normalizeSemanticName(name);
+      if (!key) {
+        return;
+      }
+      const bucket = lookup[key] || [];
+      if (!bucket.some((item) => item.issue_id && item.issue_id === issue.issue_id)) {
+        bucket.push(issue);
+      }
+      lookup[key] = bucket;
+    };
+
+    issues.forEach((issue) => {
+      const scope = issue.scope || {};
+      appendIssue(scope.entity || '', issue);
+      appendIssue(scope.company || '', issue);
+      appendIssue(scope.family || '', issue);
+      appendIssue(issue.entity_name || '', issue);
+      appendIssue(issue.company_name || '', issue);
+      appendIssue(issue.family_name || '', issue);
+    });
+
+    Object.keys(lookup).forEach((key) => {
+      lookup[key] = [...lookup[key]].sort((left, right) => Number(right.priority || 0) - Number(left.priority || 0));
+    });
+
+    return lookup;
+  }, [reportPackage]);
+
+  const semanticDossierLookup = useMemo(() => {
+    const lookup: Record<string, SemanticDossierSnapshot> = {};
+
+    const appendDossier = (name: string, snapshot: SemanticDossierSnapshot) => {
+      const key = normalizeSemanticName(name);
+      if (!key) {
+        return;
+      }
+      lookup[key] = snapshot;
+    };
+
+    const familyDossiers = Array.isArray(reportPackage?.family_dossiers) ? reportPackage.family_dossiers : [];
+    familyDossiers.forEach((item: Record<string, unknown>) => {
+      const familyName = normalizeSemanticName(item.family_name || item.name);
+      if (!familyName) {
+        return;
+      }
+      const riskOverview = (item.risk_overview as Record<string, unknown> | undefined) || {};
+      const keyIssueCards = asKeyIssueCards(item.key_issue_cards);
+      appendDossier(familyName, {
+        dossierType: 'family',
+        name: familyName,
+        summary: String(item.summary || '').trim() || undefined,
+        riskLevel: String(riskOverview.risk_level || '').trim(),
+        riskLabel: String(riskOverview.risk_label || '').trim(),
+        priorityScore: asSemanticNumber(riskOverview.priority_score),
+        confidence: asSemanticNumber(riskOverview.confidence),
+        severity: asSemanticNumber(riskOverview.severity),
+        issueCount: asSemanticNumber(riskOverview.issue_count),
+        transactionCount: asSemanticNumber(item.transaction_count),
+        totalIncome: asSemanticNumber(item.total_income),
+        totalExpense: asSemanticNumber(item.total_expense),
+        memberCount: asSemanticNumber(item.member_count),
+        issueRefs: Array.isArray(item.issue_refs) ? item.issue_refs.map((ref) => String(ref)) : [],
+        members: asSemanticTextList(item.members),
+        relatedPersons: [],
+        relatedCompanies: [],
+        roleTags: [],
+        keyIssueCards,
+        keyIssueHeadlines: keyIssueCards.map((card) => card.headline || '').filter(Boolean),
+      });
+    });
+
+    const personDossiers = Array.isArray(reportPackage?.person_dossiers) ? reportPackage.person_dossiers : [];
+    personDossiers.forEach((item: Record<string, unknown>) => {
+      const entityName = normalizeSemanticName(item.entity_name || item.name);
+      if (!entityName) {
+        return;
+      }
+      const riskOverview = (item.risk_overview as Record<string, unknown> | undefined) || {};
+      const keyIssueCards = asKeyIssueCards(item.key_issue_cards);
+      appendDossier(entityName, {
+        dossierType: 'person',
+        name: entityName,
+        familyName: normalizeSemanticName(item.family_name),
+        summary: String(item.summary || '').trim() || undefined,
+        riskLevel: String(riskOverview.risk_level || '').trim(),
+        riskLabel: String(riskOverview.risk_label || '').trim(),
+        priorityScore: asSemanticNumber(riskOverview.priority_score),
+        confidence: asSemanticNumber(riskOverview.confidence),
+        severity: asSemanticNumber(riskOverview.severity),
+        issueCount: asSemanticNumber(riskOverview.issue_count),
+        transactionCount: asSemanticNumber(item.transaction_count),
+        totalIncome: asSemanticNumber(item.total_income),
+        totalExpense: asSemanticNumber(item.total_expense),
+        realIncome: asSemanticNumber(item.real_income),
+        realExpense: asSemanticNumber(item.real_expense),
+        issueRefs: Array.isArray(item.issue_refs) ? item.issue_refs.map((ref) => String(ref)) : [],
+        members: [],
+        relatedPersons: [],
+        relatedCompanies: [],
+        roleTags: [],
+        keyIssueCards,
+        keyIssueHeadlines: keyIssueCards.map((card) => card.headline || '').filter(Boolean),
+      });
+    });
+
+    const companyDossiers = Array.isArray(reportPackage?.company_dossiers) ? reportPackage.company_dossiers : [];
+    companyDossiers.forEach((item: Record<string, unknown>) => {
+      const entityName = normalizeSemanticName(item.entity_name || item.name);
+      if (!entityName) {
+        return;
+      }
+      const riskOverview = (item.risk_overview as Record<string, unknown> | undefined) || {};
+      const keyIssueCards = asKeyIssueCards(item.key_issue_cards);
+      appendDossier(entityName, {
+        dossierType: 'company',
+        name: entityName,
+        summary: String(item.summary || '').trim() || undefined,
+        riskLevel: String(riskOverview.risk_level || '').trim(),
+        riskLabel: String(riskOverview.risk_label || '').trim(),
+        priorityScore: asSemanticNumber(riskOverview.priority_score),
+        confidence: asSemanticNumber(riskOverview.confidence),
+        severity: asSemanticNumber(riskOverview.severity),
+        issueCount: asSemanticNumber(riskOverview.issue_count),
+        transactionCount: asSemanticNumber(item.transaction_count),
+        totalIncome: asSemanticNumber(item.total_income),
+        totalExpense: asSemanticNumber(item.total_expense),
+        issueRefs: Array.isArray(item.issue_refs) ? item.issue_refs.map((ref) => String(ref)) : [],
+        members: [],
+        relatedPersons: asSemanticTextList(item.related_persons),
+        relatedCompanies: asSemanticTextList(item.related_companies),
+        roleTags: Array.isArray(item.role_tags) ? item.role_tags.map((tag) => String(tag)) : [],
+        keyIssueCards,
+        keyIssueHeadlines: keyIssueCards.map((card) => card.headline || '').filter(Boolean),
+      });
+    });
+
+    return lookup;
+  }, [reportPackage]);
+
+  const selectedNodeSemantic = useMemo(() => {
+    const entityName = normalizeSemanticName(selectedNode?.entityName);
+    if (!entityName) {
+      return null;
+    }
+    const allIssues = semanticIssuesByEntity[entityName] || [];
+    const dossier = semanticDossierLookup[entityName] || null;
+    const previewIssues = allIssues.slice(0, 3);
+    const previewIssueIds = new Set(previewIssues.map((issue) => String(issue.issue_id || '').trim()).filter(Boolean));
+    const dossierHighlights = (dossier?.keyIssueCards || [])
+      .filter((card) => !(card.issueId && previewIssueIds.has(card.issueId)))
+      .slice(0, 3);
+
+    return {
+      entityName,
+      priority: semanticPriorityLookup[entityName] || null,
+      dossier,
+      issues: previewIssues,
+      issueCount: allIssues.length || dossier?.issueCount || 0,
+      dossierHighlights,
+    };
+  }, [selectedNode, semanticDossierLookup, semanticIssuesByEntity, semanticPriorityLookup]);
   
   // 切换展开/折叠状态
   const toggleSection = (section: string) => {
@@ -368,6 +619,16 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
       return next;
     });
   };
+
+  useEffect(() => {
+    if (!selectedNode?.entityName) {
+      return;
+    }
+    setExpandedSections(prev => ({
+      ...prev,
+      selectedNodeSemantic: true,
+    }));
+  }, [selectedNode?.entityName]);
 
   // 格式化金额显示 - 统一使用万元单位（P2: 金额单位统一）
   const formatAmount = (amount: number) => {
@@ -580,9 +841,17 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
     });
   };
 
+  const resolveSemanticEntityNameFromNode = (node?: { id?: unknown; label?: unknown } | null) => {
+    const nodeId = String(node?.id || '').trim();
+    if (nodeId) {
+      return nodeId;
+    }
+    return String(node?.label || '').trim();
+  };
+
   const resolveGraphNodeNameById = (nodeId: string | number) => {
     const matchedNode = graphData?.nodes.find(node => String(node.id) === String(nodeId));
-    return String(matchedNode?.label || matchedNode?.id || nodeId).trim();
+    return resolveSemanticEntityNameFromNode(matchedNode) || String(nodeId).trim();
   };
 
   const focusGraphNodes = (names: string[], label: string) => {
@@ -606,11 +875,13 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
     });
 
     const firstNode = matchedNodes[0];
+    const semanticEntityName = resolveSemanticEntityNameFromNode(firstNode) || String(label).trim();
     setSelectedNode({
-      label: formatPartyName(String(firstNode.label || firstNode.id || label)),
+      label: formatPartyName(semanticEntityName),
       group: String(firstNode.group || 'other'),
+      entityName: semanticEntityName,
     });
-    onLog?.(`图谱已定位 ${label}: ${matchedNodes.map(node => String(node.label || node.id)).join('、')}`);
+    onLog?.(`图谱已定位 ${label}: ${matchedNodes.map(node => resolveSemanticEntityNameFromNode(node)).filter(Boolean).join('、')}`);
   };
 
   const getCycleNodes = (cycle: GraphData['report']['fund_cycles'][number]) => {
@@ -1103,7 +1374,11 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
           const nodeData = nodes.get(nodeId);
           if (nodeData && !Array.isArray(nodeData)) {
             const n = nodeData as any;
-            setSelectedNode({ label: n.label, group: n.group });
+            setSelectedNode({
+              label: n.label,
+              group: n.group,
+              entityName: resolveGraphNodeNameById(nodeId),
+            });
             onLog?.(`选中节点: ${n.label}`);
             syncPanelToGraphSelection({
               nodeNames: [resolveGraphNodeNameById(nodeId)],
@@ -1143,6 +1418,25 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
       }
     };
   }, [graphData]);
+
+  useEffect(() => {
+    const pendingTarget = ui.semanticNavigation;
+    if (ui.activeTab !== 'graph' || pendingTarget?.tab !== 'graph') {
+      return;
+    }
+    const targetEntityName = String(pendingTarget?.entityName || '').trim();
+    if (!targetEntityName || !networkInstance.current) {
+      return;
+    }
+
+    focusGraphNodes([targetEntityName], `语义定位 ${targetEntityName}`);
+    clearSemanticNavigation();
+  }, [
+    clearSemanticNavigation,
+    graphData,
+    ui.activeTab,
+    ui.semanticNavigation,
+  ]);
 
   return (
     <div className="h-full w-full flex bg-gradient-to-br from-theme-bg-base to-theme-bg-elevated text-white" style={{ minHeight: '700px' }}>
@@ -1433,6 +1727,268 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
             </div>
           )}
 
+          {graphData && selectedNode && (
+            <div className="stat-card bg-white/10 rounded-lg overflow-hidden border-l-4 border-cyan-500">
+              <button
+                onClick={() => toggleSection('selectedNodeSemantic')}
+                className="w-full p-4 hover:bg-white/5 transition-colors text-left flex items-center justify-between"
+              >
+                <div>
+                  <h4 className="text-white text-sm font-medium mb-1">🧩 选中节点语义详情</h4>
+                  <div className="text-sm font-semibold text-cyan-300">
+                    {selectedNode.label}
+                  </div>
+                  <div className="text-xs theme-text-muted">
+                    {groupLabelForDisplay(selectedNode.group)}
+                  </div>
+                </div>
+                {expandedSections['selectedNodeSemantic'] ?
+                  <ChevronUp className="w-5 h-5 theme-text-muted" /> :
+                  <ChevronDown className="w-5 h-5 theme-text-muted" />
+                }
+              </button>
+              {expandedSections['selectedNodeSemantic'] && (
+                <div className="px-4 pb-4 border-t border-white/10 pt-3 space-y-3">
+                  {selectedNodeSemantic?.priority || selectedNodeSemantic?.dossier || selectedNodeSemantic?.issues.length ? (
+                    <>
+                      {(selectedNodeSemantic.priority || selectedNodeSemantic.dossier) && (
+                        <div className="rounded-lg bg-white/5 p-3 space-y-2">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className={getRiskLevelBadgeStyle(
+                              selectedNodeSemantic.priority?.risk_level
+                              || selectedNodeSemantic.dossier?.riskLevel
+                              || 'medium'
+                            )}>
+                              {formatRiskLevel(
+                                selectedNodeSemantic.priority?.risk_level
+                                || selectedNodeSemantic.dossier?.riskLevel
+                                || 'medium'
+                              )}
+                            </span>
+                            {selectedNodeSemantic.priority?.priority_score !== undefined && (
+                              <span className="text-xs font-mono text-cyan-300">
+                                正式优先级 {Number(selectedNodeSemantic.priority.priority_score).toFixed(1)}
+                              </span>
+                            )}
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            {selectedNodeSemantic.dossier?.transactionCount !== undefined ? (
+                              <div className="rounded-md bg-black/15 px-2.5 py-2">
+                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">交易笔数</div>
+                                <div className="mt-1 text-sm font-semibold text-white">
+                                  {Math.round(selectedNodeSemantic.dossier.transactionCount).toLocaleString('zh-CN')} 笔
+                                </div>
+                              </div>
+                            ) : null}
+                            {selectedNodeSemantic.issueCount ? (
+                              <div className="rounded-md bg-black/15 px-2.5 py-2">
+                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">正式问题卡</div>
+                                <div className="mt-1 text-sm font-semibold text-white">
+                                  {selectedNodeSemantic.issueCount} 条
+                                </div>
+                              </div>
+                            ) : null}
+                            {selectedNodeSemantic.dossier?.totalIncome !== undefined ? (
+                              <div className="rounded-md bg-black/15 px-2.5 py-2">
+                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">总流入</div>
+                                <div className="mt-1 text-sm font-semibold text-emerald-300">
+                                  {formatAmount(selectedNodeSemantic.dossier.totalIncome)}
+                                </div>
+                              </div>
+                            ) : null}
+                            {selectedNodeSemantic.dossier?.totalExpense !== undefined ? (
+                              <div className="rounded-md bg-black/15 px-2.5 py-2">
+                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">总流出</div>
+                                <div className="mt-1 text-sm font-semibold text-rose-300">
+                                  {formatAmount(selectedNodeSemantic.dossier.totalExpense)}
+                                </div>
+                              </div>
+                            ) : null}
+                            {selectedNodeSemantic.dossier?.realIncome !== undefined ? (
+                              <div className="rounded-md bg-black/15 px-2.5 py-2">
+                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">真实收入</div>
+                                <div className="mt-1 text-sm font-semibold text-emerald-300">
+                                  {formatAmount(selectedNodeSemantic.dossier.realIncome)}
+                                </div>
+                              </div>
+                            ) : null}
+                            {selectedNodeSemantic.dossier?.realExpense !== undefined ? (
+                              <div className="rounded-md bg-black/15 px-2.5 py-2">
+                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">真实支出</div>
+                                <div className="mt-1 text-sm font-semibold text-rose-300">
+                                  {formatAmount(selectedNodeSemantic.dossier.realExpense)}
+                                </div>
+                              </div>
+                            ) : null}
+                            {selectedNodeSemantic.dossier?.memberCount !== undefined ? (
+                              <div className="rounded-md bg-black/15 px-2.5 py-2">
+                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">家庭成员</div>
+                                <div className="mt-1 text-sm font-semibold text-white">
+                                  {Math.round(selectedNodeSemantic.dossier.memberCount)} 名
+                                </div>
+                              </div>
+                            ) : null}
+                            {selectedNodeSemantic.dossier?.confidence !== undefined ? (
+                              <div className="rounded-md bg-black/15 px-2.5 py-2">
+                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">置信度</div>
+                                <div className="mt-1 text-sm font-semibold text-white">
+                                  {(selectedNodeSemantic.dossier.confidence * 100).toFixed(0)}%
+                                </div>
+                              </div>
+                            ) : null}
+                          </div>
+                          {selectedNodeSemantic.priority?.family_name ? (
+                            <div className="text-xs theme-text-dim">
+                              所属家庭: {selectedNodeSemantic.priority.family_name}
+                            </div>
+                          ) : null}
+                          {!selectedNodeSemantic.priority?.family_name && selectedNodeSemantic.dossier?.familyName ? (
+                            <div className="text-xs theme-text-dim">
+                              所属家庭: {selectedNodeSemantic.dossier.familyName}
+                            </div>
+                          ) : null}
+                          {selectedNodeSemantic.dossier?.members.length ? (
+                            <div className="text-xs theme-text-secondary leading-relaxed">
+                              家庭成员: {selectedNodeSemantic.dossier.members.slice(0, 6).join('、')}
+                            </div>
+                          ) : null}
+                          {selectedNodeSemantic.dossier?.relatedPersons.length ? (
+                            <div className="text-xs theme-text-secondary leading-relaxed">
+                              关联人员: {selectedNodeSemantic.dossier.relatedPersons.slice(0, 6).join('、')}
+                            </div>
+                          ) : null}
+                          {selectedNodeSemantic.dossier?.relatedCompanies.length ? (
+                            <div className="text-xs theme-text-secondary leading-relaxed">
+                              关联公司: {selectedNodeSemantic.dossier.relatedCompanies.slice(0, 6).join('、')}
+                            </div>
+                          ) : null}
+                          {selectedNodeSemantic.priority?.top_reasons?.length ? (
+                            <div className="text-xs theme-text-secondary leading-relaxed">
+                              {selectedNodeSemantic.priority.top_reasons.slice(0, 2).join('；')}
+                            </div>
+                          ) : null}
+                          {selectedNodeSemantic.dossier?.summary ? (
+                            <div className="text-xs theme-text-secondary leading-relaxed">
+                              {selectedNodeSemantic.dossier.summary}
+                            </div>
+                          ) : null}
+                          {selectedNodeSemantic.dossier?.roleTags?.length ? (
+                            <div className="flex flex-wrap gap-1.5">
+                              {selectedNodeSemantic.dossier.roleTags.slice(0, 3).map((tag) => (
+                                <span
+                                  key={`${selectedNodeSemantic.entityName}-${tag}`}
+                                  className="text-[10px] px-2 py-0.5 rounded-full border border-cyan-500/20 text-cyan-300 bg-cyan-500/10"
+                                >
+                                  {tag}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+                          {selectedNodeSemantic.dossier?.keyIssueHeadlines.length ? (
+                            <div className="space-y-1">
+                              <div className="text-[10px] uppercase tracking-wide theme-text-dim">卷宗重点</div>
+                              {selectedNodeSemantic.dossier.keyIssueHeadlines.slice(0, 2).map((headline) => (
+                                <div
+                                  key={`${selectedNodeSemantic.entityName}-${headline}`}
+                                  className="text-xs theme-text-secondary leading-relaxed"
+                                >
+                                  {headline}
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
+                          {(selectedNodeSemantic.priority?.issue_refs?.length || selectedNodeSemantic.dossier?.issueRefs?.length) ? (
+                            <div className="flex flex-wrap gap-1.5">
+                              {(selectedNodeSemantic.priority?.issue_refs || selectedNodeSemantic.dossier?.issueRefs || []).slice(0, 4).map((ref) => (
+                                <span
+                                  key={`${selectedNodeSemantic.entityName}-${ref}`}
+                                  className="text-[10px] px-2 py-0.5 rounded-full border border-amber-500/20 text-amber-200 bg-amber-500/10 font-mono"
+                                >
+                                  {ref}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      )}
+
+                      {selectedNodeSemantic.dossierHighlights.length > 0 && (
+                        <div className="rounded-lg bg-white/5 p-3 space-y-2">
+                          <div className="text-[10px] uppercase tracking-wide theme-text-dim">卷宗重点问题</div>
+                          {selectedNodeSemantic.dossierHighlights.map((card, idx) => (
+                            <div
+                              key={`${card.issueId || selectedNodeSemantic.entityName}-highlight-${idx}`}
+                              className="rounded-md bg-black/15 px-3 py-2"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className={getRiskLevelBadgeStyle(card.riskLevel || selectedNodeSemantic.dossier?.riskLevel || 'medium')}>
+                                  {formatRiskLevel(card.riskLevel || selectedNodeSemantic.dossier?.riskLevel || 'medium')}
+                                </span>
+                                <span className="text-[10px] font-mono theme-text-dim">
+                                  {card.issueId || card.category || 'dossier'}
+                                </span>
+                              </div>
+                              <div className="mt-2 text-sm text-white leading-6">
+                                {card.headline || '正式卷宗已收录重点问题'}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {selectedNodeSemantic.issues.length > 0 && (
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="text-[10px] uppercase tracking-wide theme-text-dim">问题卡联动</div>
+                            {selectedNodeSemantic.issueCount > selectedNodeSemantic.issues.length ? (
+                              <div className="text-[10px] theme-text-dim">
+                                另有 {selectedNodeSemantic.issueCount - selectedNodeSemantic.issues.length} 条已收录正式卷宗
+                              </div>
+                            ) : null}
+                          </div>
+                          {selectedNodeSemantic.issues.map((issue, idx) => (
+                            <div key={`${issue.issue_id || selectedNodeSemantic.entityName}-${idx}`} className="rounded-lg bg-white/5 p-3">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className={getRiskLevelBadgeStyle(issue.risk_level || 'medium')}>
+                                  {formatRiskLevel(issue.risk_level || 'medium')}
+                                </span>
+                                <span className="text-[10px] font-mono theme-text-dim">
+                                  {issue.issue_id || issue.category || 'issue'}
+                                </span>
+                              </div>
+                              <div className="mt-2 text-sm text-white leading-6">
+                                {issue.headline || issue.narrative || '待核查问题'}
+                              </div>
+                              {issue.why_flagged?.length ? (
+                                <div className="mt-2 text-xs theme-text-secondary leading-relaxed">
+                                  触发依据: {issue.why_flagged.slice(0, 2).join('；')}
+                                </div>
+                              ) : null}
+                              {issue.next_actions?.length ? (
+                                <div className="mt-2 text-xs theme-text-muted leading-relaxed">
+                                  下一步: {issue.next_actions.slice(0, 2).join('；')}
+                                </div>
+                              ) : null}
+                              {issue.evidence_refs?.length ? (
+                                <div className="mt-2 text-[11px] font-mono theme-text-dim leading-relaxed">
+                                  证据引用: {issue.evidence_refs.slice(0, 2).join('；')}
+                                </div>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="text-sm theme-text-dim leading-relaxed">
+                      当前选中节点尚未进入正式语义层，暂无法展示问题卡或卷宗摘要。
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* 重点核查对象 - 可折叠 */}
           {graphData && (
             <div className="stat-card bg-white/10 rounded-lg overflow-hidden border-l-4 border-rose-500">
@@ -1467,6 +2023,14 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                     <div className="space-y-3">
                       {focusEntities.map((entity, idx) => {
                         const inGraph = entity.in_graph || Boolean(focusEntityInGraph(entity));
+                        const semanticKey = normalizeSemanticName(entity.name);
+                        const semanticPriority = semanticPriorityLookup[semanticKey];
+                        const semanticDossier = semanticDossierLookup[semanticKey];
+                        const semanticIssues = semanticIssuesByEntity[semanticKey] || [];
+                        const displayRiskLevel = semanticPriority?.risk_level
+                          || semanticDossier?.riskLevel
+                          || entity.risk_level
+                          || 'medium';
                         return (
                           <button
                             key={`${entity.name}-${idx}`}
@@ -1483,27 +2047,53 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                                   {inGraph ? '可在当前图谱中定位' : '当前采样图未展示该对象'}
                                 </div>
                               </div>
-                              <span className={getRiskLevelBadgeStyle(entity.risk_level || 'medium')}>
-                                {formatRiskLevel(entity.risk_level || 'medium')}
+                              <span className={getRiskLevelBadgeStyle(displayRiskLevel)}>
+                                {formatRiskLevel(displayRiskLevel)}
                               </span>
                             </div>
                             <div className="mt-2 flex flex-wrap items-center gap-3 text-xs theme-text-secondary">
                               <span>评分 {entity.risk_score.toFixed(1)}</span>
+                              {semanticPriority?.priority_score !== undefined && (
+                                <span>正式优先级 {Number(semanticPriority.priority_score).toFixed(1)}</span>
+                              )}
                               {entity.risk_confidence !== undefined && (
                                 <span>{formatConfidence(entity.risk_confidence)}</span>
                               )}
                               {entity.high_priority_clue_count !== undefined && (
                                 <span>高优先线索 {entity.high_priority_clue_count}</span>
                               )}
+                              {semanticIssues.length > 0 && (
+                                <span>问题卡 {semanticIssues.length}</span>
+                              )}
                             </div>
-                            {entity.summary && (
+                            {(semanticDossier?.summary || entity.summary) && (
                               <div className="mt-2 text-xs theme-text-secondary leading-relaxed">
-                                {entity.summary}
+                                {semanticDossier?.summary || entity.summary}
                               </div>
                             )}
-                            {entity.top_clues && entity.top_clues.length > 0 && (
+                            {(semanticPriority?.top_reasons?.length || entity.top_clues?.length) && (
                               <div className="mt-2 text-xs text-amber-200 leading-relaxed">
-                                {entity.top_clues.slice(0, 1).join('；')}
+                                {(semanticPriority?.top_reasons?.slice(0, 1) || entity.top_clues.slice(0, 1)).join('；')}
+                              </div>
+                            )}
+                            {(semanticDossier?.roleTags?.length || semanticPriority?.issue_refs?.length) && (
+                              <div className="mt-2 flex flex-wrap gap-1.5">
+                                {(semanticDossier?.roleTags || []).slice(0, 2).map((tag) => (
+                                  <span
+                                    key={`${entity.name}-${tag}`}
+                                    className="text-[10px] px-2 py-0.5 rounded-full border border-cyan-500/20 text-cyan-300 bg-cyan-500/10"
+                                  >
+                                    {tag}
+                                  </span>
+                                ))}
+                                {(semanticPriority?.issue_refs || []).slice(0, 2).map((ref) => (
+                                  <span
+                                    key={`${entity.name}-${ref}`}
+                                    className="text-[10px] px-2 py-0.5 rounded-full border border-amber-500/20 text-amber-200 bg-amber-500/10 font-mono"
+                                  >
+                                    {ref}
+                                  </span>
+                                ))}
                               </div>
                             )}
                           </button>
@@ -2778,7 +3368,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
             )}
             {selectedNode && (
               <div className="text-sm text-cyan-400">
-                选中: {selectedNode.label} ({selectedNode.group})
+                选中: {selectedNode.label} ({groupLabelForDisplay(selectedNode.group)})
               </div>
             )}
           </div>

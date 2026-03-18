@@ -757,6 +757,163 @@ def test_get_results_deduplicates_cached_direct_transfer_mirror_rows():
     assert records[0]["description"] == "中行系统跨行转账附言（原始流水码已省略）"
 
 
+def test_get_results_includes_report_package_when_semantic_artifact_exists(tmp_path):
+    output_dir = tmp_path / "output"
+    results_dir = output_dir / "analysis_results" / "qa"
+    results_dir.mkdir(parents=True)
+    (results_dir / "report_package.json").write_text(
+        json.dumps(
+            {
+                "main_report_view": {
+                    "summary_narrative": "统一语义层共归集2项重点问题。",
+                    "issue_count": 2,
+                },
+                "priority_board": [
+                    {
+                        "entity_name": "张三",
+                        "priority_score": 88.5,
+                        "risk_level": "high",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    previous_state = {
+        "status": api_server.analysis_state.status,
+        "progress": api_server.analysis_state.progress,
+        "phase": api_server.analysis_state.phase,
+        "start_time": api_server.analysis_state.start_time,
+        "end_time": api_server.analysis_state.end_time,
+        "results": api_server.analysis_state.results,
+        "error": api_server.analysis_state.error,
+    }
+    previous_config = dict(api_server._current_config)
+    previous_sync = api_server._sync_analysis_state_with_active_output
+
+    api_server.analysis_state.status = "completed"
+    api_server.analysis_state.progress = 100
+    api_server.analysis_state.phase = "已从缓存恢复"
+    api_server.analysis_state.results = {
+        "persons": ["张三"],
+        "companies": [],
+        "suspicions": {"directTransfers": []},
+        "analysisResults": {},
+        "graphData": {"nodes": [], "edges": []},
+    }
+
+    try:
+        api_server._current_config.clear()
+        api_server._current_config["outputDirectory"] = str(output_dir)
+        api_server._sync_analysis_state_with_active_output = lambda force_reload=False: True
+
+        response = asyncio.run(api_server.get_results())
+        payload = json.loads(response.body.decode("utf-8"))
+    finally:
+        api_server.analysis_state.status = previous_state["status"]
+        api_server.analysis_state.progress = previous_state["progress"]
+        api_server.analysis_state.phase = previous_state["phase"]
+        api_server.analysis_state.start_time = previous_state["start_time"]
+        api_server.analysis_state.end_time = previous_state["end_time"]
+        api_server.analysis_state.results = previous_state["results"]
+        api_server.analysis_state.error = previous_state["error"]
+        api_server._sync_analysis_state_with_active_output = previous_sync
+        api_server._current_config.clear()
+        api_server._current_config.update(previous_config)
+
+    assert payload["data"]["reportPackage"]["main_report_view"]["issue_count"] == 2
+    assert payload["data"]["reportPackage"]["priority_board"][0]["entity_name"] == "张三"
+
+
+def test_get_results_refreshes_report_package_when_semantic_artifact_missing(
+    tmp_path, monkeypatch
+):
+    output_dir = tmp_path / "output"
+    results_dir = output_dir / "analysis_results"
+    results_dir.mkdir(parents=True)
+    refresh_calls = []
+
+    def fake_refresh(active_output_dir):
+        refresh_calls.append(active_output_dir)
+        qa_dir = output_dir / "analysis_results" / "qa"
+        qa_dir.mkdir(parents=True, exist_ok=True)
+        (qa_dir / "report_package.json").write_text(
+            json.dumps(
+                {
+                    "main_report_view": {
+                        "summary_narrative": "自动补建语义包成功。",
+                        "issue_count": 1,
+                    },
+                    "priority_board": [
+                        {
+                            "entity_name": "李四",
+                            "priority_score": 76.0,
+                            "risk_level": "medium",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return {"report_package_path": str(qa_dir / "report_package.json")}
+
+    previous_state = {
+        "status": api_server.analysis_state.status,
+        "progress": api_server.analysis_state.progress,
+        "phase": api_server.analysis_state.phase,
+        "start_time": api_server.analysis_state.start_time,
+        "end_time": api_server.analysis_state.end_time,
+        "results": api_server.analysis_state.results,
+        "error": api_server.analysis_state.error,
+    }
+    previous_config = dict(api_server._current_config)
+
+    api_server.analysis_state.status = "completed"
+    api_server.analysis_state.progress = 100
+    api_server.analysis_state.phase = "已从缓存恢复"
+    api_server.analysis_state.results = {
+        "persons": ["李四"],
+        "companies": [],
+        "suspicions": {"directTransfers": []},
+        "analysisResults": {},
+        "graphData": {"nodes": [], "edges": []},
+    }
+
+    try:
+        api_server._current_config.clear()
+        api_server._current_config["outputDirectory"] = str(output_dir)
+        monkeypatch.setattr(
+            api_server,
+            "_sync_analysis_state_with_active_output",
+            lambda force_reload=False: True,
+        )
+        monkeypatch.setattr(
+            api_server,
+            "_refresh_report_semantic_artifacts",
+            fake_refresh,
+        )
+
+        response = asyncio.run(api_server.get_results())
+        payload = json.loads(response.body.decode("utf-8"))
+    finally:
+        api_server.analysis_state.status = previous_state["status"]
+        api_server.analysis_state.progress = previous_state["progress"]
+        api_server.analysis_state.phase = previous_state["phase"]
+        api_server.analysis_state.start_time = previous_state["start_time"]
+        api_server.analysis_state.end_time = previous_state["end_time"]
+        api_server.analysis_state.results = previous_state["results"]
+        api_server.analysis_state.error = previous_state["error"]
+        api_server._current_config.clear()
+        api_server._current_config.update(previous_config)
+
+    assert refresh_calls == [str(output_dir)]
+    assert payload["data"]["reportPackage"]["main_report_view"]["issue_count"] == 1
+    assert payload["data"]["reportPackage"]["priority_board"][0]["entity_name"] == "李四"
+
+
 def test_preview_report_file_supports_head_requests_for_html(tmp_path):
     output_dir = tmp_path / "output"
     results_dir = output_dir / "analysis_results"
@@ -785,6 +942,227 @@ def test_preview_report_file_supports_head_requests_for_html(tmp_path):
         assert response.status_code == 200
         assert response.body == b""
         assert response.headers["content-type"].startswith("text/html")
+    finally:
+        api_server._current_config.clear()
+        api_server._current_config.update(previous_config)
+
+
+def test_get_report_manifest_groups_files_by_semantic_category(tmp_path):
+    output_dir = tmp_path / "output"
+    results_dir = output_dir / "analysis_results"
+    qa_dir = results_dir / "qa"
+    appendix_dir = results_dir / "专项报告"
+    dossier_dir = results_dir / "对象卷宗"
+
+    qa_dir.mkdir(parents=True)
+    appendix_dir.mkdir(parents=True)
+    dossier_dir.mkdir(parents=True)
+
+    (results_dir / "核查结果分析报告.txt").write_text("main", encoding="utf-8")
+    (results_dir / "初查报告.html").write_text("<html></html>", encoding="utf-8")
+    (results_dir / "资金核查底稿.xlsx").write_text("excel", encoding="utf-8")
+    (results_dir / "分析执行日志.txt").write_text("log", encoding="utf-8")
+    (qa_dir / "report_package.json").write_text('{"ok":true}', encoding="utf-8")
+    (qa_dir / "report_consistency_check.txt").write_text("qa", encoding="utf-8")
+    (appendix_dir / "资金穿透分析报告.txt").write_text("appendix", encoding="utf-8")
+    (dossier_dir / "张三对象卷宗.txt").write_text("dossier", encoding="utf-8")
+
+    previous_config = dict(api_server._current_config)
+
+    try:
+        api_server._current_config.clear()
+        api_server._current_config["outputDirectory"] = str(output_dir)
+
+        payload = asyncio.run(api_server.get_report_manifest())
+        groups = {item["key"]: item for item in payload["groups"]}
+
+        assert payload["success"] is True
+        assert payload["totals"]["reportCount"] == 8
+        assert "primary_reports" in groups
+        assert "appendices" in groups
+        assert "dossiers" in groups
+        assert "qa_artifacts" in groups
+        assert "workpapers" in groups
+        assert "technical_files" in groups
+        assert any(
+            item["name"] == "qa/report_package.json"
+            for item in groups["qa_artifacts"]["items"]
+        )
+        assert any(
+            item["name"] == "专项报告/资金穿透分析报告.txt"
+            for item in groups["appendices"]["items"]
+        )
+        assert any(
+            item["name"] == "对象卷宗/张三对象卷宗.txt"
+            for item in groups["dossiers"]["items"]
+        )
+    finally:
+        api_server._current_config.clear()
+        api_server._current_config.update(previous_config)
+
+
+def test_get_report_manifest_exposes_semantic_navigation_metadata(tmp_path):
+    output_dir = tmp_path / "output"
+    results_dir = output_dir / "analysis_results"
+    qa_dir = results_dir / "qa"
+    appendix_dir = results_dir / "专项报告"
+    dossier_dir = results_dir / "对象卷宗"
+
+    qa_dir.mkdir(parents=True)
+    appendix_dir.mkdir(parents=True)
+    dossier_dir.mkdir(parents=True)
+
+    semantic_package = {
+        "main_report_view": {
+            "summary_narrative": "统一语义层共归集3项重点问题；其中高风险1项；优先核查对象为张三、测试科技有限公司。",
+            "issue_count": 3,
+            "high_risk_issue_count": 1,
+            "top_priority_entities": [
+                {
+                    "entity_name": "张三",
+                    "top_reasons": ["大额往来异常", "与测试科技有限公司存在直接资金往来"],
+                },
+                {
+                    "entity_name": "测试科技有限公司",
+                    "top_reasons": ["公司卷宗已形成", "存在通道节点特征"],
+                },
+            ],
+        },
+        "appendix_views": {
+            "appendix_index": {
+                "items": [
+                    {
+                        "appendix_key": "appendix_a_assets_income",
+                        "title": "附录A 资产与收入匹配",
+                        "summary_line": "覆盖2名人员、1个家庭，收支倒挂1人。",
+                        "item_count": 3,
+                    },
+                    {
+                        "appendix_key": "appendix_c_network_penetration",
+                        "title": "附录C 关系网络与资金穿透",
+                        "summary_line": "提炼2个网络重点对象，关联穿透问题4项。",
+                        "item_count": 4,
+                    },
+                    {
+                        "appendix_key": "appendix_e_wallet_supplement",
+                        "title": "附录E 电子钱包补证",
+                        "summary_line": "电子钱包状态已接入，覆盖1个主体，摘要交易15笔。",
+                        "item_count": 2,
+                    },
+                ]
+            }
+        },
+        "family_dossiers": [{"family_name": "张三家庭"}],
+        "person_dossiers": [{"entity_name": "张三"}],
+        "company_dossiers": [
+            {
+                "entity_name": "测试科技有限公司",
+                "role_tags": ["通道节点", "桥接节点"],
+                "risk_overview": {"risk_level": "high"},
+            }
+        ],
+        "qa_checks": {
+            "summary": {"pass": 3, "warn": 1, "fail": 1, "total": 5},
+            "checks": [
+                {
+                    "check_id": "high_risk_requires_traceable_evidence_refs",
+                    "status": "fail",
+                    "message": "High-risk issue is missing traceable evidence refs.",
+                },
+                {
+                    "check_id": "company_dossiers_enriched",
+                    "status": "warn",
+                    "message": "Some company dossiers were materialized but still lack role/risk enrichment.",
+                },
+            ],
+        },
+    }
+
+    (results_dir / "核查结果分析报告.txt").write_text("main", encoding="utf-8")
+    (results_dir / "初查报告.html").write_text("<html></html>", encoding="utf-8")
+    (results_dir / "电子钱包补充分析报告.txt").write_text("wallet", encoding="utf-8")
+    (results_dir / "电子钱包重点核查清单.txt").write_text("wallet list", encoding="utf-8")
+    (qa_dir / "report_package.json").write_text(
+        json.dumps(semantic_package, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (qa_dir / "report_consistency_check.txt").write_text("qa", encoding="utf-8")
+    (appendix_dir / "资金穿透分析报告.txt").write_text("appendix", encoding="utf-8")
+    (dossier_dir / "张三对象卷宗.txt").write_text("dossier", encoding="utf-8")
+
+    previous_config = dict(api_server._current_config)
+
+    try:
+        api_server._current_config.clear()
+        api_server._current_config["outputDirectory"] = str(output_dir)
+
+        payload = asyncio.run(api_server.get_report_manifest())
+        groups = {item["key"]: item for item in payload["groups"]}
+        report_lookup = {item["name"]: item for item in payload["reports"]}
+
+        assert (
+            payload["semanticOverview"]["mainReport"]["issueCount"] == 3
+        )
+        assert (
+            groups["primary_reports"]["semanticHeadline"]
+            == "统一语义层共归集3项重点问题；其中高风险1项；优先核查对象为张三、测试科技有限公司。"
+        )
+        assert "高风险 1 项" in groups["primary_reports"]["semanticBadges"]
+        assert (
+            groups["appendices"]["semanticHighlights"][0]["title"]
+            == "附录A 资产与收入匹配"
+        )
+        assert (
+            groups["qa_artifacts"]["semanticHeadline"]
+            == "QA 检查存在 1 项阻断问题，当前仍需收口。"
+        )
+        assert (
+            groups["dossiers"]["semanticHighlights"][0]["title"] == "桥接节点"
+            or groups["dossiers"]["semanticHighlights"][0]["title"] == "通道节点"
+        )
+        assert report_lookup["初查报告.html"]["semanticTitle"] == "正式主报告入口"
+        assert (
+            report_lookup["qa/report_package.json"]["semanticTitle"] == "统一报告语义包"
+        )
+        assert (
+            report_lookup["专项报告/资金穿透分析报告.txt"]["semanticTitle"]
+            == "附录C 关系网络与资金穿透"
+        )
+        assert report_lookup["电子钱包补充分析报告.txt"]["groupKey"] == "appendices"
+        assert report_lookup["电子钱包重点核查清单.txt"]["groupKey"] == "workpapers"
+    finally:
+        api_server._current_config.clear()
+        api_server._current_config.update(previous_config)
+
+
+def test_preview_report_file_supports_json_semantic_artifacts(tmp_path):
+    output_dir = tmp_path / "output"
+    results_dir = output_dir / "analysis_results" / "qa"
+    results_dir.mkdir(parents=True)
+    artifact_path = results_dir / "report_package.json"
+    artifact_path.write_text('{"meta":{"case":"测试"}}', encoding="utf-8")
+
+    previous_config = dict(api_server._current_config)
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/reports/preview/qa/report_package.json",
+            "headers": [],
+        }
+    )
+
+    try:
+        api_server._current_config.clear()
+        api_server._current_config["outputDirectory"] = str(output_dir)
+
+        response = asyncio.run(
+            api_server.preview_report_file("qa/report_package.json", request)
+        )
+
+        assert response["success"] is True
+        assert response["type"] == "text"
+        assert '"case":"测试"' in response["content"]
     finally:
         api_server._current_config.clear()
         api_server._current_config.update(previous_config)

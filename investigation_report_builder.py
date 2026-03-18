@@ -715,6 +715,79 @@ class InvestigationReportBuilder:
         """将语义层优先级映射为报告可读文本。"""
         return priority_band_label(priority_score, risk_level)
 
+    def _build_semantic_conclusion_view(
+        self,
+        report_package: Optional[Dict[str, Any]],
+        legacy_conclusion: Optional[Dict[str, Any]] = None,
+        prefer_legacy_if_present: bool = False,
+    ) -> Dict[str, Any]:
+        """构建主报告结论视图，优先读取 report_package.main_report_view。"""
+        report_package = report_package if isinstance(report_package, dict) else {}
+        legacy_conclusion = (
+            legacy_conclusion if isinstance(legacy_conclusion, dict) else {}
+        )
+        semantic_view = (
+            report_package.get("main_report_view", {})
+            if isinstance(report_package.get("main_report_view", {}), dict)
+            else {}
+        )
+        semantic_issue_count = int(
+            self._safe_float_value(
+                semantic_view.get("issue_count"),
+                len(semantic_view.get("issues", []))
+                if isinstance(semantic_view.get("issues", []), list)
+                else 0,
+            )
+        )
+        semantic_priority_entities = (
+            semantic_view.get("top_priority_entities", [])
+            if isinstance(semantic_view.get("top_priority_entities", []), list)
+            else []
+        )
+        semantic_company_items = (
+            semantic_view.get("company_issue_items", [])
+            if isinstance(semantic_view.get("company_issue_items", []), list)
+            else []
+        )
+        legacy_summary_narrative = str(
+            legacy_conclusion.get("summary_narrative") or ""
+        ).strip()
+        semantic_prefer_over_legacy = bool(semantic_view.get("prefer_over_legacy"))
+        has_material_semantic = (
+            semantic_issue_count > 0
+            or bool(semantic_priority_entities)
+            or bool(semantic_company_items)
+        )
+        if semantic_prefer_over_legacy:
+            return semantic_view
+        if prefer_legacy_if_present and legacy_summary_narrative:
+            return {
+                "summary_narrative": legacy_summary_narrative,
+                "aggregation_summary": legacy_conclusion.get("aggregation_summary", {})
+                if isinstance(legacy_conclusion.get("aggregation_summary", {}), dict)
+                else {},
+                "issues": legacy_conclusion.get("issues", [])
+                if isinstance(legacy_conclusion.get("issues", []), list)
+                else [],
+                "top_priority_entities": [],
+                "company_issue_summary": {},
+                "company_issue_items": [],
+            }
+        if semantic_view and (has_material_semantic or not legacy_summary_narrative):
+            return semantic_view
+        return {
+            "summary_narrative": legacy_summary_narrative,
+            "aggregation_summary": legacy_conclusion.get("aggregation_summary", {})
+            if isinstance(legacy_conclusion.get("aggregation_summary", {}), dict)
+            else {},
+            "issues": legacy_conclusion.get("issues", [])
+            if isinstance(legacy_conclusion.get("issues", []), list)
+            else [],
+            "top_priority_entities": [],
+            "company_issue_summary": {},
+            "company_issue_items": [],
+        }
+
     def _build_semantic_qa_check_lookup(
         self, report_package: Optional[Dict[str, Any]]
     ) -> Dict[str, Dict[str, Any]]:
@@ -953,9 +1026,16 @@ class InvestigationReportBuilder:
         report_package: Optional[Dict[str, Any]],
         legacy_next_steps: Optional[List[Dict[str, Any]]] = None,
         limit: int = 10,
+        prefer_legacy_if_present: bool = False,
     ) -> List[Dict[str, Any]]:
         """优先从语义层问题卡生成下一步建议，缺失时回退到旧结构。"""
         report_package = report_package if isinstance(report_package, dict) else {}
+        if (
+            prefer_legacy_if_present
+            and isinstance(legacy_next_steps, list)
+            and legacy_next_steps
+        ):
+            return legacy_next_steps
         semantic_steps: List[Dict[str, Any]] = []
         seen_actions = set()
         for issue in report_package.get("issues", []) or []:
@@ -10536,6 +10616,10 @@ class InvestigationReportBuilder:
             render_report.get("report_package", {}),
             render_report.get("next_steps", []),
         )
+        render_report["_semantic_conclusion"] = self._build_semantic_conclusion_view(
+            render_report.get("report_package", {}),
+            render_report.get("conclusion", {}),
+        )
         render_report["_semantic_qa_alerts"] = self._build_semantic_qa_alerts(
             render_report.get("report_package", {}),
             str(
@@ -13967,8 +14051,15 @@ class InvestigationReportBuilder:
             semantic_package,
             company_sections,
         )
+        semantic_conclusion = self._build_semantic_conclusion_view(
+            semantic_package,
+            report_conclusion,
+            prefer_legacy_if_present=report is not None,
+        )
         semantic_next_steps = self._build_semantic_next_steps(
-            semantic_package, report_next_steps
+            semantic_package,
+            report_next_steps,
+            prefer_legacy_if_present=report is not None,
         )
 
         # 从真实数据源提取统计信息
@@ -14162,7 +14253,11 @@ class InvestigationReportBuilder:
             f"【总体评价】: 本次核查对象{risk_level}，总体风险评级为[{risk_level}]"
         )
         lines.append(f"【风险原因】: {risk_reason}")
-        aggregation_summary = report_conclusion.get("aggregation_summary", {})
+        aggregation_summary = (
+            semantic_conclusion.get("aggregation_summary", {})
+            if isinstance(semantic_conclusion.get("aggregation_summary", {}), dict)
+            else {}
+        )
         aggregation_highlights = report_conclusion.get("aggregation_highlights", [])
         if not aggregation_summary:
             aggregation_summary = self._get_aggregation_data().get("summary", {})
@@ -14174,8 +14269,11 @@ class InvestigationReportBuilder:
                 f"高风险{aggregation_summary.get('高风险实体数', 0)}个，"
                 f"高优先线索实体{aggregation_summary.get('高优先线索实体数', 0)}个"
             )
-        if report_conclusion.get("summary_narrative"):
-            lines.append(f"【正式报告综合研判】: {report_conclusion.get('summary_narrative')}")
+        semantic_summary_narrative = str(
+            semantic_conclusion.get("summary_narrative") or ""
+        ).strip()
+        if semantic_summary_narrative:
+            lines.append(f"【正式报告综合研判】: {semantic_summary_narrative}")
         if semantic_priority_board:
             lines.append("【语义层优先核查对象】:")
             for idx, item in enumerate(semantic_priority_board[:5], 1):
@@ -14989,13 +15087,35 @@ class InvestigationReportBuilder:
                     lines.append("      • 建议动作: " + "；".join(next_actions[:2]))
             lines.append("")
 
-        issue_source = semantic_issues if semantic_issues else report_conclusion.get("issues", [])
+        issue_source = (
+            semantic_conclusion.get("issues", [])
+            if isinstance(semantic_conclusion.get("issues", []), list)
+            and semantic_conclusion.get("issues", [])
+            else (semantic_issues if semantic_issues else report_conclusion.get("issues", []))
+        )
         if issue_source:
             lines.append("【正式报告问题清单】")
             for idx, issue in enumerate(issue_source[:10], 1):
                 if not isinstance(issue, dict):
                     continue
-                if semantic_issues:
+                if isinstance(semantic_conclusion.get("issues", []), list) and semantic_conclusion.get("issues", []):
+                    person = str(
+                        issue.get("entity_name")
+                        or issue.get("company_name")
+                        or issue.get("family_name")
+                        or ""
+                    ).strip()
+                    issue_type = str(issue.get("category", "") or "").strip()
+                    description = str(
+                        issue.get("headline", "") or issue.get("narrative", "") or ""
+                    ).strip()
+                    severity = str(
+                        issue.get("risk_label", "")
+                        or issue.get("risk_level", "")
+                        or issue.get("severity", "")
+                        or ""
+                    ).strip()
+                elif semantic_issues:
                     scope = issue.get("scope", {}) if isinstance(issue.get("scope", {}), dict) else {}
                     person = str(scope.get("entity", "") or scope.get("company", "") or "").strip()
                     issue_type = str(issue.get("category", "") or issue.get("theme", "") or "").strip()

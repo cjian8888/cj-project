@@ -2,6 +2,8 @@
  * API 服务 - 与 FastAPI 后端通信
  */
 
+import type { ReportPackage } from '../types';
+
 function getDefaultWsUrl(): string {
     if (typeof window === 'undefined') {
         return 'ws://localhost:8000/ws';
@@ -149,14 +151,80 @@ export interface AnalysisResults {
     profiles: Record<string, Profile>;
     suspicions: Suspicions;
     analysisResults: Record<string, unknown>;
+    reportPackage?: ReportPackage | null;
     walletData?: Record<string, unknown>;
+}
+
+export interface ReportSemanticHighlight {
+    title: string;
+    summary?: string;
+}
+
+export interface ReportSemanticSection {
+    headline?: string;
+    badges?: string[];
+    highlights?: ReportSemanticHighlight[];
+    issueCount?: number;
+    highRiskIssueCount?: number;
+    topPriorityEntities?: string[];
+    appendixCount?: number;
+    failCount?: number;
+    warnCount?: number;
+    passCount?: number;
+    totalCount?: number;
+    familyCount?: number;
+    personCount?: number;
+    companyCount?: number;
+}
+
+export interface ReportSemanticOverview {
+    mainReport?: ReportSemanticSection;
+    appendices?: ReportSemanticSection;
+    qa?: ReportSemanticSection;
+    dossiers?: ReportSemanticSection;
 }
 
 export interface Report {
     name: string;
-    path: string;
+    path?: string;
     size: number;
     modified: string;
+    filename?: string;
+    type?: string;
+    extension?: string;
+    groupKey?: string;
+    groupLabel?: string;
+    groupOrder?: number;
+    isPreviewable?: boolean;
+    semanticTitle?: string;
+    semanticSummary?: string;
+    semanticBadges?: string[];
+    semanticRank?: number;
+}
+
+export interface ReportGroup {
+    key: string;
+    label: string;
+    description: string;
+    order: number;
+    count: number;
+    items: Report[];
+    semanticHeadline?: string;
+    semanticBadges?: string[];
+    semanticHighlights?: ReportSemanticHighlight[];
+}
+
+export interface ReportManifestResponse {
+    success: boolean;
+    reports: Report[];
+    groups: ReportGroup[];
+    semanticOverview?: ReportSemanticOverview;
+    totals: {
+        reportCount: number;
+        groupCount: number;
+    };
+    message?: string;
+    error?: string;
 }
 
 export interface LogEntry {
@@ -386,6 +454,13 @@ class ApiService {
      */
     async getReports(): Promise<{ reports: Report[] }> {
         return this.request('/api/reports');
+    }
+
+    /**
+     * 获取报告中心分组清单
+     */
+    async getReportManifest(): Promise<ReportManifestResponse> {
+        return this.request('/api/reports/manifest');
     }
 
     /**

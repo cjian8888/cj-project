@@ -221,6 +221,8 @@ def test_generate_complete_txt_report_emits_report_package_and_company_dossier()
             payload["appendix_views"]["company_issue_overview"]["items"][0]["next_actions"][0]
             == "调取交易回单、合同及对手方背景材料。"
         )
+        assert payload["main_report_view"]["issue_count"] >= 1
+        assert "统一语义层共归集" in payload["main_report_view"]["summary_narrative"]
         assert payload["issues"][0]["issue_id"].startswith(("FLOW-", "CON-"))
         assert "REPORT PACKAGE QA SUMMARY" in summary_text
         assert any(
@@ -349,6 +351,56 @@ def test_generate_complete_txt_report_prefers_semantic_priority_and_actions():
         assert "【语义层优先核查对象】:" in text
         assert "张三 | 优先级88.0 | 风险critical" in text
         assert "调取交易回单、合同及对手方背景材料。" in text
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_generate_complete_txt_report_prefers_semantic_main_report_view_over_legacy_conclusion():
+    tmp_path = _make_workspace_tmp_dir()
+    try:
+        builder, report = _make_builder(tmp_path)
+        report["conclusion"] = {
+            "summary_narrative": "旧版综合研判",
+            "issues": [
+                {
+                    "person": "旧对象",
+                    "issue_type": "旧问题",
+                    "description": "旧版问题描述",
+                    "severity": "medium",
+                }
+            ],
+        }
+        report_package = builder.build_report_package(report=report)
+        report_package["main_report_view"] = {
+            "prefer_over_legacy": True,
+            "summary_narrative": "语义层综合研判",
+            "aggregation_summary": {
+                "极高风险实体数": 2,
+                "高风险实体数": 1,
+                "高优先线索实体数": 3,
+            },
+            "issues": [
+                {
+                    "entity_name": "张三",
+                    "category": "直接往来",
+                    "headline": "语义层问题描述",
+                    "risk_label": "高风险",
+                }
+            ],
+        }
+        builder._ensure_report_package = lambda report=None, formal_report_path=None: report_package
+        reports_dir = tmp_path / "analysis_results"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        report_path = reports_dir / "核查结果分析报告.txt"
+
+        builder.generate_complete_txt_report(str(report_path), report=report)
+        text = report_path.read_text(encoding="utf-8")
+
+        assert "【正式报告综合研判】: 语义层综合研判" in text
+        assert "【聚合排序】: 极高风险2个，高风险1个，高优先线索实体3个" in text
+        assert "张三（直接往来）：语义层问题描述 [高风险]" in text
+        assert "【正式报告综合研判】: 旧版综合研判" not in text
+        assert "旧对象（旧问题）：旧版问题描述" not in text
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
 
@@ -493,6 +545,45 @@ def test_render_html_report_v3_prefers_report_package_conclusion_and_next_steps(
         assert "测试科技有限公司发生300,000元直接往来" in html
         assert "调取交易回单、合同及对手方背景材料。" in html
         assert "来源FLOW-001" in html
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_render_html_report_v3_prefers_semantic_main_report_view_summary_over_legacy_conclusion():
+    tmp_path = _make_workspace_tmp_dir()
+    try:
+        builder, _ = _make_builder(tmp_path)
+        report = builder.build_report_v5()
+        report["conclusion"] = {
+            "summary_narrative": "旧版综合研判",
+            "issues": [
+                {
+                    "person": "旧对象",
+                    "issue_type": "旧问题",
+                    "description": "旧版问题描述",
+                    "severity": "medium",
+                }
+            ],
+        }
+        report_package = builder.build_report_package(report=report)
+        report_package["main_report_view"] = {
+            "prefer_over_legacy": True,
+            "summary_narrative": "语义层综合研判",
+            "issues": [
+                {
+                    "entity_name": "张三",
+                    "category": "直接往来",
+                    "headline": "语义层问题描述",
+                }
+            ],
+        }
+        builder._ensure_report_package = lambda report=None, formal_report_path=None: report_package
+
+        html = builder.render_html_report_v3(report)
+
+        assert "语义层综合研判" in html
+        assert "语义层问题描述" in html
+        assert "旧版综合研判" not in html
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
 

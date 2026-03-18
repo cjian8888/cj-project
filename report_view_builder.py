@@ -230,6 +230,113 @@ def _build_company_issue_overview(
     }
 
 
+def _is_high_risk_issue(issue: Dict[str, Any]) -> bool:
+    risk_level = normalize_risk_level(issue.get("risk_level"), default="low")
+    return risk_level in {"critical", "high"} or _as_float(issue.get("severity")) >= 75
+
+
+def _build_main_report_view(
+    issues: List[Dict[str, Any]],
+    priority_board: List[Dict[str, Any]],
+    company_issue_overview: Dict[str, Any],
+    aggregation_summary_view: Dict[str, Any],
+) -> Dict[str, Any]:
+    company_summary = _as_dict(company_issue_overview.get("summary"))
+    company_items = _as_list(company_issue_overview.get("items"))
+    aggregation_summary = _as_dict(aggregation_summary_view.get("summary"))
+
+    top_priority_entities = []
+    for item in priority_board[:5]:
+        if not isinstance(item, dict):
+            continue
+        entity_name = str(item.get("entity_name") or "").strip()
+        if not entity_name:
+            continue
+        top_priority_entities.append(
+            {
+                "entity_name": entity_name,
+                "entity_type": str(item.get("entity_type") or "").strip(),
+                "family_name": str(item.get("family_name") or "").strip(),
+                "priority_score": round(_as_float(item.get("priority_score")), 1),
+                "risk_level": normalize_risk_level(item.get("risk_level"), default="low"),
+                "risk_label": str(item.get("risk_label") or risk_level_label(item.get("risk_level"))),
+                "top_reasons": _unique_texts(_as_list(item.get("top_reasons")))[:3],
+                "issue_refs": _unique_texts(_as_list(item.get("issue_refs")))[:5],
+            }
+        )
+
+    issue_cards = []
+    high_risk_issue_count = 0
+    for issue in issues[:10]:
+        if not isinstance(issue, dict):
+            continue
+        scope = _as_dict(issue.get("scope"))
+        if _is_high_risk_issue(issue):
+            high_risk_issue_count += 1
+        issue_cards.append(
+            {
+                "issue_id": str(issue.get("issue_id") or "").strip(),
+                "entity_name": str(
+                    scope.get("entity") or scope.get("company") or scope.get("family") or ""
+                ).strip(),
+                "company_name": str(scope.get("company") or "").strip(),
+                "family_name": str(scope.get("family") or "").strip(),
+                "category": str(issue.get("category") or issue.get("theme") or "").strip(),
+                "headline": str(issue.get("headline") or issue.get("narrative") or "").strip(),
+                "narrative": str(issue.get("narrative") or "").strip(),
+                "risk_level": normalize_risk_level(issue.get("risk_level"), default="low"),
+                "risk_label": risk_level_label(issue.get("risk_level")),
+                "priority": round(_as_float(issue.get("priority")), 1),
+                "severity": round(_as_float(issue.get("severity")), 1),
+                "why_flagged": _unique_texts(_as_list(issue.get("why_flagged")))[:3],
+                "counter_indicators": _unique_texts(
+                    _as_list(issue.get("counter_indicators"))
+                )[:2],
+                "evidence_refs": _unique_texts(_as_list(issue.get("evidence_refs")))[:3],
+                "next_actions": _unique_texts(_as_list(issue.get("next_actions")))[:3],
+            }
+        )
+
+    top_entity_names = [
+        str(item.get("entity_name") or "").strip()
+        for item in top_priority_entities[:3]
+        if str(item.get("entity_name") or "").strip()
+    ]
+    companies_with_issues = int(_as_float(company_summary.get("companies_with_issues")))
+    high_risk_company_count = int(_as_float(company_summary.get("high_risk_company_count")))
+    issue_count = len(issue_cards)
+
+    if issue_count or company_items:
+        narrative_parts = [f"统一语义层共归集{issue_count}项重点问题"]
+        if high_risk_issue_count:
+            narrative_parts.append(f"其中高风险{high_risk_issue_count}项")
+        if companies_with_issues:
+            narrative_parts.append(f"涉案公司问题{companies_with_issues}家")
+        if high_risk_company_count:
+            narrative_parts.append(f"高风险公司{high_risk_company_count}家")
+        if top_entity_names:
+            narrative_parts.append(f"优先核查对象为{'、'.join(top_entity_names)}")
+        summary_narrative = "；".join(narrative_parts) + "。"
+    else:
+        summary_narrative = "统一语义层未归集到需要进入正式报告的重点问题。"
+
+    return {
+        "title": "正式报告结论视图",
+        "summary_narrative": summary_narrative,
+        "issue_count": issue_count,
+        "high_risk_issue_count": high_risk_issue_count,
+        "top_priority_entities": top_priority_entities,
+        "issues": issue_cards,
+        "company_issue_summary": {
+            "companies_with_issues": companies_with_issues,
+            "high_risk_company_count": high_risk_company_count,
+            "item_count": len(company_items),
+        },
+        "company_issue_items": company_items[:8],
+        "aggregation_summary": aggregation_summary,
+    }
+
+
 def _build_appendix_a_assets_income(
     normalized_facts: Dict[str, Any], dossier_payload: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -1235,6 +1342,12 @@ def build_report_package_view(
         {"issues": issues},
     )
     appendix_views["appendix_index"] = _build_appendix_index(appendix_views)
+    main_report_view = _build_main_report_view(
+        issues,
+        priority_board,
+        appendix_views["company_issue_overview"],
+        appendix_views["aggregation_summary"],
+    )
 
     evidence_index = {
         ref: {
@@ -1255,6 +1368,7 @@ def build_report_package_view(
         "person_dossiers": person_dossiers,
         "company_dossiers": company_dossiers,
         "appendix_views": appendix_views,
+        "main_report_view": main_report_view,
         "evidence_index": evidence_index,
         "qa_checks": _as_dict(qa_checks),
     }

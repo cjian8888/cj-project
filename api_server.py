@@ -4202,12 +4202,16 @@ async def get_results():
             results_data = serialize_for_json(analysis_state.results)
             results_data = to_camel_case(results_data)
             results_data = serialize_for_json(results_data)
-            if isinstance(results_data, dict) and isinstance(
-                results_data.get("suspicions"), dict
-            ):
+            if isinstance(results_data, dict):
                 results_data = dict(results_data)
-                results_data["suspicions"] = _normalize_serialized_suspicions_payload(
-                    results_data["suspicions"]
+                if isinstance(results_data.get("suspicions"), dict):
+                    results_data["suspicions"] = _normalize_serialized_suspicions_payload(
+                        results_data["suspicions"]
+                    )
+                results_dir = _get_active_results_dir()
+                report_package = _load_report_package_for_manifest(results_dir)
+                results_data["reportPackage"] = (
+                    serialize_for_json(report_package) if report_package else None
                 )
             response_body = json.dumps(
                 {"message": "分析结果获取成功", "data": results_data},
@@ -4698,6 +4702,630 @@ async def generate_default_primary_targets():
 # ==================== 报告文件访问 API ====================
 
 
+_REPORT_FILE_TYPES = {
+    ".txt": "text",
+    ".html": "html",
+    ".htm": "html",
+    ".xlsx": "excel",
+    ".xls": "excel",
+    ".md": "markdown",
+    ".pdf": "pdf",
+    ".json": "json",
+    ".docx": "docx",
+}
+
+_REPORT_GROUP_DEFS = [
+    {
+        "key": "primary_reports",
+        "label": "主报告",
+        "description": "正式 HTML/TXT/PDF 报告与主入口文件。",
+        "order": 10,
+    },
+    {
+        "key": "appendices",
+        "label": "附录",
+        "description": "专题输出与附录类报告文件。",
+        "order": 20,
+    },
+    {
+        "key": "dossiers",
+        "label": "对象卷宗",
+        "description": "按家庭、个人、公司沉淀的对象级卷宗。",
+        "order": 30,
+    },
+    {
+        "key": "qa_artifacts",
+        "label": "QA与一致性检查",
+        "description": "report_package、QA 检查与一致性产物。",
+        "order": 40,
+    },
+    {
+        "key": "workpapers",
+        "label": "工作底稿",
+        "description": "Excel、底稿与结构化明细文件。",
+        "order": 50,
+    },
+    {
+        "key": "technical_files",
+        "label": "技术文件",
+        "description": "日志、索引、说明等技术性辅助文件。",
+        "order": 60,
+    },
+]
+
+_PRIMARY_REPORT_PRIORITY_HINTS = {
+    "初查报告.html": 10,
+    "初查报告.htm": 10,
+    "初查报告.pdf": 15,
+    "核查结果分析报告.txt": 20,
+    "核查结果分析报告.pdf": 25,
+}
+
+_APPENDIX_SEMANTIC_HINTS = [
+    {
+        "appendixKey": "appendix_a_assets_income",
+        "order": 10,
+        "tokens": ["资产全貌分析报告"],
+    },
+    {
+        "appendixKey": "appendix_b_income_loan",
+        "order": 20,
+        "tokens": ["借贷行为分析报告", "异常收入来源分析报告"],
+    },
+    {
+        "appendixKey": "appendix_c_network_penetration",
+        "order": 30,
+        "tokens": ["资金穿透分析报告", "疑点检测分析报告"],
+    },
+    {
+        "appendixKey": "appendix_d_timeline_behavior",
+        "order": 40,
+        "tokens": ["时序分析报告", "行为特征分析报告"],
+    },
+    {
+        "appendixKey": "appendix_e_wallet_supplement",
+        "order": 50,
+        "tokens": ["电子钱包补充分析报告", "电子钱包重点核查清单"],
+    },
+]
+
+
+def _manifest_as_dict(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _manifest_as_list(value: Any) -> List[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _manifest_as_int(value: Any, default: int = 0) -> int:
+    try:
+        if value in ("", None):
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _manifest_unique_texts(values: List[Any]) -> List[str]:
+    seen = set()
+    result: List[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _load_report_package_for_manifest(results_dir: str) -> Dict[str, Any]:
+    package_path = os.path.join(results_dir, "qa", "report_package.json")
+    logger = logging.getLogger(__name__)
+
+    def _read_package() -> Dict[str, Any]:
+        if not os.path.exists(package_path):
+            return {}
+        try:
+            with open(package_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            return payload if isinstance(payload, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            logger.warning("[报告清单] 无法读取 report_package.json: %s", package_path)
+            return {}
+
+    payload = _read_package()
+    if payload:
+        return payload
+
+    output_dir = os.path.dirname(os.path.abspath(results_dir))
+    semantic_paths = _refresh_report_semantic_artifacts(output_dir)
+    if semantic_paths:
+        logger.info("[报告清单] report_package 缺失，已尝试基于缓存刷新")
+    return _read_package()
+
+
+def _build_manifest_main_report_overview(report_package: Dict[str, Any]) -> Dict[str, Any]:
+    main_report_view = _manifest_as_dict(report_package.get("main_report_view"))
+    if not main_report_view:
+        return {}
+
+    issue_count = _manifest_as_int(
+        main_report_view.get("issue_count"),
+        len(_manifest_as_list(main_report_view.get("issues"))),
+    )
+    high_risk_issue_count = _manifest_as_int(
+        main_report_view.get("high_risk_issue_count")
+    )
+    top_priority_entities = []
+    highlights = []
+
+    for item in _manifest_as_list(main_report_view.get("top_priority_entities"))[:3]:
+        if not isinstance(item, dict):
+            continue
+        entity_name = str(item.get("entity_name") or "").strip()
+        if not entity_name:
+            continue
+        top_priority_entities.append(entity_name)
+        highlights.append(
+            {
+                "title": entity_name,
+                "summary": "；".join(
+                    _manifest_unique_texts(_manifest_as_list(item.get("top_reasons")))[:2]
+                ),
+            }
+        )
+
+    badges = []
+    if issue_count:
+        badges.append(f"重点问题 {issue_count} 项")
+    if high_risk_issue_count:
+        badges.append(f"高风险 {high_risk_issue_count} 项")
+    if top_priority_entities:
+        badges.append(f"优先对象 {'、'.join(top_priority_entities)}")
+
+    headline = str(main_report_view.get("summary_narrative") or "").strip()
+    if not headline and badges:
+        headline = "统一语义层已生成主报告结论摘要。"
+
+    return {
+        "headline": headline,
+        "badges": badges,
+        "highlights": highlights,
+        "issueCount": issue_count,
+        "highRiskIssueCount": high_risk_issue_count,
+        "topPriorityEntities": top_priority_entities,
+    }
+
+
+def _build_manifest_appendix_overview(report_package: Dict[str, Any]) -> Dict[str, Any]:
+    appendix_views = _manifest_as_dict(report_package.get("appendix_views"))
+    appendix_index = _manifest_as_dict(appendix_views.get("appendix_index"))
+    appendix_items = []
+    appendix_lookup: Dict[str, Dict[str, Any]] = {}
+
+    for item in _manifest_as_list(appendix_index.get("items")):
+        if not isinstance(item, dict):
+            continue
+        appendix_key = str(item.get("appendix_key") or "").strip()
+        title = str(item.get("title") or "").strip()
+        summary = str(item.get("summary_line") or "").strip()
+        if not appendix_key or not title:
+            continue
+        normalized_item = {
+            "appendixKey": appendix_key,
+            "title": title,
+            "summary": summary,
+            "itemCount": _manifest_as_int(item.get("item_count")),
+        }
+        appendix_items.append(normalized_item)
+        appendix_lookup[appendix_key] = normalized_item
+
+    if not appendix_items:
+        return {}
+
+    total_count = sum(item["itemCount"] for item in appendix_items)
+    badges = [f"附录主题 {len(appendix_items)} 组"]
+    if total_count:
+        badges.append(f"摘要内容 {total_count} 条")
+
+    return {
+        "headline": f"统一语义层已归集 {len(appendix_items)} 个正式附录主题。",
+        "badges": badges,
+        "highlights": [
+            {"title": item["title"], "summary": item["summary"]}
+            for item in appendix_items[:5]
+        ],
+        "appendixLookup": appendix_lookup,
+        "appendixCount": len(appendix_items),
+    }
+
+
+def _build_manifest_qa_overview(report_package: Dict[str, Any]) -> Dict[str, Any]:
+    qa_checks = _manifest_as_dict(report_package.get("qa_checks"))
+    summary = _manifest_as_dict(qa_checks.get("summary"))
+    checks = _manifest_as_list(qa_checks.get("checks"))
+    if not summary and not checks:
+        return {}
+
+    fail_count = _manifest_as_int(summary.get("fail"))
+    warn_count = _manifest_as_int(summary.get("warn"))
+    pass_count = _manifest_as_int(summary.get("pass"))
+    total_count = _manifest_as_int(summary.get("total"), len(checks))
+
+    if fail_count:
+        headline = f"QA 检查存在 {fail_count} 项阻断问题，当前仍需收口。"
+    elif warn_count:
+        headline = f"QA 检查存在 {warn_count} 项提示，主链路已可继续推进。"
+    elif total_count:
+        headline = f"QA 检查 {total_count} 项均已通过。"
+    else:
+        headline = ""
+
+    highlights = []
+    focus_statuses = {"fail", "warn"} if (fail_count or warn_count) else {"pass"}
+    for item in checks:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "").strip().lower()
+        if status not in focus_statuses:
+            continue
+        highlights.append(
+            {
+                "title": str(item.get("check_id") or "").strip(),
+                "summary": str(item.get("message") or "").strip(),
+            }
+        )
+        if len(highlights) >= 4:
+            break
+
+    badges = []
+    if total_count:
+        badges.append(f"检查 {total_count} 项")
+    if fail_count:
+        badges.append(f"阻断 {fail_count} 项")
+    if warn_count:
+        badges.append(f"提示 {warn_count} 项")
+    if pass_count:
+        badges.append(f"通过 {pass_count} 项")
+
+    return {
+        "headline": headline,
+        "badges": badges,
+        "highlights": highlights,
+        "failCount": fail_count,
+        "warnCount": warn_count,
+        "passCount": pass_count,
+        "totalCount": total_count,
+    }
+
+
+def _build_manifest_dossier_overview(report_package: Dict[str, Any]) -> Dict[str, Any]:
+    family_dossiers = _manifest_as_list(report_package.get("family_dossiers"))
+    person_dossiers = _manifest_as_list(report_package.get("person_dossiers"))
+    company_dossiers = _manifest_as_list(report_package.get("company_dossiers"))
+    if not family_dossiers and not person_dossiers and not company_dossiers:
+        return {}
+
+    role_tag_counts: Dict[str, int] = {}
+    high_risk_company_count = 0
+    for item in company_dossiers:
+        if not isinstance(item, dict):
+            continue
+        risk_overview = _manifest_as_dict(item.get("risk_overview"))
+        risk_level = str(risk_overview.get("risk_level") or "").strip().lower()
+        if risk_level in {"high", "critical"}:
+            high_risk_company_count += 1
+        for tag in _manifest_as_list(item.get("role_tags")):
+            text = str(tag or "").strip()
+            if not text:
+                continue
+            role_tag_counts[text] = role_tag_counts.get(text, 0) + 1
+
+    ordered_role_tags = sorted(
+        role_tag_counts.items(),
+        key=lambda item: (-item[1], item[0]),
+    )
+
+    badges = []
+    if family_dossiers:
+        badges.append(f"家庭 {len(family_dossiers)} 份")
+    if person_dossiers:
+        badges.append(f"个人 {len(person_dossiers)} 份")
+    if company_dossiers:
+        badges.append(f"公司 {len(company_dossiers)} 份")
+    if high_risk_company_count:
+        badges.append(f"高风险公司 {high_risk_company_count} 家")
+
+    return {
+        "headline": (
+            f"卷宗层已覆盖 {len(family_dossiers)} 个家庭、"
+            f"{len(person_dossiers)} 名个人、{len(company_dossiers)} 家公司。"
+        ),
+        "badges": badges,
+        "highlights": [
+            {"title": tag, "summary": f"涉及 {count} 家公司卷宗"}
+            for tag, count in ordered_role_tags[:4]
+        ],
+        "familyCount": len(family_dossiers),
+        "personCount": len(person_dossiers),
+        "companyCount": len(company_dossiers),
+    }
+
+
+def _build_manifest_semantic_context(results_dir: str) -> Dict[str, Any]:
+    report_package = _load_report_package_for_manifest(results_dir)
+    if not report_package:
+        return {}
+
+    main_report = _build_manifest_main_report_overview(report_package)
+    appendices = _build_manifest_appendix_overview(report_package)
+    qa = _build_manifest_qa_overview(report_package)
+    dossiers = _build_manifest_dossier_overview(report_package)
+
+    return {
+        "available": any([main_report, appendices, qa, dossiers]),
+        "mainReport": main_report,
+        "appendices": appendices,
+        "qa": qa,
+        "dossiers": dossiers,
+    }
+
+
+def _infer_appendix_semantic_meta(relative_path: str) -> Dict[str, Any]:
+    normalized_path = str(relative_path or "").replace("\\", "/").strip("/")
+    for item in _APPENDIX_SEMANTIC_HINTS:
+        if any(token in normalized_path for token in item["tokens"]):
+            return item
+    return {}
+
+
+def _build_group_semantic_summary(
+    group_key: str, semantic_context: Dict[str, Any]
+) -> Dict[str, Any]:
+    section_map = {
+        "primary_reports": "mainReport",
+        "appendices": "appendices",
+        "dossiers": "dossiers",
+        "qa_artifacts": "qa",
+    }
+    section = _manifest_as_dict(semantic_context.get(section_map.get(group_key, "")))
+    if not section:
+        return {}
+    return {
+        "semanticHeadline": str(section.get("headline") or "").strip(),
+        "semanticBadges": _manifest_as_list(section.get("badges")),
+        "semanticHighlights": _manifest_as_list(section.get("highlights")),
+    }
+
+
+def _build_report_item_semantic_meta(
+    report: Dict[str, Any], semantic_context: Dict[str, Any]
+) -> Dict[str, Any]:
+    filename = str(report.get("name") or "").replace("\\", "/").strip("/")
+    basename = os.path.basename(filename)
+    group_key = str(report.get("groupKey") or "").strip()
+
+    primary_rank = _PRIMARY_REPORT_PRIORITY_HINTS.get(basename)
+    if primary_rank is not None:
+        main_report = _manifest_as_dict(semantic_context.get("mainReport"))
+        return {
+            "semanticTitle": "正式主报告入口",
+            "semanticSummary": str(main_report.get("headline") or "").strip(),
+            "semanticBadges": _manifest_as_list(main_report.get("badges"))[:3],
+            "semanticRank": primary_rank,
+        }
+
+    if group_key == "appendices":
+        appendix_context = _manifest_as_dict(semantic_context.get("appendices"))
+        appendix_lookup = _manifest_as_dict(appendix_context.get("appendixLookup"))
+        appendix_meta = _infer_appendix_semantic_meta(filename)
+        appendix_key = str(appendix_meta.get("appendixKey") or "").strip()
+        appendix_item = _manifest_as_dict(appendix_lookup.get(appendix_key))
+        if appendix_key and appendix_item:
+            badges = ["正式附录主题"]
+            if appendix_item.get("itemCount"):
+                badges.append(f"摘要 {appendix_item['itemCount']} 条")
+            return {
+                "semanticTitle": str(appendix_item.get("title") or "").strip(),
+                "semanticSummary": str(appendix_item.get("summary") or "").strip(),
+                "semanticBadges": badges,
+                "semanticRank": _manifest_as_int(appendix_meta.get("order"), 999),
+            }
+
+    if group_key == "qa_artifacts":
+        qa = _manifest_as_dict(semantic_context.get("qa"))
+        main_report = _manifest_as_dict(semantic_context.get("mainReport"))
+        if basename == "report_package.json":
+            badges = []
+            issue_count = _manifest_as_int(main_report.get("issueCount"))
+            if issue_count:
+                badges.append(f"问题卡 {issue_count} 项")
+            badges.extend(_manifest_as_list(qa.get("badges"))[:2])
+            return {
+                "semanticTitle": "统一报告语义包",
+                "semanticSummary": str(main_report.get("headline") or "").strip(),
+                "semanticBadges": _manifest_unique_texts(badges),
+                "semanticRank": 10,
+            }
+        if basename in {"report_consistency_check.txt", "report_consistency_check.json"}:
+            return {
+                "semanticTitle": "QA 一致性检查",
+                "semanticSummary": str(qa.get("headline") or "").strip(),
+                "semanticBadges": _manifest_as_list(qa.get("badges"))[:4],
+                "semanticRank": 20,
+            }
+
+    return {}
+
+
+def _report_manifest_sort_key(item: Dict[str, Any]) -> Any:
+    try:
+        modified_ts = datetime.fromisoformat(str(item.get("modified") or "")).timestamp()
+    except (TypeError, ValueError):
+        modified_ts = 0.0
+    return (
+        int(item.get("groupOrder", 999) or 999),
+        int(item.get("semanticRank", 999) or 999),
+        -int(modified_ts),
+        str(item.get("name") or ""),
+    )
+
+
+def _get_report_group_meta(group_key: str) -> Dict[str, Any]:
+    for item in _REPORT_GROUP_DEFS:
+        if item["key"] == group_key:
+            return dict(item)
+    return {
+        "key": group_key,
+        "label": group_key,
+        "description": "",
+        "order": 999,
+    }
+
+
+def _classify_report_group(relative_path: str, ext: str) -> Dict[str, Any]:
+    normalized_path = str(relative_path or "").replace("\\", "/").strip("/")
+    lower_path = normalized_path.lower()
+    filename = os.path.basename(normalized_path)
+    lower_name = filename.lower()
+
+    if (
+        lower_path.startswith("qa/")
+        or lower_name in {
+            "report_package.json",
+            "report_consistency_check.json",
+            "report_consistency_check.txt",
+        }
+    ):
+        return _get_report_group_meta("qa_artifacts")
+
+    if (
+        "卷宗" in filename
+        or "dossier" in lower_name
+        or lower_path.startswith("卷宗/")
+        or lower_path.startswith("dossiers/")
+    ):
+        return _get_report_group_meta("dossiers")
+
+    if (
+        lower_path.startswith("专项报告/")
+        or "附录" in filename
+        or "appendix" in lower_name
+        or "电子钱包补充分析报告" in filename
+    ):
+        return _get_report_group_meta("appendices")
+
+    if (
+        ext in {".xlsx", ".xls"}
+        or "底稿" in filename
+        or "核查清单" in filename
+        or "清洗表" in filename
+    ):
+        return _get_report_group_meta("workpapers")
+
+    if (
+        lower_name in {"分析执行日志.txt", "报告目录清单.txt"}
+        or ext in {".md"}
+        or lower_path.startswith("logs/")
+    ):
+        return _get_report_group_meta("technical_files")
+
+    return _get_report_group_meta("primary_reports")
+
+
+def _collect_report_files(results_dir: str) -> List[Dict[str, Any]]:
+    reports: List[Dict[str, Any]] = []
+
+    def scan_directory(directory: str, prefix: str = "") -> None:
+        if not os.path.exists(directory):
+            return
+
+        for item in os.listdir(directory):
+            item_path = os.path.join(directory, item)
+            relative_path = os.path.relpath(item_path, results_dir)
+
+            if os.path.isfile(item_path):
+                ext = os.path.splitext(item)[1].lower()
+                if ext not in _REPORT_FILE_TYPES:
+                    continue
+
+                stat = os.stat(item_path)
+                display_name = item if prefix == "" else f"{prefix}/{item}"
+                group_meta = _classify_report_group(display_name, ext)
+                reports.append(
+                    {
+                        "name": display_name,
+                        "filename": display_name,
+                        "type": _REPORT_FILE_TYPES[ext],
+                        "size": stat.st_size,
+                        "modified": datetime.fromtimestamp(
+                            stat.st_mtime
+                        ).isoformat(),
+                        "path": item_path,
+                        "extension": ext,
+                        "groupKey": group_meta["key"],
+                        "groupLabel": group_meta["label"],
+                        "groupOrder": group_meta["order"],
+                        "isPreviewable": ext in {".txt", ".html", ".htm", ".md", ".json"},
+                    }
+                )
+            elif os.path.isdir(item_path):
+                scan_directory(
+                    item_path, prefix=item if prefix == "" else f"{prefix}/{item}"
+                )
+
+    scan_directory(results_dir)
+    reports.sort(key=_report_manifest_sort_key)
+    return reports
+
+
+def _build_report_manifest(results_dir: str) -> Dict[str, Any]:
+    semantic_context = _build_manifest_semantic_context(results_dir)
+    reports = []
+    for item in _collect_report_files(results_dir):
+        semantic_meta = _build_report_item_semantic_meta(item, semantic_context)
+        reports.append({**item, **semantic_meta})
+    reports.sort(key=_report_manifest_sort_key)
+    groups: List[Dict[str, Any]] = []
+
+    for group_def in _REPORT_GROUP_DEFS:
+        items = [item for item in reports if item.get("groupKey") == group_def["key"]]
+        if not items:
+            continue
+        items.sort(key=_report_manifest_sort_key)
+        group_payload = {
+            "key": group_def["key"],
+            "label": group_def["label"],
+            "description": group_def["description"],
+            "order": group_def["order"],
+            "count": len(items),
+            "items": items,
+        }
+        group_payload.update(_build_group_semantic_summary(group_def["key"], semantic_context))
+        groups.append(group_payload)
+
+    return {
+        "success": True,
+        "reports": reports,
+        "groups": groups,
+        "semanticOverview": {
+            "mainReport": _manifest_as_dict(semantic_context.get("mainReport")),
+            "appendices": {
+                key: value
+                for key, value in _manifest_as_dict(semantic_context.get("appendices")).items()
+                if key != "appendixLookup"
+            },
+            "qa": _manifest_as_dict(semantic_context.get("qa")),
+            "dossiers": _manifest_as_dict(semantic_context.get("dossiers")),
+        },
+        "totals": {
+            "reportCount": len(reports),
+            "groupCount": len(groups),
+        },
+    }
+
+
 @app.get("/api/reports")
 async def get_report_files():
     """
@@ -4711,62 +5339,49 @@ async def get_report_files():
     if not os.path.exists(results_dir):
         return {"success": True, "reports": [], "message": "报告目录不存在"}
 
-    reports = []
-
-    # 定义报告类型映射
-    report_types = {
-        ".txt": "text",
-        ".html": "html",
-        ".xlsx": "excel",
-        ".md": "markdown",
-        ".pdf": "pdf",
-    }
-
-    def scan_directory(directory, prefix=""):
-        """递归扫描目录"""
-        if not os.path.exists(directory):
-            return
-
-        for item in os.listdir(directory):
-            item_path = os.path.join(directory, item)
-            relative_path = os.path.relpath(item_path, results_dir)
-
-            if os.path.isfile(item_path):
-                ext = os.path.splitext(item)[1].lower()
-                if ext in report_types:
-                    stat = os.stat(item_path)
-                    # 在子目录中的文件，添加子目录前缀
-                    display_name = item if prefix == "" else f"{prefix}/{item}"
-
-                    reports.append(
-                        {
-                            "name": display_name,  # 兼容前端旧字段
-                            "filename": display_name,
-                            "type": report_types[ext],
-                            "size": stat.st_size,
-                            "modified": datetime.fromtimestamp(
-                                stat.st_mtime
-                            ).isoformat(),
-                            "path": item_path,
-                        }
-                    )
-            elif os.path.isdir(item_path):
-                # 递归扫描子目录
-                scan_directory(
-                    item_path, prefix=item if prefix == "" else f"{prefix}/{item}"
-                )
-
     try:
-        scan_directory(results_dir)
-
-        # 按修改时间排序（最新的在前）
-        reports.sort(key=lambda x: x["modified"], reverse=True)
-
+        reports = _collect_report_files(results_dir)
         logger.info(f"[报告列表] 找到 {len(reports)} 个报告文件")
         return {"success": True, "reports": reports}
     except Exception as e:
         logger.exception(f"[报告列表] 获取失败: {e}")
         return {"success": False, "reports": [], "error": str(e)}
+
+
+@app.get("/api/reports/manifest")
+async def get_report_manifest():
+    """获取报告中心分组清单。"""
+    logger = logging.getLogger(__name__)
+    results_dir = _get_active_results_dir()
+
+    if not os.path.exists(results_dir):
+        return {
+            "success": True,
+            "reports": [],
+            "groups": [],
+            "semanticOverview": {},
+            "totals": {"reportCount": 0, "groupCount": 0},
+            "message": "报告目录不存在",
+        }
+
+    try:
+        manifest = _build_report_manifest(results_dir)
+        logger.info(
+            "[报告清单] 分组完成: %s 个文件, %s 个分组",
+            manifest["totals"]["reportCount"],
+            manifest["totals"]["groupCount"],
+        )
+        return manifest
+    except Exception as e:
+        logger.exception(f"[报告清单] 获取失败: {e}")
+        return {
+            "success": False,
+            "reports": [],
+            "groups": [],
+            "semanticOverview": {},
+            "totals": {"reportCount": 0, "groupCount": 0},
+            "error": str(e),
+        }
 
 
 @app.api_route("/api/reports/preview/{filename:path}", methods=["GET", "HEAD"])
@@ -4846,7 +5461,7 @@ async def preview_report_file(filename: str, request: Request):
         return Response(status_code=200, media_type=media_type)
 
     try:
-        if ext == ".txt" or ext == ".md":
+        if ext in {".txt", ".md", ".json"}:
             # 文本文件，直接返回内容
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()

@@ -23,7 +23,13 @@ import {
     Info
 } from 'lucide-react';
 import { api, API_BASE_URL } from '../services/api';
-import type { Report } from '../services/api';
+import type {
+    Report,
+    ReportGroup,
+    ReportSemanticOverview,
+    ReportSemanticSection,
+} from '../services/api';
+import type { ReportIssue, ReportPackage, ReportPriorityBoardItem } from '../types';
 import {
     BarChart,
     Bar,
@@ -118,6 +124,34 @@ function TabButton({ label, icon: Icon, active, onClick }: TabButtonProps) {
       `}
         >
             <Icon className="w-4 h-4" />
+            {label}
+        </button>
+    );
+}
+
+interface SemanticGraphActionButtonProps {
+    onClick: () => void;
+    label?: string;
+    disabled?: boolean;
+}
+
+function SemanticGraphActionButton({
+    onClick,
+    label = '定位图谱',
+    disabled = false,
+}: SemanticGraphActionButtonProps) {
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            disabled={disabled}
+            className="
+                inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg
+                text-xs font-medium border border-cyan-500/20 text-cyan-300 bg-cyan-500/10
+                hover:bg-cyan-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed
+            "
+        >
+            <Network className="w-3.5 h-3.5" />
             {label}
         </button>
     );
@@ -2037,10 +2071,108 @@ function OverviewTab() {
 // ==================== Risk Intel Tab ====================
 
 function RiskIntelTab() {
-    const { data } = useApp();
+    const { data, navigateToSemanticTarget } = useApp();
     const [filter, setFilter] = useState<'all' | RiskActivityType>('all');
+    const [semanticFilter, setSemanticFilter] = useState<'all' | 'high' | 'company' | 'family' | 'person'>('all');
+    const reportPackage = data.reportPackage as ReportPackage | null;
+    const mainReportView = reportPackage?.main_report_view || null;
 
     const riskGroups = useMemo(() => buildRiskActivityGroups(data.suspicions), [data.suspicions]);
+    const semanticPriorityBoard = useMemo(() => {
+        const items = Array.isArray(reportPackage?.priority_board) ? reportPackage.priority_board : [];
+        return [...items]
+            .filter((item): item is ReportPriorityBoardItem => Boolean(item?.entity_name))
+            .sort((left, right) => {
+                return Number(right.priority_score || 0) - Number(left.priority_score || 0);
+            })
+            .slice(0, 6);
+    }, [reportPackage]);
+
+    const semanticIssueCatalog = useMemo(() => {
+        const mainIssues = Array.isArray(mainReportView?.issues) ? mainReportView.issues : [];
+        const reportIssues = Array.isArray(reportPackage?.issues) ? reportPackage.issues : [];
+        const source = mainIssues.length > 0 ? mainIssues : reportIssues;
+        return [...source]
+            .filter((item): item is ReportIssue => Boolean(item?.issue_id || item?.headline || item?.narrative))
+            .sort((left, right) => {
+                const rightPriority = Number(right.priority || 0);
+                const leftPriority = Number(left.priority || 0);
+                if (rightPriority !== leftPriority) {
+                    return rightPriority - leftPriority;
+                }
+                return Number(right.severity || 0) - Number(left.severity || 0);
+            });
+    }, [mainReportView, reportPackage]);
+
+    const semanticCompanyDossiers = useMemo(() => {
+        const items = Array.isArray(reportPackage?.company_dossiers) ? reportPackage.company_dossiers : [];
+        return items
+            .map((item) => {
+                const dossier = (item || {}) as Record<string, unknown>;
+                const riskOverview = ((dossier.risk_overview as Record<string, unknown> | undefined) || {});
+                const keyIssueCards = Array.isArray(dossier.key_issue_cards)
+                    ? dossier.key_issue_cards
+                        .map((card) => {
+                            const issue = (card || {}) as Record<string, unknown>;
+                            return {
+                                issueId: String(issue.issue_id || '').trim(),
+                                category: String(issue.category || '').trim(),
+                                headline: String(issue.headline || '').trim(),
+                                riskLevel: String(issue.risk_level || '').trim() || 'low',
+                                priority: Number(issue.priority || 0),
+                            };
+                        })
+                        .filter((card) => card.issueId || card.headline)
+                    : [];
+
+                return {
+                    entityName: String(dossier.entity_name || dossier.name || '').trim(),
+                    summary: String(dossier.summary || '').trim(),
+                    riskLevel: String(riskOverview.risk_level || '').trim() || 'low',
+                    riskLabel: String(riskOverview.risk_label || '').trim(),
+                    priorityScore: Number(riskOverview.priority_score || 0),
+                    issueCount: Number(riskOverview.issue_count || 0),
+                    transactionCount: Number(dossier.transaction_count || 0),
+                    totalIncome: Number(dossier.total_income || 0),
+                    totalExpense: Number(dossier.total_expense || 0),
+                    roleTags: Array.isArray(dossier.role_tags)
+                        ? dossier.role_tags.map((tag) => String(tag || '').trim()).filter(Boolean)
+                        : [],
+                    relatedPersons: Array.isArray(dossier.related_persons)
+                        ? dossier.related_persons.map((name) => String(name || '').trim()).filter(Boolean)
+                        : [],
+                    relatedCompanies: Array.isArray(dossier.related_companies)
+                        ? dossier.related_companies.map((name) => String(name || '').trim()).filter(Boolean)
+                        : [],
+                    issueRefs: Array.isArray(dossier.issue_refs)
+                        ? dossier.issue_refs.map((ref) => String(ref || '').trim()).filter(Boolean)
+                        : [],
+                    keyIssueCards,
+                };
+            })
+            .filter((item) => item.entityName)
+            .sort((left, right) => {
+                if (right.priorityScore !== left.priorityScore) {
+                    return right.priorityScore - left.priorityScore;
+                }
+                return right.issueCount - left.issueCount;
+            });
+    }, [reportPackage]);
+
+    const semanticSummary = String(mainReportView?.summary_narrative || '').trim();
+    const semanticIssueCount = Number(mainReportView?.issue_count || semanticIssueCatalog.length || 0);
+    const semanticHighRiskIssueCount = Number(
+        mainReportView?.high_risk_issue_count
+        || semanticIssueCatalog.filter((issue) => ['high', 'critical'].includes(String(issue.risk_level || '').trim().toLowerCase())).length
+        || 0
+    );
+    const qaSummary = reportPackage?.qa_checks?.summary;
+    const hasSemanticData = Boolean(
+        semanticSummary
+        || semanticPriorityBoard.length
+        || semanticIssueCatalog.length
+        || semanticCompanyDossiers.length
+    );
 
     const riskFilters = [
         { id: 'all', label: '全部风险', count: riskGroups.all.length },
@@ -2076,6 +2208,49 @@ function RiskIntelTab() {
     }, [filter, riskGroups]);
 
     const hasAnyData = riskGroups.all.length > 0;
+    const showLegacyLogSection = !hasSemanticData;
+
+    const getIssueScopeKind = (issue: ReportIssue): 'company' | 'family' | 'person' => {
+        const scope = (issue.scope || {}) as Record<string, unknown>;
+        const entityType = String(scope.entity_type || '').trim().toLowerCase();
+        if (entityType === 'company' || issue.scope?.company || issue.company_name) {
+            return 'company';
+        }
+        if (entityType === 'family' || issue.scope?.family || issue.family_name) {
+            return 'family';
+        }
+        return 'person';
+    };
+
+    const semanticIssueFilters = useMemo(() => {
+        const countBy = (matcher: (issue: ReportIssue) => boolean) => semanticIssueCatalog.filter(matcher).length;
+        return [
+            { id: 'all', label: '全部问题', count: semanticIssueCatalog.length },
+            { id: 'high', label: '高风险优先', count: countBy((issue) => ['high', 'critical'].includes(String(issue.risk_level || '').trim().toLowerCase())) },
+            { id: 'company', label: '公司对象', count: countBy((issue) => getIssueScopeKind(issue) === 'company') },
+            { id: 'family', label: '家庭对象', count: countBy((issue) => getIssueScopeKind(issue) === 'family') },
+            { id: 'person', label: '个人对象', count: countBy((issue) => getIssueScopeKind(issue) === 'person') },
+        ] as const;
+    }, [semanticIssueCatalog]);
+
+    const filteredSemanticIssues = useMemo(() => {
+        const filtered = semanticIssueCatalog.filter((issue) => {
+            switch (semanticFilter) {
+                case 'high':
+                    return ['high', 'critical'].includes(String(issue.risk_level || '').trim().toLowerCase());
+                case 'company':
+                    return getIssueScopeKind(issue) === 'company';
+                case 'family':
+                    return getIssueScopeKind(issue) === 'family';
+                case 'person':
+                    return getIssueScopeKind(issue) === 'person';
+                case 'all':
+                default:
+                    return true;
+            }
+        });
+        return filtered.slice(0, 12);
+    }, [semanticFilter, semanticIssueCatalog]);
 
     const getTypeLabel = (type: RiskActivityType) => {
         switch (type) {
@@ -2089,105 +2264,562 @@ function RiskIntelTab() {
         }
     };
 
+    const getPriorityEntityTypeLabel = (item: ReportPriorityBoardItem) => {
+        switch (item.entity_type) {
+            case 'company':
+                return '公司对象';
+            case 'family':
+                return '家庭对象';
+            default:
+                return '个人对象';
+        }
+    };
+
+    const getIssueEntityLabel = (issue: ReportIssue) => {
+        return issue.scope?.entity
+            || issue.scope?.company
+            || issue.scope?.family
+            || issue.entity_name
+            || issue.company_name
+            || issue.family_name
+            || '未指定对象';
+    };
+
+    const getIssueDateRangeLabel = (issue: ReportIssue) => {
+        const start = issue.time_range?.start || '';
+        const end = issue.time_range?.end || '';
+        if (start && end && start !== end) {
+            return `${start} 至 ${end}`;
+        }
+        return start || end || '';
+    };
+
+    const getIssueScopeKindLabel = (issue: ReportIssue) => {
+        switch (getIssueScopeKind(issue)) {
+            case 'company':
+                return '公司对象';
+            case 'family':
+                return '家庭对象';
+            case 'person':
+            default:
+                return '个人对象';
+        }
+    };
+
+    const getIssueNavigationEntity = (issue: ReportIssue) => {
+        return String(
+            issue.scope?.entity
+            || issue.scope?.company
+            || issue.scope?.family
+            || issue.entity_name
+            || issue.company_name
+            || issue.family_name
+            || ''
+        ).trim();
+    };
+
+    const navigateEntityToGraph = (entityName: string, source: string) => {
+        const normalizedEntityName = String(entityName || '').trim();
+        if (!normalizedEntityName) {
+            return;
+        }
+        navigateToSemanticTarget({
+            tab: 'graph',
+            entityName: normalizedEntityName,
+            source,
+        });
+    };
+
     return (
         <div className="space-y-6">
-            {/* Filter Bar */}
-            <div className="flex items-center gap-2 flex-wrap">
-                {riskFilters.map((f) => (
-                    <button
-                        key={f.id}
-                        onClick={() => setFilter(f.id)}
-                        className={`
-              flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium
-              transition-all duration-200
-              ${filter === f.id
-                                ? 'bg-red-500/20 text-red-400 border border-red-500/30'
-                                : 'theme-bg-muted/50 theme-text-muted border theme-border hover:theme-border-strong hover:theme-text'
-                            }
-            `}
-                    >
-                        {f.label}
-                        <span className={`
-              px-1.5 py-0.5 rounded text-[10px] font-bold
-              ${filter === f.id ? 'bg-red-500/30' : 'theme-bg-muted'}
-            `}>
-                            {f.count}
-                        </span>
-                    </button>
-                ))}
-            </div>
-
-            {/* Suspicious Activity Table */}
-            <div className="card">
-                <div className="flex items-center gap-3 mb-6">
-                    <div className="p-2 rounded-lg bg-red-500/10">
-                        <AlertTriangle className="w-5 h-5 text-red-400" />
+            {hasSemanticData ? (
+                <>
+                    <div className="card border border-red-500/20 bg-gradient-to-r from-red-500/10 via-orange-500/5 to-transparent">
+                        <div className="flex items-start gap-4">
+                            <div className="p-3 rounded-xl bg-red-500/15 flex-shrink-0">
+                                <AlertTriangle className="w-6 h-6 text-red-400" />
+                            </div>
+                            <div className="flex-1 space-y-3">
+                                <div>
+                                    <h3 className="font-semibold text-white">风险情报总览</h3>
+                                    <p className="text-xs theme-text-dim mt-1">当前页面优先消费统一语义层 `report_package`</p>
+                                </div>
+                                <p className="text-sm theme-text-secondary leading-7">
+                                    {semanticSummary || '统一语义层已生成风险结论，但主摘要为空。'}
+                                </p>
+                                <div className="flex flex-wrap gap-2">
+                                    <span className="text-[11px] px-2.5 py-1 rounded-full border border-red-500/20 text-red-300 bg-red-500/10">
+                                        重点问题 {semanticIssueCount} 项
+                                    </span>
+                                    <span className="text-[11px] px-2.5 py-1 rounded-full border border-orange-500/20 text-orange-300 bg-orange-500/10">
+                                        高风险 {semanticHighRiskIssueCount} 项
+                                    </span>
+                                    <span className="text-[11px] px-2.5 py-1 rounded-full border border-cyan-500/20 text-cyan-300 bg-cyan-500/10">
+                                        优先对象 {semanticPriorityBoard.length} 个
+                                    </span>
+                                    {Number(qaSummary?.fail || 0) > 0 && (
+                                        <span className="text-[11px] px-2.5 py-1 rounded-full border border-amber-500/20 text-amber-300 bg-amber-500/10">
+                                            QA 阻断 {Number(qaSummary?.fail || 0)} 项
+                                        </span>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
                     </div>
-                    <div>
-                        <h3 className="font-semibold text-white">可疑活动日志</h3>
-                        <p className="text-xs theme-text-dim">
-                            {filter === 'all' ? '显示所有类型' : `筛选: ${riskFilters.find(f => f.id === filter)?.label}`}
-                            {' • '}共 {filteredData.length} 条记录
-                        </p>
+
+                    <div className="grid grid-cols-1 xl:grid-cols-5 gap-6">
+                        <div className="xl:col-span-2 card">
+                            <div className="flex items-center gap-3 mb-5">
+                                <div className="p-2 rounded-lg bg-cyan-500/10">
+                                    <Users className="w-5 h-5 text-cyan-400" />
+                                </div>
+                                <div>
+                                    <h3 className="font-semibold text-white">优先核查对象</h3>
+                                    <p className="text-xs theme-text-dim">直接来自 `priority_board` 的排序结果</p>
+                                </div>
+                            </div>
+
+                            {semanticPriorityBoard.length > 0 ? (
+                                <div className="space-y-3">
+                                    {semanticPriorityBoard.map((item, index) => (
+                                        <div key={`${item.entity_name}-${index}`} className="rounded-xl border theme-border bg-gray-900/30 p-4 space-y-3">
+                                            <div className="flex items-start justify-between gap-3">
+                                                <div>
+                                                    <p className="text-sm font-semibold theme-text-secondary">{item.entity_name}</p>
+                                                    <p className="text-xs theme-text-dim mt-1">
+                                                        {getPriorityEntityTypeLabel(item)}
+                                                        {item.family_name ? ` · ${item.family_name}` : ''}
+                                                    </p>
+                                                </div>
+                                                <div className="text-right">
+                                                    <span className={getRiskLevelBadgeStyle(item.risk_level || 'low')}>
+                                                        {formatRiskLevel(item.risk_level || 'low')}
+                                                    </span>
+                                                    <p className="font-mono text-cyan-300 text-sm mt-2">
+                                                        {Number(item.priority_score || 0).toFixed(1)}
+                                                    </p>
+                                                </div>
+                                            </div>
+
+                                            {item.top_reasons?.length ? (
+                                                <div className="space-y-1.5">
+                                                    {item.top_reasons.slice(0, 3).map((reason) => (
+                                                        <div key={`${item.entity_name}-${reason}`} className="text-xs theme-text-muted leading-relaxed">
+                                                            {sanitizeValue(reason)}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            ) : (
+                                                <div className="text-xs theme-text-dim">暂无优先原因摘要</div>
+                                            )}
+
+                                            {item.issue_refs?.length ? (
+                                                <div className="flex flex-wrap gap-1.5">
+                                                    {item.issue_refs.slice(0, 4).map((ref) => (
+                                                        <span
+                                                            key={`${item.entity_name}-${ref}`}
+                                                            className="text-[10px] px-2 py-0.5 rounded-full border border-cyan-500/20 text-cyan-300 bg-cyan-500/10 font-mono"
+                                                        >
+                                                            {ref}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            ) : null}
+
+                                            <div className="flex justify-end">
+                                                <SemanticGraphActionButton
+                                                    onClick={() => navigateEntityToGraph(item.entity_name, `risk:priority:${item.entity_name}`)}
+                                                />
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <EmptyState type="data" message="统一语义层暂未返回优先核查对象" />
+                            )}
+                        </div>
+
+                        <div className="xl:col-span-3 card">
+                            <div className="flex items-center gap-3 mb-5">
+                                <div className="p-2 rounded-lg bg-orange-500/10">
+                                    <FileText className="w-5 h-5 text-orange-400" />
+                                </div>
+                                <div>
+                                    <h3 className="font-semibold text-white">问题总览</h3>
+                                    <p className="text-xs theme-text-dim">风险页直接消费统一问题卡，不再依赖旧版 `suspicions` 主体列表</p>
+                                </div>
+                            </div>
+
+                            {semanticIssueCatalog.length > 0 ? (
+                                <div className="space-y-4">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        {semanticIssueFilters.map((item) => (
+                                            <button
+                                                key={item.id}
+                                                onClick={() => setSemanticFilter(item.id)}
+                                                className={`
+                                                    flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200
+                                                    ${semanticFilter === item.id
+                                                        ? 'bg-orange-500/20 text-orange-300 border border-orange-500/30'
+                                                        : 'theme-bg-muted/50 theme-text-muted border theme-border hover:theme-border-strong hover:theme-text'}
+                                                `}
+                                            >
+                                                {item.label}
+                                                <span className={`
+                                                    px-1.5 py-0.5 rounded text-[10px] font-bold
+                                                    ${semanticFilter === item.id ? 'bg-orange-500/30' : 'theme-bg-muted'}
+                                                `}>
+                                                    {item.count}
+                                                </span>
+                                            </button>
+                                        ))}
+                                    </div>
+
+                                    {filteredSemanticIssues.map((issue, index) => {
+                                        const navigationEntity = getIssueNavigationEntity(issue);
+                                        return (
+                                            <div key={`${issue.issue_id || issue.headline || 'issue'}-${index}`} className="rounded-xl border theme-border bg-gray-900/30 p-4 space-y-3">
+                                            <div className="flex items-start justify-between gap-3">
+                                                <div className="space-y-1">
+                                                    <div className="flex items-center gap-2 flex-wrap">
+                                                        <span className={getRiskLevelBadgeStyle(issue.risk_level || 'low')}>
+                                                            {formatRiskLevel(issue.risk_level || 'low')}
+                                                        </span>
+                                                        <span className="text-[10px] px-2 py-0.5 rounded-full border border-cyan-500/20 text-cyan-300 bg-cyan-500/10">
+                                                            {getIssueScopeKindLabel(issue)}
+                                                        </span>
+                                                        <span className="text-[10px] px-2 py-0.5 rounded-full border theme-border theme-text-dim">
+                                                            {sanitizeValue(issue.category || issue.theme || '风险问题')}
+                                                        </span>
+                                                        {issue.issue_id ? (
+                                                            <span className="text-[10px] font-mono theme-text-dim">{issue.issue_id}</span>
+                                                        ) : null}
+                                                    </div>
+                                                    <h4 className="text-sm font-semibold theme-text-secondary leading-6">
+                                                        {sanitizeValue(issue.headline || issue.narrative || '待核查问题')}
+                                                    </h4>
+                                                    <div className="text-xs theme-text-dim">
+                                                        {sanitizeValue(getIssueEntityLabel(issue))}
+                                                        {getIssueDateRangeLabel(issue) ? ` · ${getIssueDateRangeLabel(issue)}` : ''}
+                                                        {Number(issue.amount_impact || 0) > 0 ? ` · ${formatCurrency(Number(issue.amount_impact || 0))}` : ''}
+                                                    </div>
+                                                </div>
+                                                <div className="text-right min-w-[84px]">
+                                                    <div className="text-[10px] theme-text-dim">优先级</div>
+                                                    <div className="font-mono text-orange-300 text-lg font-semibold">
+                                                        {Number(issue.priority || 0).toFixed(1)}
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {issue.narrative ? (
+                                                <p className="text-sm theme-text-muted leading-6">
+                                                    {sanitizeValue(issue.narrative)}
+                                                </p>
+                                            ) : null}
+
+                                            {issue.why_flagged?.length ? (
+                                                <div>
+                                                    <div className="text-xs theme-text-dim mb-2">触发依据</div>
+                                                    <div className="space-y-1.5">
+                                                        {issue.why_flagged.slice(0, 3).map((reason) => (
+                                                            <div key={`${issue.issue_id || issue.headline}-why-${reason}`} className="text-xs theme-text-secondary">
+                                                                {sanitizeValue(reason)}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            ) : null}
+
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                <div>
+                                                    <div className="text-xs theme-text-dim mb-2">建议动作</div>
+                                                    {issue.next_actions?.length ? (
+                                                        <div className="space-y-1.5">
+                                                            {issue.next_actions.slice(0, 3).map((action) => (
+                                                                <div key={`${issue.issue_id || issue.headline}-action-${action}`} className="text-xs theme-text-secondary">
+                                                                    {sanitizeValue(action)}
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    ) : (
+                                                        <div className="text-xs theme-text-dim">暂无下一步动作</div>
+                                                    )}
+                                                </div>
+
+                                                <div>
+                                                    <div className="text-xs theme-text-dim mb-2">证据引用</div>
+                                                    {issue.evidence_refs?.length ? (
+                                                        <div className="flex flex-wrap gap-1.5">
+                                                            {issue.evidence_refs.slice(0, 4).map((ref) => (
+                                                                <span
+                                                                    key={`${issue.issue_id || issue.headline}-evidence-${ref}`}
+                                                                    className="text-[10px] px-2 py-0.5 rounded-full border border-orange-500/20 text-orange-300 bg-orange-500/10 font-mono"
+                                                                >
+                                                                    {ref}
+                                                                </span>
+                                                            ))}
+                                                        </div>
+                                                    ) : (
+                                                        <div className="text-xs theme-text-dim">暂无证据引用</div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                            <div className="flex justify-end">
+                                                <SemanticGraphActionButton
+                                                    onClick={() => navigateEntityToGraph(
+                                                        navigationEntity,
+                                                        `risk:issue:${issue.issue_id || issue.headline || index}`,
+                                                    )}
+                                                    disabled={!navigationEntity}
+                                                />
+                                            </div>
+                                            </div>
+                                        );
+                                    })}
+
+                                    {filteredSemanticIssues.length === 0 ? (
+                                        <EmptyState type="data" message="当前筛选条件下暂无统一问题卡" />
+                                    ) : null}
+                                </div>
+                            ) : (
+                                <EmptyState type="data" message="统一语义层暂未返回问题总览" />
+                            )}
+                        </div>
+                    </div>
+
+                    <div className="card">
+                        <div className="flex items-center gap-3 mb-5">
+                            <div className="p-2 rounded-lg bg-cyan-500/10">
+                                <Building2 className="w-5 h-5 text-cyan-400" />
+                            </div>
+                            <div>
+                                <h3 className="font-semibold text-white">公司专题</h3>
+                                <p className="text-xs theme-text-dim">直接消费 `company_dossiers` 的公司卷宗摘要</p>
+                            </div>
+                        </div>
+
+                        {semanticCompanyDossiers.length > 0 ? (
+                            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+                                {semanticCompanyDossiers.map((company, index) => (
+                                    <div key={`${company.entityName}-${index}`} className="rounded-xl border theme-border bg-gray-900/30 p-4 space-y-3">
+                                        <div className="flex items-start justify-between gap-3">
+                                            <div>
+                                                <p className="text-sm font-semibold theme-text-secondary">{company.entityName}</p>
+                                                <p className="text-xs theme-text-dim mt-1">
+                                                    公司卷宗
+                                                    {company.relatedPersons.length ? ` · 关联人员 ${company.relatedPersons.length} 名` : ''}
+                                                </p>
+                                            </div>
+                                            <div className="text-right">
+                                                <span className={getRiskLevelBadgeStyle(company.riskLevel || 'low')}>
+                                                    {formatRiskLevel(company.riskLevel || 'low')}
+                                                </span>
+                                                <p className="font-mono text-cyan-300 text-sm mt-2">
+                                                    {company.priorityScore.toFixed(1)}
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        {company.roleTags.length ? (
+                                            <div className="flex flex-wrap gap-1.5">
+                                                {company.roleTags.slice(0, 3).map((tag) => (
+                                                    <span
+                                                        key={`${company.entityName}-${tag}`}
+                                                        className="text-[10px] px-2 py-0.5 rounded-full border border-cyan-500/20 text-cyan-300 bg-cyan-500/10"
+                                                    >
+                                                        {sanitizeValue(tag)}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        ) : null}
+
+                                        {company.summary ? (
+                                            <p className="text-xs theme-text-muted leading-6">{sanitizeValue(company.summary)}</p>
+                                        ) : (
+                                            <div className="text-xs theme-text-dim">暂无公司摘要</div>
+                                        )}
+
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <div className="rounded-lg bg-black/15 px-3 py-2">
+                                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">问题数</div>
+                                                <div className="mt-1 text-sm font-semibold text-white">{company.issueCount}</div>
+                                            </div>
+                                            <div className="rounded-lg bg-black/15 px-3 py-2">
+                                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">交易笔数</div>
+                                                <div className="mt-1 text-sm font-semibold text-white">{company.transactionCount}</div>
+                                            </div>
+                                            <div className="rounded-lg bg-black/15 px-3 py-2">
+                                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">总流入</div>
+                                                <div className="mt-1 text-sm font-semibold text-emerald-300">{formatAmountInWan(company.totalIncome)}</div>
+                                            </div>
+                                            <div className="rounded-lg bg-black/15 px-3 py-2">
+                                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">总流出</div>
+                                                <div className="mt-1 text-sm font-semibold text-rose-300">{formatAmountInWan(company.totalExpense)}</div>
+                                            </div>
+                                        </div>
+
+                                        {company.relatedPersons.length ? (
+                                            <div className="text-xs theme-text-secondary leading-6">
+                                                关联人员: {company.relatedPersons.slice(0, 5).join('、')}
+                                            </div>
+                                        ) : null}
+
+                                        {company.relatedCompanies.length ? (
+                                            <div className="text-xs theme-text-secondary leading-6">
+                                                关联公司: {company.relatedCompanies.slice(0, 5).join('、')}
+                                            </div>
+                                        ) : null}
+
+                                        {company.keyIssueCards.length ? (
+                                            <div className="space-y-2">
+                                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">重点问题</div>
+                                                {company.keyIssueCards.slice(0, 2).map((issue) => (
+                                                    <div key={`${company.entityName}-${issue.issueId || issue.headline}`} className="rounded-lg bg-black/15 px-3 py-2">
+                                                        <div className="flex items-center justify-between gap-2">
+                                                            <span className={getRiskLevelBadgeStyle(issue.riskLevel || 'low')}>
+                                                                {formatRiskLevel(issue.riskLevel || 'low')}
+                                                            </span>
+                                                            <span className="text-[10px] font-mono theme-text-dim">
+                                                                {issue.issueId || issue.category || 'issue'}
+                                                            </span>
+                                                        </div>
+                                                        <div className="mt-2 text-xs theme-text-secondary leading-6">
+                                                            {sanitizeValue(issue.headline || '已收录公司重点问题')}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        ) : null}
+
+                                        <div className="flex justify-end">
+                                            <SemanticGraphActionButton
+                                                onClick={() => navigateEntityToGraph(company.entityName, `risk:company:${company.entityName}`)}
+                                            />
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <EmptyState type="data" message="统一语义层暂未返回公司专题卷宗" />
+                        )}
+                    </div>
+                </>
+            ) : (
+                <div className="card border border-amber-500/20 bg-amber-500/5">
+                    <div className="flex items-start gap-4">
+                        <div className="p-3 rounded-xl bg-amber-500/10">
+                            <Info className="w-6 h-6 text-amber-400" />
+                        </div>
+                        <div>
+                            <h3 className="font-semibold text-white">统一语义层尚未接入当前风险页数据</h3>
+                            <p className="text-sm theme-text-muted mt-2 leading-6">
+                                当前回退展示旧版 `suspicions` 风险日志。待后端存在 `report_package` 后，本页会优先显示问题卡与优先核查对象。
+                            </p>
+                        </div>
                     </div>
                 </div>
+            )}
 
-                {filteredData.length > 0 ? (
-                    <div className="overflow-x-auto">
-                        <table className="w-full">
-                            <thead>
-                                <tr className="border-b theme-border">
-                                    <th className="pb-3 text-left text-xs font-semibold theme-text-dim uppercase tracking-wider">类型</th>
-                                    <th className="pb-3 text-left text-xs font-semibold theme-text-dim uppercase tracking-wider">日期</th>
-                                    <th className="pb-3 text-left text-xs font-semibold theme-text-dim uppercase tracking-wider">主体/转出方</th>
-                                    <th className="pb-3 text-left text-xs font-semibold theme-text-dim uppercase tracking-wider">对手方/来源</th>
-                                    <th className="pb-3 text-right text-xs font-semibold theme-text-dim uppercase tracking-wider">金额</th>
-                                    <th className="pb-3 text-left text-xs font-semibold theme-text-dim uppercase tracking-wider">说明</th>
-                                    <th className="pb-3 text-center text-xs font-semibold theme-text-dim uppercase tracking-wider">风险等级</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {filteredData.map((item: RiskActivity, idx: number) => (
-                                    <tr key={idx} className="border-b theme-border/50 hover:bg-red-500/5 transition-colors">
-                                        <td className="py-4">
-                                            <span className={getRiskLevelBadgeStyle(item.riskLevel)}>
-                                                {getTypeLabel(item.type)}
-                                            </span>
-                                        </td>
-                                        <td className="py-4">
-                                            <div className="flex items-center gap-2 theme-text-secondary">
-                                                <Clock className="w-3 h-3 theme-text-dim" />
-                                                <span className="text-xs">{formatDate(item.date)}</span>
-                                            </div>
-                                        </td>
-                                        <td className="py-4 theme-text-secondary font-medium" title={formatPartyName(item.from)}>
-                                            {truncate(formatPartyName(item.from), 12)}
-                                        </td>
-                                        <td className="py-4 theme-text-secondary font-medium" title={formatPartyName(item.to)}>
-                                            {truncate(formatPartyName(item.to), 12)}
-                                        </td>
-                                        <td className="py-4 text-right">
-                                            <span className="text-red-400 font-bold">
-                                                {item.amount === null ? '--' : formatCurrency(item.amount)}
-                                            </span>
-                                        </td>
-                                        <td className="py-4 max-w-[200px]" title={formatRiskDescription(item.description)}>
-                                            <span className="text-xs theme-text-muted truncate block">{truncate(formatRiskDescription(item.description), 20)}</span>
-                                        </td>
-                                        <td className="py-4 text-center">
-                                            <span className={getRiskLevelBadgeStyle(item.riskLevel)}>
-                                                {formatRiskLevel(item.riskLevel)}
-                                            </span>
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
+            {showLegacyLogSection && (
+                <>
+                    <div className="flex items-center gap-2 flex-wrap">
+                        {riskFilters.map((f) => (
+                            <button
+                                key={f.id}
+                                onClick={() => setFilter(f.id)}
+                                className={`
+                  flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium
+                  transition-all duration-200
+                  ${filter === f.id
+                                        ? 'bg-red-500/20 text-red-400 border border-red-500/30'
+                                        : 'theme-bg-muted/50 theme-text-muted border theme-border hover:theme-border-strong hover:theme-text'
+                                    }
+                `}
+                            >
+                                {f.label}
+                                <span className={`
+                  px-1.5 py-0.5 rounded text-[10px] font-bold
+                  ${filter === f.id ? 'bg-red-500/30' : 'theme-bg-muted'}
+                `}>
+                                    {f.count}
+                                </span>
+                            </button>
+                        ))}
                     </div>
-                ) : (
-                    <EmptyState type={hasAnyData ? 'data' : 'safe'} message={hasAnyData ? '当前筛选条件下暂无记录' : undefined} />
-                )}
-            </div>
+
+                    <div className="card">
+                        <div className="flex items-center gap-3 mb-6">
+                            <div className="p-2 rounded-lg bg-red-500/10">
+                                <AlertTriangle className="w-5 h-5 text-red-400" />
+                            </div>
+                            <div>
+                                <h3 className="font-semibold text-white">可疑活动日志</h3>
+                                <p className="text-xs theme-text-dim">
+                                    {filter === 'all' ? '显示所有类型' : `筛选: ${riskFilters.find(f => f.id === filter)?.label}`}
+                                    {' • '}共 {filteredData.length} 条记录
+                                </p>
+                            </div>
+                        </div>
+
+                        {filteredData.length > 0 ? (
+                            <div className="overflow-x-auto">
+                                <table className="w-full">
+                                    <thead>
+                                        <tr className="border-b theme-border">
+                                            <th className="pb-3 text-left text-xs font-semibold theme-text-dim uppercase tracking-wider">类型</th>
+                                            <th className="pb-3 text-left text-xs font-semibold theme-text-dim uppercase tracking-wider">日期</th>
+                                            <th className="pb-3 text-left text-xs font-semibold theme-text-dim uppercase tracking-wider">主体/转出方</th>
+                                            <th className="pb-3 text-left text-xs font-semibold theme-text-dim uppercase tracking-wider">对手方/来源</th>
+                                            <th className="pb-3 text-right text-xs font-semibold theme-text-dim uppercase tracking-wider">金额</th>
+                                            <th className="pb-3 text-left text-xs font-semibold theme-text-dim uppercase tracking-wider">说明</th>
+                                            <th className="pb-3 text-center text-xs font-semibold theme-text-dim uppercase tracking-wider">风险等级</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {filteredData.map((item: RiskActivity, idx: number) => (
+                                            <tr key={idx} className="border-b theme-border/50 hover:bg-red-500/5 transition-colors">
+                                                <td className="py-4">
+                                                    <span className={getRiskLevelBadgeStyle(item.riskLevel)}>
+                                                        {getTypeLabel(item.type)}
+                                                    </span>
+                                                </td>
+                                                <td className="py-4">
+                                                    <div className="flex items-center gap-2 theme-text-secondary">
+                                                        <Clock className="w-3 h-3 theme-text-dim" />
+                                                        <span className="text-xs">{formatDate(item.date)}</span>
+                                                    </div>
+                                                </td>
+                                                <td className="py-4 theme-text-secondary font-medium" title={formatPartyName(item.from)}>
+                                                    {truncate(formatPartyName(item.from), 12)}
+                                                </td>
+                                                <td className="py-4 theme-text-secondary font-medium" title={formatPartyName(item.to)}>
+                                                    {truncate(formatPartyName(item.to), 12)}
+                                                </td>
+                                                <td className="py-4 text-right">
+                                                    <span className="text-red-400 font-bold">
+                                                        {item.amount === null ? '--' : formatCurrency(item.amount)}
+                                                    </span>
+                                                </td>
+                                                <td className="py-4 max-w-[200px]" title={formatRiskDescription(item.description)}>
+                                                    <span className="text-xs theme-text-muted truncate block">{truncate(formatRiskDescription(item.description), 20)}</span>
+                                                </td>
+                                                <td className="py-4 text-center">
+                                                    <span className={getRiskLevelBadgeStyle(item.riskLevel)}>
+                                                        {formatRiskLevel(item.riskLevel)}
+                                                    </span>
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        ) : (
+                            <EmptyState type={hasAnyData ? 'data' : 'safe'} message={hasAnyData ? '当前筛选条件下暂无记录' : undefined} />
+                        )}
+                    </div>
+                </>
+            )}
         </div>
     );
 }
@@ -2212,8 +2844,74 @@ function GraphViewTab() {
 
 // ==================== Audit Report Tab ====================
 
+function hasSemanticSectionContent(section?: ReportSemanticSection | null) {
+    return Boolean(section?.headline || section?.badges?.length || section?.highlights?.length);
+}
+
+interface ReportSemanticPanelProps {
+    title: string;
+    icon: React.ElementType;
+    section?: ReportSemanticSection;
+    accentClass: string;
+}
+
+function ReportSemanticPanel({ title, icon: Icon, section, accentClass }: ReportSemanticPanelProps) {
+    if (!hasSemanticSectionContent(section)) {
+        return null;
+    }
+
+    return (
+        <div className="rounded-2xl border theme-border bg-gray-900/30 p-4 space-y-3">
+            <div className="flex items-center gap-3">
+                <div className={`p-2 rounded-xl ${accentClass}`}>
+                    <Icon className="w-5 h-5" />
+                </div>
+                <div>
+                    <h4 className="font-semibold theme-text-secondary">{title}</h4>
+                    <p className="text-xs theme-text-dim">报告中心语义导航摘要</p>
+                </div>
+            </div>
+
+            {section?.headline && (
+                <p className="text-sm theme-text-muted leading-relaxed">{section.headline}</p>
+            )}
+
+            {section?.badges?.length ? (
+                <div className="flex flex-wrap gap-2">
+                    {section.badges.slice(0, 4).map((badge) => (
+                        <span
+                            key={badge}
+                            className="text-[11px] px-2.5 py-1 rounded-full border theme-border theme-text-dim"
+                        >
+                            {badge}
+                        </span>
+                    ))}
+                </div>
+            ) : null}
+
+            {section?.highlights?.length ? (
+                <div className="space-y-2">
+                    {section.highlights.slice(0, 3).map((item) => (
+                        <div
+                            key={`${title}-${item.title}`}
+                            className="rounded-xl border theme-border bg-black/10 px-3 py-2"
+                        >
+                            <p className="text-sm font-medium theme-text-secondary">{item.title}</p>
+                            {item.summary ? (
+                                <p className="text-xs theme-text-dim mt-1 leading-relaxed">{item.summary}</p>
+                            ) : null}
+                        </div>
+                    ))}
+                </div>
+            ) : null}
+        </div>
+    );
+}
+
 function AuditReportTab() {
     const [reports, setReports] = useState<Report[]>([]);
+    const [reportGroups, setReportGroups] = useState<ReportGroup[]>([]);
+    const [semanticOverview, setSemanticOverview] = useState<ReportSemanticOverview | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [downloading, setDownloading] = useState<string | null>(null);
@@ -2230,16 +2928,41 @@ function AuditReportTab() {
         try {
             setLoading(true);
             setError(null);
-            const response = await api.getReports();
-            setReports(response.reports);
+            try {
+                const manifest = await api.getReportManifest();
+                setReports(manifest.reports || []);
+                setReportGroups((manifest.groups || []).filter(group => group.count > 0));
+                setSemanticOverview(manifest.semanticOverview || null);
+            } catch (manifestErr) {
+                console.warn('获取报告分组清单失败，回退到平铺列表:', manifestErr);
+                const response = await api.getReports();
+                setReports(response.reports);
+                setSemanticOverview(null);
+                setReportGroups([
+                    {
+                        key: 'all_reports',
+                        label: '全部报告',
+                        description: '后端尚未返回分组清单，当前展示平铺文件列表。',
+                        order: 999,
+                        count: response.reports.length,
+                        items: response.reports,
+                    }
+                ]);
+            }
         } catch (err) {
             const errorMsg = err instanceof Error ? err.message : '获取报告列表失败';
             setError(errorMsg);
+            setSemanticOverview(null);
             console.error('获取报告列表失败:', err);
         } finally {
             setLoading(false);
         }
     };
+
+    const showSemanticOverview = hasSemanticSectionContent(semanticOverview?.mainReport)
+        || hasSemanticSectionContent(semanticOverview?.appendices)
+        || hasSemanticSectionContent(semanticOverview?.qa)
+        || hasSemanticSectionContent(semanticOverview?.dossiers);
 
     // 下载报告
     const handleDownload = async (filename: string) => {
@@ -2267,9 +2990,9 @@ function AuditReportTab() {
 
     // P2-3: 预览报告
     const handlePreview = async (filename: string) => {
-        // 只支持 txt/html/markdown 文件预览
+        // 只支持 txt/html/markdown/json 文件预览
         const ext = filename.toLowerCase().split('.').pop();
-        if (!['txt', 'html', 'htm', 'md'].includes(ext || '')) {
+        if (!['txt', 'html', 'htm', 'md', 'json'].includes(ext || '')) {
             // 不支持的文件类型直接下载
             handleDownload(filename);
             return;
@@ -2403,70 +3126,172 @@ function AuditReportTab() {
                 ) : reports.length === 0 ? (
                     <EmptyState type="data" message="暂无报告" />
                 ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        {reports.map((report, idx) => {
-                            const Icon = (
-                                report.name.includes('xlsx') || report.name.includes('xls') ? FileText :
-                                    report.name.includes('html') || report.name.includes('htm') ? Network :
-                                        report.name.includes('pdf') ? FileText : FileText
-                            );
-                            const isDownloading = downloading === report.name;
+                    <div className="space-y-6">
+                        {showSemanticOverview && (
+                            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                                <ReportSemanticPanel
+                                    title="主报告导航"
+                                    icon={FileText}
+                                    section={semanticOverview?.mainReport}
+                                    accentClass="bg-blue-500/10 text-blue-400"
+                                />
+                                <ReportSemanticPanel
+                                    title="附录导航"
+                                    icon={Folder}
+                                    section={semanticOverview?.appendices}
+                                    accentClass="bg-emerald-500/10 text-emerald-400"
+                                />
+                                <ReportSemanticPanel
+                                    title="QA 门控"
+                                    icon={AlertTriangle}
+                                    section={semanticOverview?.qa}
+                                    accentClass="bg-amber-500/10 text-amber-400"
+                                />
+                                <ReportSemanticPanel
+                                    title="卷宗覆盖"
+                                    icon={Users}
+                                    section={semanticOverview?.dossiers}
+                                    accentClass="bg-cyan-500/10 text-cyan-400"
+                                />
+                            </div>
+                        )}
 
-                            return (
-                                <div
-                                    key={idx}
-                                    className="flex items-center justify-between p-4 rounded-xl border bg-gray-800/30 theme-border hover:theme-border-strong transition-all duration-200"
-                                >
-                                    <div className="flex items-center gap-4">
-                                        <div className="p-3 rounded-xl bg-blue-500/10">
-                                            <Icon className="w-5 h-5 text-blue-400" />
-                                        </div>
-                                        <div>
-                                            <p className="font-medium theme-text-secondary">{truncate(report.name, 25)}</p>
-                                            <p className="text-xs theme-text-dim mt-0.5">{getFileTypeDescription(report.name)}</p>
-                                            <div className="flex items-center gap-2 mt-1">
-                                                <span className="text-[10px] font-mono theme-text-dim uppercase">{getFileType(report.name)}</span>
-                                                <span className="text-[10px] theme-text-dim">•</span>
-                                                <span className="text-[10px] theme-text-dim">{formatFileSize(report.size)}</span>
+                        {reportGroups.map((group) => (
+                            <div key={group.key} className="space-y-3">
+                                <div className="flex items-center justify-between">
+                                    <div>
+                                        <h4 className="font-semibold theme-text-secondary">{group.label}</h4>
+                                        <p className="text-xs theme-text-dim mt-1">{group.description}</p>
+                                        {(group.semanticHeadline || group.semanticBadges?.length || group.semanticHighlights?.length) && (
+                                            <div className="mt-3 rounded-xl border theme-border bg-gray-900/30 p-3 space-y-3 max-w-3xl">
+                                                {group.semanticHeadline ? (
+                                                    <p className="text-sm theme-text-muted leading-relaxed">{group.semanticHeadline}</p>
+                                                ) : null}
+                                                {group.semanticBadges?.length ? (
+                                                    <div className="flex flex-wrap gap-2">
+                                                        {group.semanticBadges.slice(0, 4).map((badge) => (
+                                                            <span
+                                                                key={`${group.key}-${badge}`}
+                                                                className="text-[11px] px-2 py-1 rounded-full border theme-border theme-text-dim"
+                                                            >
+                                                                {badge}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                ) : null}
+                                                {group.semanticHighlights?.length ? (
+                                                    <div className="space-y-2">
+                                                        {group.semanticHighlights.slice(0, 3).map((item) => (
+                                                            <div key={`${group.key}-${item.title}`}>
+                                                                <p className="text-sm font-medium theme-text-secondary">{item.title}</p>
+                                                                {item.summary ? (
+                                                                    <p className="text-xs theme-text-dim mt-0.5 leading-relaxed">{item.summary}</p>
+                                                                ) : null}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                ) : null}
                                             </div>
-                                        </div>
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                        {/* 预览按钮 - 主操作 */}
-                                        {['txt', 'html', 'htm'].includes(report.name.toLowerCase().split('.').pop() || '') && (
-                                            <button
-                                                onClick={() => handlePreview(report.name)}
-                                                disabled={previewLoading}
-                                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-cyan-500/20 border border-cyan-500/30 text-cyan-400 hover:bg-cyan-500/30 hover:border-cyan-400 transition-colors"
-                                            >
-                                                <Eye className="w-4 h-4" />
-                                                预览
-                                            </button>
                                         )}
-                                        {/* 下载按钮 - 次操作 */}
-                                        <button
-                                            onClick={() => handleDownload(report.name)}
-                                            disabled={isDownloading}
-                                            className={`
-                                                flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-sm
-                                                transition-all duration-200
-                                                ${isDownloading
-                                                    ? 'theme-bg-muted/50 theme-text-dim cursor-wait border theme-border-strong'
-                                                    : 'border theme-border-strong hover:border-blue-500 theme-text-muted hover:text-blue-400 hover:bg-blue-500/10'
-                                                }
-                                            `}
-                                            title="下载文件"
-                                        >
-                                            {isDownloading ? (
-                                                <RefreshCw className="w-4 h-4 animate-spin" />
-                                            ) : (
-                                                <Download className="w-4 h-4" />
-                                            )}
-                                        </button>
                                     </div>
+                                    <span className="text-[11px] px-2.5 py-1 rounded-full border theme-border theme-text-dim">
+                                        {group.count} 个文件
+                                    </span>
                                 </div>
-                            );
-                        })}
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    {group.items.map((report) => {
+                                        const Icon = (
+                                            report.name.includes('xlsx') || report.name.includes('xls') ? FileSpreadsheet :
+                                                report.name.includes('html') || report.name.includes('htm') ? Network :
+                                                    report.name.includes('json') ? Folder :
+                                                        report.name.includes('pdf') ? FileText : FileText
+                                        );
+                                        const isDownloading = downloading === report.name;
+                                        const ext = report.name.toLowerCase().split('.').pop() || '';
+                                        const canPreview = ['txt', 'html', 'htm', 'md', 'json'].includes(ext);
+
+                                        return (
+                                            <div
+                                                key={report.name}
+                                                className="flex items-center justify-between p-4 rounded-xl border bg-gray-800/30 theme-border hover:theme-border-strong transition-all duration-200"
+                                            >
+                                                <div className="flex items-center gap-4">
+                                                    <div className="p-3 rounded-xl bg-blue-500/10">
+                                                        <Icon className="w-5 h-5 text-blue-400" />
+                                                    </div>
+                                                    <div>
+                                                        <p className="font-medium theme-text-secondary">{truncate(report.name, 36)}</p>
+                                                        <p className="text-xs theme-text-dim mt-0.5">{getFileTypeDescription(report.name, group.label)}</p>
+                                                        <div className="flex items-center gap-2 mt-1">
+                                                            <span className="text-[10px] font-mono theme-text-dim uppercase">{getFileType(report.name)}</span>
+                                                            <span className="text-[10px] theme-text-dim">•</span>
+                                                            <span className="text-[10px] theme-text-dim">{formatFileSize(report.size)}</span>
+                                                        </div>
+                                                        {(report.semanticTitle || report.semanticSummary || report.semanticBadges?.length) && (
+                                                            <div className="mt-2 space-y-2 max-w-xl">
+                                                                {report.semanticTitle ? (
+                                                                    <p className="text-[11px] font-medium tracking-wide text-cyan-400 uppercase">
+                                                                        {report.semanticTitle}
+                                                                    </p>
+                                                                ) : null}
+                                                                {report.semanticSummary ? (
+                                                                    <p className="text-xs theme-text-muted leading-relaxed">
+                                                                        {report.semanticSummary}
+                                                                    </p>
+                                                                ) : null}
+                                                                {report.semanticBadges?.length ? (
+                                                                    <div className="flex flex-wrap gap-1.5">
+                                                                        {report.semanticBadges.slice(0, 3).map((badge) => (
+                                                                            <span
+                                                                                key={`${report.name}-${badge}`}
+                                                                                className="text-[10px] px-2 py-0.5 rounded-full border border-cyan-500/20 text-cyan-300 bg-cyan-500/10"
+                                                                            >
+                                                                                {badge}
+                                                                            </span>
+                                                                        ))}
+                                                                    </div>
+                                                                ) : null}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                                <div className="flex items-center gap-2">
+                                                    {canPreview && (
+                                                        <button
+                                                            onClick={() => handlePreview(report.name)}
+                                                            disabled={previewLoading}
+                                                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-cyan-500/20 border border-cyan-500/30 text-cyan-400 hover:bg-cyan-500/30 hover:border-cyan-400 transition-colors"
+                                                        >
+                                                            <Eye className="w-4 h-4" />
+                                                            预览
+                                                        </button>
+                                                    )}
+                                                    <button
+                                                        onClick={() => handleDownload(report.name)}
+                                                        disabled={isDownloading}
+                                                        className={`
+                                                            flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-sm
+                                                            transition-all duration-200
+                                                            ${isDownloading
+                                                                ? 'theme-bg-muted/50 theme-text-dim cursor-wait border theme-border-strong'
+                                                                : 'border theme-border-strong hover:border-blue-500 theme-text-muted hover:text-blue-400 hover:bg-blue-500/10'
+                                                            }
+                                                        `}
+                                                        title="下载文件"
+                                                    >
+                                                        {isDownloading ? (
+                                                            <RefreshCw className="w-4 h-4 animate-spin" />
+                                                        ) : (
+                                                            <Download className="w-4 h-4" />
+                                                        )}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        ))}
                     </div>
                 )}
             </div>
@@ -2493,10 +3318,28 @@ function AuditReportTab() {
 
 // ==================== Helper Functions ====================
 
-function getFileTypeDescription(filename: string): string {
+function getFileTypeDescription(filename: string, groupLabel: string = ''): string {
     const name = filename.toLowerCase();
+    if (groupLabel.includes('QA')) {
+        return '语义包、一致性检查与质量门控产物';
+    }
+    if (groupLabel.includes('附录')) {
+        return '按主题沉淀的附录或专题输出';
+    }
+    if (groupLabel.includes('卷宗')) {
+        return '对象级复核卷宗与问题引用';
+    }
+    if (groupLabel.includes('技术')) {
+        return '日志、索引与技术辅助文件';
+    }
+    if (groupLabel.includes('工作底稿')) {
+        return '结构化底稿与明细数据文件';
+    }
     if (name.includes('excel') || name.includes('xlsx') || name.includes('xls')) {
         return '完整的分析结果 Excel 格式';
+    }
+    if (name.includes('json')) {
+        return '结构化语义或检查结果文件';
     }
     if (name.includes('html') || name.includes('report')) {
         return '详细的文字分析报告';

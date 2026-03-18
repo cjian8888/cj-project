@@ -6,6 +6,7 @@ import type {
     AnalysisState,
     DataState,
     LogEntry,
+    SemanticNavigationTarget,
     UIState,
     TabType,
     SuspicionResult,
@@ -128,6 +129,7 @@ const defaultData: DataState = {
             analysisMetadata: {},
         },
     },
+    reportPackage: null,
     walletData: defaultWalletData,
     categorizedFiles: {
         persons: {},
@@ -140,6 +142,7 @@ const defaultUI: UIState = {
     activeTab: 'overview',
     sidebarCollapsed: true,
     theme: 'dark',
+    semanticNavigation: null,
 };
 
 const initialLogs: LogEntry[] = [
@@ -186,6 +189,8 @@ interface AppContextType extends AppState {
 
     // UI actions
     setActiveTab: (tab: TabType) => void;
+    navigateToSemanticTarget: (target: Omit<SemanticNavigationTarget, 'requestKey'>) => void;
+    clearSemanticNavigation: () => void;
     toggleSidebar: () => void;
     toggleTheme: () => void;
 }
@@ -205,6 +210,7 @@ export function AppProvider({ children }: AppProviderProps) {
     const [logs, setLogs] = useState<LogEntry[]>(initialLogs);
     const [ui, setUI] = useState<UIState>(defaultUI);
     const completeHandledRef = useRef(false);
+    const semanticNavigationRequestRef = useRef(0);
 
     // ==================== Config Actions ====================
 
@@ -330,6 +336,7 @@ export function AppProvider({ children }: AppProviderProps) {
             profiles: backendData.profiles || {},
             suspicions: safeSuspicions,
             analysisResults: safeAnalysisResults,
+            reportPackage: backendData.reportPackage || null,
             walletData: backendData.walletData || defaultWalletData,
             categorizedFiles: defaultData.categorizedFiles,
         };
@@ -759,7 +766,35 @@ export function AppProvider({ children }: AppProviderProps) {
     // ==================== UI Actions ====================
 
     const setActiveTab = useCallback((tab: TabType) => {
-        setUI(prev => ({ ...prev, activeTab: tab }));
+        setUI(prev => ({
+            ...prev,
+            activeTab: tab,
+            semanticNavigation: prev.activeTab === tab ? prev.semanticNavigation : null,
+        }));
+    }, []);
+
+    const navigateToSemanticTarget = useCallback((target: Omit<SemanticNavigationTarget, 'requestKey'>) => {
+        semanticNavigationRequestRef.current += 1;
+        setUI(prev => ({
+            ...prev,
+            activeTab: target.tab,
+            semanticNavigation: {
+                ...target,
+                requestKey: semanticNavigationRequestRef.current,
+            },
+        }));
+    }, []);
+
+    const clearSemanticNavigation = useCallback(() => {
+        setUI(prev => {
+            if (!prev.semanticNavigation) {
+                return prev;
+            }
+            return {
+                ...prev,
+                semanticNavigation: null,
+            };
+        });
     }, []);
 
     const toggleSidebar = useCallback(() => {
@@ -804,6 +839,8 @@ export function AppProvider({ children }: AppProviderProps) {
         addLog,
         clearLogs,
         setActiveTab,
+        navigateToSemanticTarget,
+        clearSemanticNavigation,
         toggleSidebar,
         toggleTheme,
     };
