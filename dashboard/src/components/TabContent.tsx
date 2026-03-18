@@ -139,7 +139,7 @@ interface AuditMetric {
 }
 
 function OverviewTab() {
-    const { data, analysis } = useApp();
+    const { data, analysis, ui } = useApp();
 
     // Modal 状态
     const [selectedMetric, setSelectedMetric] = useState<AuditMetric | null>(null);
@@ -242,8 +242,7 @@ function OverviewTab() {
                     riskLevel: cashRatio > 15 ? 'high' : cashRatio > 8 ? 'medium' : 'low'
                 };
             })
-            .sort((a, b) => b.total - a.total)
-            .slice(0, 8);
+            .sort((a, b) => b.total - a.total);
     }, [hasRealData, data.profiles, data.persons, data.analysisResults]);
 
     const companyProfiles = useMemo(() => {
@@ -284,8 +283,7 @@ function OverviewTab() {
                     riskLevel: cashRatio > 20 ? 'high' : cashRatio > 10 ? 'medium' : 'low'
                 };
             })
-            .sort((a, b) => b.total - a.total)
-            .slice(0, 8);
+            .sort((a, b) => b.total - a.total);
     }, [hasRealData, data.profiles, data.companies]);
 
     // 当前显示的流量数据
@@ -435,7 +433,10 @@ function OverviewTab() {
 
     // 🆕 审计发现类型分布 - 按借贷分析和收入分析的分类显示
     const auditFindingsDistribution = useMemo(() => {
-        if (!hasRealData) return [{ name: '等待分析', value: 100, color: '#374151' }];
+        const emptyStateColor = ui.theme === 'light' ? '#dbe4f0' : '#334155';
+        if (!hasRealData) {
+            return [{ name: '等待分析', value: 1, color: emptyStateColor, percent: 100, placeholder: true }];
+        }
 
         // 统计借贷分析各分类的数量
         const loanCounts = {
@@ -454,7 +455,7 @@ function OverviewTab() {
         };
 
         // 组装饼图数据（只显示有数据的分类）
-        const categories: { name: string; value: number; color: string }[] = [];
+        const categories: { name: string; value: number; color: string; placeholder?: boolean }[] = [];
         const colorPalette = [
             '#3b82f6', // 蓝
             '#8b5cf6', // 紫
@@ -497,7 +498,7 @@ function OverviewTab() {
         }
 
         if (categories.length === 0) {
-            return [{ name: '暂无发现', value: 100, color: '#374151' }];
+            return [{ name: '暂无发现', value: 1, color: emptyStateColor, percent: 100, placeholder: true }];
         }
 
         // 计算百分比
@@ -506,7 +507,26 @@ function OverviewTab() {
             ...c,
             percent: Math.round((c.value / total) * 100)
         }));
-    }, [hasRealData, loanDetailsData, incomeDetailsData]);
+    }, [hasRealData, incomeDetailsData, loanDetailsData, ui.theme]);
+
+    const chartStrokeColor = ui.theme === 'light' ? '#ffffff' : '#0f172a';
+    const chartTooltipStyle = ui.theme === 'light'
+        ? {
+            backgroundColor: '#ffffff',
+            border: '1px solid #cbd5e1',
+            borderRadius: '8px',
+            padding: '8px 12px',
+            boxShadow: '0 10px 30px rgba(15, 23, 42, 0.12)',
+        }
+        : {
+            backgroundColor: '#1e293b',
+            border: '1px solid #3b82f6',
+            borderRadius: '8px',
+            padding: '8px 12px',
+            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.5)',
+        };
+    const chartTooltipItemStyle = ui.theme === 'light' ? { color: '#0f172a' } : { color: '#f1f5f9' };
+    const chartTooltipLabelStyle = ui.theme === 'light' ? { color: '#64748b', marginBottom: '4px' } : { color: '#94a3b8', marginBottom: '4px' };
 
     // 使用新的数据源（兼容旧变量名）
     const incomeDistributionData = auditFindingsDistribution;
@@ -544,12 +564,21 @@ function OverviewTab() {
     );
 
     // 筛选极高风险和高风险实体
-    const criticalRiskEntities = rankedEntities.filter((e: any) =>
-        e.riskLevel === 'critical' || (e.riskScore && e.riskScore >= 80)
-    );
-    const highRiskEntities = rankedEntities.filter((e: any) =>
-        e.riskLevel === 'high' || (e.riskScore && e.riskScore >= 60 && e.riskScore < 80)
-    );
+    const resolveAggregationRiskLevel = (entity: any): 'critical' | 'high' | 'medium' | 'low' => {
+        const normalizedLevel = String(entity?.riskLevel || entity?.risk_level || '').trim().toLowerCase();
+        if (normalizedLevel === 'critical' || normalizedLevel === 'high' || normalizedLevel === 'medium' || normalizedLevel === 'low') {
+            return normalizedLevel;
+        }
+
+        const score = Number(entity?.riskScore ?? entity?.risk_score ?? entity?.score ?? 0);
+        if (score >= 70) return 'critical';
+        if (score >= 50) return 'high';
+        if (score >= 30) return 'medium';
+        return 'low';
+    };
+
+    const criticalRiskEntities = rankedEntities.filter((e: any) => resolveAggregationRiskLevel(e) === 'critical');
+    const highRiskEntities = rankedEntities.filter((e: any) => resolveAggregationRiskLevel(e) === 'high');
 
     const auditMetrics: AuditMetric[] = [
         // 1. 借贷风险分析 - 显示所有借贷类型总数，弹窗中分类展示
@@ -594,7 +623,7 @@ function OverviewTab() {
             label: '极高风险实体',
             value: criticalRiskEntities.length > 0 ? criticalRiskEntities.length : (aggregationSummary['极高风险实体数'] || 0),
             color: 'text-red-500',
-            desc: '风险评分≥80',
+            desc: '风险评分≥70',
             icon: AlertTriangle
         },
         // 7. 高风险实体 - 使用筛选后的 rankedEntities
@@ -603,7 +632,7 @@ function OverviewTab() {
             label: '高风险实体',
             value: highRiskEntities.length > 0 ? highRiskEntities.length : (aggregationSummary['高风险实体数'] || 0),
             color: 'text-orange-500',
-            desc: '风险评分60-79',
+            desc: '风险评分50-69',
             icon: AlertTriangle
         },
         // 8. 全部风险实体 - 新增，展示所有排名实体
@@ -1037,6 +1066,27 @@ function OverviewTab() {
         setSelectedRiskInsight(null);
     };
 
+    const formatEvidenceBucketLabel = (bucket: string) => {
+        const labels: Record<string, string> = {
+            fund_cycles: '资金闭环',
+            pass_through: '过账通道',
+            hub_connections: '资金枢纽',
+            high_risk_transactions: '高风险交易',
+            communities: '团伙关系',
+            periodic_income: '周期性收入',
+            sudden_changes: '资金突变',
+            delayed_transfers: '固定延迟转账',
+            related_party: '直接往来',
+            third_party_relays: '第三方中转',
+            discovered_nodes: '外围节点',
+            relationship_clusters: '关系簇',
+            loans: '借贷关系',
+            wallet_summaries: '电子钱包摘要',
+            wallet_alerts: '电子钱包预警',
+        };
+        return labels[bucket] || bucket;
+    };
+
     const buildRiskEntityDetail = (entity: any) => {
         const entityName = entity.name || entity.entity || '未知';
         const pack = aggregationEvidencePacks[entityName] || {};
@@ -1046,7 +1096,7 @@ function OverviewTab() {
         const bucketSummary = Object.entries(bucketCounts)
             .filter(([, count]) => Number(count) > 0)
             .slice(0, 3)
-            .map(([bucket, count]) => `${bucket}:${count}`)
+            .map(([bucket, count]) => `${formatEvidenceBucketLabel(bucket)}:${count}`)
             .join(' | ');
 
         return {
@@ -1062,14 +1112,14 @@ function OverviewTab() {
                 || `风险评分: ${entity.riskScore || entity.score || 'N/A'}`
             ),
             riskScore: entity.riskScore || entity.score,
-            riskLevel: entity.riskLevel || entity.risk_level || pack.risk_level || 'low',
+            riskLevel: entity.riskLevel || entity.risk_level || pack.risk_level || resolveAggregationRiskLevel(entity),
             riskConfidence: entity.riskConfidence ?? pack.risk_confidence ?? 0,
             topEvidenceScore: entity.topEvidenceScore ?? pack.top_evidence_score ?? 0,
             highPriorityClueCount: entity.highPriorityClueCount ?? pack.high_priority_clue_count ?? 0,
             aggregationExplainability: explainability,
             summary: entity.summary || pack.summary || '',
             reasons: [
-                `风险评分: ${entity.riskScore || entity.score || 'N/A'} (${entity.riskLevel || '未分级'})`,
+                `风险评分: ${entity.riskScore || entity.score || 'N/A'} (${entity.riskLevel || entity.risk_level || resolveAggregationRiskLevel(entity)})`,
                 `置信度: ${entity.riskConfidence ?? pack.risk_confidence ?? 'N/A'}`,
                 `高优先线索: ${entity.highPriorityClueCount ?? pack.high_priority_clue_count ?? 0}`,
                 entity.topEvidenceScore || pack.top_evidence_score
@@ -1093,7 +1143,7 @@ function OverviewTab() {
         return {
             entityName,
             entityType: item?.entityType || pack.entityType || 'person',
-            riskLevel: item?.riskLevel || pack.risk_level || 'low',
+            riskLevel: item?.riskLevel || pack.risk_level || resolveAggregationRiskLevel(item),
             riskScore: item?.riskScore ?? pack.risk_score ?? 0,
             riskConfidence: item?.riskConfidence ?? pack.risk_confidence ?? 0,
             topEvidenceScore: item?.topEvidenceScore ?? pack.top_evidence_score ?? 0,
@@ -1102,7 +1152,7 @@ function OverviewTab() {
             topClues,
             bucketCounts: Object.entries(bucketCounts)
                 .filter(([, count]) => Number(count) > 0)
-                .map(([bucket, count]) => ({ bucket, count: Number(count) })),
+                .map(([bucket, count]) => ({ bucket: formatEvidenceBucketLabel(bucket), count: Number(count) })),
             reasons: Array.isArray(item?.reasons) ? item.reasons : [],
         };
     };
@@ -1318,7 +1368,7 @@ function OverviewTab() {
                                                         return (
                                                             <>
                                                                 <div>
-                                                                    <div className="text-xs uppercase tracking-[0.2em] theme-text-dim mb-2">Explainability</div>
+                                                                    <div className="text-xs uppercase tracking-[0.2em] theme-text-dim mb-2">风险解释</div>
                                                                     <div className="theme-text text-lg font-semibold">{panel.entityName}</div>
                                                                     <div className="theme-text-muted text-xs mt-1">
                                                                         {panel.entityType === 'company' ? '公司对象' : '个人对象'} | 风险等级 {formatRiskLevel(panel.riskLevel)}
@@ -1353,7 +1403,7 @@ function OverviewTab() {
 
                                                                 {panel.topClues.length > 0 && (
                                                                     <div>
-                                                                        <div className="text-xs theme-text-dim mb-2">Top Clues</div>
+                                                                        <div className="text-xs theme-text-dim mb-2">重点线索</div>
                                                                         <div className="space-y-2">
                                                                             {panel.topClues.slice(0, 3).map((clue: any, idx: number) => (
                                                                                 <div key={idx} className="rounded-lg border theme-border-muted p-3">
@@ -1923,7 +1973,7 @@ function OverviewTab() {
                 </div>
             </div>
 
-            {/* 🆕 Audit Findings Distribution - Pie Chart */}
+            {/* 借贷/收入发现分布 - Pie Chart */}
             <div className="card">
                 <div className="flex items-center justify-between gap-3 mb-4">
                     <div className="flex items-center gap-3">
@@ -1931,24 +1981,25 @@ function OverviewTab() {
                             <Wallet className="w-5 h-5 text-violet-400" />
                         </div>
                         <div>
-                            <h3 className="font-semibold text-white">审计发现分布</h3>
-                            <p className="text-xs theme-text-dim">按借贷/收入分类统计</p>
+                            <h3 className="font-semibold theme-text">借贷/收入发现分布</h3>
+                            <p className="text-xs theme-text-dim">仅统计借贷分析与异常收入识别结果</p>
                         </div>
                     </div>
                 </div>
 
-                <div className="h-40 mb-2">
-                    <ResponsiveContainer width="100%" height="100%" minHeight={80}>
-                        <PieChart>
+                <div className="mb-2 w-full min-h-[176px]">
+                    <ResponsiveContainer width="100%" height={176} debounce={120}>
+                        <PieChart margin={{ top: 8, right: 12, bottom: 8, left: 12 }}>
                             <Pie
                                 data={incomeDistributionData}
                                 cx="50%"
                                 cy="50%"
-                                innerRadius={45}
-                                outerRadius={70}
-                                paddingAngle={3}
+                                innerRadius="56%"
+                                outerRadius="82%"
+                                paddingAngle={2}
                                 dataKey="value"
-                                stroke="#1f2937"
+                                isAnimationActive={false}
+                                stroke={chartStrokeColor}
                                 strokeWidth={2}
                             >
                                 {incomeDistributionData.map((entry: { name: string; value: number; color: string }, index: number) => (
@@ -1956,15 +2007,9 @@ function OverviewTab() {
                                 ))}
                             </Pie>
                             <Tooltip
-                                contentStyle={{
-                                    backgroundColor: '#1e293b',
-                                    border: '1px solid #3b82f6',
-                                    borderRadius: '8px',
-                                    padding: '8px 12px',
-                                    boxShadow: '0 4px 12px rgba(0, 0, 0, 0.5)'
-                                }}
-                                itemStyle={{ color: '#f1f5f9' }}
-                                labelStyle={{ color: '#94a3b8', marginBottom: '4px' }}
+                                contentStyle={chartTooltipStyle}
+                                itemStyle={chartTooltipItemStyle}
+                                labelStyle={chartTooltipLabelStyle}
                                 formatter={(value: number | undefined, name?: string) => value !== undefined ? [`${value} 条`, name || ''] : ['', '']} />
                         </PieChart>
                     </ResponsiveContainer>
@@ -1972,13 +2017,15 @@ function OverviewTab() {
 
                 {/* 图例区域 */}
                 <div className="space-y-1.5">
-                    {incomeDistributionData.map((item: { name: string; value: number; percent?: number; color: string }) => (
+                    {incomeDistributionData.map((item: { name: string; value: number; percent?: number; color: string; placeholder?: boolean }) => (
                         <div key={item.name} className="flex items-center justify-between text-sm">
                             <div className="flex items-center gap-2">
                                 <div className="w-3 h-3 rounded-full" style={{ backgroundColor: item.color }} />
                                 <span className="theme-text-secondary">{item.name}</span>
                             </div>
-                            <span className="font-medium text-white">{item.percent || item.value}%</span>
+                            <span className="font-medium theme-text">
+                                {item.placeholder ? (hasRealData ? '无异常' : '待分析') : `${item.percent || item.value}%`}
+                            </span>
                         </div>
                     ))}
                 </div>

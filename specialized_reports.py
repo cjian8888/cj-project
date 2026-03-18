@@ -29,7 +29,7 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional
 import config
 import utils
-from utils.aggregation_view import build_aggregation_overview
+from utils.aggregation_view import build_aggregation_overview, extract_aggregation_payload
 from utils.path_explainability import get_or_build_path_evidence_template
 
 logger = utils.setup_logger(__name__)
@@ -657,6 +657,252 @@ class SpecializedReportGenerator:
         except Exception as e:
             logger.warning(f"获取{person} {target_date}交易失败: {e}")
             return []
+
+    def _get_aggregation_evidence_packs(self) -> Dict[str, Dict[str, Any]]:
+        """获取聚合证据包，兼容 camelCase / snake_case。"""
+        aggregation = extract_aggregation_payload(analysis_results=self.analysis_results)
+        packs = aggregation.get("evidencePacks")
+        if not isinstance(packs, dict):
+            packs = aggregation.get("evidence_packs", {})
+        return packs if isinstance(packs, dict) else {}
+
+    def _build_aggregation_bucket_dedupe_key(self, bucket: str, item: Dict[str, Any]) -> str:
+        """为聚合证据桶构建稳定去重键。"""
+        if not isinstance(item, dict):
+            return json.dumps(item, ensure_ascii=False, sort_keys=True)
+
+        if bucket == "hub_connections":
+            return json.dumps(
+                {
+                    "node": self._clean_text(item.get("node", item.get("name")), default=""),
+                    "node_type": self._clean_text(item.get("node_type", item.get("type")), default=""),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+
+        if bucket == "high_risk_transactions":
+            return json.dumps(
+                {
+                    "person": self._clean_text(item.get("person"), default=""),
+                    "date": self._clean_text(item.get("date"), default=""),
+                    "amount": round(self._safe_float(item.get("amount", 0)), 2),
+                    "counterparty": self._clean_text(item.get("counterparty"), default=""),
+                    "description": self._clean_text(item.get("description"), default=""),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+
+        if bucket == "communities":
+            community_id = item.get("community_id", item.get("communityId"))
+            members = item.get("members", [])
+            if isinstance(members, list):
+                members = sorted(
+                    self._clean_text(member, default="")
+                    for member in members
+                    if self._clean_text(member, default="")
+                )
+            else:
+                members = []
+            return json.dumps(
+                {
+                    "community_id": community_id,
+                    "members": members,
+                    "total_amount": round(
+                        self._safe_float(item.get("total_amount", item.get("amount", 0))), 2
+                    ),
+                    "type": self._clean_text(item.get("type"), default=""),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+
+        return json.dumps(item, ensure_ascii=False, sort_keys=True)
+
+    def _collect_aggregation_bucket_records(self, bucket: str) -> List[Dict[str, Any]]:
+        """跨实体汇总聚合证据桶，并保留证据包来源路径。"""
+        collected: Dict[str, Dict[str, Any]] = {}
+        for entity_name, pack in self._get_aggregation_evidence_packs().items():
+            if not isinstance(pack, dict):
+                continue
+            evidence = pack.get("evidence", {})
+            if not isinstance(evidence, dict):
+                continue
+            items = evidence.get(bucket, [])
+            if not isinstance(items, list):
+                continue
+
+            for index, item in enumerate(items):
+                if not isinstance(item, dict):
+                    continue
+                dedupe_key = self._build_aggregation_bucket_dedupe_key(bucket, item)
+                path = (
+                    "analysis_cache/derived_data.json -> aggregation.evidencePacks"
+                    f'["{entity_name}"].evidence.{bucket}[{index}]'
+                )
+                if dedupe_key not in collected:
+                    record = dict(item)
+                    record["_aggregation_entities"] = {entity_name}
+                    record["_aggregation_paths"] = [path]
+                    collected[dedupe_key] = record
+                else:
+                    collected[dedupe_key]["_aggregation_entities"].add(entity_name)
+                    collected[dedupe_key]["_aggregation_paths"].append(path)
+
+        records = list(collected.values())
+        for record in records:
+            record["_aggregation_entities"] = sorted(record.get("_aggregation_entities", set()))
+            record["_aggregation_paths"] = list(record.get("_aggregation_paths", []))
+        return records
+
+    def _find_cleaned_transaction_trace(
+        self,
+        person: str,
+        tx_datetime: Any,
+        amount: Any,
+        counterparty: Any = "",
+        description: Any = "",
+    ) -> Dict[str, Any]:
+        """根据清洗后流水回补单笔交易的源文件和行号。"""
+        person = self._clean_text(person, default="")
+        if not person:
+            return {}
+
+        file_path = self._resolve_cleaned_person_flow_path(person)
+        if not os.path.exists(file_path):
+            return {}
+
+        if person not in self._person_flow_raw_df_cache:
+            try:
+                self._person_flow_raw_df_cache[person] = pd.read_excel(file_path)
+            except Exception as exc:
+                logger.warning(f"[专项报告] 加载 cleaned_data 失败 {file_path}: {exc}")
+                self._person_flow_raw_df_cache[person] = pd.DataFrame()
+
+        df = self._person_flow_raw_df_cache.get(person, pd.DataFrame())
+        if df.empty:
+            return {}
+
+        date_col = next(
+            (c for c in ["交易时间", "transaction_time", "date"] if c in df.columns),
+            None,
+        )
+        if not date_col:
+            return {}
+
+        target_dt = str(tx_datetime or "").strip().replace("T", " ")
+        target_date = target_dt.split(" ")[0] if target_dt else ""
+        target_amount = round(abs(self._safe_float(amount, 0.0)), 2)
+        target_counterparty = self._clean_text(counterparty, default="")
+        target_description = self._clean_text(description, default="")
+
+        counterparty_col = next(
+            (c for c in ["交易对手", "counterparty", "对手方"] if c in df.columns),
+            None,
+        )
+        desc_col = next(
+            (c for c in ["交易摘要", "description", "摘要"] if c in df.columns),
+            None,
+        )
+
+        amount_series_candidates = []
+        for col in [
+            "收入(元)",
+            "收入(万元)",
+            "income",
+            "income_amount",
+            "in_amount",
+            "支出(元)",
+            "支出(万元)",
+            "expense",
+            "expense_amount",
+            "out_amount",
+            "交易金额",
+            "amount",
+        ]:
+            if col in df.columns:
+                amount_series_candidates.append((col, utils.normalize_amount_series(df[col], col)))
+
+        if not amount_series_candidates:
+            return {}
+
+        normalized_dt = utils.normalize_datetime_series(df[date_col])
+        best_match: Optional[Dict[str, Any]] = None
+
+        for idx, row in df.iterrows():
+            tx_dt = normalized_dt.iloc[idx] if idx < len(normalized_dt) else None
+            if pd.isna(tx_dt):
+                continue
+
+            dt_text = tx_dt.strftime("%Y-%m-%d %H:%M:%S")
+            row_date = dt_text.split(" ")[0]
+            if target_dt:
+                if dt_text != target_dt and row_date != target_date:
+                    continue
+            elif target_date and row_date != target_date:
+                continue
+
+            amount_match = False
+            for _, series in amount_series_candidates:
+                row_amount = round(abs(self._safe_float(series.iloc[idx], 0.0)), 2)
+                if abs(row_amount - target_amount) <= 0.01:
+                    amount_match = True
+                    break
+            if not amount_match:
+                continue
+
+            score = 0
+            if dt_text == target_dt:
+                score += 3
+            elif row_date == target_date:
+                score += 1
+
+            row_counterparty = (
+                self._clean_text(row.get(counterparty_col), default="")
+                if counterparty_col
+                else ""
+            )
+            row_description = (
+                self._clean_text(row.get(desc_col), default="")
+                if desc_col
+                else ""
+            )
+            if target_counterparty and row_counterparty == target_counterparty:
+                score += 2
+            if target_description and row_description == target_description:
+                score += 2
+            elif target_description and row_description and (
+                target_description in row_description or row_description in target_description
+            ):
+                score += 1
+
+            source_file = self._clean_text(
+                row.get("来源文件", row.get("source_file")),
+                default="",
+            )
+            source_row_index = row.get("source_row_index")
+            try:
+                source_row_index = (
+                    int(source_row_index) if pd.notna(source_row_index) else None
+                )
+            except (TypeError, ValueError):
+                source_row_index = None
+
+            candidate = {
+                "score": score,
+                "source_file": source_file,
+                "source_row_index": source_row_index,
+            }
+            if best_match is None or candidate["score"] > best_match["score"]:
+                best_match = candidate
+
+        if not best_match:
+            return {}
+        return {
+            "source_file": best_match.get("source_file", ""),
+            "source_row_index": best_match.get("source_row_index"),
+        }
 
     # ==================== 借贷行为报告 ====================
 
@@ -1548,11 +1794,23 @@ class SpecializedReportGenerator:
         lines.append("   识别资金停留时间短、净流量接近0的节点，")
         lines.append("   发现空壳公司或资金中介。")
         lines.append("")
-        lines.append("3. 外围节点扩展：")
+        lines.append("3. 资金枢纽识别：")
+        lines.append("   识别入度、出度和总连接数显著偏高的关键节点，")
+        lines.append("   辅助锁定资金网络中的分发中心或汇集节点。")
+        lines.append("")
+        lines.append("4. 高风险交易聚焦：")
+        lines.append("   汇总聚合模型命中的异常交易，")
+        lines.append("   优先展示金额异常、对手异常或行为异常的单笔流水。")
+        lines.append("")
+        lines.append("5. 团伙关系识别：")
+        lines.append("   汇总聚合模型识别出的可疑资金网络/团伙，")
+        lines.append("   辅助判断多人或多主体联动关系。")
+        lines.append("")
+        lines.append("6. 外围节点扩展：")
         lines.append("   从中转链与闭环路径中提取新出现的外围账户或公司，")
         lines.append("   识别原始排查对象之外的潜在关键节点。")
         lines.append("")
-        lines.append("4. 关系簇识别：")
+        lines.append("7. 关系簇识别：")
         lines.append("   基于直接往来、中转链和闭环共同构建联通组件，")
         lines.append("   识别多名核心对象通过外围节点形成的共同关系网络。")
         lines.append("")
@@ -1599,6 +1857,10 @@ class SpecializedReportGenerator:
                 values = [labels.get(str(item), str(item)) for item in relation_types if item]
                 return "、".join(values) if values else "未标注"
             return labels.get(str(relation_types), str(relation_types))
+
+        def _format_datetime(value: Any) -> str:
+            text = self._clean_text(value, default="未知时间")
+            return text.replace("T", " ")
 
         def _format_evidence(evidence: Any, limit: int = 3) -> str:
             if not evidence:
@@ -1879,6 +2141,7 @@ class SpecializedReportGenerator:
         # 兼容新旧结构：优先 relatedParty.third_party_relays
         pass_throughs = (
             related_party.get("third_party_relays")
+            or penetration.get("pass_through_channels")
             or penetration.get("pass_through_nodes")
             or penetration.get("passthrough_channels")
             or []
@@ -1920,18 +2183,38 @@ class SpecializedReportGenerator:
                     _append_path_points(lines, node.get("path_explainability"))
                     _append_time_axis(lines, node.get("path_explainability"))
                 else:
-                    lines.append(f"  节点: {node.get('name', '未知') if isinstance(node, dict) else '未知'}")
+                    node_name = "未知"
+                    total_inflow = 0.0
+                    total_outflow = 0.0
+                    net_flow = 0.0
+                    transfer_count = 0
+                    ratio = None
                     if isinstance(node, dict):
-                        lines.append(
-                            f"  总流入: {utils.format_currency(_to_float(node.get('total_inflow')))}"
+                        node_name = node.get("name") or node.get("node") or "未知"
+                        total_inflow = _to_float(node.get("total_inflow"))
+                        if total_inflow <= 0:
+                            total_inflow = _to_float(node.get("inflow"))
+                        total_outflow = _to_float(node.get("total_outflow"))
+                        if total_outflow <= 0:
+                            total_outflow = _to_float(node.get("outflow"))
+                        net_flow = _to_float(node.get("net_flow"))
+                        if not net_flow and (total_inflow or total_outflow):
+                            net_flow = total_inflow - total_outflow
+                        transfer_count = int(
+                            node.get("transfer_count")
+                            or node.get("transaction_count")
+                            or node.get("edge_count")
+                            or 0
                         )
-                        lines.append(
-                            f"  总流出: {utils.format_currency(_to_float(node.get('total_outflow')))}"
-                        )
-                        lines.append(
-                            f"  净流量: {utils.format_currency(_to_float(node.get('net_flow')))}"
-                        )
-                        lines.append(f"  转账频次: {node.get('transfer_count', 0)} 笔")
+                        ratio = node.get("ratio")
+                    lines.append(f"  节点: {node_name}")
+                    if isinstance(node, dict):
+                        lines.append(f"  总流入: {utils.format_currency(total_inflow)}")
+                        lines.append(f"  总流出: {utils.format_currency(total_outflow)}")
+                        lines.append(f"  净流量: {utils.format_currency(net_flow)}")
+                        lines.append(f"  转账频次: {transfer_count} 笔")
+                        if ratio is not None:
+                            lines.append(f"  进出比: {_to_float(ratio):.2f}")
                         if node.get("risk_score") is not None:
                             lines.append(f"  风险评分: {float(node.get('risk_score', 0) or 0):.1f}")
                         if node.get("confidence") is not None:
@@ -2049,6 +2332,164 @@ class SpecializedReportGenerator:
                 lines.append("")
         else:
             lines.append("  未识别出可聚类的关系簇")
+
+        lines.append("")
+
+        # ==================== 五、资金枢纽节点 ====================
+        lines.append("五、资金枢纽节点")
+        lines.append("-" * 70)
+
+        hub_connections = self._collect_aggregation_bucket_records("hub_connections")
+        hub_connections.sort(
+            key=lambda item: (
+                -int(item.get("total_degree", 0) or 0),
+                -int(item.get("in_degree", 0) or 0),
+                self._clean_text(item.get("node", item.get("name")), default=""),
+            )
+        )
+
+        if hub_connections:
+            node_type_labels = {"person": "个人", "company": "企业"}
+            for i, hub in enumerate(hub_connections, 1):
+                node_name = self._clean_text(hub.get("node", hub.get("name")), default="未知")
+                node_type = node_type_labels.get(
+                    self._clean_text(hub.get("node_type", hub.get("type")), default="").lower(),
+                    self._clean_text(hub.get("node_type", hub.get("type")), default="未标注"),
+                )
+                in_degree = int(hub.get("in_degree", 0) or 0)
+                out_degree = int(hub.get("out_degree", 0) or 0)
+                total_degree = int(hub.get("total_degree", 0) or 0)
+                aggregation_entities = hub.get("_aggregation_entities", []) or []
+                aggregation_paths = hub.get("_aggregation_paths", []) or []
+
+                lines.append(f"【资金枢纽 {i}】")
+                lines.append(f"  节点名称: {node_name}")
+                lines.append(f"  节点类型: {node_type}")
+                lines.append(f"  入度/出度/总连接数: {in_degree}/{out_degree}/{total_degree}")
+                if aggregation_entities:
+                    lines.append(f"  命中实体: {'、'.join(str(item) for item in aggregation_entities)}")
+                if aggregation_paths:
+                    lines.append(f"  📁 聚合路径: {aggregation_paths[0]}")
+                    if len(aggregation_paths) > 1:
+                        lines.append(f"  📌 同类证据同时出现在 {len(aggregation_paths)} 个证据包中")
+                lines.append("")
+                lines.append("  【审计提示】: 资金枢纽节点通常承担资金汇集、分发或桥接功能，")
+                lines.append("            建议结合上下游对手、账户控制关系和时间分布进一步核验。")
+                lines.append("")
+        else:
+            lines.append("  未识别出聚合意义上的资金枢纽节点")
+
+        lines.append("")
+
+        # ==================== 六、高风险交易 ====================
+        lines.append("六、高风险交易聚焦")
+        lines.append("-" * 70)
+
+        high_risk_transactions = self._collect_aggregation_bucket_records("high_risk_transactions")
+        high_risk_transactions.sort(
+            key=lambda item: (
+                -self._safe_float(item.get("score", item.get("risk_score", 0))),
+                -self._safe_float(item.get("amount", 0)),
+                self._clean_text(item.get("person"), default=""),
+            )
+        )
+
+        if high_risk_transactions:
+            for i, tx in enumerate(high_risk_transactions, 1):
+                person = self._clean_text(tx.get("person"), default="未知主体")
+                counterparty = self._clean_text(tx.get("counterparty"), default="未知对手方")
+                tx_time = _format_datetime(tx.get("date"))
+                amount = self._safe_float(tx.get("amount", 0))
+                score = self._safe_float(tx.get("score", tx.get("risk_score", 0)))
+                reason = self._clean_text(tx.get("reasons", tx.get("reason")), default="未提供")
+                description = self._clean_text(tx.get("description"), default="")
+                aggregation_paths = tx.get("_aggregation_paths", []) or []
+
+                lines.append(f"【高风险交易 {i}】")
+                lines.append(f"  主体: {person}")
+                lines.append(f"  交易时间: {tx_time}")
+                lines.append(f"  对手方: {counterparty}")
+                lines.append(f"  交易金额: {utils.format_currency(amount)} 元")
+                lines.append(f"  风险评分: {score:.1f}")
+                lines.append(f"  触发原因: {reason}")
+                if description and description != "未知":
+                    lines.append(f"  交易摘要: {description}")
+
+                trace_item = {
+                    "source_file": tx.get("source_file", tx.get("sourceFile", "")),
+                    "source_row_index": tx.get("source_row_index", tx.get("sourceRowIndex")),
+                }
+                if not trace_item["source_file"] and trace_item["source_row_index"] is None:
+                    trace_item = self._find_cleaned_transaction_trace(
+                        person=person,
+                        tx_datetime=tx.get("date"),
+                        amount=tx.get("amount", 0),
+                        counterparty=tx.get("counterparty", ""),
+                        description=tx.get("description", ""),
+                    )
+                if trace_item.get("source_file") or trace_item.get("source_row_index") is not None:
+                    self._add_traceability(lines, trace_item)
+                if aggregation_paths:
+                    lines.append(f"  📁 聚合路径: {aggregation_paths[0]}")
+                    if len(aggregation_paths) > 1:
+                        lines.append(f"  📌 同类证据同时出现在 {len(aggregation_paths)} 个证据包中")
+                lines.append("")
+                lines.append("  【审计提示】: 建议核查该笔交易的真实用途、对手身份以及对应业务凭证，")
+                lines.append("            重点关注异常金额、异常商户和时间场景是否存在规避监管特征。")
+                lines.append("")
+        else:
+            lines.append("  未识别出聚合意义上的高风险交易")
+
+        lines.append("")
+
+        # ==================== 七、团伙关系 ====================
+        lines.append("七、团伙关系识别")
+        lines.append("-" * 70)
+
+        communities = self._collect_aggregation_bucket_records("communities")
+        communities.sort(
+            key=lambda item: (
+                -self._safe_float(item.get("total_amount", 0)),
+                -len(item.get("members", []) or []),
+                self._clean_text(item.get("community_id", item.get("communityId")), default=""),
+            )
+        )
+
+        if communities:
+            profile_names = set(self.profiles.keys()) if isinstance(self.profiles, dict) else set()
+            for i, community in enumerate(communities, 1):
+                community_id = community.get("community_id", community.get("communityId", f"community_{i}"))
+                members = community.get("members", []) or []
+                if not isinstance(members, list):
+                    members = []
+                members = [self._clean_text(member, default="") for member in members if self._clean_text(member, default="")]
+                total_amount = self._safe_float(community.get("total_amount", 0))
+                community_type = self._clean_text(community.get("type"), default="未标注")
+                aggregation_entities = community.get("_aggregation_entities", []) or []
+                aggregation_paths = community.get("_aggregation_paths", []) or []
+                hit_entities = [member for member in members if member in profile_names]
+
+                lines.append(f"【团伙关系 {i}】")
+                lines.append(f"  团伙ID: {community_id}")
+                lines.append(f"  团伙类型: {community_type}")
+                lines.append(f"  成员数量: {len(members)}")
+                lines.append(f"  成员名单: {'、'.join(members) if members else '未提供'}")
+                if total_amount > 0:
+                    lines.append(f"  聚合金额: {utils.format_currency(total_amount)} 元")
+                if hit_entities:
+                    lines.append(f"  命中排查对象: {'、'.join(hit_entities)}")
+                elif aggregation_entities:
+                    lines.append(f"  命中证据包: {'、'.join(str(item) for item in aggregation_entities)}")
+                if aggregation_paths:
+                    lines.append(f"  📁 聚合路径: {aggregation_paths[0]}")
+                    if len(aggregation_paths) > 1:
+                        lines.append(f"  📌 该团伙在 {len(aggregation_paths)} 个成员证据包中同步出现")
+                lines.append("")
+                lines.append("  【审计提示】: 建议结合成员之间的资金往来、任职/股权/同住址信息进行交叉核验，")
+                lines.append("            判断其是否构成稳定的资金网络、利益共同体或异常协同行为。")
+                lines.append("")
+        else:
+            lines.append("  未识别出聚合意义上的团伙关系")
 
         lines.append("")
 

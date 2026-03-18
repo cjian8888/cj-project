@@ -125,6 +125,15 @@ WEALTH_MANAGEMENT_KEYWORDS = [
     '稳利', '安心', '财富', '专户', '清算', '宝', '计划'
 ]
 
+GENERIC_WALLET_COUNTERPARTIES = {
+    '电子钱包总体',
+    '跨平台账户映射',
+    '夜间活跃交易',
+    '电子钱包收入聚集',
+    '电子钱包快速转手',
+    '银行账户支出',
+}
+
 def is_legitimate_institution(name: str) -> bool:
     """检查是否为正规金融机构/公共服务"""
     if not name:
@@ -157,6 +166,7 @@ class ClueAggregator:
             'related_party': {},
         }
         self._bucket_seen_keys = defaultdict(lambda: defaultdict(set))
+        self._bucket_item_indexes = defaultdict(lambda: defaultdict(dict))
         
         # 每个实体的证据包
         self.evidence_packs = {entity: self._create_empty_pack() for entity in self.all_entities}
@@ -186,6 +196,54 @@ class ClueAggregator:
             return json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
         except (TypeError, ValueError):
             return str(item)
+
+    def _build_bucket_dedupe_key(self, bucket: str, item: Any) -> str:
+        if bucket == 'related_party' and isinstance(item, dict):
+            amount = item.get('amount')
+            if amount is None:
+                amount = item.get('金额')
+            if amount is None:
+                amount = max(
+                    self._safe_float(item.get('收入')),
+                    self._safe_float(item.get('支出')),
+                )
+            normalized_item = {
+                'from': item.get('from') or item.get('发起方') or item.get('person1') or '',
+                'to': item.get('to') or item.get('接收方') or item.get('person2') or '',
+                'amount': round(self._safe_float(amount), 2),
+                'date': item.get('date') or item.get('日期') or item.get('交易日期') or item.get('time') or '',
+                'description': item.get('description') or item.get('摘要') or '',
+            }
+            return self._serialize_dedupe_key(normalized_item)
+        return self._serialize_dedupe_key(item)
+
+    @staticmethod
+    def _is_empty_value(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return value.strip() == ''
+        if isinstance(value, (list, tuple, set, dict)):
+            return len(value) == 0
+        return False
+
+    def _merge_related_party_item(self, existing: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(existing) if isinstance(existing, dict) else {}
+        if not isinstance(incoming, dict):
+            return merged
+
+        for key, value in incoming.items():
+            if self._is_empty_value(value):
+                continue
+            if self._is_empty_value(merged.get(key)):
+                merged[key] = value
+                continue
+            if key == 'relationship_context':
+                existing_rank = {'family': 2, 'external': 1}.get(str(merged.get(key, '') or '').strip().lower(), 0)
+                incoming_rank = {'family': 2, 'external': 1}.get(str(value or '').strip().lower(), 0)
+                if incoming_rank > existing_rank:
+                    merged[key] = value
+        return merged
 
     @staticmethod
     def _normalize_risk_level(level: Any, score: Any = None) -> str:
@@ -228,13 +286,22 @@ class ClueAggregator:
         if entity not in self.evidence_packs:
             return False
 
-        dedupe_key = self._serialize_dedupe_key(item)
+        dedupe_key = self._build_bucket_dedupe_key(bucket, item)
         seen_keys = self._bucket_seen_keys[entity][bucket]
         if dedupe_key in seen_keys:
+            if bucket == 'related_party':
+                existing_index = self._bucket_item_indexes[entity][bucket].get(dedupe_key)
+                if existing_index is not None:
+                    existing_item = self.evidence_packs[entity]['evidence'][bucket][existing_index]
+                    self.evidence_packs[entity]['evidence'][bucket][existing_index] = (
+                        self._merge_related_party_item(existing_item, item)
+                    )
             return False
 
         seen_keys.add(dedupe_key)
-        self.evidence_packs[entity]['evidence'][bucket].append(item)
+        bucket_items = self.evidence_packs[entity]['evidence'][bucket]
+        bucket_items.append(item)
+        self._bucket_item_indexes[entity][bucket][dedupe_key] = len(bucket_items) - 1
         return True
 
     def _append_to_entities(self, bucket: str, item: Dict, *candidates: Any) -> List[str]:
@@ -256,6 +323,18 @@ class ClueAggregator:
                 seen_entities.add(entity)
 
         return matched_entities
+
+    @staticmethod
+    def _include_wallet_counterparty_for_entity_count(alert: Dict[str, Any]) -> bool:
+        if not isinstance(alert, dict):
+            return False
+        role = str(alert.get('counterparty_role', '') or '').strip().lower()
+        if role in {'self', 'family', 'salary_payer'}:
+            return False
+        counterparty = str(alert.get('counterparty', '') or '').strip()
+        if not counterparty or counterparty in GENERIC_WALLET_COUNTERPARTIES:
+            return False
+        return True
 
     def _normalize_fund_cycle_record(
         self,
@@ -525,14 +604,7 @@ class ClueAggregator:
             entity = self._resolve_entity(hub.get('node'))
             if entity:
                 self._append_entity_evidence(entity, 'hub_connections', hub)
-        
-        # 聚合直接往来
-        for tx_type in ['person_to_company', 'company_to_person', 'person_to_person', 'company_to_company']:
-            for tx in penetration_results.get(tx_type, []):
-                sender = tx.get('发起方')
-                receiver = tx.get('接收方')
-                self._append_to_entities('related_party', tx, sender, receiver)
-    
+
     def aggregate_ml_results(self, ml_results: Dict):
         """聚合机器学习分析结果"""
         logger.info('聚合机器学习分析结果...')
@@ -947,7 +1019,7 @@ class ClueAggregator:
                     + [
                         alert.get('counterparty')
                         for alert in evidence.get('wallet_alerts', [])
-                        if isinstance(alert, dict)
+                        if self._include_wallet_counterparty_for_entity_count(alert)
                     ]
                 )
                 if item and item != entity

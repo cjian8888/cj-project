@@ -168,8 +168,17 @@ class UnifiedRiskModel:
             reasons.append(f"识别{len(evidence.get('relationship_clusters', []))}个关系簇")
         if external_node_score > 0:
             reasons.append(f"发现{len(evidence.get('discovered_nodes', []))}个外围节点")
+        family_direct_count = sum(
+            1
+            for relation in evidence.get('direct_relations', [])
+            if isinstance(relation, dict) and str(relation.get('relationship_context', '')).lower() == 'family'
+        )
+        external_direct_count = max(len(evidence.get('direct_relations', [])) - family_direct_count, 0)
         if direct_relation_score > 0:
-            reasons.append(f"存在{len(evidence.get('direct_relations', []))}笔直接往来")
+            if external_direct_count > 0:
+                reasons.append(f"存在{external_direct_count}笔直接往来")
+            elif family_direct_count > 0:
+                reasons.append(f"存在{family_direct_count}笔家庭内部直接往来")
         if wallet_summary_score > 0:
             reasons.append(f"已补充{len(evidence.get('wallet_summaries', []))}个电子钱包摘要")
         if wallet_alert_score > 0:
@@ -208,6 +217,7 @@ class UnifiedRiskModel:
                     'relationship_cluster_count': len(evidence.get('relationship_clusters', [])),
                     'discovered_node_count': len(evidence.get('discovered_nodes', [])),
                     'direct_relation_count': len(evidence.get('direct_relations', [])),
+                    'family_direct_relation_count': family_direct_count,
                     'wallet_summary_count': len(evidence.get('wallet_summaries', [])),
                     'wallet_alert_count': len(evidence.get('wallet_alerts', [])),
                 },
@@ -293,6 +303,14 @@ class UnifiedRiskModel:
         if channel_scores:
             score += min(6.0, max(channel_scores) / 15.0)
 
+        node_types = {
+            str(item.get('node_type', '') or '').strip().lower()
+            for item in (transit_channels or [])
+            if isinstance(item, dict) and str(item.get('node_type', '') or '').strip()
+        }
+        if node_types and node_types == {'person'}:
+            score *= 0.55
+
         return min(score, 22.0)
 
     def _score_relay_chains(self, relay_chains: List[Dict]) -> float:
@@ -346,9 +364,24 @@ class UnifiedRiskModel:
         if not direct_relations:
             return 0.0
 
-        relation_count = len(direct_relations)
+        external_relations = [
+            relation
+            for relation in direct_relations
+            if not (
+                isinstance(relation, dict)
+                and str(relation.get('relationship_context', '') or '').strip().lower() == 'family'
+            )
+        ]
+        family_relations = [
+            relation
+            for relation in direct_relations
+            if isinstance(relation, dict)
+            and str(relation.get('relationship_context', '') or '').strip().lower() == 'family'
+        ]
+
+        relation_count = len(external_relations)
         total_amount = 0.0
-        for relation in direct_relations:
+        for relation in external_relations:
             if not isinstance(relation, dict):
                 continue
             amount = relation.get('amount')
@@ -367,6 +400,30 @@ class UnifiedRiskModel:
             score += 4.0
         elif total_amount >= 100_000:
             score += 2.0
+
+        if not external_relations and family_relations:
+            family_amount = 0.0
+            for relation in family_relations:
+                if not isinstance(relation, dict):
+                    continue
+                amount = relation.get('amount')
+                if amount is None:
+                    amount = max(
+                        float(relation.get('收入', 0) or 0),
+                        float(relation.get('支出', 0) or 0),
+                    )
+                try:
+                    family_amount += float(amount or 0)
+                except (TypeError, ValueError):
+                    continue
+
+            score = min(len(family_relations) * 0.08, 1.6)
+            if family_amount >= 1_000_000:
+                score += 1.2
+            elif family_amount >= 100_000:
+                score += 0.6
+        elif family_relations and relation_count > 0:
+            score *= 0.7
         return min(score, 12.0)
 
     def _score_wallet_summaries(self, wallet_summaries: List[Dict]) -> float:

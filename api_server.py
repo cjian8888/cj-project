@@ -218,6 +218,11 @@ _cache_manager: Optional[CacheManager] = None  # 缓存管理器（懒加载）
 _analysis_log_lock = threading.Lock()
 _active_analysis_log_paths: Dict[str, str] = {}
 _last_analysis_log_paths: Dict[str, str] = {}
+_ANALYSIS_LOG_LINE_RE = re.compile(
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) "
+    r"\[(?P<level>[A-Z]+)\] "
+    r"(?P<message>.*)$"
+)
 
 
 def _get_dashboard_dist_dir() -> Path:
@@ -365,6 +370,79 @@ def _finalize_analysis_runtime_log_capture(status: str):
 def _get_last_analysis_log_paths() -> Dict[str, str]:
     with _analysis_log_lock:
         return dict(_last_analysis_log_paths)
+
+
+def _normalize_analysis_log_level(level: str) -> str:
+    normalized = str(level or "").strip().upper()
+    if normalized in {"WARN", "WARNING"}:
+        return "WARN"
+    if normalized in {"ERROR", "ERR", "FATAL"}:
+        return "ERROR"
+    return "INFO"
+
+
+def _resolve_analysis_log_history_path() -> Optional[str]:
+    last_paths = _get_last_analysis_log_paths()
+    candidates = [
+        last_paths.get("resultsMirror"),
+        os.path.join(_get_active_results_dir(), "分析执行日志.txt"),
+        last_paths.get("latest"),
+        os.path.join(_get_active_output_dir(), "analysis_logs", "analysis_run_latest.log"),
+        last_paths.get("run"),
+    ]
+
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _load_analysis_log_history(limit: int = 200) -> Dict[str, Any]:
+    target_limit = max(1, min(int(limit or 200), 500))
+    log_path = _resolve_analysis_log_history_path()
+    if not log_path or not os.path.exists(log_path):
+        return {
+            "logs": [],
+            "stats": {"info": 0, "warn": 0, "error": 0},
+            "path": "",
+            "source": "unavailable",
+        }
+
+    parsed_logs: List[Dict[str, str]] = []
+    with open(log_path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            match = _ANALYSIS_LOG_LINE_RE.match(line)
+            if not match:
+                continue
+            parsed_logs.append(
+                {
+                    "time": match.group("timestamp")[11:19],
+                    "level": _normalize_analysis_log_level(match.group("level")),
+                    "msg": match.group("message").strip(),
+                }
+            )
+
+    visible_logs = parsed_logs[-target_limit:]
+    stats = {"info": 0, "warn": 0, "error": 0}
+    for item in visible_logs:
+        if item["level"] == "WARN":
+            stats["warn"] += 1
+        elif item["level"] == "ERROR":
+            stats["error"] += 1
+        else:
+            stats["info"] += 1
+
+    return {
+        "logs": visible_logs,
+        "stats": stats,
+        "path": log_path,
+        "source": "analysis_results_mirror"
+        if os.path.basename(log_path) == "分析执行日志.txt"
+        else "analysis_runtime_log",
+    }
 
 
 def _get_active_output_dir() -> str:
@@ -3219,7 +3297,9 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             try:
                 analysis_results["relatedParty"] = (
                     related_party_analyzer.analyze_related_party_flows(
-                        cleaned_data, all_persons
+                        cleaned_data,
+                        all_persons,
+                        profiles=profiles,
                     )
                 )
 
@@ -3990,6 +4070,16 @@ async def get_status():
     """获取分析状态"""
     _sync_analysis_state_with_active_output()
     return analysis_state.to_dict()
+
+
+@app.get("/api/analysis/log-history")
+async def get_analysis_log_history(limit: int = 200):
+    """获取最近一次分析的历史日志，供前端恢复日志面板。"""
+    _sync_analysis_state_with_active_output()
+    return {
+        "message": "分析日志获取成功",
+        "data": serialize_for_json(_load_analysis_log_history(limit=limit)),
+    }
 
 
 @app.post("/api/active-paths")

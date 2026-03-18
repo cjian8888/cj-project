@@ -12915,6 +12915,245 @@ class InvestigationReportBuilder:
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
+    @staticmethod
+    def _get_frontend_bucket_label(bucket: str) -> str:
+        """复用前端证据分布桶名称，避免报告与前端口径不一致。"""
+        labels = {
+            "fund_cycles": "资金闭环",
+            "pass_through": "过账通道",
+            "hub_connections": "资金枢纽",
+            "high_risk_transactions": "高风险交易",
+            "communities": "团伙关系",
+            "periodic_income": "周期性收入",
+            "sudden_changes": "资金突变",
+            "delayed_transfers": "固定延迟转账",
+            "related_party": "直接往来",
+            "third_party_relays": "第三方中转",
+            "discovered_nodes": "外围节点",
+            "relationship_clusters": "关系簇",
+            "loans": "借贷关系",
+            "wallet_summaries": "电子钱包摘要",
+            "wallet_alerts": "电子钱包预警",
+        }
+        return labels.get(bucket, bucket)
+
+    def _build_frontend_person_flow_rows(self) -> List[Dict[str, Any]]:
+        """生成与前端“个人资金流量”面板一致的人员流量清单。"""
+        rows: List[Dict[str, Any]] = []
+        for name in self._core_persons:
+            profile = self.profiles.get(name, {})
+            if not isinstance(profile, dict):
+                continue
+
+            summary = profile.get("summary", {})
+            if not isinstance(summary, dict):
+                summary = {}
+
+            income = self._safe_float_value(
+                profile.get("totalIncome"),
+                self._safe_float_value(summary.get("total_income"), 0.0),
+            )
+            expense = self._safe_float_value(
+                profile.get("totalExpense"),
+                self._safe_float_value(summary.get("total_expense"), 0.0),
+            )
+            transaction_count = int(
+                self._safe_float_value(
+                    profile.get("transactionCount"),
+                    self._safe_float_value(summary.get("transaction_count"), 0.0),
+                )
+            )
+
+            rows.append(
+                {
+                    "name": name,
+                    "income": income,
+                    "expense": expense,
+                    "total_flow": income + expense,
+                    "transaction_count": transaction_count,
+                }
+            )
+
+        rows.sort(key=lambda item: (-item["total_flow"], item["name"]))
+        return rows
+
+    def _format_frontend_person_flow_trace_line(self, name: str) -> str:
+        """格式化前端个人资金流量面板的溯源路径。"""
+        return (
+            f'口径来源: analysis_cache/profiles.json -> ["{name}"].'
+            "totalIncome / totalExpense / transactionCount"
+        )
+
+    def _format_frontend_bucket_trace_line(
+        self,
+        entity_name: str,
+        bucket: str,
+        items: List[Any],
+    ) -> str:
+        """为前端证据分布桶生成简短溯源说明。"""
+        base_path = (
+            'analysis_cache/derived_data.json -> aggregation.evidencePacks'
+            f'["{entity_name}"]'
+        )
+        if not isinstance(items, list) or not items:
+            return f"来源: {base_path}.evidence.{bucket}"
+
+        sample = items[0]
+        if not isinstance(sample, dict):
+            return f"来源: {base_path}.evidence.{bucket}[0]"
+
+        if bucket == "related_party":
+            return (
+                f"来源: {base_path}.evidence.{bucket}；"
+                f"{self._format_direct_transfer_trace_line(sample)}"
+            )
+
+        if bucket == "sudden_changes":
+            source_file = self._normalize_trace_source_name(sample.get("source_file"))
+            row = self._normalize_trace_row(sample.get("source_row_index"))
+            row_text = f"第{row}行" if row is not None else "行号未提供"
+            return f"来源: {base_path}.evidence.{bucket}；样例来源: [{source_file}, {row_text}]"
+
+        if bucket == "pass_through":
+            node = str(sample.get("node", "") or "未知节点").strip()
+            ratio = self._safe_float_value(sample.get("ratio"), 0.0) * 100
+            return (
+                f"来源: {base_path}.evidence.{bucket}；"
+                f"样例节点: {node}，进出比 {ratio:.1f}%"
+            )
+
+        if bucket == "hub_connections":
+            node = str(sample.get("node", "") or "未知节点").strip()
+            in_degree = int(self._safe_float_value(sample.get("in_degree"), 0.0))
+            out_degree = int(self._safe_float_value(sample.get("out_degree"), 0.0))
+            total_degree = int(self._safe_float_value(sample.get("total_degree"), 0.0))
+            return (
+                f"来源: {base_path}.evidence.{bucket}；"
+                f"样例节点: {node}，入度/出度/总连接数 = {in_degree}/{out_degree}/{total_degree}"
+            )
+
+        if bucket == "high_risk_transactions":
+            date = str(sample.get("date", "") or "未知时间").strip()
+            counterparty = str(sample.get("counterparty", "") or "未知对手方").strip()
+            amount = self._safe_float_value(sample.get("amount"), 0.0)
+            reason = str(sample.get("reasons", "") or "未提供").strip()
+            return (
+                f"来源: {base_path}.evidence.{bucket}；"
+                f"样例交易: {date} | {counterparty} | {amount:,.2f}元 | 原因: {reason}"
+            )
+
+        if bucket == "communities":
+            members = sample.get("members", [])
+            if isinstance(members, list):
+                member_text = "、".join(str(member).strip() for member in members[:5] if str(member).strip())
+            else:
+                member_text = ""
+            total_amount = self._safe_float_value(sample.get("total_amount"), 0.0)
+            return (
+                f"来源: {base_path}.evidence.{bucket}；"
+                f"样例成员: {member_text or '未提供'} | 聚合金额 {total_amount / 10000:,.2f}万元"
+            )
+
+        if bucket == "relationship_clusters":
+            core_members = sample.get("core_members", [])
+            if isinstance(core_members, list):
+                member_text = "、".join(str(member).strip() for member in core_members if str(member).strip())
+            else:
+                member_text = ""
+            direct_count = int(self._safe_float_value(sample.get("direct_flow_count"), 0.0))
+            relay_count = int(self._safe_float_value(sample.get("relay_count"), 0.0))
+            loop_count = int(self._safe_float_value(sample.get("loop_count"), 0.0))
+            return (
+                f"来源: {base_path}.evidence.{bucket}；"
+                f"样例成员: {member_text or '未提供'} | 直接往来/中转/闭环 = "
+                f"{direct_count}/{relay_count}/{loop_count}"
+            )
+
+        return f"来源: {base_path}.evidence.{bucket}[0]"
+
+    def _load_analysis_log_lines(self) -> List[str]:
+        """读取分析执行日志镜像，供报告复盘使用。"""
+        log_path = os.path.join(self.output_dir, "analysis_results", "分析执行日志.txt")
+        if not os.path.exists(log_path):
+            return []
+        try:
+            with open(log_path, "r", encoding="utf-8") as f:
+                return [line.rstrip("\n") for line in f]
+        except OSError:
+            return []
+
+    @staticmethod
+    def _find_first_log_excerpt(log_lines: List[str], patterns: List[str]) -> str:
+        """按关键字查找首条日志摘录。"""
+        for line in log_lines:
+            if all(pattern in line for pattern in patterns):
+                return line.strip()
+        for line in log_lines:
+            if any(pattern in line for pattern in patterns):
+                return line.strip()
+        return ""
+
+    def _build_analysis_log_landing_review(self) -> List[Dict[str, str]]:
+        """汇总分析日志关键信息的落地情况。"""
+        log_lines = self._load_analysis_log_lines()
+        if not log_lines:
+            return []
+
+        stages = [
+            {
+                "stage": "数据清洗",
+                "patterns": ["data_cleaner", "清洗合并完成"],
+                "landing": "已落地 output/cleaned_data/；主报告通过资金概况和溯源说明复用结果，但未逐条展开清洗日志。",
+                "artifacts": "output/cleaned_data/；核查结果分析报告.txt 的资金概况/溯源说明",
+            },
+            {
+                "stage": "资金画像",
+                "patterns": ["financial_profiler", "资金画像生成完成"],
+                "landing": "已落地 analysis_cache/profiles.json，并在主报告“家庭资产与资金画像”章节展开。",
+                "artifacts": "output/analysis_cache/profiles.json；核查结果分析报告.txt 第二部分",
+            },
+            {
+                "stage": "资金穿透",
+                "patterns": ["fund_penetration", "过账通道"],
+                "landing": "已形成多层落地。过账通道、关系簇已进入专项报告；资金枢纽等前端证据桶已补充进入主 TXT，但尚未形成独立专项章节。",
+                "artifacts": "output/analysis_cache/derived_data.json::penetration/aggregation；专项报告/资金穿透分析报告.txt；核查结果分析报告.txt【前端关键视图落地】；资金核查底稿.xlsx",
+            },
+            {
+                "stage": "关联方分析",
+                "patterns": ["related_party_analyzer", "关联方分析完成"],
+                "landing": "已落地 relatedParty 结果；主报告保留全局直接往来摘要，专项报告保留关系簇与代表路径。",
+                "artifacts": "output/analysis_cache/derived_data.json::relatedParty；专项报告/资金穿透分析报告.txt",
+            },
+            {
+                "stage": "时序分析",
+                "patterns": ["time_series_analyzer", "资金突变"],
+                "landing": "已落地 timeSeries 结果，并在专项时序报告中按事件展开。",
+                "artifacts": "output/analysis_cache/derived_data.json::timeSeries；专项报告/时序分析报告.txt",
+            },
+            {
+                "stage": "线索聚合",
+                "patterns": ["clue_aggregator", "统一风险评分"],
+                "landing": "已落地。主报告已写入聚合排序摘要、前端证据分布逐桶计数和问题清单，完整明细仍以 aggregation 证据包为准。",
+                "artifacts": "output/analysis_cache/derived_data.json::aggregation；核查结果分析报告.txt；前端风险解释面板",
+            },
+        ]
+
+        reviews: List[Dict[str, str]] = []
+        for stage in stages:
+            excerpt = self._find_first_log_excerpt(log_lines, stage["patterns"])
+            if not excerpt:
+                continue
+            reviews.append(
+                {
+                    "stage": stage["stage"],
+                    "excerpt": excerpt,
+                    "landing": stage["landing"],
+                    "artifacts": stage["artifacts"],
+                }
+            )
+
+        return reviews
+
     def _format_cash_collision_trace_line(self, item: Dict[str, Any]) -> str:
         """格式化现金碰撞/时序伴随的证据溯源字段。"""
         refs = item.get("evidence_refs") or item.get("evidenceRefs") or {}
@@ -13220,6 +13459,10 @@ class InvestigationReportBuilder:
         lines.append(f"【风险原因】: {risk_reason}")
         aggregation_summary = report_conclusion.get("aggregation_summary", {})
         aggregation_highlights = report_conclusion.get("aggregation_highlights", [])
+        if not aggregation_summary:
+            aggregation_summary = self._get_aggregation_data().get("summary", {})
+        if not aggregation_highlights:
+            aggregation_highlights = self._build_aggregation_highlights(limit=5)
         if aggregation_summary:
             lines.append(
                 f"【聚合排序】: 极高风险{aggregation_summary.get('极高风险实体数', 0)}个，"
@@ -13313,6 +13556,66 @@ class InvestigationReportBuilder:
             lines.append(f"  • 发现 {len(regular_non_salary)} 组规律性非工资收入")
 
         lines.append("")
+
+        frontend_person_flows = self._build_frontend_person_flow_rows()
+        if frontend_person_flows or aggregation_highlights:
+            lines.append("【前端关键视图落地】")
+            if frontend_person_flows:
+                lines.append(
+                    f"  • 个人资金流量: 共{len(frontend_person_flows)}人，口径与前端列表一致，按流水总额排序"
+                )
+                for idx, row in enumerate(frontend_person_flows, 1):
+                    lines.append(
+                        f"    {idx}. {row['name']} | 流水总额{row['total_flow'] / 10000:,.2f}万元 | "
+                        f"收入{row['income'] / 10000:,.2f}万元 | 支出{row['expense'] / 10000:,.2f}万元 | "
+                        f"{row['transaction_count']}笔"
+                    )
+                    lines.append(
+                        f"       ↳ {self._format_frontend_person_flow_trace_line(row['name'])}"
+                    )
+            if aggregation_highlights:
+                lines.append(
+                    "  • 聚合风险看板: 以下证据分布与前端高风险解释面板同口径，来源于 aggregation 证据包"
+                )
+                for highlight in aggregation_highlights[:3]:
+                    entity_name = str(highlight.get("entity", "") or "").strip()
+                    if not entity_name:
+                        continue
+                    pack = self._get_entity_aggregation_pack(entity_name)
+                    explainability = pack.get("aggregation_explainability", {})
+                    if not isinstance(explainability, dict):
+                        explainability = {}
+                    bucket_counts = explainability.get("evidence_bucket_counts", {})
+                    if not isinstance(bucket_counts, dict):
+                        bucket_counts = {}
+                    positive_buckets = [
+                        (bucket, int(self._safe_float_value(count, 0.0)))
+                        for bucket, count in bucket_counts.items()
+                        if self._safe_float_value(count, 0.0) > 0
+                    ]
+                    positive_buckets.sort(key=lambda item: (-item[1], item[0]))
+                    bucket_summary = "；".join(
+                        f"{self._get_frontend_bucket_label(bucket)}{count}"
+                        for bucket, count in positive_buckets
+                    )
+                    lines.append(
+                        f"    • {entity_name}: {bucket_summary or '当前无正向证据桶'}"
+                    )
+                    lines.append(
+                        "      ↳ 口径来源: "
+                        'analysis_cache/derived_data.json -> aggregation.evidencePacks'
+                        f'["{entity_name}"].aggregation_explainability.evidence_bucket_counts'
+                    )
+                    evidence = pack.get("evidence", {})
+                    if not isinstance(evidence, dict):
+                        evidence = {}
+                    for bucket, count in positive_buckets:
+                        lines.append(
+                            "      ↳ "
+                            f"{self._get_frontend_bucket_label(bucket)}{count}: "
+                            f"{self._format_frontend_bucket_trace_line(entity_name, bucket, evidence.get(bucket, []))}"
+                        )
+            lines.append("")
 
         # 二、家庭资产与资金画像（复用正式报告对象）
         lines.append("二、家庭资产与资金画像")
@@ -13836,6 +14139,19 @@ class InvestigationReportBuilder:
                         suffix.append(f"期限{deadline}")
                     suffix_text = f"（{'，'.join(suffix)}）" if suffix else ""
                     lines.append(f"  {idx}. {action_text}{suffix_text}")
+            lines.append("")
+
+        log_landing_reviews = self._build_analysis_log_landing_review()
+        if log_landing_reviews:
+            lines.append("【分析执行日志落地复盘】")
+            for item in log_landing_reviews:
+                lines.append(f"  • {item.get('stage', '未命名阶段')}: {item.get('landing', '')}")
+                excerpt = str(item.get("excerpt", "") or "").strip()
+                artifacts = str(item.get("artifacts", "") or "").strip()
+                if excerpt:
+                    lines.append(f"    ↳ 日志摘录: {excerpt}")
+                if artifacts:
+                    lines.append(f"    ↳ 落地产物: {artifacts}")
             lines.append("")
 
         # 综合研判与建议

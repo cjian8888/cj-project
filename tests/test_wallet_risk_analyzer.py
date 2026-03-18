@@ -593,3 +593,79 @@ def test_enhance_wallet_alerts_downgrades_financial_platform_overlap():
 
     assert overlap_alert["risk_level"] == "low"
     assert "金融平台" in overlap_alert["risk_reason"]
+
+
+def test_enhance_wallet_alerts_identifies_family_from_shared_property():
+    wallet_data = _build_wallet_data("朱明", "110101199001010011", True)
+    artifact_details = {
+        "alipayTransactionRows": [
+            {
+                "subjectId": "110101199001010011",
+                "subjectName": "朱明",
+                "isEffective": True,
+                "direction": "收入",
+                "createdAt": "2025-08-01 10:00:00",
+                "amountYuan": 18000.0,
+                "counterpartyName": "吴嘉欣",
+                "itemName": "家庭转账",
+            },
+            {
+                "subjectId": "110101199001010011",
+                "subjectName": "朱明",
+                "isEffective": True,
+                "direction": "收入",
+                "createdAt": "2025-08-02 10:00:00",
+                "amountYuan": 18000.0,
+                "counterpartyName": "吴嘉欣",
+                "itemName": "家庭转账",
+            },
+            {
+                "subjectId": "110101199001010011",
+                "subjectName": "朱明",
+                "isEffective": True,
+                "direction": "收入",
+                "createdAt": "2025-08-03 10:00:00",
+                "amountYuan": 18000.0,
+                "counterpartyName": "吴嘉欣",
+                "itemName": "家庭转账",
+            },
+        ],
+        "tenpayTransactionRows": [],
+    }
+    cleaned_data = {
+        "朱明": pd.DataFrame(
+            [
+                {"日期": "2025-08-01", "收入": 25000, "支出": 0, "交易对手": "吴嘉欣", "交易摘要": "家庭转账"},
+                {"日期": "2025-08-02", "收入": 25000, "支出": 0, "交易对手": "吴嘉欣", "交易摘要": "家庭转账"},
+                {"日期": "2025-08-03", "收入": 25000, "支出": 0, "交易对手": "吴嘉欣", "交易摘要": "家庭转账"},
+            ]
+        )
+    }
+    profiles = {
+        "朱明": {
+            "properties_precise": [
+                {
+                    "ownership_type": "共同共有",
+                    "co_owners": ["朱明", "吴嘉欣"],
+                }
+            ]
+        }
+    }
+
+    enhanced = wallet_risk_analyzer.enhance_wallet_alerts(
+        wallet_data=wallet_data,
+        artifact_details=artifact_details,
+        cleaned_data=cleaned_data,
+        id_to_name_map={"110101199001010011": "朱明"},
+        profiles=profiles,
+    )
+
+    overlap_alert = next(
+        item for item in enhanced["alerts"]
+        if item["alert_type"] == "wallet_bank_counterparty_overlap"
+        and item["counterparty"] == "吴嘉欣"
+    )
+
+    assert overlap_alert["counterparty_role"] == "family"
+    assert overlap_alert["risk_level"] == "low"
+    assert "家庭成员" in overlap_alert["risk_reason"]

@@ -849,6 +849,79 @@ def test_analysis_runtime_logs_are_persisted_to_output_and_stop_after_finalize(t
             api_server._last_analysis_log_paths.update(previous_last)
 
 
+def test_get_analysis_log_history_restores_visible_logs_and_level_stats(tmp_path):
+    output_dir = tmp_path / "output"
+    results_dir = output_dir / "analysis_results"
+    results_dir.mkdir(parents=True)
+    mirror_path = results_dir / "分析执行日志.txt"
+    mirror_path.write_text(
+        "\n".join(
+            [
+                "# 分析执行日志",
+                "2026-03-17 21:00:48 [INFO] data_cleaner - 开始清洗",
+                "2026-03-17 21:00:49 [WARNING] data_cleaner - 发现1条零金额记录",
+                "2026-03-17 21:00:50 [ERROR] data_cleaner - 缺少日期字段",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    previous_config = dict(api_server._current_config)
+    previous_state = {
+        "status": api_server.analysis_state.status,
+        "progress": api_server.analysis_state.progress,
+        "phase": api_server.analysis_state.phase,
+        "start_time": api_server.analysis_state.start_time,
+        "end_time": api_server.analysis_state.end_time,
+        "results": api_server.analysis_state.results,
+        "error": api_server.analysis_state.error,
+        "stop_requested": api_server.analysis_state.stop_requested,
+    }
+    with api_server._analysis_log_lock:
+        previous_active = dict(api_server._active_analysis_log_paths)
+        previous_last = dict(api_server._last_analysis_log_paths)
+
+    try:
+        api_server._current_config.clear()
+        api_server._current_config["outputDirectory"] = str(output_dir)
+        api_server.analysis_state.reset()
+
+        with api_server._analysis_log_lock:
+            api_server._active_analysis_log_paths.clear()
+            api_server._last_analysis_log_paths.clear()
+            api_server._last_analysis_log_paths["resultsMirror"] = str(mirror_path)
+
+        response = asyncio.run(api_server.get_analysis_log_history(limit=10))
+
+        assert response["message"] == "分析日志获取成功"
+        assert response["data"]["path"] == str(mirror_path)
+        assert response["data"]["source"] == "analysis_results_mirror"
+        assert response["data"]["stats"] == {"info": 1, "warn": 1, "error": 1}
+        assert [item["level"] for item in response["data"]["logs"]] == [
+            "INFO",
+            "WARN",
+            "ERROR",
+        ]
+        assert response["data"]["logs"][0]["time"] == "21:00:48"
+        assert response["data"]["logs"][1]["msg"] == "data_cleaner - 发现1条零金额记录"
+    finally:
+        api_server.analysis_state.status = previous_state["status"]
+        api_server.analysis_state.progress = previous_state["progress"]
+        api_server.analysis_state.phase = previous_state["phase"]
+        api_server.analysis_state.start_time = previous_state["start_time"]
+        api_server.analysis_state.end_time = previous_state["end_time"]
+        api_server.analysis_state.results = previous_state["results"]
+        api_server.analysis_state.error = previous_state["error"]
+        api_server.analysis_state.stop_requested = previous_state["stop_requested"]
+        api_server._current_config.clear()
+        api_server._current_config.update(previous_config)
+        with api_server._analysis_log_lock:
+            api_server._active_analysis_log_paths.clear()
+            api_server._active_analysis_log_paths.update(previous_active)
+            api_server._last_analysis_log_paths.clear()
+            api_server._last_analysis_log_paths.update(previous_last)
+
+
 def test_run_analysis_refactored_defaults_to_project_output_dir(tmp_path, monkeypatch):
     input_dir = tmp_path / "input"
     input_dir.mkdir()

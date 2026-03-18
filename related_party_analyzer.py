@@ -7,7 +7,7 @@
 
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Dict, List, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from collections import defaultdict
 import config
 import utils
@@ -15,6 +15,7 @@ from counterparty_utils import is_payment_platform_counterparty
 from name_normalizer import normalize_for_matching, is_same_person
 import fund_penetration
 import risk_scoring
+from utils.family_relation_utils import build_family_pair_keys, is_family_pair
 from utils.path_explainability import (
     build_cluster_path_explainability,
     build_direct_flow_path_explainability,
@@ -23,6 +24,7 @@ from utils.path_explainability import (
 )
 
 logger = utils.setup_logger(__name__)
+DIRECT_FLOW_MIRROR_MATCH_TOLERANCE_SECONDS = 5
 
 
 def _normalize_risk_score(score: float) -> float:
@@ -37,9 +39,183 @@ def _score_to_level(score: float) -> str:
     return risk_scoring.score_to_risk_level(score)
 
 
+def _coerce_direct_flow_datetime(value: Any) -> Optional[datetime]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.to_pydatetime()
+    if isinstance(value, datetime):
+        return value
+    try:
+        parsed = pd.to_datetime(value, errors="coerce")
+    except Exception:
+        return None
+    if pd.isna(parsed):
+        return None
+    if isinstance(parsed, pd.Timestamp):
+        return parsed.to_pydatetime()
+    return parsed if isinstance(parsed, datetime) else None
+
+
+def _build_direct_flow_transaction_ref(flow: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "date": flow.get("date"),
+        "amount": float(flow.get("amount", 0) or 0),
+        "source_file": flow.get("source_file", ""),
+        "source_row_index": flow.get("source_row_index"),
+        "description": flow.get("description", ""),
+        "direction": str(
+            flow.get("observation_direction") or flow.get("direction") or ""
+        ).strip(),
+        "counterparty_raw": str(flow.get("counterparty_raw", "") or "").strip(),
+        "observed_entity": str(flow.get("observed_entity", "") or "").strip(),
+    }
+
+
+def _finalize_direct_flow_record(flow: Dict[str, Any]) -> Dict[str, Any]:
+    record = dict(flow)
+    refs = list(record.get("transaction_refs", []) or [])
+    if not refs:
+        refs = [_build_direct_flow_transaction_ref(record)]
+    record["transaction_refs"] = refs
+    record["transaction_refs_total"] = max(
+        int(record.get("transaction_refs_total", len(refs)) or len(refs)),
+        len(refs),
+    )
+    return record
+
+
+def _merge_mirrored_direct_flows(
+    left: Dict[str, Any], right: Dict[str, Any]
+) -> Dict[str, Any]:
+    pay_flow = (
+        left
+        if str(left.get("observation_direction", "")).strip().lower() == "pay"
+        else right
+    )
+    receive_flow = right if pay_flow is left else left
+    refs = [
+        _build_direct_flow_transaction_ref(pay_flow),
+        _build_direct_flow_transaction_ref(receive_flow),
+    ]
+
+    merged = dict(pay_flow)
+    merged["date"] = pay_flow.get("date") or receive_flow.get("date")
+    merged["description"] = (
+        str(pay_flow.get("description", "") or "").strip()
+        or str(receive_flow.get("description", "") or "").strip()
+    )
+    merged["relationship_context"] = (
+        "family"
+        if any(
+            str(item.get("relationship_context", "")).strip().lower() == "family"
+            for item in (left, right)
+        )
+        else str(pay_flow.get("relationship_context", "") or "").strip()
+        or str(receive_flow.get("relationship_context", "") or "").strip()
+    )
+    merged["transaction_refs"] = refs
+    merged["transaction_refs_total"] = len(refs)
+    merged["source_file"] = pay_flow.get("source_file") or receive_flow.get(
+        "source_file", ""
+    )
+    merged["source_row_index"] = pay_flow.get(
+        "source_row_index"
+    ) or receive_flow.get("source_row_index")
+    merged["counterparty_raw"] = pay_flow.get(
+        "counterparty_raw"
+    ) or receive_flow.get("counterparty_raw", "")
+    merged["observed_entity"] = pay_flow.get("observed_entity") or receive_flow.get(
+        "observed_entity", ""
+    )
+    merged["observation_direction"] = "pay"
+    merged["direction"] = "pay"
+    return _finalize_direct_flow_record(merged)
+
+
+def _dedupe_mirrored_direct_flows(
+    direct_flows: List[Dict[str, Any]],
+    tolerance_seconds: int = DIRECT_FLOW_MIRROR_MATCH_TOLERANCE_SECONDS,
+) -> List[Dict[str, Any]]:
+    grouped: Dict[Tuple[str, str, float], List[Tuple[int, Dict[str, Any]]]] = defaultdict(
+        list
+    )
+
+    for index, flow in enumerate(direct_flows):
+        from_node = str(flow.get("from", "") or "").strip()
+        to_node = str(flow.get("to", "") or "").strip()
+        amount = round(float(flow.get("amount", 0) or 0), 2)
+        grouped[(from_node, to_node, amount)].append((index, flow))
+
+    deduped: List[Dict[str, Any]] = []
+    for items in grouped.values():
+        items.sort(
+            key=lambda item: (
+                _coerce_direct_flow_datetime(item[1].get("date")) or datetime.max,
+                item[0],
+            )
+        )
+        consumed: Set[int] = set()
+
+        for index, flow in items:
+            if index in consumed:
+                continue
+
+            flow_dt = _coerce_direct_flow_datetime(flow.get("date"))
+            flow_observation = str(
+                flow.get("observation_direction", "") or ""
+            ).strip().lower()
+            matched_index: Optional[int] = None
+            matched_flow: Optional[Dict[str, Any]] = None
+            matched_diff: Optional[float] = None
+
+            for other_index, other in items:
+                if other_index == index or other_index in consumed:
+                    continue
+
+                other_observation = str(
+                    other.get("observation_direction", "") or ""
+                ).strip().lower()
+                if {flow_observation, other_observation} != {"pay", "receive"}:
+                    continue
+
+                other_dt = _coerce_direct_flow_datetime(other.get("date"))
+                if flow_dt is None or other_dt is None:
+                    continue
+
+                diff_seconds = abs((flow_dt - other_dt).total_seconds())
+                if diff_seconds > tolerance_seconds:
+                    continue
+
+                if matched_diff is None or diff_seconds < matched_diff:
+                    matched_index = other_index
+                    matched_flow = other
+                    matched_diff = diff_seconds
+
+            if matched_index is not None and matched_flow is not None:
+                consumed.add(index)
+                consumed.add(matched_index)
+                deduped.append(_merge_mirrored_direct_flows(flow, matched_flow))
+                continue
+
+            consumed.add(index)
+            deduped.append(_finalize_direct_flow_record(flow))
+
+    deduped.sort(
+        key=lambda flow: (
+            _coerce_direct_flow_datetime(flow.get("date")) or datetime.max,
+            str(flow.get("from", "") or "").strip(),
+            str(flow.get("to", "") or "").strip(),
+            float(flow.get("amount", 0) or 0),
+        )
+    )
+    return deduped
+
+
 def analyze_related_party_flows(
     all_transactions: Dict[str, pd.DataFrame],
-    core_persons: List[str]
+    core_persons: List[str],
+    profiles: Optional[Dict[str, Dict]] = None,
 ) -> Dict:
     """
     分析关联方之间的资金往来
@@ -54,6 +230,7 @@ def analyze_related_party_flows(
     logger.info('='*60)
     logger.info('开始关联方资金穿透分析')
     logger.info('='*60)
+    family_pair_keys = build_family_pair_keys(core_persons, profiles or {})
     
     results = {
         'direct_flows': [],           # 直接资金往来
@@ -68,7 +245,11 @@ def analyze_related_party_flows(
     
     # 1. 分析直接资金往来
     logger.info('【阶段1】分析关联人直接资金往来')
-    results['direct_flows'] = _analyze_direct_flows(all_transactions, core_persons)
+    results['direct_flows'] = _analyze_direct_flows(
+        all_transactions,
+        core_persons,
+        family_pair_keys=family_pair_keys,
+    )
     
     # 2. 检测第三方中转
     logger.info('【阶段2】检测第三方中转模式')
@@ -95,7 +276,11 @@ def analyze_related_party_flows(
     # 5. 生成外围节点与关系簇
     logger.info('【阶段5】提取外围节点与关系簇')
     results['discovered_nodes'] = _extract_discovered_nodes(results, core_persons)
-    results['relationship_clusters'] = _build_relationship_clusters(results, core_persons)
+    results['relationship_clusters'] = _build_relationship_clusters(
+        results,
+        core_persons,
+        family_pair_keys=family_pair_keys,
+    )
     
     # 6. 生成汇总
     results['summary'] = _generate_summary(results, core_persons)
@@ -111,7 +296,8 @@ def analyze_related_party_flows(
 
 def _analyze_direct_flows(
     all_transactions: Dict[str, pd.DataFrame],
-    core_persons: List[str]
+    core_persons: List[str],
+    family_pair_keys: Optional[Set[frozenset[str]]] = None,
 ) -> List[Dict]:
     """分析核心人员之间的直接资金往来 (性能优化版)"""
     direct_flows = []
@@ -142,22 +328,36 @@ def _analyze_direct_flows(
             if mask.any():
                 subset = df[mask]
                 for _, row in subset.iterrows():
+                    income_amount = float(row.get('income', 0) or 0)
+                    expense_amount = float(row.get('expense', 0) or 0)
+                    is_receive = income_amount > 0
+                    sender = other_person if is_receive else person
+                    receiver = person if is_receive else other_person
                     flow = {
-                        'from': person,
-                        'to': other_person,
+                        'from': sender,
+                        'to': receiver,
                         'date': row.get('date'),
-                        'amount': max(row.get('income', 0), row.get('expense', 0)),
-                        'direction': 'receive' if row.get('income', 0) > 0 else 'pay',
+                        'amount': max(income_amount, expense_amount),
+                        'direction': 'pay',
+                        'observation_direction': 'receive' if is_receive else 'pay',
+                        'observed_entity': person,
                         'description': row.get('description', ''),
                         'counterparty_raw': str(row.get('counterparty', '')),
+                        'relationship_context': (
+                            'family' if is_family_pair(person, other_person, family_pair_keys) else 'external'
+                        ),
                         # 【审计溯源】原始文件和行号
                         'source_file': row.get('数据来源', ''),
                         'source_row_index': row.get('source_row_index', None)
                     }
                     direct_flows.append(flow)
-    
-    logger.info(f'  发现 {len(direct_flows)} 笔关联人直接资金往来')
-    return direct_flows
+
+    deduped_flows = _dedupe_mirrored_direct_flows(direct_flows)
+    logger.info(
+        f'  发现 {len(direct_flows)} 条关联人直接往来侧账记录, '
+        f'去重后 {len(deduped_flows)} 笔唯一交易'
+    )
+    return deduped_flows
 
 
 def _get_excluded_relay_keywords() -> List[str]:
@@ -800,7 +1000,25 @@ def _extract_discovered_nodes(results: Dict, core_persons: List[str]) -> List[Di
     return discovered_nodes
 
 
-def _build_relationship_clusters(results: Dict, core_persons: List[str]) -> List[Dict]:
+def _is_family_core_group(
+    core_members: List[str],
+    family_pair_keys: Optional[Set[frozenset[str]]] = None,
+) -> bool:
+    if len(core_members) < 2 or not family_pair_keys:
+        return False
+
+    for idx, left in enumerate(core_members):
+        for right in core_members[idx + 1:]:
+            if not is_family_pair(left, right, family_pair_keys):
+                return False
+    return True
+
+
+def _build_relationship_clusters(
+    results: Dict,
+    core_persons: List[str],
+    family_pair_keys: Optional[Set[frozenset[str]]] = None,
+) -> List[Dict]:
     """构建包含核心人员和外围节点的关系簇。"""
     adjacency = defaultdict(set)
     cluster_stats = defaultdict(lambda: {'direct_flow_count': 0, 'relay_count': 0, 'loop_count': 0, 'total_amount': 0.0})
@@ -962,16 +1180,41 @@ def _build_relationship_clusters(results: Dict, core_persons: List[str]) -> List
                 if stat['loop_count']:
                     relation_types.add('fund_loop')
 
-        risk_score = 35 + direct_flow_count * 4 + relay_count * 8 + loop_count * 15
-        risk_score += min(12, len(external_members) * 3)
-        if total_amount >= 1_000_000:
-            risk_score += 18
-        elif total_amount >= 500_000:
-            risk_score += 14
-        elif total_amount >= 100_000:
-            risk_score += 10
-        elif total_amount > 0:
-            risk_score += 6
+        family_cluster = (
+            not external_members
+            and relay_count == 0
+            and loop_count == 0
+            and _is_family_core_group(core_members, family_pair_keys)
+        )
+
+        if family_cluster:
+            risk_score = 8
+            if direct_flow_count >= 20:
+                risk_score += 8
+            elif direct_flow_count >= 8:
+                risk_score += 5
+            elif direct_flow_count > 0:
+                risk_score += 3
+
+            if total_amount >= 1_000_000:
+                risk_score += 10
+            elif total_amount >= 500_000:
+                risk_score += 7
+            elif total_amount >= 100_000:
+                risk_score += 4
+            elif total_amount > 0:
+                risk_score += 2
+        else:
+            risk_score = 35 + direct_flow_count * 4 + relay_count * 8 + loop_count * 15
+            risk_score += min(12, len(external_members) * 3)
+            if total_amount >= 1_000_000:
+                risk_score += 18
+            elif total_amount >= 500_000:
+                risk_score += 14
+            elif total_amount >= 100_000:
+                risk_score += 10
+            elif total_amount > 0:
+                risk_score += 6
 
         confidence = 0.50
         if loop_count > 0:
@@ -982,12 +1225,16 @@ def _build_relationship_clusters(results: Dict, core_persons: List[str]) -> List
             confidence += 0.08
         if total_amount > 0:
             confidence += 0.10
+        if family_cluster:
+            confidence -= 0.10
 
         evidence = [
             f"核心成员 {len(core_members)} 个，外围成员 {len(external_members)} 个",
             f"直接往来/中转/闭环 = {direct_flow_count}/{relay_count}/{loop_count}",
             f"关系类型: {'、'.join(sorted(relation_types)) or '未标注'}",
         ]
+        if family_cluster:
+            evidence.append("命中家庭成员关系，当前按家庭内部资金往来降级展示")
         if total_amount > 0:
             evidence.append(f"聚合金额估算 {utils.format_currency(total_amount)} 元")
 
@@ -1008,6 +1255,7 @@ def _build_relationship_clusters(results: Dict, core_persons: List[str]) -> List
             'risk_level': _score_to_level(normalized_score),
             'confidence': _normalize_confidence(confidence),
             'evidence': evidence,
+            'relationship_context': 'family' if family_cluster else 'external',
             'representative_path_total': len(ranked_representative_paths),
         }
         cluster_payload['path_explainability'] = build_cluster_path_explainability(

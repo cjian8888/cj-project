@@ -1414,6 +1414,119 @@ def test_generate_complete_txt_report_includes_aggregation_highlights(tmp_path):
     assert "聚合排序识别重点对象: 张三(88.0分)、李四(72.0分)" in text
 
 
+def test_generate_complete_txt_report_includes_frontend_landing_and_log_review(tmp_path):
+    analysis_results_dir = tmp_path / "analysis_results"
+    analysis_results_dir.mkdir(parents=True, exist_ok=True)
+    (analysis_results_dir / "分析执行日志.txt").write_text(
+        "\n".join(
+            [
+                "2026-03-17 21:00:53 [INFO] data_cleaner - 张三 清洗合并完成: 1个文件, 12行 → 12行",
+                "2026-03-17 21:01:33 [INFO] financial_profiler - 张三 资金画像生成完成",
+                "2026-03-17 21:02:19 [INFO] fund_penetration -   过账通道: 1 个",
+                "2026-03-17 21:02:22 [INFO] related_party_analyzer - 关联方分析完成: 直接往来2笔, 第三方中转0条链, 资金闭环0个, 外围节点0个",
+                "2026-03-17 21:02:24 [INFO] time_series_analyzer -   资金突变事件: 1",
+                "2026-03-17 21:02:25 [INFO] clue_aggregator - 张三 统一风险评分: 88.0 (critical, confidence=0.82)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    analysis_cache = {
+        "profiles": {
+            "张三": {
+                "totalIncome": 1_000_000,
+                "totalExpense": 500_000,
+                "transactionCount": 12,
+                "summary": {
+                    "total_income": 1_000_000,
+                    "total_expense": 500_000,
+                    "real_income": 800_000,
+                    "real_expense": 300_000,
+                },
+            }
+        },
+        "derived_data": {
+            "aggregation": {
+                "summary": {
+                    "极高风险实体数": 1,
+                    "高风险实体数": 0,
+                    "高优先线索实体数": 1,
+                },
+                "ranked_entities": [
+                    {
+                        "name": "张三",
+                        "risk_score": 88.0,
+                        "risk_confidence": 0.82,
+                        "risk_level": "critical",
+                        "summary": "疑似过账通道; 存在2笔直接往来",
+                        "high_priority_clue_count": 2,
+                    }
+                ],
+                "evidence_packs": {
+                    "张三": {
+                        "summary": "疑似过账通道; 存在2笔直接往来",
+                        "aggregation_explainability": {
+                            "evidence_bucket_counts": {
+                                "pass_through": 1,
+                                "related_party": 2,
+                            },
+                            "top_clues": [
+                                {"description": "过账通道"},
+                                {"description": "直接往来: 张三 → 李四"},
+                            ],
+                        },
+                        "evidence": {
+                            "pass_through": [
+                                {
+                                    "node": "张三",
+                                    "ratio": 0.88,
+                                    "risk_score": 68.0,
+                                    "confidence": 0.7,
+                                }
+                            ],
+                            "related_party": [
+                                {
+                                    "from": "张三",
+                                    "to": "李四",
+                                    "source_file": "张三_测试流水.xlsx",
+                                    "source_row_index": 12,
+                                }
+                            ],
+                        },
+                    }
+                },
+            }
+        },
+        "suspicions": {},
+        "graph_data": {},
+        "metadata": {},
+    }
+    builder = InvestigationReportBuilder(analysis_cache, output_dir=str(tmp_path))
+    report = {
+        "meta": {"title_subject": "张三"},
+        "family_sections": [],
+        "person_sections": [],
+        "company_sections": [],
+        "conclusion": {},
+        "next_steps": [],
+    }
+
+    report_path = tmp_path / "核查结果分析报告.txt"
+    builder.generate_complete_txt_report(str(report_path), report=report)
+    text = report_path.read_text(encoding="utf-8")
+
+    assert "【前端关键视图落地】" in text
+    assert "个人资金流量: 共1人" in text
+    assert "张三 | 流水总额150.00万元" in text
+    assert 'analysis_cache/profiles.json -> ["张三"].totalIncome / totalExpense / transactionCount' in text
+    assert "张三: 直接往来2；过账通道1" in text
+    assert "【分析执行日志落地复盘】" in text
+    assert "数据清洗" in text
+    assert "张三 清洗合并完成" in text
+    assert "线索聚合" in text
+    assert "derived_data.json::aggregation" in text
+
+
 def test_income_expense_match_uses_non_salary_wording_not_unknown_income():
     profile = {
         "summary": {

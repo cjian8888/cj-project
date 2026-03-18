@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState } from 'react';
+import { useRef, useEffect, useMemo, useState } from 'react';
 import { Terminal, X, Maximize2, Minimize2, Copy, CheckCircle2 } from 'lucide-react';
 import { useApp } from '../contexts/AppContext';
 
@@ -7,6 +7,23 @@ export function LogConsole() {
     const scrollRef = useRef<HTMLDivElement>(null);
     const [isExpanded, setIsExpanded] = useState(false);
     const [copied, setCopied] = useState(false);
+
+    const logStats = useMemo(() => {
+        return logs.reduce(
+            (stats, log) => {
+                const level = String(log.level || '').trim().toUpperCase();
+                if (level === 'WARN' || level === 'WARNING') {
+                    stats.warn += 1;
+                } else if (level === 'ERROR' || level === 'ERR' || level === 'CRITICAL' || level === 'FATAL') {
+                    stats.error += 1;
+                } else {
+                    stats.info += 1;
+                }
+                return stats;
+            },
+            { info: 0, warn: 0, error: 0 }
+        );
+    }, [logs]);
 
     // Auto-scroll to bottom when logs change
     useEffect(() => {
@@ -61,15 +78,15 @@ export function LogConsole() {
                     <div className="hidden sm:flex items-center gap-3 mr-3 text-xs">
                         <span className="flex items-center gap-1">
                             <span className="w-2 h-2 rounded-full bg-blue-500" />
-                            <span className="theme-text-dim">{logs.filter(l => l.level === 'INFO').length}</span>
+                            <span className="theme-text-dim">{logStats.info}</span>
                         </span>
                         <span className="flex items-center gap-1">
                             <span className="w-2 h-2 rounded-full bg-yellow-500" />
-                            <span className="theme-text-dim">{logs.filter(l => l.level === 'WARN').length}</span>
+                            <span className="theme-text-dim">{logStats.warn}</span>
                         </span>
                         <span className="flex items-center gap-1">
                             <span className="w-2 h-2 rounded-full bg-red-500" />
-                            <span className="theme-text-dim">{logs.filter(l => l.level === 'ERROR').length}</span>
+                            <span className="theme-text-dim">{logStats.error}</span>
                         </span>
                     </div>
 

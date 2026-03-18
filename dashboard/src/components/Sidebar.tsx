@@ -24,6 +24,7 @@ import Logo from '../assets/logo.png';
 import { useApp } from '../contexts/AppContext';
 import type { TabType } from '../types';
 import { api } from '../services/api';
+import { APP_VERSION } from '../constants/appVersion';
 
 export function Sidebar() {
     const {
@@ -401,7 +402,7 @@ export function Sidebar() {
                             <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
                             <span className="theme-text-dim">系统在线</span>
                         </div>
-                        <span className="theme-text-dim font-mono">v3.0.0</span>
+                        <span className="theme-text-dim font-mono">{APP_VERSION}</span>
                     </div>
                     {analysis.lastRunTime && (
                         <p className="text-[10px] theme-text-dim mt-2">

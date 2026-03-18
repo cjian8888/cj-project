@@ -415,3 +415,115 @@ def test_aggregator_wallet_alert_prefers_source_risk_score_and_confidence(monkey
     assert alert["confidence"] == 0.72
     assert alert["rule_code"] == "WALLET-UNMAPPED-LARGE-001"
     assert any("未命中主链" in item for item in alert["evidence"])
+
+
+def test_aggregator_dedupes_related_party_records_across_sources(monkeypatch):
+    _stub_ratio_calculators(monkeypatch)
+
+    aggregator = ClueAggregator(["张三", "李四"], [])
+    shared_flow = {
+        "from": "张三",
+        "to": "李四",
+        "amount": 200000,
+        "date": "2024-01-02",
+        "description": "转账",
+        "relationship_context": "family",
+    }
+
+    aggregator.aggregate_penetration_results(
+        {
+            "person_to_person": [
+                {
+                    "发起方": "张三",
+                    "接收方": "李四",
+                    "金额": 200000,
+                    "日期": "2024-01-02",
+                    "摘要": "转账",
+                }
+            ]
+        }
+    )
+    aggregator.aggregate_related_party_results({"direct_flows": [shared_flow]})
+
+    pack = aggregator.get_entity_evidence_pack("张三")
+
+    assert len(pack["evidence"]["related_party"]) == 1
+    assert pack["evidence"]["related_party"][0]["relationship_context"] == "family"
+
+
+def test_penetration_direct_transactions_do_not_pollute_related_party_bucket(monkeypatch):
+    _stub_ratio_calculators(monkeypatch)
+
+    aggregator = ClueAggregator(["朱明", "吴嘉欣"], [])
+    aggregator.aggregate_penetration_results(
+        {
+            "person_to_person": [
+                {
+                    "发起方": "朱明",
+                    "接收方": "吴嘉欣",
+                    "金额": 10000,
+                    "日期": "2024-01-02T10:00:00",
+                    "摘要": "旧格式侧账",
+                }
+            ]
+        }
+    )
+    aggregator.aggregate_related_party_results(
+        {
+            "direct_flows": [
+                {
+                    "from": "朱明",
+                    "to": "吴嘉欣",
+                    "amount": 10000,
+                    "date": "2024-01-02T10:00:00",
+                    "description": "转账",
+                    "relationship_context": "family",
+                    "transaction_refs_total": 2,
+                    "transaction_refs": [
+                        {"date": "2024-01-02T10:00:00", "amount": 10000},
+                        {"date": "2024-01-02T10:00:01", "amount": 10000},
+                    ],
+                }
+            ]
+        }
+    )
+
+    pack = aggregator.get_entity_evidence_pack("朱明")
+
+    assert len(pack["evidence"]["related_party"]) == 1
+    assert pack["evidence"]["related_party"][0]["transaction_refs_total"] == 2
+    assert "发起方" not in pack["evidence"]["related_party"][0]
+
+
+def test_aggregator_excludes_family_and_generic_wallet_counterparties_from_entity_count(monkeypatch):
+    _stub_ratio_calculators(monkeypatch)
+
+    aggregator = ClueAggregator(["朱明"], [])
+    aggregator.aggregate_wallet_results(
+        {
+            "subjects": [],
+            "alerts": [
+                {
+                    "person": "朱明",
+                    "counterparty": "吴嘉欣",
+                    "counterparty_role": "family",
+                    "amount": 120000,
+                    "risk_level": "low",
+                    "alert_type": "wallet_bank_counterparty_overlap",
+                },
+                {
+                    "person": "朱明",
+                    "counterparty": "电子钱包总体",
+                    "counterparty_role": "external",
+                    "amount": 220000,
+                    "risk_level": "medium",
+                    "alert_type": "wallet_quick_pass_through",
+                },
+            ],
+        }
+    )
+
+    aggregator.calculate_entity_risk_scores()
+    pack = aggregator.get_entity_evidence_pack("朱明")
+
+    assert pack["risk_details"]["entity_score"] == 0.0

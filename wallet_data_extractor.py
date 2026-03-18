@@ -1252,6 +1252,7 @@ def _build_wallet_alert_record(
     transaction_count: int = 0,
     overlap_count: int = 0,
     evidence_summary: str = "",
+    counterparty_role: str = "",
 ) -> Dict[str, Any]:
     rule_code = _wallet_alert_rule_code(alert_type)
     risk_score = _wallet_alert_risk_score(
@@ -1286,6 +1287,7 @@ def _build_wallet_alert_record(
         "risk_score": risk_score,
         "confidence": confidence,
         "evidence_summary": evidence_summary or description,
+        "counterparty_role": counterparty_role,
     }
 
 

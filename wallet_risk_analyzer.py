@@ -19,6 +19,7 @@ import financial_profiler
 import utils
 import wallet_data_extractor
 from name_normalizer import normalize_for_matching
+from utils.family_relation_utils import collect_family_names_from_profile
 from utils.safe_types import safe_float, safe_int, safe_str
 
 logger = utils.setup_logger(__name__)
@@ -291,9 +292,8 @@ def _resolve_profile_for_subject(
 
 def _collect_family_aliases(profile: Dict[str, Any], subject_name: str) -> Set[str]:
     family_aliases: Set[str] = set()
-    for name in _extract_person_names(profile.get("coaddress_persons", [])):
-        if name and not financial_profiler._matches_name(name, subject_name):
-            family_aliases.update(financial_profiler._build_name_alias_set([name]))
+    for name in collect_family_names_from_profile(profile, subject_name):
+        family_aliases.update(financial_profiler._build_name_alias_set([name]))
     return family_aliases
 
 
@@ -548,6 +548,7 @@ def _detect_bank_linkage_alerts(
                     f"银行 {overlap['bank_count']} 笔/{overlap['bank_amount'] / 10000:.1f} 万元。"
                     f"{(' ' + role_note) if role_note else ''}"
                 ),
+                counterparty_role=role_hint,
             )
         )
 

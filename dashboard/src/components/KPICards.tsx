@@ -69,7 +69,7 @@ export function KPICards() {
             id: 'risk',
             label: '风险研判',
             value: formatAmountInWan(transactionRiskAmount),
-            subLabel: `${suspicionCount} 条异常线索 / ${transactionClueCount} 条核心交易风险`,
+            subLabel: `${suspicionCount} 条总线索（含钱包/节假日/AML） / ${transactionClueCount} 条交易型风险`,
             icon: ShieldAlert,
             trend: (transactionRiskAmount > 0 ? 'down' : 'neutral') as 'up' | 'neutral' | 'down',
             trendValue: transactionRiskAmount > 0 ? '需核查' : '未见异常',

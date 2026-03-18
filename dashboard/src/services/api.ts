@@ -170,6 +170,20 @@ export interface WebSocketMessage {
     data: LogEntry | AnalysisStatus;
 }
 
+export interface AnalysisLogHistoryResponse {
+    message: string;
+    data: {
+        logs: LogEntry[];
+        stats: {
+            info: number;
+            warn: number;
+            error: number;
+        };
+        path: string;
+        source: string;
+    };
+}
+
 // ==================== HTTP API ====================
 
 class ApiService {
@@ -358,6 +372,13 @@ class ApiService {
      */
     async getResults(): Promise<{ message: string; data: AnalysisResults | null }> {
         return this.request('/api/results');
+    }
+
+    /**
+     * 获取最近一次分析的历史日志，用于恢复日志控制台
+     */
+    async getAnalysisLogHistory(limit: number = 200): Promise<AnalysisLogHistoryResponse> {
+        return this.request(`/api/analysis/log-history?limit=${encodeURIComponent(String(limit))}`);
     }
 
     /**

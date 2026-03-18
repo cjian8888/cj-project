@@ -121,3 +121,96 @@ def test_unified_risk_model_scores_wallet_summaries_and_alerts():
     assert "电子钱包" in result.reason
     assert result.details["wallet_summary_score"] > 0
     assert result.details["wallet_alert_score"] > 0
+
+
+def test_unified_risk_model_downgrades_family_only_direct_relations():
+    model = UnifiedRiskModel()
+    family_result = model.calculate_score(
+        entity_name="朱明",
+        evidence={
+            "money_loops": [],
+            "transit_channel": {},
+            "transit_channels": [],
+            "relay_chains": [],
+            "relationship_clusters": [],
+            "discovered_nodes": [],
+            "direct_relations": [
+                {"amount": 280000, "relationship_context": "family"},
+                {"amount": 220000, "relationship_context": "family"},
+            ],
+            "related_entities": ["吴嘉欣"],
+            "wallet_summaries": [],
+            "wallet_alerts": [],
+            "ml_anomalies": [],
+            "total_records": 200,
+        },
+        financial_ratio=0.0,
+        family_ratio=0.0,
+    )
+    external_result = model.calculate_score(
+        entity_name="朱明",
+        evidence={
+            "money_loops": [],
+            "transit_channel": {},
+            "transit_channels": [],
+            "relay_chains": [],
+            "relationship_clusters": [],
+            "discovered_nodes": [],
+            "direct_relations": [
+                {"amount": 280000, "relationship_context": "external"},
+                {"amount": 220000, "relationship_context": "external"},
+            ],
+            "related_entities": ["外围账户A"],
+            "wallet_summaries": [],
+            "wallet_alerts": [],
+            "ml_anomalies": [],
+            "total_records": 200,
+        },
+        financial_ratio=0.0,
+        family_ratio=0.0,
+    )
+
+    assert family_result.risk_level == "LOW"
+    assert "家庭内部直接往来" in family_result.reason
+    assert family_result.details["direct_relation_score"] < external_result.details["direct_relation_score"]
+    assert family_result.total_score < external_result.total_score
+    assert family_result.details["evidence_summary"]["family_direct_relation_count"] == 2
+
+
+def test_unified_risk_model_downgrades_person_only_transit_channels():
+    model = UnifiedRiskModel()
+    base_evidence = {
+        "money_loops": [],
+        "relay_chains": [],
+        "relationship_clusters": [],
+        "discovered_nodes": [],
+        "direct_relations": [],
+        "related_entities": [],
+        "wallet_summaries": [],
+        "wallet_alerts": [],
+        "ml_anomalies": [],
+        "total_records": 300,
+    }
+
+    person_result = model.calculate_score(
+        entity_name="朱明",
+        evidence={
+            **base_evidence,
+            "transit_channel": {"in": 500000, "out": 490000},
+            "transit_channels": [{"risk_score": 78, "node_type": "person"}],
+        },
+        financial_ratio=0.0,
+        family_ratio=0.0,
+    )
+    company_result = model.calculate_score(
+        entity_name="朱明",
+        evidence={
+            **base_evidence,
+            "transit_channel": {"in": 500000, "out": 490000},
+            "transit_channels": [{"risk_score": 78, "node_type": "company"}],
+        },
+        financial_ratio=0.0,
+        family_ratio=0.0,
+    )
+
+    assert person_result.details["channel_score"] < company_result.details["channel_score"]

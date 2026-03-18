@@ -476,10 +476,30 @@ def build_direct_flow_path_explainability(flow: Dict[str, Any]) -> Dict[str, Any
     path = f"{from_node} → {to_node}".strip(" →")
     amount = float(flow.get("amount", 0) or 0)
     direction = str(flow.get("direction", "") or "").strip()
+    transaction_refs = [
+        ref for ref in list(flow.get("transaction_refs", []) or []) if isinstance(ref, dict)
+    ]
     date_text = _format_dt(flow.get("date"))
     description = str(flow.get("description", "") or "").strip()
     source_file = str(flow.get("source_file", "") or "").strip()
     source_row_index = flow.get("source_row_index")
+
+    if transaction_refs:
+        if not date_text:
+            date_text = _format_dt(transaction_refs[0].get("date"))
+        if not description:
+            description = next(
+                (
+                    str(ref.get("description", "") or "").strip()
+                    for ref in transaction_refs
+                    if str(ref.get("description", "") or "").strip()
+                ),
+                "",
+            )
+        if not source_file:
+            source_file = str(transaction_refs[0].get("source_file", "") or "").strip()
+        if source_row_index in (None, ""):
+            source_row_index = transaction_refs[0].get("source_row_index")
 
     if direction == "receive":
         direction_label = "收款"
@@ -499,16 +519,21 @@ def build_direct_flow_path_explainability(flow: Dict[str, Any]) -> Dict[str, Any
     ]
     if description:
         inspection_points.append(f"交易摘要: {description}")
+    if len(transaction_refs) > 1:
+        inspection_points.append(f"原始侧账: 已匹配 {len(transaction_refs)} 条双边流水")
 
-    transaction_ref = {
-        "date": date_text,
-        "amount": amount,
-        "source_file": source_file,
-        "source_row_index": source_row_index,
-        "description": description,
-        "direction": direction,
-        "counterparty_raw": str(flow.get("counterparty_raw", "") or "").strip(),
-    }
+    if not transaction_refs:
+        transaction_refs = [
+            {
+                "date": date_text,
+                "amount": amount,
+                "source_file": source_file,
+                "source_row_index": source_row_index,
+                "description": description,
+                "direction": direction,
+                "counterparty_raw": str(flow.get("counterparty_raw", "") or "").strip(),
+            }
+        ]
 
     result = {
         "path_type": "direct_flow",
@@ -518,9 +543,12 @@ def build_direct_flow_path_explainability(flow: Dict[str, Any]) -> Dict[str, Any
         "amount_basis": "single_transaction",
         "amount": amount,
         "direction": direction,
-        "transaction_refs": [transaction_ref],
-        "transaction_refs_total": 1,
-        "transaction_ref_sample_count": 1,
+        "transaction_refs": transaction_refs,
+        "transaction_refs_total": max(
+            _safe_int(flow.get("transaction_refs_total", len(transaction_refs)), len(transaction_refs)),
+            len(transaction_refs),
+        ),
+        "transaction_ref_sample_count": len(transaction_refs),
         "transaction_refs_truncated": False,
         "summary": summary,
         "inspection_points": inspection_points,

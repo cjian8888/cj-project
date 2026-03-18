@@ -9,6 +9,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from clue_aggregator import ClueAggregator
 from specialized_reports import SpecializedReportGenerator
 
 
@@ -391,6 +392,33 @@ def test_penetration_report_includes_aggregation_focus_ranking(tmp_path):
     assert "重点线索: 资金闭环: 张三 → 外围账户B → 张三" in report
 
 
+def test_penetration_report_reads_pass_through_channels_from_penetration(tmp_path):
+    generator = _make_generator(
+        tmp_path,
+        analysis_results={
+            "penetration": {
+                "pass_through_channels": [
+                    {
+                        "node": "中转账户A",
+                        "inflow": 500000,
+                        "outflow": 495000,
+                        "ratio": 0.99,
+                        "risk_score": 76,
+                        "confidence": 0.84,
+                        "evidence": ["进出高度匹配"],
+                    }
+                ]
+            }
+        },
+    )
+
+    report = generator._generate_penetration_report()
+
+    assert "【过账通道 1】" in report
+    assert "中转账户A" in report
+    assert "未发现过账通道" not in report
+
+
 def test_income_report_uses_special_scope_wording_for_unknown_source(tmp_path):
     generator = _make_generator(
         tmp_path,
@@ -727,6 +755,33 @@ def test_penetration_report_prefers_strong_penetration_cycles_over_related_party
     assert "置信度: 0.81" in report
 
 
+def test_penetration_report_accepts_aggregation_instance(tmp_path):
+    aggregator = ClueAggregator(["张三"], [])
+    aggregator.evidence_packs["张三"]["evidence"]["hub_connections"].append(
+        {
+            "node": "张三",
+            "node_type": "person",
+            "in_degree": 3,
+            "out_degree": 4,
+            "total_degree": 7,
+        }
+    )
+
+    generator = _make_generator(
+        tmp_path,
+        analysis_results={
+            "aggregation": aggregator,
+            "relatedParty": {},
+            "penetration": {},
+        },
+    )
+
+    report = generator._generate_penetration_report()
+
+    assert "五、资金枢纽节点" in report
+    assert "节点名称: 张三" in report
+
+
 def test_penetration_report_includes_discovered_nodes_and_relationship_clusters(tmp_path):
     generator = _make_generator(
         tmp_path,
@@ -804,3 +859,77 @@ def test_penetration_report_includes_discovered_nodes_and_relationship_clusters(
     assert "证据: 当前回传 2 步时间轴事件，实际共 2 步" in report
     assert "风险评分: 76.0" in report
     assert "风险评分: 84.0" in report
+
+
+def test_penetration_report_includes_hub_transactions_and_communities_sections(tmp_path):
+    generator = _make_generator(
+        tmp_path,
+        analysis_results={
+            "aggregation": {
+                "evidencePacks": {
+                    "张三": {
+                        "evidence": {
+                            "hub_connections": [
+                                {
+                                    "node": "张三",
+                                    "in_degree": 2,
+                                    "out_degree": 3,
+                                    "total_degree": 5,
+                                    "node_type": "person",
+                                }
+                            ],
+                            "high_risk_transactions": [
+                                {
+                                    "person": "张三",
+                                    "date": "2024-01-02T10:00:00",
+                                    "amount": 88000,
+                                    "counterparty": "某商户",
+                                    "description": "异常消费",
+                                    "score": 91,
+                                    "reasons": "金额显著偏离常规",
+                                }
+                            ],
+                            "communities": [
+                                {
+                                    "community_id": "comm_1",
+                                    "members": ["张三", "李四", "王五"],
+                                    "total_amount": 180000,
+                                    "type": "资金闭环团伙",
+                                }
+                            ],
+                        }
+                    }
+                }
+            }
+        },
+        profiles={"张三": {"has_data": True}},
+    )
+
+    cleaned_dir = tmp_path / "output" / "cleaned_data" / "个人"
+    cleaned_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [
+            {
+                "交易时间": "2024-01-02 10:00:00",
+                "交易对手": "某商户",
+                "交易摘要": "异常消费",
+                "支出(元)": 88000,
+                "来源文件": "原始流水.xlsx",
+                "source_row_index": 18,
+            }
+        ]
+    ).to_excel(cleaned_dir / "张三_合并流水.xlsx", index=False)
+
+    report = generator._generate_penetration_report()
+
+    assert "五、资金枢纽节点" in report
+    assert "【资金枢纽 1】" in report
+    assert "入度/出度/总连接数: 2/3/5" in report
+    assert "六、高风险交易聚焦" in report
+    assert "【高风险交易 1】" in report
+    assert "📁 溯源: 原始流水.xlsx" in report
+    assert "📍 行号: 第18行" in report
+    assert "七、团伙关系识别" in report
+    assert "【团伙关系 1】" in report
+    assert "团伙ID: comm_1" in report
+    assert "成员名单: 张三、李四、王五" in report

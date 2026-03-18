@@ -13,6 +13,7 @@ import type {
 } from '../types';
 import { api, ws } from '../services/api';
 import type { AnalysisStatus, WebSocketMessage } from '../services/api';
+import { APP_VERSION } from '../constants/appVersion';
 
 // ==================== Storage Keys ====================
 const STORAGE_KEYS = {
@@ -142,11 +143,22 @@ const defaultUI: UIState = {
 };
 
 const initialLogs: LogEntry[] = [
-    { time: '00:00:01', level: 'INFO', msg: '系统初始化完成，版本 v3.0.0' },
+    { time: '00:00:01', level: 'INFO', msg: `系统初始化完成，版本 ${APP_VERSION}` },
     { time: '00:00:02', level: 'INFO', msg: '连接安全数据仓库 (节点 A-7)' },
     { time: '00:00:03', level: 'INFO', msg: '加载实体关系模型...' },
     { time: '00:00:05', level: 'INFO', msg: '分析引擎就绪，等待指令' },
 ];
+
+function normalizeLogLevel(level: string): LogEntry['level'] {
+    const normalized = String(level || '').trim().toUpperCase();
+    if (normalized === 'WARN' || normalized === 'WARNING') {
+        return 'WARN';
+    }
+    if (normalized === 'ERROR' || normalized === 'ERR' || normalized === 'CRITICAL' || normalized === 'FATAL') {
+        return 'ERROR';
+    }
+    return 'INFO';
+}
 
 // ==================== Context ====================
 
@@ -236,8 +248,13 @@ export function AppProvider({ children }: AppProviderProps) {
     // ==================== Analysis Actions ====================
 
     const addLog = useCallback((log: LogEntry) => {
+        const normalizedLog: LogEntry = {
+            time: String(log.time || new Date().toLocaleTimeString()),
+            level: normalizeLogLevel((log as { level?: string }).level || 'INFO'),
+            msg: String(log.msg || ''),
+        };
         setLogs(prev => {
-            const newLogs = [...prev, log];
+            const newLogs = [...prev, normalizedLog];
             // Keep only last 200 logs
             if (newLogs.length > 200) {
                 return newLogs.slice(-200);
@@ -336,6 +353,29 @@ export function AppProvider({ children }: AppProviderProps) {
         }));
     }, [buildSafeDataState]);
 
+    const restoreHistoricalLogs = useCallback(async (): Promise<boolean> => {
+        try {
+            const response = await api.getAnalysisLogHistory(200);
+            const historicalLogs = Array.isArray(response.data?.logs)
+                ? response.data.logs
+                    .map((log) => ({
+                        time: String(log.time || ''),
+                        level: normalizeLogLevel(log.level || 'INFO'),
+                        msg: String(log.msg || ''),
+                    }))
+                    .filter((log) => log.time && log.msg)
+                : [];
+
+            if (historicalLogs.length > 0) {
+                setLogs(historicalLogs);
+                return true;
+            }
+        } catch (error) {
+            console.warn('恢复历史日志失败:', error);
+        }
+        return false;
+    }, []);
+
     const initializeFromBackend = useCallback(async () => {
         const now = new Date();
         const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
@@ -357,7 +397,10 @@ export function AppProvider({ children }: AppProviderProps) {
                         currentPhase: '从缓存恢复完成',
                         lastRunTime: status.endTime ? new Date(status.endTime) : null,
                     });
-                    addLog({ time: timeStr, level: 'INFO', msg: `✓ 已从缓存恢复: ${backendData.persons?.length || 0} 人员, ${backendData.companies?.length || 0} 企业` });
+                    const restoredLogs = await restoreHistoricalLogs();
+                    if (!restoredLogs) {
+                        addLog({ time: timeStr, level: 'INFO', msg: `✓ 已从缓存恢复: ${backendData.persons?.length || 0} 人员, ${backendData.companies?.length || 0} 企业` });
+                    }
                     return;
                 }
             }
@@ -390,7 +433,7 @@ export function AppProvider({ children }: AppProviderProps) {
             setAnalysis(prev => ({ ...prev, isLoading: false }));
             addLog({ time: new Date().toLocaleTimeString(), level: 'WARN', msg: `后端连接失败: ${errorMsg}，请确保后端服务已启动` });
         }
-    }, [addLog, applyCompletedData]);
+    }, [addLog, applyCompletedData, restoreHistoricalLogs]);
 
     const syncDataSources = useCallback(async (dataSources: Partial<AppConfig['dataSources']> = {}) => {
         const nextDataSources = {
@@ -515,18 +558,19 @@ export function AppProvider({ children }: AppProviderProps) {
 
                 // 添加短暂延迟确保后端数据保存完成，然后获取结果
                 setTimeout(() => {
-                    api.getResults().then(result => {
+                    api.getResults().then(async result => {
                         if (result.data) {
                             const backendData = result.data as any;
                             applyCompletedData(backendData, {
                                 currentPhase: '分析完成',
                                 preserveLastRunTime: true,
                             });
-
-                            // 添加完成日志
-                            const now = new Date();
-                            const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-                            addLog({ time: timeStr, level: 'INFO', msg: '✓ 分析完成，数据已加载' });
+                            const restoredLogs = await restoreHistoricalLogs();
+                            if (!restoredLogs) {
+                                const now = new Date();
+                                const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+                                addLog({ time: timeStr, level: 'INFO', msg: '✓ 分析完成，数据已加载' });
+                            }
                         }
                     }).catch(error => {
                         console.error('获取分析结果失败:', error);
@@ -551,7 +595,7 @@ export function AppProvider({ children }: AppProviderProps) {
             unsubscribe();
             ws.disconnect();
         };
-    }, [addLog, applyCompletedData]);
+    }, [addLog, applyCompletedData, restoreHistoricalLogs]);
 
     const stopAnalysis = useCallback(async () => {
         const now = new Date();
