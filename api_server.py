@@ -484,6 +484,41 @@ def _refresh_report_index_file(output_dir: str) -> Optional[str]:
         return None
 
 
+def _refresh_report_semantic_artifacts(output_dir: str) -> Optional[Dict[str, str]]:
+    """刷新 report_package 与 QA 一致性产物。"""
+    logger = logging.getLogger(__name__)
+    try:
+        builder = load_investigation_report_builder(output_dir)
+        if builder is None:
+            logger.info("跳过 report_package 刷新: 报告构建器未就绪")
+            return None
+        return builder.save_report_package_artifacts()
+    except Exception as exc:
+        logger.warning(f"刷新 report_package 失败: {exc}")
+        return None
+
+
+def _persist_report_semantic_artifacts(
+    builder: Optional[InvestigationReportBuilder],
+    report: Optional[Dict[str, Any]] = None,
+    output_dir: Optional[str] = None,
+) -> Optional[Dict[str, str]]:
+    """在报告预生成链路中落地 report_package 与 QA 产物。"""
+    logger = logging.getLogger(__name__)
+    if builder is None:
+        return None
+    try:
+        return builder.save_report_package_artifacts(
+            report=report,
+            formal_report_path=None,
+        )
+    except Exception as exc:
+        logger.warning(f"预生成 report_package 失败: {exc}")
+        if output_dir:
+            return _refresh_report_semantic_artifacts(output_dir)
+        return None
+
+
 def _is_path_within(base_dir: str, target_path: str) -> bool:
     """判断目标路径是否位于指定目录内（解析符号链接后）。"""
     try:
@@ -5087,6 +5122,12 @@ async def generate_investigation_report_with_config(
                 "sections": request.sections or [],
             }
 
+        semantic_paths = _persist_report_semantic_artifacts(
+            builder, report=report, output_dir=active_output_dir
+        )
+        if semantic_paths:
+            logger.info(f"[报告生成] report_package 已生成: {semantic_paths}")
+
         logger.info(f"[报告生成] v5.0 报告生成成功（完整四部分架构）")
 
         return {
@@ -5185,6 +5226,12 @@ async def generate_investigation_report_v5(
                 "sections": request.sections or [],
             }
 
+        semantic_paths = _persist_report_semantic_artifacts(
+            builder, report=report, output_dir=active_output_dir
+        )
+        if semantic_paths:
+            logger.info(f"[报告生成v5] report_package 已生成: {semantic_paths}")
+
         logger.info(f"[报告生成v5] v5.0报告生成成功")
 
         return {
@@ -5281,6 +5328,12 @@ async def generate_investigation_report_html(
                 "sections": request.sections or [],
             }
 
+        semantic_paths = _persist_report_semantic_artifacts(
+            builder, report=report, output_dir=output_dir
+        )
+        if semantic_paths:
+            logger.info(f"[HTML报告生成] report_package 已生成: {semantic_paths}")
+
         logger.info(f"[HTML报告生成] 报告数据生成完成，开始渲染HTML模板")
 
         # 6. 【关键】使用 Jinja2 模板渲染正式HTML
@@ -5374,6 +5427,10 @@ async def save_html_report(request: dict):
 
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(html_content)
+
+        semantic_paths = _refresh_report_semantic_artifacts(_get_active_output_dir())
+        if semantic_paths:
+            logger.info(f"[报告保存] report_package 已刷新: {semantic_paths}")
 
         index_path = _refresh_report_index_file(_get_active_output_dir())
         if index_path:

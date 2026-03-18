@@ -30,6 +30,15 @@ import config
 import family_assets_helper
 import utils
 import yaml
+from report_dossier_builder import build_report_dossiers
+from report_fact_normalizer import normalize_report_facts
+from report_issue_engine import build_report_issues
+from report_quality_guard import (
+    render_report_quality_summary_text,
+    run_report_quality_checks,
+)
+from report_view_builder import build_report_package_view
+from unified_risk_model import priority_band_label, risk_level_label
 from utils.phrase_loader import PhraseLoader
 from report_schema import (
     InvestigationReport,
@@ -538,6 +547,318 @@ class InvestigationReportBuilder:
             if self._is_company(name):
                 companies.append(name)
         return companies
+
+    def _build_analysis_cache_snapshot(self) -> Dict[str, Any]:
+        """构建 report_package 所需的缓存快照。"""
+        return {
+            "profiles": self.profiles if isinstance(self.profiles, dict) else {},
+            "derived_data": self.derived_data
+            if isinstance(self.derived_data, dict)
+            else {},
+            "suspicions": self.suspicions if isinstance(self.suspicions, dict) else {},
+            "graph_data": self.graph_data if isinstance(self.graph_data, dict) else {},
+            "metadata": self.metadata if isinstance(self.metadata, dict) else {},
+            "walletData": self._wallet_cache if isinstance(self._wallet_cache, dict) else {},
+            "precisePropertyData": self._external_property_cache
+            if isinstance(self._external_property_cache, dict)
+            else {},
+            "vehicleData": self._external_vehicle_cache
+            if isinstance(self._external_vehicle_cache, dict)
+            else {},
+            "wealthProductData": self._external_wealth_cache
+            if isinstance(self._external_wealth_cache, dict)
+            else {},
+            "securitiesData": self._external_securities_cache
+            if isinstance(self._external_securities_cache, dict)
+            else {},
+            "insuranceData": self._external_insurance_cache
+            if isinstance(self._external_insurance_cache, dict)
+            else {},
+            "immigrationData": self._external_immigration_cache
+            if isinstance(self._external_immigration_cache, dict)
+            else {},
+            "hotelData": self._external_hotel_cache
+            if isinstance(self._external_hotel_cache, dict)
+            else {},
+            "hotelCohabitation": self._external_hotel_cohabitation_cache
+            if isinstance(self._external_hotel_cohabitation_cache, dict)
+            else {},
+            "railwayData": self._external_railway_cache
+            if isinstance(self._external_railway_cache, dict)
+            else {},
+            "flightData": self._external_flight_cache
+            if isinstance(self._external_flight_cache, dict)
+            else {},
+            "coaddressData": self._external_coaddress_cache
+            if isinstance(self._external_coaddress_cache, dict)
+            else {},
+            "coviolationData": self._external_coviolation_cache
+            if isinstance(self._external_coviolation_cache, dict)
+            else {},
+        }
+
+    def _resolve_report_dirs(
+        self, report_path: Optional[str] = None
+    ) -> Dict[str, str]:
+        """解析正式报告目录与 QA 目录。"""
+        if report_path:
+            reports_dir = os.path.dirname(os.path.abspath(report_path))
+        else:
+            reports_dir = os.path.join(self.output_dir, "analysis_results")
+        return {
+            "reports_dir": reports_dir,
+            "qa_dir": os.path.join(reports_dir, "qa"),
+        }
+
+    def build_report_package(
+        self,
+        report: Optional[Dict[str, Any]] = None,
+        formal_report_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """构建第一阶段统一报告语义包。"""
+        analysis_cache = self._build_analysis_cache_snapshot()
+        report_data = report if isinstance(report, dict) else {}
+        normalized_facts = normalize_report_facts(
+            analysis_cache,
+            report=report_data,
+            core_persons=self._core_persons,
+            companies=self._companies,
+        )
+        issue_payload = build_report_issues(
+            analysis_cache,
+            normalized_facts,
+            report=report_data,
+        )
+        dossier_payload = build_report_dossiers(
+            normalized_facts,
+            report=report_data,
+            issues=issue_payload.get("issues", []),
+        )
+        report_dirs = self._resolve_report_dirs(formal_report_path)
+        report_package = build_report_package_view(
+            normalized_facts,
+            issue_payload,
+            dossier_payload,
+            qa_checks={},
+        )
+        report_package["qa_checks"] = run_report_quality_checks(
+            analysis_cache,
+            report_package,
+            report=report_data,
+            report_dir=report_dirs["reports_dir"],
+            formal_report_path=formal_report_path,
+        )
+        return report_package
+
+    def save_report_package_artifacts(
+        self,
+        report: Optional[Dict[str, Any]] = None,
+        formal_report_path: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """落地 report_package 与一致性检查文件。"""
+        report_dirs = self._resolve_report_dirs(formal_report_path)
+        os.makedirs(report_dirs["qa_dir"], exist_ok=True)
+        report_package = self.build_report_package(
+            report=report,
+            formal_report_path=formal_report_path,
+        )
+        report_package_path = os.path.join(report_dirs["qa_dir"], "report_package.json")
+        consistency_path = os.path.join(
+            report_dirs["qa_dir"], "report_consistency_check.json"
+        )
+        consistency_summary_path = os.path.join(
+            report_dirs["qa_dir"], "report_consistency_check.txt"
+        )
+        with open(report_package_path, "w", encoding="utf-8") as handle:
+            json.dump(report_package, handle, ensure_ascii=False, indent=2)
+        with open(consistency_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                report_package.get("qa_checks", {}),
+                handle,
+                ensure_ascii=False,
+                indent=2,
+            )
+        with open(consistency_summary_path, "w", encoding="utf-8") as handle:
+            handle.write(render_report_quality_summary_text(report_package))
+        return {
+            "report_package_path": report_package_path,
+            "consistency_path": consistency_path,
+            "consistency_summary_path": consistency_summary_path,
+        }
+
+    def _ensure_report_package(
+        self,
+        report: Optional[Dict[str, Any]] = None,
+        formal_report_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """确保报告对象包含可供渲染复用的 report_package。"""
+        report_data = report if isinstance(report, dict) else {}
+        package = report_data.get("report_package") if isinstance(report_data, dict) else {}
+        needs_refresh = not isinstance(package, dict) or not package
+        if formal_report_path and isinstance(package, dict):
+            qa_checks = package.get("qa_checks", {})
+            if not isinstance(qa_checks, dict) or not qa_checks.get("checks"):
+                needs_refresh = True
+            else:
+                needs_refresh = True
+        if needs_refresh:
+            package = self.build_report_package(
+                report=report_data,
+                formal_report_path=formal_report_path,
+            )
+            if isinstance(report_data, dict):
+                report_data["report_package"] = package
+        return package if isinstance(package, dict) else {}
+
+    @staticmethod
+    def _map_semantic_priority_label(priority_score: Any, risk_level: Any = "") -> str:
+        """将语义层优先级映射为报告可读文本。"""
+        return priority_band_label(priority_score, risk_level)
+
+    def _build_semantic_next_steps(
+        self,
+        report_package: Optional[Dict[str, Any]],
+        legacy_next_steps: Optional[List[Dict[str, Any]]] = None,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """优先从语义层问题卡生成下一步建议，缺失时回退到旧结构。"""
+        report_package = report_package if isinstance(report_package, dict) else {}
+        semantic_steps: List[Dict[str, Any]] = []
+        seen_actions = set()
+        for issue in report_package.get("issues", []) or []:
+            if not isinstance(issue, dict):
+                continue
+            issue_id = str(issue.get("issue_id") or "").strip()
+            priority_label = self._map_semantic_priority_label(
+                issue.get("priority"), issue.get("risk_level")
+            )
+            for action in issue.get("next_actions", []) or []:
+                action_text = str(action or "").strip()
+                if not action_text or action_text in seen_actions:
+                    continue
+                seen_actions.add(action_text)
+                semantic_steps.append(
+                    {
+                        "action_text": action_text,
+                        "priority": priority_label,
+                        "deadline": "",
+                        "source_issue_id": issue_id,
+                    }
+                )
+                break
+            if len(semantic_steps) >= limit:
+                break
+        if semantic_steps:
+            return semantic_steps
+        return legacy_next_steps if isinstance(legacy_next_steps, list) else []
+
+    def _build_company_render_sections(
+        self,
+        report_package: Optional[Dict[str, Any]],
+        legacy_company_sections: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """构建供 TXT/HTML 复用的公司渲染对象，优先读取 semantic company_dossiers。"""
+        semantic_package = report_package if isinstance(report_package, dict) else {}
+        legacy_sections = (
+            legacy_company_sections if isinstance(legacy_company_sections, list) else []
+        )
+
+        legacy_lookup: Dict[str, Dict[str, Any]] = {}
+        ordered_names: List[str] = []
+        for item in legacy_sections:
+            if not isinstance(item, dict):
+                continue
+            company_name = str(item.get("company_name") or item.get("name") or "").strip()
+            if not company_name or company_name in legacy_lookup:
+                continue
+            legacy_lookup[company_name] = item
+            ordered_names.append(company_name)
+
+        dossier_lookup: Dict[str, Dict[str, Any]] = {}
+        for item in semantic_package.get("company_dossiers", []) or []:
+            if not isinstance(item, dict):
+                continue
+            company_name = str(item.get("entity_name") or item.get("company_name") or "").strip()
+            if not company_name:
+                continue
+            dossier_lookup[company_name] = item
+            if company_name not in ordered_names:
+                ordered_names.append(company_name)
+
+        render_sections: List[Dict[str, Any]] = []
+        for company_name in ordered_names:
+            legacy = legacy_lookup.get(company_name, {})
+            legacy_dimensions = legacy.get("dimensions", {}) if isinstance(legacy, dict) else {}
+            dossier = dossier_lookup.get(company_name, {})
+            risk_overview = dossier.get("risk_overview", {}) if isinstance(dossier, dict) else {}
+            semantic_summary = str(dossier.get("summary") or "").strip()
+            legacy_narrative = str(legacy.get("narrative") or "").strip()
+            narrative = (
+                semantic_summary
+                or legacy_narrative
+                or f"{company_name}已纳入统一语义层公司卷宗。"
+            )
+            render_sections.append(
+                {
+                    "company_name": company_name,
+                    "name": company_name,
+                    "total_income": (
+                        dossier.get("total_income")
+                        if isinstance(dossier, dict) and dossier.get("total_income") is not None
+                        else legacy.get("total_income", legacy.get("totalIncome", 0))
+                    )
+                    or 0,
+                    "total_expense": (
+                        dossier.get("total_expense")
+                        if isinstance(dossier, dict) and dossier.get("total_expense") is not None
+                        else legacy.get("total_expense", legacy.get("totalExpense", 0))
+                    )
+                    or 0,
+                    "transaction_count": (
+                        dossier.get("transaction_count")
+                        if isinstance(dossier, dict)
+                        and dossier.get("transaction_count") is not None
+                        else legacy.get("transaction_count", legacy.get("transactionCount", 0))
+                    )
+                    or 0,
+                    "narrative": narrative,
+                    "dimensions": legacy_dimensions if isinstance(legacy_dimensions, dict) else {},
+                    "semantic_dossier": {
+                        "summary": semantic_summary or legacy_narrative,
+                        "risk_overview": risk_overview if isinstance(risk_overview, dict) else {},
+                        "role_tags": (
+                            dossier.get("role_tags", []) if isinstance(dossier, dict) else []
+                        ),
+                        "related_persons": (
+                            dossier.get("related_persons", []) if isinstance(dossier, dict) else []
+                        ),
+                        "related_companies": (
+                            dossier.get("related_companies", []) if isinstance(dossier, dict) else []
+                        ),
+                        "major_inflows": (
+                            dossier.get("major_inflows", []) if isinstance(dossier, dict) else []
+                        ),
+                        "major_outflows": (
+                            dossier.get("major_outflows", []) if isinstance(dossier, dict) else []
+                        ),
+                        "behavioral_flags": (
+                            dossier.get("behavioral_flags", []) if isinstance(dossier, dict) else []
+                        ),
+                        "key_issue_cards": (
+                            dossier.get("key_issue_cards", []) if isinstance(dossier, dict) else []
+                        ),
+                        "issue_refs": (
+                            dossier.get("issue_refs", []) if isinstance(dossier, dict) else []
+                        ),
+                    },
+                    "render_source": (
+                        "merged"
+                        if legacy and dossier
+                        else ("semantic" if dossier else "legacy")
+                    ),
+                }
+            )
+        return render_sections
 
     def _is_company(self, name: str) -> bool:
         """判断是否为公司"""
@@ -6947,6 +7268,11 @@ class InvestigationReportBuilder:
             },
         }
 
+        try:
+            report["report_package"] = self._ensure_report_package(report)
+        except Exception as exc:
+            logger.warning(f"[初查报告v5] report_package 挂载失败: {exc}")
+
         logger.info(f"[初查报告v5] 报告生成完成，完整四部分架构（含v4.0兼容字段）")
         return report
 
@@ -9932,6 +10258,19 @@ class InvestigationReportBuilder:
         )
         render_report = dict(report) if isinstance(report, dict) else {"report": report}
         render_report["_title_subject"] = title_subject
+        try:
+            render_report["report_package"] = self._ensure_report_package(render_report)
+        except Exception as exc:
+            logger.warning(f"[HTML报告] report_package 挂载失败: {exc}")
+            render_report.setdefault("report_package", {})
+        render_report["_company_render_sections"] = self._build_company_render_sections(
+            render_report.get("report_package", {}),
+            render_report.get("company_sections", []),
+        )
+        render_report["_semantic_next_steps"] = self._build_semantic_next_steps(
+            render_report.get("report_package", {}),
+            render_report.get("next_steps", []),
+        )
 
         # 渲染HTML
         html = template.render(report=render_report)
@@ -13288,20 +13627,82 @@ class InvestigationReportBuilder:
                 else None
             )
 
+        try:
+            semantic_package = self._ensure_report_package(
+                report_data, formal_report_path=output_path
+            )
+        except Exception as exc:
+            logger.warning(f"[txt报告] report_package 挂载失败，回退旧结构: {exc}")
+            semantic_package = {}
+
         family_sections = report_data.get("family_sections", []) or []
         person_sections = report_data.get("person_sections", []) or []
         company_sections = report_data.get("company_sections", []) or []
         report_conclusion = report_data.get("conclusion", {}) or {}
         report_next_steps = report_data.get("next_steps", []) or []
+        semantic_coverage = (
+            semantic_package.get("coverage", {})
+            if isinstance(semantic_package, dict)
+            else {}
+        )
+        semantic_priority_board = (
+            semantic_package.get("priority_board", [])
+            if isinstance(semantic_package, dict)
+            else []
+        )
+        semantic_issues = (
+            semantic_package.get("issues", []) if isinstance(semantic_package, dict) else []
+        )
+        semantic_appendix_views = (
+            semantic_package.get("appendix_views", {})
+            if isinstance(semantic_package, dict)
+            else {}
+        )
+        semantic_company_issue_overview = (
+            semantic_appendix_views.get("company_issue_overview", {})
+            if isinstance(semantic_appendix_views, dict)
+            else {}
+        )
+        semantic_company_issue_items = (
+            semantic_company_issue_overview.get("items", [])
+            if isinstance(semantic_company_issue_overview, dict)
+            else []
+        )
+        semantic_appendix_index = (
+            semantic_appendix_views.get("appendix_index", {})
+            if isinstance(semantic_appendix_views, dict)
+            else {}
+        )
+        semantic_appendix_items = (
+            semantic_appendix_index.get("items", [])
+            if isinstance(semantic_appendix_index, dict)
+            else []
+        )
+        company_render_sections = self._build_company_render_sections(
+            semantic_package,
+            company_sections,
+        )
+        semantic_next_steps = self._build_semantic_next_steps(
+            semantic_package, report_next_steps
+        )
 
         # 从真实数据源提取统计信息
-        person_count = len(self._core_persons)
-        company_count = len(company_sections) if company_sections else len(self._companies)
+        person_count = int(
+            semantic_coverage.get("persons_count")
+            or len(self._core_persons)
+            or 0
+        )
+        company_count = int(
+            semantic_coverage.get("companies_count")
+            or (len(company_sections) if company_sections else len(self._companies))
+            or 0
+        )
 
         # 计算交易总数
-        total_transactions = 0
-        for name, profile in self.profiles.items():
-            total_transactions += profile.get("transactionCount", 0) or 0
+        total_transactions = int(semantic_coverage.get("bank_transaction_count") or 0)
+        if total_transactions <= 0:
+            for name, profile in self.profiles.items():
+                total_transactions += profile.get("transactionCount", 0) or 0
 
         # 计算疑点总数（兼容 camelCase / snake_case）
         def _get_suspicion_list(*keys: str) -> List[Dict]:
@@ -13445,6 +13846,16 @@ class InvestigationReportBuilder:
         else:
             lines.append("  • 第三方支付: 建议调取微信、支付宝账户流水")
         lines.append("  • 配偶资产: 建议调取配偶银行流水及资产信息")
+        available_sources = semantic_coverage.get("available_external_sources", [])
+        missing_sources = semantic_coverage.get("missing_sources", [])
+        if available_sources:
+            lines.append(
+                "  • 已接入外部来源: " + "、".join(str(item) for item in available_sources[:10])
+            )
+        if missing_sources:
+            lines.append(
+                "  • 仍缺外部来源: " + "、".join(str(item) for item in missing_sources[:10])
+            )
         lines.append("")
 
         # 一、核查结论
@@ -13471,6 +13882,24 @@ class InvestigationReportBuilder:
             )
         if report_conclusion.get("summary_narrative"):
             lines.append(f"【正式报告综合研判】: {report_conclusion.get('summary_narrative')}")
+        if semantic_priority_board:
+            lines.append("【语义层优先核查对象】:")
+            for idx, item in enumerate(semantic_priority_board[:5], 1):
+                if not isinstance(item, dict):
+                    continue
+                entity_name = str(item.get("entity_name") or "").strip()
+                if not entity_name:
+                    continue
+                top_reasons = [
+                    str(reason).strip()
+                    for reason in (item.get("top_reasons", []) or [])
+                    if str(reason).strip()
+                ]
+                reason_text = "；".join(top_reasons[:2]) if top_reasons else "暂无补充原因"
+                lines.append(
+                    f"  {idx}. {entity_name} | 优先级{item.get('priority_score', 0)} | "
+                    f"风险{item.get('risk_level', '') or '未标注'} | 依据: {reason_text}"
+                )
         lines.append("")
 
         # 主要发现
@@ -13935,27 +14364,138 @@ class InvestigationReportBuilder:
                 continue
 
         # 三、公司资金核查
-        if company_sections:
+        if company_render_sections:
             lines.append("三、公司资金核查")
             lines.append("-" * 70)
             lines.append("")
 
-            for company_section in company_sections:
+            for company_section in company_render_sections:
                 company = company_section.get("name", "") or company_section.get("company_name", "")
                 lines.append(f"【{company}】")
                 lines.append("")
 
                 profile = self.profiles.get(company, {})
+                semantic_company = company_section.get("semantic_dossier", {})
+                semantic_risk = (
+                    semantic_company.get("risk_overview", {})
+                    if isinstance(semantic_company, dict)
+                    else {}
+                )
                 inflow = profile.get("totalIncome", 0) or 0
                 outflow = profile.get("totalExpense", 0) or 0
                 lines.append(
                     f"  • 资金概况: 总流入 {inflow:,.0f} | 总流出 {outflow:,.0f}"
                 )
+                if semantic_risk:
+                    lines.append(
+                        "  • 统一风险: {label} | 优先级{priority:.1f} | 置信度{confidence:.2f}".format(
+                            label=risk_level_label(semantic_risk.get("risk_level", "low")),
+                            priority=float(semantic_risk.get("priority_score", 0) or 0),
+                            confidence=float(semantic_risk.get("confidence", 0) or 0),
+                        )
+                    )
+                role_tags = (
+                    semantic_company.get("role_tags", [])
+                    if isinstance(semantic_company, dict)
+                    else []
+                )
+                if role_tags:
+                    lines.append(
+                        "  • 角色标签: " + "、".join(str(tag) for tag in role_tags[:5])
+                    )
+                related_persons = (
+                    semantic_company.get("related_persons", [])
+                    if isinstance(semantic_company, dict)
+                    else []
+                )
+                if related_persons:
+                    lines.append(
+                        "  • 关联人员: " + "、".join(str(name) for name in related_persons[:5])
+                    )
+                key_issue_cards = (
+                    semantic_company.get("key_issue_cards", [])
+                    if isinstance(semantic_company, dict)
+                    else []
+                )
+                if key_issue_cards:
+                    top_issue = key_issue_cards[0]
+                    lines.append(
+                        "  • 重点问题: {headline}".format(
+                            headline=str(
+                                top_issue.get("headline")
+                                or top_issue.get("category")
+                                or "待补充"
+                            ).strip()
+                        )
+                    )
+                related_companies = (
+                    semantic_company.get("related_companies", [])
+                    if isinstance(semantic_company, dict)
+                    else []
+                )
+                if related_companies:
+                    lines.append(
+                        "  • 关联公司: " + "、".join(str(name) for name in related_companies[:5])
+                    )
 
                 lines.append(
                     "  • 公私往来: 需要进一步核查（见Excel底稿'第三方支付'章节）"
                 )
                 lines.append("")
+
+        if semantic_company_issue_items:
+            lines.append("【语义层公司问题总览】")
+            for idx, item in enumerate(semantic_company_issue_items[:5], 1):
+                if not isinstance(item, dict):
+                    continue
+                entity_name = str(item.get("entity_name") or "").strip()
+                if not entity_name:
+                    continue
+                risk_label = str(item.get("risk_label") or "").strip() or "低风险"
+                role_tags = [
+                    str(tag).strip()
+                    for tag in (item.get("role_tags", []) or [])
+                    if str(tag).strip()
+                ]
+                issue_cards = [
+                    issue
+                    for issue in (item.get("key_issue_cards", []) or [])
+                    if isinstance(issue, dict)
+                ]
+                top_headlines = [
+                    str(issue.get("headline") or "").strip()
+                    for issue in issue_cards[:2]
+                    if str(issue.get("headline") or "").strip()
+                ]
+                next_actions = [
+                    str(action).strip()
+                    for action in (item.get("next_actions", []) or [])
+                    if str(action).strip()
+                ]
+                summary_parts = [f"{idx}. {entity_name} | {risk_label}"]
+                if role_tags:
+                    summary_parts.append("角色: " + "、".join(role_tags[:4]))
+                if top_headlines:
+                    summary_parts.append("重点: " + "；".join(top_headlines))
+                if next_actions:
+                    summary_parts.append("建议: " + "；".join(next_actions[:2]))
+                lines.append("  " + " | ".join(summary_parts))
+            lines.append("")
+
+        if semantic_appendix_items:
+            lines.append("【统一语义层附录摘要】")
+            for idx, item in enumerate(semantic_appendix_items[:5], 1):
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip()
+                if not title:
+                    continue
+                summary_line = str(item.get("summary_line") or "").strip()
+                if summary_line:
+                    lines.append(f"  {idx}. {title}：{summary_line}")
+                else:
+                    lines.append(f"  {idx}. {title}")
+            lines.append("")
 
         # 四、主要疑点与核查建议
         lines.append("四、主要疑点与核查建议")
@@ -14104,15 +14644,74 @@ class InvestigationReportBuilder:
         )
         lines.append("")
 
-        if report_conclusion:
+        if semantic_company_issue_items:
+            lines.append("【正式报告公司问题清单】")
+            for idx, item in enumerate(semantic_company_issue_items[:5], 1):
+                if not isinstance(item, dict):
+                    continue
+                entity_name = str(item.get("entity_name") or "").strip()
+                if not entity_name:
+                    continue
+                risk_label = str(item.get("risk_label") or "").strip() or "低风险"
+                summary_text = str(item.get("summary") or "").strip()
+                lines.append(
+                    f"  {idx}. {entity_name} [{risk_label}]"
+                    + (f"：{summary_text}" if summary_text else "")
+                )
+                role_tags = [
+                    str(tag).strip()
+                    for tag in (item.get("role_tags", []) or [])
+                    if str(tag).strip()
+                ]
+                if role_tags:
+                    lines.append("      • 角色标签: " + "、".join(role_tags[:5]))
+                related_persons = [
+                    str(name).strip()
+                    for name in (item.get("related_persons", []) or [])
+                    if str(name).strip()
+                ]
+                if related_persons:
+                    lines.append("      • 关联人员: " + "、".join(related_persons[:5]))
+                issue_cards = [
+                    issue
+                    for issue in (item.get("key_issue_cards", []) or [])
+                    if isinstance(issue, dict)
+                ]
+                if issue_cards:
+                    lines.append(
+                        "      • 重点问题: "
+                        + "；".join(
+                            str(issue.get("headline") or "").strip()
+                            for issue in issue_cards[:2]
+                            if str(issue.get("headline") or "").strip()
+                        )
+                    )
+                next_actions = [
+                    str(action).strip()
+                    for action in (item.get("next_actions", []) or [])
+                    if str(action).strip()
+                ]
+                if next_actions:
+                    lines.append("      • 建议动作: " + "；".join(next_actions[:2]))
+            lines.append("")
+
+        issue_source = semantic_issues if semantic_issues else report_conclusion.get("issues", [])
+        if issue_source:
             lines.append("【正式报告问题清单】")
-            for idx, issue in enumerate(report_conclusion.get("issues", [])[:10], 1):
+            for idx, issue in enumerate(issue_source[:10], 1):
                 if not isinstance(issue, dict):
                     continue
-                person = str(issue.get("person", "") or "").strip()
-                issue_type = str(issue.get("issue_type", "") or "").strip()
-                description = str(issue.get("description", "") or "").strip()
-                severity = str(issue.get("severity", "") or "").strip()
+                if semantic_issues:
+                    scope = issue.get("scope", {}) if isinstance(issue.get("scope", {}), dict) else {}
+                    person = str(scope.get("entity", "") or scope.get("company", "") or "").strip()
+                    issue_type = str(issue.get("category", "") or issue.get("theme", "") or "").strip()
+                    description = str(issue.get("headline", "") or issue.get("narrative", "") or "").strip()
+                    severity = str(issue.get("risk_level", "") or issue.get("severity", "") or "").strip()
+                else:
+                    person = str(issue.get("person", "") or "").strip()
+                    issue_type = str(issue.get("issue_type", "") or "").strip()
+                    description = str(issue.get("description", "") or "").strip()
+                    severity = str(issue.get("severity", "") or "").strip()
                 if description:
                     prefix = f"{idx}. "
                     if person:
@@ -14123,9 +14722,9 @@ class InvestigationReportBuilder:
                     lines.append(f"  {prefix}{description} [{severity or '未评级'}]")
             lines.append("")
 
-        if report_next_steps:
+        if semantic_next_steps:
             lines.append("【正式报告下一步建议】")
-            for idx, step in enumerate(report_next_steps[:10], 1):
+            for idx, step in enumerate(semantic_next_steps[:10], 1):
                 if not isinstance(step, dict):
                     continue
                 action_text = str(step.get("action_text", "") or "").strip()
@@ -14177,6 +14776,18 @@ class InvestigationReportBuilder:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
+
+        try:
+            artifact_paths = self.save_report_package_artifacts(
+                report=report_data,
+                formal_report_path=output_path,
+            )
+            logger.info(
+                "[初查报告] report_package 与 QA 产物已生成: %s",
+                artifact_paths,
+            )
+        except Exception as exc:
+            logger.warning("[初查报告] report_package 生成失败: %s", exc)
 
         logger.info(f"[初查报告] 完整txt报告已生成: {output_path}")
         return output_path

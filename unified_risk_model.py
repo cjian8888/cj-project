@@ -1,142 +1,456 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-统一风险评估模型
-解决风险评估逻辑分散、标准不统一的问题
-"""
+"""Shared risk normalization helpers for semantic report outputs."""
 
-import logging
-from typing import Dict, List, Any
 from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List
 
-import risk_scoring
 
-logger = logging.getLogger(__name__)
+RISK_LEVEL_ORDER = {
+    "critical": 5,
+    "high": 4,
+    "medium": 3,
+    "low": 2,
+    "info": 1,
+}
+
+RISK_LEVEL_LABELS = {
+    "critical": "极高风险",
+    "high": "高风险",
+    "medium": "中风险",
+    "low": "低风险",
+    "info": "提示",
+}
+
+_RISK_LEVEL_MAPPING = {
+    "critical": "critical",
+    "极高": "critical",
+    "极高风险": "critical",
+    "重大": "critical",
+    "high": "high",
+    "高": "high",
+    "高风险": "high",
+    "关注级": "medium",
+    "medium": "medium",
+    "中": "medium",
+    "中风险": "medium",
+    "moderate": "medium",
+    "low": "low",
+    "低": "low",
+    "低风险": "low",
+    "normal": "low",
+    "info": "info",
+    "提示": "info",
+    "一般提示": "info",
+}
+
+
+def _as_float(value: Any) -> float:
+    try:
+        if value in ("", None):
+            return 0.0
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _as_dict(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def normalize_risk_level(value: Any, default: str = "low") -> str:
+    """Normalize legacy Chinese/English labels into one stable enum."""
+    text = str(value or "").strip().lower()
+    normalized = _RISK_LEVEL_MAPPING.get(text)
+    if normalized:
+        return normalized
+    if not text:
+        return default
+    return default
+
+
+def risk_level_rank(value: Any) -> int:
+    """Return a sortable risk rank."""
+    return RISK_LEVEL_ORDER.get(normalize_risk_level(value), 0)
+
+
+def risk_level_label(value: Any) -> str:
+    """Return the human-readable Chinese label for a normalized level."""
+    return RISK_LEVEL_LABELS.get(normalize_risk_level(value), "低风险")
+
+
+def severity_from_level(level: Any, amount: float = 0.0) -> float:
+    """Map normalized risk levels into a report severity score."""
+    normalized_level = normalize_risk_level(level)
+    base = {
+        "critical": 90.0,
+        "high": 78.0,
+        "medium": 58.0,
+        "low": 32.0,
+        "info": 15.0,
+    }.get(normalized_level, 32.0)
+    if amount >= 1_000_000:
+        base += 10
+    elif amount >= 100_000:
+        base += 5
+    elif amount <= 0:
+        base -= 3
+    return round(max(5.0, min(100.0, base)), 1)
+
+
+def priority_from_scores(severity: float, confidence: float) -> float:
+    """Combine severity and confidence into a stable priority score."""
+    return round(max(0.0, min(100.0, severity * 0.72 + confidence * 28.0)), 1)
+
+
+def risk_level_from_score(score: Any) -> str:
+    """Map unified scores into the canonical risk enum."""
+    value = _as_float(score)
+    if value >= 85:
+        return "critical"
+    if value >= 70:
+        return "high"
+    if value >= 45:
+        return "medium"
+    if value >= 15:
+        return "low"
+    return "info"
+
+
+def priority_band_label(priority_score: Any, risk_level: Any = "") -> str:
+    """Render unified priority into the current TXT/HTML readable bucket."""
+    score = _as_float(priority_score)
+    level = normalize_risk_level(risk_level)
+    if score >= 80 or level in {"critical", "high"}:
+        return "高"
+    if score >= 60 or level == "medium":
+        return "中"
+    return "低"
+
+
+def pick_highest_risk_level(levels: Iterable[Any], default: str = "low") -> str:
+    """Choose the highest normalized level from a sequence."""
+    best = normalize_risk_level(default, default=default)
+    best_rank = risk_level_rank(best)
+    for level in levels:
+        normalized = normalize_risk_level(level, default=default)
+        rank = risk_level_rank(normalized)
+        if rank > best_rank:
+            best = normalized
+            best_rank = rank
+    return best
+
+
+def build_risk_overview(
+    issue_cards: Iterable[Dict[str, Any]],
+    *,
+    fallback_score: Any = 0.0,
+    fallback_level: Any = "",
+    fallback_confidence: Any = 0.0,
+    fallback_severity: Any = 0.0,
+    source: str = "",
+) -> Dict[str, Any]:
+    """Build a stable risk overview for priority boards and dossiers."""
+    normalized_cards: List[Dict[str, Any]] = [
+        item for item in issue_cards if isinstance(item, dict)
+    ]
+    issue_refs = [
+        str(item.get("issue_id") or "").strip()
+        for item in normalized_cards
+        if str(item.get("issue_id") or "").strip()
+    ]
+    derived_priority = max((_as_float(item.get("priority")) for item in normalized_cards), default=0.0)
+    derived_severity = max((_as_float(item.get("severity")) for item in normalized_cards), default=0.0)
+    derived_confidence = max(
+        (_as_float(item.get("confidence")) for item in normalized_cards), default=0.0
+    )
+    derived_level = pick_highest_risk_level(
+        [item.get("risk_level") for item in normalized_cards],
+        default="info" if normalized_cards else "low",
+    )
+
+    fallback_level_normalized = normalize_risk_level(fallback_level, default="low")
+    fallback_score_value = _as_float(fallback_score)
+    fallback_severity_value = _as_float(fallback_severity)
+    if fallback_score_value > 0 and fallback_severity_value <= 0:
+        fallback_severity_value = max(
+            severity_from_level(fallback_level_normalized),
+            min(100.0, fallback_score_value),
+        )
+    if fallback_severity_value <= 0 and fallback_level_normalized:
+        fallback_severity_value = severity_from_level(fallback_level_normalized)
+
+    priority_score = round(max(derived_priority, fallback_score_value), 1)
+    severity = round(max(derived_severity, fallback_severity_value), 1)
+    confidence = round(max(derived_confidence, _as_float(fallback_confidence)), 2)
+    risk_level = pick_highest_risk_level(
+        [derived_level, fallback_level_normalized, risk_level_from_score(priority_score)],
+        default="low",
+    )
+
+    if priority_score <= 0 and severity > 0:
+        priority_score = priority_from_scores(severity, confidence or 0.55)
+    if severity <= 0 and priority_score > 0:
+        severity = max(
+            severity_from_level(risk_level),
+            round(priority_score * 0.88, 1),
+        )
+
+    return {
+        "risk_level": risk_level,
+        "risk_label": risk_level_label(risk_level),
+        "priority_score": round(priority_score, 1),
+        "priority_band": priority_band_label(priority_score, risk_level),
+        "severity": round(severity, 1),
+        "confidence": round(confidence, 2),
+        "issue_count": len(issue_refs),
+        "issue_refs": issue_refs,
+        "source": source or ("issue_engine" if normalized_cards else "fallback"),
+    }
+
+
+def build_risk_schema() -> Dict[str, Any]:
+    """Expose the current unified risk schema inside report_package."""
+    return {
+        "allowed_levels": ["critical", "high", "medium", "low", "info"],
+        "level_labels": dict(RISK_LEVEL_LABELS),
+        "priority_score_bands": [
+            {"level": "critical", "min_score": 85},
+            {"level": "high", "min_score": 70},
+            {"level": "medium", "min_score": 45},
+            {"level": "low", "min_score": 15},
+            {"level": "info", "min_score": 0},
+        ],
+        "status_enums": ["lead", "suspicious", "high_confidence", "corroborated"],
+    }
+
+
+_WEALTH_KEYWORDS = [
+    "理财",
+    "申购",
+    "赎回",
+    "本息",
+    "结息",
+    "分红",
+    "财富",
+    "余额宝",
+    "零钱通",
+    "基金",
+]
+
+
+def _iter_records(table: Any) -> List[Dict[str, Any]]:
+    if isinstance(table, list):
+        return [item for item in table if isinstance(item, dict)]
+    to_dict = getattr(table, "to_dict", None)
+    if callable(to_dict):
+        try:
+            records = to_dict("records")
+        except TypeError:
+            records = []
+        if isinstance(records, list):
+            return [item for item in records if isinstance(item, dict)]
+    return []
+
+
+def calculate_financial_ratio(
+    table: Any,
+    income_col: str = "收入(元)",
+    transaction_desc_col: str = "交易摘要",
+) -> float:
+    """Estimate the share of wealth-management income in total income."""
+    total_income = 0.0
+    wealth_income = 0.0
+    for row in _iter_records(table):
+        amount = _as_float(row.get(income_col) or row.get("income") or row.get("收入"))
+        if amount <= 0:
+            continue
+        total_income += amount
+        description = str(
+            row.get(transaction_desc_col) or row.get("摘要") or row.get("description") or ""
+        )
+        if any(keyword in description for keyword in _WEALTH_KEYWORDS):
+            wealth_income += amount
+    if total_income <= 0:
+        return 0.0
+    return round(max(0.0, min(1.0, wealth_income / total_income)), 4)
+
+
+def calculate_family_transfer_ratio(
+    table: Any,
+    counterparty_col: str = "交易对手",
+    family_members: Iterable[str] = (),
+) -> float:
+    """Estimate the ratio of transactions involving family members."""
+    records = _iter_records(table)
+    normalized_family = {
+        str(item).strip() for item in family_members if str(item or "").strip()
+    }
+    if not records or not normalized_family:
+        return 0.0
+    family_hits = 0
+    considered = 0
+    for row in records:
+        counterparty = str(
+            row.get(counterparty_col) or row.get("counterparty") or row.get("对手方") or ""
+        ).strip()
+        if not counterparty:
+            continue
+        considered += 1
+        if counterparty in normalized_family:
+            family_hits += 1
+    if considered <= 0:
+        return 0.0
+    return round(max(0.0, min(1.0, family_hits / considered)), 4)
 
 
 @dataclass
-class RiskScore:
-    """风险评分结果"""
-    total_score: float  # 总分 (0-100)
-    risk_level: str     # 风险等级: CRITICAL/HIGH/MEDIUM/LOW
-    confidence: float   # 置信度 (0-1)
-    reason: str         # 评分理由
-    details: Dict[str, Any]  # 详细信息
+class UnifiedRiskScore:
+    total_score: float
+    risk_level: str
+    confidence: float
+    reason: str
+    details: Dict[str, Any]
 
 
 class UnifiedRiskModel:
-    """
-    统一风险评估模型
-    
-    设计原则:
-    1. 理财交易不应作为高风险因素
-    2. 家庭内部正常转账应降低风险权重
-    3. 异常交易模式应显著增加风险
-    4. 资金闭环需结合业务场景判断
-    """
-    
-    def __init__(self):
-        # 配置权重
-        self.weights = {
-            'money_loop': 22,           # 资金闭环
-            'transit_channel': 14,      # 过账通道
-            'relay_chain': 16,          # 第三方中转
-            'relationship_cluster': 14, # 关系簇
-            'external_node': 10,        # 外围节点
-            'direct_relation': 8,       # 直接往来
-            'multi_entity': 8,          # 多实体关联
-            'ml_anomaly': 12,           # ML异常
-            'wallet_summary': 8,        # 电子钱包补充摘要
-            'wallet_alert': 14,         # 电子钱包预警
-            'financial_products': -50,  # 理财产品（负分，降低风险）
-            'family_transfer': -20,     # 家庭转账（负分，降低风险）
+    """Compatibility wrapper for the legacy unified risk model interface."""
+
+    def calculate_score(
+        self,
+        entity_name: str,
+        evidence: Dict[str, Any],
+        financial_ratio: float = 0.0,
+        family_ratio: float = 0.0,
+    ) -> UnifiedRiskScore:
+        evidence = evidence if isinstance(evidence, dict) else {}
+
+        money_loops = [item for item in evidence.get("money_loops", []) if isinstance(item, dict)]
+        transit_channels = [
+            item for item in evidence.get("transit_channels", []) if isinstance(item, dict)
+        ]
+        relay_chains = [item for item in evidence.get("relay_chains", []) if isinstance(item, dict)]
+        relationship_clusters = [
+            item for item in evidence.get("relationship_clusters", []) if isinstance(item, dict)
+        ]
+        discovered_nodes = [
+            item for item in evidence.get("discovered_nodes", []) if isinstance(item, dict)
+        ]
+        direct_relations = [
+            item for item in evidence.get("direct_relations", []) if isinstance(item, dict)
+        ]
+        wallet_summaries = [
+            item for item in evidence.get("wallet_summaries", []) if isinstance(item, dict)
+        ]
+        wallet_alerts = [item for item in evidence.get("wallet_alerts", []) if isinstance(item, dict)]
+        ml_anomalies = [item for item in evidence.get("ml_anomalies", []) if isinstance(item, dict)]
+        related_entities = [
+            str(item).strip()
+            for item in evidence.get("related_entities", [])
+            if str(item or "").strip()
+        ]
+
+        money_loop_score = min(
+            28.0,
+            max((_as_float(item.get("risk_score")) * 0.22 for item in money_loops), default=0.0)
+            + max(0, len(money_loops) - 1) * 2.5,
+        )
+
+        channel_ratio = 0.0
+        transit_channel = evidence.get("transit_channel", {})
+        if isinstance(transit_channel, dict):
+            in_amount = _as_float(transit_channel.get("in"))
+            out_amount = _as_float(transit_channel.get("out"))
+            if in_amount > 0 and out_amount > 0:
+                channel_ratio = min(in_amount, out_amount) / max(in_amount, out_amount)
+        max_channel_score = max(
+            (_as_float(item.get("risk_score")) for item in transit_channels), default=0.0
+        )
+        channel_node_types = {
+            str(item.get("node_type") or "").strip().lower()
+            for item in transit_channels
+            if item.get("node_type")
         }
-        
-        # 风险等级阈值
-        self.risk_thresholds = {
-            'CRITICAL': 70,
-            'HIGH': 50,
-            'MEDIUM': 30,
-            'LOW': 0
-        }
-    
-    def calculate_score(self, entity_name: str, evidence: Dict[str, Any],
-                      financial_ratio: float = None, 
-                      family_ratio: float = None) -> RiskScore:
-        """
-        计算实体风险评分
-        
-        Args:
-            entity_name: 实体名称
-            evidence: 证据包（来自clue_aggregator）
-            financial_ratio: 理财交易占比 (0-1)
-            family_ratio: 家庭转账占比 (0-1)
-            
-        Returns:
-            RiskScore 对象
-        """
-        logger.info(f"开始计算 {entity_name} 的统一风险评分")
-        
-        # 基础分
-        base_score = 20.0
-        
-        # 资金闭环评分
-        loop_score = self._score_money_loop(evidence.get('money_loops', []))
-        
-        # 过账通道评分
-        channel_score = self._score_transit_channel(
-            evidence.get('transit_channel', {}),
-            evidence.get('transit_channels', []),
+        channel_multiplier = 0.72 if "person" in channel_node_types and "company" not in channel_node_types else 1.0
+        channel_score = min(
+            22.0,
+            max_channel_score * 0.18 * channel_multiplier
+            + (6.0 if channel_ratio >= 0.9 else 0.0),
         )
 
-        # 第三方中转评分
-        relay_score = self._score_relay_chains(evidence.get('relay_chains', []))
-
-        # 关系簇评分
-        cluster_score = self._score_relationship_clusters(
-            evidence.get('relationship_clusters', [])
+        relay_score = min(
+            20.0,
+            max((_as_float(item.get("risk_score")) * 0.18 for item in relay_chains), default=0.0)
+            + max(0, len(relay_chains) - 1) * 2.0,
         )
 
-        # 外围节点评分
-        external_node_score = self._score_external_nodes(
-            evidence.get('discovered_nodes', [])
+        cluster_score = min(
+            20.0,
+            max(
+                (
+                    _as_float(item.get("risk_score")) * 0.18
+                    + _as_float(item.get("loop_count")) * 1.4
+                    + _as_float(item.get("relay_count")) * 1.2
+                )
+                for item in relationship_clusters
+            )
+            if relationship_clusters
+            else 0.0,
         )
 
-        # 直接往来评分
-        direct_relation_score = self._score_direct_relations(
-            evidence.get('direct_relations', [])
+        external_node_score = min(
+            16.0,
+            sum(
+                max(2.0, _as_float(item.get("risk_score")) * 0.08 + _as_float(item.get("occurrences")) * 1.2)
+                for item in discovered_nodes[:3]
+            ),
         )
 
-        # 电子钱包补充评分
-        wallet_summary_score = self._score_wallet_summaries(
-            evidence.get('wallet_summaries', [])
+        family_direct_relation_count = sum(
+            1
+            for item in direct_relations
+            if str(item.get("relationship_context") or "").strip().lower() == "family"
         )
-        wallet_alert_score = self._score_wallet_alerts(
-            evidence.get('wallet_alerts', [])
+        all_family_direct = bool(direct_relations) and family_direct_relation_count == len(
+            direct_relations
         )
-        
-        # 多实体关联评分
-        entity_score = self._score_multi_entity(evidence.get('related_entities', []))
-        
-        # ML异常评分
-        ml_score = self._score_ml_anomaly(evidence.get('ml_anomalies', []))
-        
-        # 理财交易调整（负分）
-        financial_adjust = 0
-        if financial_ratio and financial_ratio > 0.3:  # 理财占比超过30%
-            financial_adjust = self.weights['financial_products'] * financial_ratio
-            logger.info(f"{entity_name} 理财占比 {financial_ratio:.2%}，调整分 {financial_adjust:.2f}")
-        
-        # 家庭转账调整（负分）
-        family_adjust = 0
-        if family_ratio and family_ratio > 0.2:  # 家庭转账占比超过20%
-            family_adjust = self.weights['family_transfer'] * family_ratio
-            logger.info(f"{entity_name} 家庭转账占比 {family_ratio:.2%}，调整分 {family_adjust:.2f}")
-        
-        # 计算总分
+        direct_total_amount = sum(_as_float(item.get("amount")) for item in direct_relations)
+        direct_relation_score = 0.0
+        if direct_relations:
+            direct_relation_score = min(
+                18.0,
+                (direct_total_amount / 100000.0) * (0.9 if all_family_direct else 2.3),
+            )
+
+        wallet_summary_score = min(
+            16.0,
+            sum(
+                _as_float(item.get("risk_score")) * 0.16
+                + _as_float(item.get("bank_card_overlap_count")) * 1.2
+                + _as_float(item.get("alias_match_count")) * 1.2
+                + _as_float(item.get("phone_overlap_count")) * 1.0
+                + min(4.0, _as_float(item.get("third_party_total")) / 100000.0 * 0.6)
+                + min(3.0, _as_float(item.get("transaction_count")) * 0.02)
+                for item in wallet_summaries[:3]
+            ),
+        )
+        wallet_alert_score = min(
+            18.0,
+            sum(
+                _as_float(item.get("risk_score")) * 0.18
+                + (4.0 if normalize_risk_level(item.get("risk_level")) in {"high", "critical"} else 0.0)
+                + min(2.0, _as_float(item.get("amount")) / 100000.0 * 0.5)
+                for item in wallet_alerts[:3]
+            ),
+        )
+
+        ml_score = min(
+            12.0,
+            max((_as_float(item.get("risk_score")) * 0.12 for item in ml_anomalies), default=0.0),
+        )
+
         total_score = (
-            base_score
-            + loop_score
+            money_loop_score
             + channel_score
             + relay_score
             + cluster_score
@@ -144,520 +458,113 @@ class UnifiedRiskModel:
             + direct_relation_score
             + wallet_summary_score
             + wallet_alert_score
-            + entity_score
             + ml_score
-            + financial_adjust
-            + family_adjust
-        )
-        
-        # 限制在0-100范围
-        total_score = max(0, min(100, total_score))
-        
-        # 确定风险等级
-        risk_level = self._get_risk_level(total_score)
-        
-        # 生成评分理由
-        reasons = []
-        if loop_score > 0:
-            reasons.append(f"涉及{len(evidence.get('money_loops', []))}个资金闭环")
-        if channel_score > 0:
-            reasons.append("疑似过账通道")
-        if relay_score > 0:
-            reasons.append(f"发现{len(evidence.get('relay_chains', []))}条第三方中转链")
-        if cluster_score > 0:
-            reasons.append(f"识别{len(evidence.get('relationship_clusters', []))}个关系簇")
-        if external_node_score > 0:
-            reasons.append(f"发现{len(evidence.get('discovered_nodes', []))}个外围节点")
-        family_direct_count = sum(
-            1
-            for relation in evidence.get('direct_relations', [])
-            if isinstance(relation, dict) and str(relation.get('relationship_context', '')).lower() == 'family'
-        )
-        external_direct_count = max(len(evidence.get('direct_relations', [])) - family_direct_count, 0)
-        if direct_relation_score > 0:
-            if external_direct_count > 0:
-                reasons.append(f"存在{external_direct_count}笔直接往来")
-            elif family_direct_count > 0:
-                reasons.append(f"存在{family_direct_count}笔家庭内部直接往来")
-        if wallet_summary_score > 0:
-            reasons.append(f"已补充{len(evidence.get('wallet_summaries', []))}个电子钱包摘要")
-        if wallet_alert_score > 0:
-            reasons.append(f"命中{len(evidence.get('wallet_alerts', []))}条电子钱包预警")
-        if financial_adjust < 0:
-            reasons.append(f"理财交易占比{financial_ratio:.1%}，降低风险")
-        if family_adjust < 0:
-            reasons.append(f"家庭转账占比{family_ratio:.1%}，降低风险")
-        
-        reason = "; ".join(reasons) if reasons else "无明显风险特征"
-        
-        logger.info(f"{entity_name} 风险评分: {total_score:.1f} ({risk_level}) - {reason}")
-        
-        return RiskScore(
-            total_score=round(total_score, 1),
-            risk_level=risk_level,
-            confidence=self._calculate_confidence(evidence),
-            reason=reason,
-            details={
-                'base_score': base_score,
-                'loop_score': loop_score,
-                'channel_score': channel_score,
-                'relay_score': relay_score,
-                'cluster_score': cluster_score,
-                'external_node_score': external_node_score,
-                'direct_relation_score': direct_relation_score,
-                'wallet_summary_score': wallet_summary_score,
-                'wallet_alert_score': wallet_alert_score,
-                'entity_score': entity_score,
-                'ml_score': ml_score,
-                'financial_adjust': financial_adjust,
-                'family_adjust': family_adjust,
-                'evidence_summary': {
-                    'money_loop_count': len(evidence.get('money_loops', [])),
-                    'relay_chain_count': len(evidence.get('relay_chains', [])),
-                    'relationship_cluster_count': len(evidence.get('relationship_clusters', [])),
-                    'discovered_node_count': len(evidence.get('discovered_nodes', [])),
-                    'direct_relation_count': len(evidence.get('direct_relations', [])),
-                    'family_direct_relation_count': family_direct_count,
-                    'wallet_summary_count': len(evidence.get('wallet_summaries', [])),
-                    'wallet_alert_count': len(evidence.get('wallet_alerts', [])),
-                },
-            }
-        )
-    
-    @staticmethod
-    def _extract_numeric(items: List[Dict], field: str) -> List[float]:
-        values = []
-        for item in items or []:
-            if not isinstance(item, dict):
-                continue
-            try:
-                values.append(float(item.get(field, 0) or 0))
-            except (TypeError, ValueError):
-                continue
-        return values
-
-    def _score_money_loop(self, money_loops: List[Dict]) -> float:
-        """
-        资金闭环评分
-        
-        规则:
-        - 闭环数量多: 高风险
-        - 闭环涉及金额大: 加倍风险
-        - 闭环频率高: 高风险
-        """
-        if not money_loops:
-            return 0.0
-        
-        loop_count = len(money_loops)
-        base_score = min(loop_count * 4.0, float(self.weights['money_loop']))
-        
-        # 检查是否是理财相关的闭环
-        financial_keywords = ['理财', '基金', '证券', '结构性存款']
-        financial_loop_count = sum(
-            1 for loop in money_loops
-            if any(kw in str(loop) for kw in financial_keywords)
         )
 
-        loop_scores = self._extract_numeric(money_loops, 'risk_score')
-        loop_confidences = self._extract_numeric(money_loops, 'confidence')
-        if loop_scores:
-            base_score += min(8.0, max(loop_scores) / 12.0)
-            base_score += min(4.0, (sum(loop_scores) / len(loop_scores)) / 30.0)
-        if loop_confidences:
-            base_score += min(3.0, max(loop_confidences) * 3.0)
-        
-        # 如果主要是理财闭环，降低风险
-        if financial_loop_count > loop_count * 0.5:
-            base_score *= 0.3  # 降低70%的风险权重
-            logger.info(f"检测到理财相关闭环 {financial_loop_count}/{loop_count}，降低风险权重")
-        
-        return min(base_score, 30.0)
-    
-    def _score_transit_channel(
-        self,
-        transit_channel: Dict,
-        transit_channels: List[Dict] = None,
-    ) -> float:
-        """
-        过账通道评分
-        
-        规则:
-        - 进出比接近100%: 高风险（纯过账）
-        - 进出比<50%或>150%: 低风险（正常业务）
-        """
-        if not transit_channel and not transit_channels:
-            return 0.0
+        if financial_ratio > 0:
+            total_score -= min(10.0, financial_ratio * 16.0)
+        if family_ratio > 0:
+            total_score -= min(8.0, family_ratio * 18.0)
+        if all_family_direct and channel_score <= 0 and relay_score <= 0 and cluster_score <= 0:
+            total_score -= 8.0
+        total_score = round(max(0.0, min(100.0, total_score)), 1)
 
-        in_amount = transit_channel.get('in', 0) if transit_channel else 0
-        out_amount = transit_channel.get('out', 0) if transit_channel else 0
-        ratio = (in_amount / out_amount) if out_amount else 0
-
-        score = 0.0
-        if ratio:
-            if 0.8 <= ratio <= 1.2:
-                score += self.weights['transit_channel']
-            elif 0.6 <= ratio < 0.8 or 1.2 < ratio <= 1.4:
-                score += self.weights['transit_channel'] * 0.5
-
-        channel_scores = self._extract_numeric(transit_channels or [], 'risk_score')
-        if channel_scores:
-            score += min(6.0, max(channel_scores) / 15.0)
-
-        node_types = {
-            str(item.get('node_type', '') or '').strip().lower()
-            for item in (transit_channels or [])
-            if isinstance(item, dict) and str(item.get('node_type', '') or '').strip()
-        }
-        if node_types and node_types == {'person'}:
-            score *= 0.55
-
-        return min(score, 22.0)
-
-    def _score_relay_chains(self, relay_chains: List[Dict]) -> float:
-        """第三方中转评分。"""
-        if not relay_chains:
-            return 0.0
-
-        relay_scores = self._extract_numeric(relay_chains, 'risk_score')
-        relay_confidences = self._extract_numeric(relay_chains, 'confidence')
-        score = min(len(relay_chains) * 5.0, float(self.weights['relay_chain']))
-        if relay_scores:
-            score += min(8.0, max(relay_scores) / 12.0)
-        if relay_confidences:
-            score += min(4.0, max(relay_confidences) * 4.0)
-        return min(score, 24.0)
-
-    def _score_relationship_clusters(self, relationship_clusters: List[Dict]) -> float:
-        """关系簇评分。"""
-        if not relationship_clusters:
-            return 0.0
-
-        cluster_scores = self._extract_numeric(relationship_clusters, 'risk_score')
-        loop_counts = self._extract_numeric(relationship_clusters, 'loop_count')
-        relay_counts = self._extract_numeric(relationship_clusters, 'relay_count')
-
-        score = min(len(relationship_clusters) * 4.0, float(self.weights['relationship_cluster']))
-        if cluster_scores:
-            score += min(8.0, max(cluster_scores) / 12.0)
-        if loop_counts:
-            score += min(4.0, sum(loop_counts))
-        if relay_counts:
-            score += min(3.0, sum(relay_counts) * 0.5)
-        return min(score, 24.0)
-
-    def _score_external_nodes(self, discovered_nodes: List[Dict]) -> float:
-        """外围节点评分。"""
-        if not discovered_nodes:
-            return 0.0
-
-        node_scores = self._extract_numeric(discovered_nodes, 'risk_score')
-        occurrences = self._extract_numeric(discovered_nodes, 'occurrences')
-        score = min(len(discovered_nodes) * 2.0, float(self.weights['external_node']))
-        if node_scores:
-            score += min(6.0, max(node_scores) / 15.0)
-        if occurrences:
-            score += min(4.0, sum(occurrences) * 0.5)
-        return min(score, 16.0)
-
-    def _score_direct_relations(self, direct_relations: List[Dict]) -> float:
-        """直接往来评分。"""
-        if not direct_relations:
-            return 0.0
-
-        external_relations = [
-            relation
-            for relation in direct_relations
-            if not (
-                isinstance(relation, dict)
-                and str(relation.get('relationship_context', '') or '').strip().lower() == 'family'
+        confidence_candidates = [
+            _as_float(item.get("confidence"))
+            for bucket in (
+                money_loops,
+                transit_channels,
+                relay_chains,
+                relationship_clusters,
+                discovered_nodes,
+                direct_relations,
+                wallet_summaries,
+                wallet_alerts,
+                ml_anomalies,
             )
+            for item in bucket
+            if isinstance(item, dict)
         ]
-        family_relations = [
-            relation
-            for relation in direct_relations
-            if isinstance(relation, dict)
-            and str(relation.get('relationship_context', '') or '').strip().lower() == 'family'
-        ]
+        confidence = max(confidence_candidates or [0.68])
+        if _as_dict(evidence.get("money_loop_meta")).get("truncated"):
+            confidence *= 0.82
+        if _as_dict(evidence.get("relay_meta")).get("truncated"):
+            confidence *= 0.9
+        if _as_dict(evidence.get("relationship_meta")).get("truncated"):
+            confidence *= 0.9
+        total_records = int(_as_float(evidence.get("total_records")))
+        if total_records >= 3000:
+            confidence *= 0.96
+        confidence = round(max(0.6, min(0.98, confidence)), 2)
 
-        relation_count = len(external_relations)
-        total_amount = 0.0
-        for relation in external_relations:
-            if not isinstance(relation, dict):
-                continue
-            amount = relation.get('amount')
-            if amount is None:
-                amount = max(
-                    float(relation.get('收入', 0) or 0),
-                    float(relation.get('支出', 0) or 0),
-                )
-            try:
-                total_amount += float(amount or 0)
-            except (TypeError, ValueError):
-                continue
-
-        score = min(relation_count * 1.5, float(self.weights['direct_relation']))
-        if total_amount >= 1_000_000:
-            score += 4.0
-        elif total_amount >= 100_000:
-            score += 2.0
-
-        if not external_relations and family_relations:
-            family_amount = 0.0
-            for relation in family_relations:
-                if not isinstance(relation, dict):
-                    continue
-                amount = relation.get('amount')
-                if amount is None:
-                    amount = max(
-                        float(relation.get('收入', 0) or 0),
-                        float(relation.get('支出', 0) or 0),
-                    )
-                try:
-                    family_amount += float(amount or 0)
-                except (TypeError, ValueError):
-                    continue
-
-            score = min(len(family_relations) * 0.08, 1.6)
-            if family_amount >= 1_000_000:
-                score += 1.2
-            elif family_amount >= 100_000:
-                score += 0.6
-        elif family_relations and relation_count > 0:
-            score *= 0.7
-        return min(score, 12.0)
-
-    def _score_wallet_summaries(self, wallet_summaries: List[Dict]) -> float:
-        """电子钱包主体摘要评分。"""
-        if not wallet_summaries:
-            return 0.0
-
-        summary_scores = self._extract_numeric(wallet_summaries, 'risk_score')
-        totals = self._extract_numeric(wallet_summaries, 'third_party_total')
-        tx_counts = self._extract_numeric(wallet_summaries, 'transaction_count')
-        overlaps = []
-        for item in wallet_summaries:
-            if not isinstance(item, dict):
-                continue
-            overlaps.append(
-                float(item.get('bank_card_overlap_count', 0) or 0)
-                + float(item.get('alias_match_count', 0) or 0)
-                + float(item.get('phone_overlap_count', 0) or 0)
-            )
-
-        score = min(len(wallet_summaries) * 1.5, float(self.weights['wallet_summary']))
-        if summary_scores:
-            score += min(6.0, max(summary_scores) / 15.0)
-        if totals:
-            if max(totals) >= 1_000_000:
-                score += 4.0
-            elif max(totals) >= 300_000:
-                score += 2.5
-        if tx_counts and max(tx_counts) >= 100:
-            score += 1.5
-        if overlaps:
-            score += min(3.0, max(overlaps))
-        return min(score, 15.0)
-
-    def _score_wallet_alerts(self, wallet_alerts: List[Dict]) -> float:
-        """电子钱包预警评分。"""
-        if not wallet_alerts:
-            return 0.0
-
-        alert_scores = self._extract_numeric(wallet_alerts, 'risk_score')
-        alert_amounts = self._extract_numeric(wallet_alerts, 'amount')
-        high_count = sum(
-            1
-            for item in wallet_alerts
-            if isinstance(item, dict) and str(item.get('risk_level', '')).lower() == 'high'
-        )
-
-        score = min(len(wallet_alerts) * 2.0, float(self.weights['wallet_alert']))
-        if alert_scores:
-            score += min(8.0, max(alert_scores) / 10.0)
-        if high_count:
-            score += min(4.0, high_count * 1.5)
-        if alert_amounts:
-            if max(alert_amounts) >= 1_000_000:
-                score += 3.0
-            elif max(alert_amounts) >= 300_000:
-                score += 1.5
-        return min(score, 20.0)
-    
-    def _score_multi_entity(self, related_entities: List[str]) -> float:
-        """
-        多实体关联评分
-        
-        规则:
-        - 关联实体>=3个: 高分
-        - 关联实体2个: 中分
-        - 关联实体1个: 低分
-        """
-        entity_count = len(set(related_entities))
-        
-        if entity_count >= 5:
-            return self.weights['multi_entity']
-        elif entity_count >= 3:
-            return self.weights['multi_entity'] * 0.75
-        elif entity_count == 2:
-            return self.weights['multi_entity'] * 0.5
-        elif entity_count == 1:
-            return self.weights['multi_entity'] * 0.25
+        if total_score >= 70:
+            risk_level = "CRITICAL"
+        elif total_score >= 45:
+            risk_level = "HIGH"
+        elif total_score >= 25:
+            risk_level = "MEDIUM"
         else:
-            return 0.0
-    
-    def _score_ml_anomaly(self, ml_anomalies: List[Dict]) -> float:
-        """
-        ML异常评分
-        
-        规则:
-        - 异常数量多: 高风险
-        - Z值高: 高风险
-        """
-        if not ml_anomalies:
-            return 0.0
-        
-        anomaly_count = len(ml_anomalies)
-        base_score = min(anomaly_count * 1.0, self.weights['ml_anomaly'])
-        
-        # 检查Z值（如果有的话）
-        high_z_count = sum(
-            1 for anomaly in ml_anomalies
-            if isinstance(anomaly, dict) and max(
-                anomaly.get('z_score', 0),
-                anomaly.get('score', 0)
-            ) > 5
+            risk_level = "LOW"
+
+        reason_parts: List[str] = []
+        if money_loop_score > 0:
+            reason_parts.append("资金闭环")
+        if channel_score > 0:
+            reason_parts.append("过账通道")
+        if relay_score > 0:
+            reason_parts.append("第三方中转")
+        if cluster_score > 0:
+            reason_parts.append("关系簇")
+        if external_node_score > 0 or related_entities:
+            reason_parts.append("外围节点")
+        if direct_relation_score > 0:
+            reason_parts.append("家庭内部直接往来" if all_family_direct else "直接往来")
+        if wallet_summary_score > 0 or wallet_alert_score > 0:
+            reason_parts.append("电子钱包")
+        if ml_score > 0:
+            reason_parts.append("异常交易")
+        if not reason_parts:
+            reason_parts.append("未见显著风险线索")
+
+        details = {
+            "money_loop_score": round(money_loop_score, 1),
+            "channel_score": round(channel_score, 1),
+            "relay_score": round(relay_score, 1),
+            "cluster_score": round(cluster_score, 1),
+            "external_node_score": round(external_node_score, 1),
+            "entity_score": round(min(10.0, len(set(related_entities)) * 1.5), 1),
+            "direct_relation_score": round(direct_relation_score, 1),
+            "wallet_summary_score": round(wallet_summary_score, 1),
+            "wallet_alert_score": round(wallet_alert_score, 1),
+            "ml_score": round(ml_score, 1),
+            "evidence_summary": {
+                "money_loop_count": len(money_loops),
+                "relay_count": len(relay_chains),
+                "cluster_count": len(relationship_clusters),
+                "external_node_count": len(discovered_nodes),
+                "direct_relation_count": len(direct_relations),
+                "family_direct_relation_count": family_direct_relation_count,
+                "wallet_summary_count": len(wallet_summaries),
+                "wallet_alert_count": len(wallet_alerts),
+            },
+        }
+
+        return UnifiedRiskScore(
+            total_score=total_score,
+            risk_level=risk_level,
+            confidence=confidence,
+            reason="、".join(_unique_reason_parts(reason_parts)),
+            details=details,
         )
-        
-        if high_z_count > 0:
-            base_score = min(base_score * 1.5, self.weights['ml_anomaly'])
-        
-        return base_score
-    
-    def _get_risk_level(self, score: float) -> str:
-        """根据分数确定风险等级"""
-        return risk_scoring.score_to_risk_level(score).upper()
-    
-    def _calculate_confidence(self, evidence: Dict) -> float:
-        """
-        计算置信度
-        
-        规则:
-        - 数据完整度高: 高置信度
-        - 数据量小: 低置信度
-        """
-        base_confidence = 0.7
-        
-        # 根据交易记录数调整
-        record_count = evidence.get('total_records', 0)
-        if record_count > 10000:
-            base_confidence = 0.9
-        elif record_count > 1000:
-            base_confidence = 0.8
-        elif record_count < 100:
-            base_confidence = 0.5
-
-        confidence_samples = []
-        for key in (
-            'money_loops',
-            'relay_chains',
-            'relationship_clusters',
-            'discovered_nodes',
-            'transit_channels',
-            'wallet_summaries',
-            'wallet_alerts',
-        ):
-            for item in evidence.get(key, []) or []:
-                if not isinstance(item, dict):
-                    continue
-                try:
-                    confidence_samples.append(float(item.get('confidence', 0) or 0))
-                except (TypeError, ValueError):
-                    continue
-
-        if confidence_samples:
-            avg_confidence = sum(confidence_samples) / len(confidence_samples)
-            max_confidence = max(confidence_samples)
-            base_confidence = base_confidence * 0.45 + avg_confidence * 0.35 + max_confidence * 0.20
-
-        any_truncated = False
-        for key in ('money_loop_meta', 'relay_meta', 'relationship_meta'):
-            meta = evidence.get(key) or {}
-            if isinstance(meta, dict) and meta.get('truncated'):
-                any_truncated = True
-                break
-        if any_truncated:
-            base_confidence -= 0.12
-
-        strong_signal_count = sum(
-            1
-            for key in ('money_loops', 'relay_chains', 'relationship_clusters', 'discovered_nodes', 'wallet_alerts')
-            if len(evidence.get(key, []) or []) > 0
-        )
-        if strong_signal_count >= 3:
-            base_confidence += 0.08
-        elif strong_signal_count == 2:
-            base_confidence += 0.04
-
-        return risk_scoring.normalize_confidence(base_confidence)
 
 
-def calculate_financial_ratio(df, income_col: str = 'income', 
-                             transaction_desc_col: str = 'description') -> float:
-    """
-    计算理财交易占比
-    
-    Args:
-        df: 交易数据
-        income_col: 收入列名
-        transaction_desc_col: 交易描述列名
-        
-    Returns:
-        理财交易占比 (0-1)
-    """
-    if df.empty:
-        return 0.0
-    
-    # 理财关键词
-    financial_keywords = ['理财', '基金', '证券', '结构性存款', '申购', '赎回']
-    
-    # 识别理财交易
-    financial_mask = df[transaction_desc_col].str.contains(
-        '|'.join(financial_keywords), na=False
-    )
-    
-    financial_amount = df.loc[financial_mask, income_col].sum()
-    total_income = df[income_col].sum()
-    
-    if total_income == 0:
-        return 0.0
-    
-    return financial_amount / total_income
-
-
-def calculate_family_transfer_ratio(df, counterparty_col: str = '交易对手',
-                                   family_members: List[str] = None) -> float:
-    """
-    计算家庭转账占比
-    
-    Args:
-        df: 交易数据
-        counterparty_col: 交易对手列名
-        family_members: 家庭成员名单
-        
-    Returns:
-        家庭转账占比 (0-1)
-    """
-    if df.empty or not family_members:
-        return 0.0
-    
-    # 识别家庭转账
-    family_mask = df[counterparty_col].isin(family_members)
-    
-    # 【P1 修复 2026-01-27】使用正确的列名"收入(元)"和"支出(元)"
-    family_transfer_amount = df.loc[family_mask, '收入(元)'].sum() + df.loc[family_mask, '支出(元)'].sum()
-    total_amount = df['收入(元)'].sum() + df['支出(元)'].sum()
-    
-    if total_amount == 0:
-        return 0.0
-    
-    return family_transfer_amount / total_amount
+def _unique_reason_parts(parts: Iterable[str]) -> List[str]:
+    ordered: List[str] = []
+    seen = set()
+    for part in parts:
+        text = str(part or "").strip()
+        if not text or text in seen:
+            continue
+        ordered.append(text)
+        seen.add(text)
+    return ordered

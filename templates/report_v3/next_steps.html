@@ -7,7 +7,20 @@ report.next_steps = [
 ]
 #}
 
-{% if report.next_steps and report.next_steps|length > 0 %}
+{% set semantic_steps = report.get('_semantic_next_steps', []) %}
+
+{% if semantic_steps and semantic_steps|length > 0 %}
+<ol class="indent-list">
+    {% for step in semantic_steps %}
+    <li>
+        {{ step.action_text }}
+        {% if step.priority or step.source_issue_id %}
+        （{% if step.priority %}优先级{{ step.priority }}{% endif %}{% if step.priority and step.source_issue_id %}，{% endif %}{% if step.source_issue_id %}来源{{ step.source_issue_id }}{% endif %}）
+        {% endif %}
+    </li>
+    {% endfor %}
+</ol>
+{% elif report.next_steps and report.next_steps|length > 0 %}
 <ol class="indent-list">
     {% for step in report.next_steps %}
     <li>{{ step.action_text }}</li>

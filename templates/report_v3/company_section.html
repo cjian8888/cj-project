@@ -1,10 +1,10 @@
 {#
-公司分析章节模板 - 适配 _build_enhanced_company_section 返回的数据结构
+公司分析章节模板 - 优先读取 semantic company_dossier，旧 enhanced_company_section 兜底
 
 数据结构：
 company_data = {
     company_name, total_income, total_expense,
-    cash_income, cash_expense, transaction_count, narrative,
+    transaction_count, narrative, semantic_dossier,
     dimensions: {
         scale_analysis, person_transfers, inter_company_flows,
         major_counterparties, risk_assessment, behavioral_patterns
@@ -12,19 +12,70 @@ company_data = {
 }
 #}
 
-{# 经营规模概述 #}
+{% set semantic = company_data.semantic_dossier if company_data.semantic_dossier else {} %}
+{% set semantic_risk = semantic.risk_overview if semantic and semantic.risk_overview else {} %}
+{% set semantic_issue_cards = semantic.key_issue_cards if semantic and semantic.key_issue_cards else [] %}
+{% set semantic_related_persons = semantic.related_persons if semantic and semantic.related_persons else [] %}
+{% set semantic_related_companies = semantic.related_companies if semantic and semantic.related_companies else [] %}
+{% set semantic_behavioral_flags = semantic.behavioral_flags if semantic and semantic.behavioral_flags else [] %}
+{% set semantic_customers = semantic.major_inflows if semantic and semantic.major_inflows else [] %}
+{% set semantic_suppliers = semantic.major_outflows if semantic and semantic.major_outflows else [] %}
+{% set legacy_dimensions = company_data.dimensions if company_data.dimensions else {} %}
+{% set behavioral = legacy_dimensions.behavioral_patterns if legacy_dimensions and legacy_dimensions.behavioral_patterns else {} %}
+{% set transfers = legacy_dimensions.person_transfers if legacy_dimensions and legacy_dimensions.person_transfers else {} %}
+{% set flows = legacy_dimensions.inter_company_flows if legacy_dimensions and legacy_dimensions.inter_company_flows else {} %}
+{% set risk = legacy_dimensions.risk_assessment if legacy_dimensions and legacy_dimensions.risk_assessment else {} %}
+{% set counterparties = legacy_dimensions.major_counterparties if legacy_dimensions and legacy_dimensions.major_counterparties else {} %}
+{% set top_customers = counterparties.top_customers if counterparties and counterparties.top_customers else semantic_customers %}
+{% set top_suppliers = counterparties.top_suppliers if counterparties and counterparties.top_suppliers else semantic_suppliers %}
+
 <p>
-    {{ company_data.narrative or (company_data.company_name ~ '累计资金流入' ~ (company_data.total_income/10000)|round(2) ~
+    {{ semantic.summary or company_data.narrative or (company_data.company_name ~ '累计资金流入' ~ (company_data.total_income/10000)|round(2) ~
     '万元，流出' ~ (company_data.total_expense/10000)|round(2) ~ '万元，涉及交易' ~ company_data.transaction_count ~ '笔。') }}
 </p>
 
-{# 行为特征分析（重点新增） #}
-{% if company_data.dimensions and company_data.dimensions.behavioral_patterns %}
-{% set behavioral = company_data.dimensions.behavioral_patterns %}
-{% if behavioral.has_patterns %}
+{% if semantic %}
+<div style="background: #f7f7ef; border-left: 4px solid #8a6d3b; padding: 14px; margin: 18px 0; border-radius: 4px;">
+    <h3 style="margin-top: 0; color: #7a5b24;">统一语义层公司卷宗</h3>
+    {% if semantic_risk %}
+    <p>
+        <strong>统一风险评级：</strong>{{ semantic_risk.risk_label or semantic_risk.risk_level }}
+        {% if semantic_risk.priority_score is not none %}（优先级{{ semantic_risk.priority_score }}）{% endif %}
+        {% if semantic_risk.confidence is not none %}，置信度{{ semantic_risk.confidence }}{% endif %}
+    </p>
+    {% endif %}
+    {% if semantic.role_tags %}
+    <p><strong>角色标签：</strong>{{ semantic.role_tags | join('、') }}</p>
+    {% endif %}
+    {% if semantic_related_persons %}
+    <p><strong>关联人员：</strong>{{ semantic_related_persons | join('、') }}</p>
+    {% endif %}
+    {% if semantic_related_companies %}
+    <p><strong>关联公司：</strong>{{ semantic_related_companies | join('、') }}</p>
+    {% endif %}
+    {% if semantic_behavioral_flags %}
+    <p><strong>行为特征：</strong>{{ semantic_behavioral_flags | join('；') }}</p>
+    {% endif %}
+    {% if semantic_issue_cards %}
+    <h4 style="margin-bottom: 8px;">重点问题卡</h4>
+    <ol class="indent-list">
+        {% for issue in semantic_issue_cards[:5] %}
+        <li>
+            {{ issue.headline }}
+            {% if issue.risk_level or issue.priority %}
+            （{% if issue.risk_level %}{{ issue.risk_level }}{% endif %}{% if issue.risk_level and issue.priority %}，{% endif %}{% if issue.priority %}优先级{{ issue.priority }}{% endif %}）
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ol>
+    {% endif %}
+</div>
+{% endif %}
+
+{% if (behavioral and behavioral.has_patterns) or semantic_behavioral_flags %}
 <h3 class="item-title">1、行为特征分析</h3>
 
-{# 快进快出检测 #}
+{% if behavioral and behavioral.has_patterns %}
 {% if behavioral.fast_in_out.total > 0 %}
 <h4>1.1 快进快出检测</h4>
 <p>
@@ -60,7 +111,6 @@ company_data = {
 {% endif %}
 {% endif %}
 
-{# 整进散出/散进整出检测 #}
 {% if behavioral.structuring.total > 0 %}
 <h4>1.2 整进散出/散进整出检测</h4>
 <p>
@@ -92,14 +142,14 @@ company_data = {
 {% endif %}
 
 <p><small>注：约7%记录的对手方信息不完整；已过滤自我转账。</small></p>
+{% else %}
+<p>统一语义层识别出以下公司行为特征：{{ semantic_behavioral_flags | join('；') }}。</p>
 {% endif %}
 {% endif %}
 
-{# 与核心人员资金往来 #}
-{% if company_data.dimensions and company_data.dimensions.person_transfers %}
-{% set transfers = company_data.dimensions.person_transfers %}
-{% if transfers.has_transfers %}
+{% if (transfers and transfers.has_transfers) or semantic_related_persons %}
 <h3 class="item-title">2、与核心人员资金往来</h3>
+{% if transfers and transfers.has_transfers %}
 <p>{{ transfers.summary }}</p>
 
 {% if transfers.transfers %}
@@ -122,23 +172,34 @@ company_data = {
     {% endfor %}
 </table>
 {% endif %}
-
+{% else %}
+<p>统一语义层识别该公司与{{ semantic_related_persons | join('、') }}存在重点关联，建议结合直接往来问题卡补核合同、回单及背景资料。</p>
 {% endif %}
 {% endif %}
 
-{# 公司间资金往来 #}
-{% if company_data.dimensions and company_data.dimensions.inter_company_flows %}
-{% set flows = company_data.dimensions.inter_company_flows %}
-{% if flows.has_flows %}
+{% if (flows and flows.has_flows) or semantic_related_companies %}
 <h3 class="item-title">3、公司间资金往来</h3>
+{% if flows and flows.has_flows %}
 <p>{{ flows.summary }}</p>
+{% else %}
+<p>统一语义层识别该公司与{{ semantic_related_companies | join('、') }}存在公司侧交叉关系，建议结合上下游凭证与实际控制关系继续核实。</p>
 {% endif %}
 {% endif %}
 
-{# 风险评分与结论 #}
-{% if company_data.dimensions and company_data.dimensions.risk_assessment %}
-{% set risk = company_data.dimensions.risk_assessment %}
+{% if semantic_risk or risk %}
 <h3 class="item-title">4、风险评分与结论</h3>
+{% if semantic_risk %}
+<p>
+    <strong>【综合风险评级】</strong>
+    <span style="color: {% if semantic_risk.risk_level in ['critical', 'high'] %}#d9534f{% elif semantic_risk.risk_level == 'medium' %}#f0ad4e{% else %}#5cb85c{% endif %}; font-weight: bold;">
+        {{ semantic_risk.risk_label or semantic_risk.risk_level }}（{{ semantic_risk.priority_score }}分）
+    </span>
+</p>
+<p>{{ semantic.summary or company_data.narrative }}</p>
+{% if risk and risk.summary %}
+<p><strong>旧五维评分补充：</strong>{{ risk.summary }}</p>
+{% endif %}
+{% else %}
 <p>
     <strong>【综合风险评级】</strong>
     <span style="color: {% if risk.level == '高风险' %}#d9534f{% elif risk.level == '中风险' %}#f0ad4e{% else %}#5cb85c{% endif %}; font-weight: bold;">
@@ -146,6 +207,7 @@ company_data = {
     </span>
 </p>
 <p>{{ risk.summary }}</p>
+{% endif %}
 
 {% if risk.factors %}
 <h4>4.1 风险因子分析</h4>
@@ -166,13 +228,11 @@ company_data = {
 {% endif %}
 {% endif %}
 
-{# 主要交易对手 #}
-{% if company_data.dimensions and company_data.dimensions.major_counterparties %}
-{% set counterparties = company_data.dimensions.major_counterparties %}
+{% if top_customers or top_suppliers %}
 <h3 class="item-title">5、主要交易对手分析（上下游）</h3>
-<p>{{ counterparties.summary }}</p>
+<p>{{ counterparties.summary if counterparties and counterparties.summary else '统一语义层已归集该公司的主要上下游交易对手。' }}</p>
 
-{% if counterparties.top_customers %}
+{% if top_customers %}
 <h4>5.1 主要客户（收入来源）</h4>
 <table>
     <tr>
@@ -181,7 +241,7 @@ company_data = {
         <th>交易金额(万元)</th>
         <th>交易笔数</th>
     </tr>
-    {% for customer in counterparties.top_customers %}
+    {% for customer in top_customers %}
     <tr>
         <td>{{ loop.index }}</td>
         <td>{{ customer.name or '未知' }}</td>
@@ -192,7 +252,7 @@ company_data = {
 </table>
 {% endif %}
 
-{% if counterparties.top_suppliers %}
+{% if top_suppliers %}
 <h4>5.2 主要供应商（支出去向）</h4>
 <table>
     <tr>
@@ -201,7 +261,7 @@ company_data = {
         <th>交易金额(万元)</th>
         <th>交易笔数</th>
     </tr>
-    {% for supplier in counterparties.top_suppliers %}
+    {% for supplier in top_suppliers %}
     <tr>
         <td>{{ loop.index }}</td>
         <td>{{ supplier.name or '未知' }}</td>
