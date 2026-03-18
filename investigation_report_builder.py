@@ -715,6 +715,239 @@ class InvestigationReportBuilder:
         """将语义层优先级映射为报告可读文本。"""
         return priority_band_label(priority_score, risk_level)
 
+    def _build_semantic_qa_check_lookup(
+        self, report_package: Optional[Dict[str, Any]]
+    ) -> Dict[str, Dict[str, Any]]:
+        """将 QA 检查结果整理成以 check_id 为键的查找表。"""
+        report_package = report_package if isinstance(report_package, dict) else {}
+        qa_checks = (
+            report_package.get("qa_checks", {})
+            if isinstance(report_package.get("qa_checks", {}), dict)
+            else {}
+        )
+        lookup: Dict[str, Dict[str, Any]] = {}
+        for item in qa_checks.get("checks", []) or []:
+            if not isinstance(item, dict):
+                continue
+            check_id = str(item.get("check_id") or "").strip()
+            if check_id:
+                lookup[check_id] = item
+        return lookup
+
+    def _count_evidence_supported_high_risk_issues(
+        self, report_package: Optional[Dict[str, Any]]
+    ) -> int:
+        """统计具备 evidence_refs 与 why_flagged 的高风险问题数量。"""
+        report_package = report_package if isinstance(report_package, dict) else {}
+        supported_count = 0
+        for issue in report_package.get("issues", []) or []:
+            if not isinstance(issue, dict):
+                continue
+            risk_level = str(issue.get("risk_level") or "").strip().lower()
+            severity = self._safe_float_value(issue.get("severity"), 0.0)
+            if risk_level not in {"high", "critical", "高风险", "极高风险"} and severity < 75:
+                continue
+            evidence_refs = [
+                str(ref).strip()
+                for ref in (issue.get("evidence_refs", []) or [])
+                if str(ref).strip()
+            ]
+            why_flagged = [
+                str(reason).strip()
+                for reason in (issue.get("why_flagged", []) or [])
+                if str(reason).strip()
+            ]
+            if evidence_refs and why_flagged:
+                supported_count += 1
+        return supported_count
+
+    def _build_semantic_qa_alerts(
+        self,
+        report_package: Optional[Dict[str, Any]],
+        risk_level: str = "",
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """构建供 TXT/HTML 复用的语义层 QA 提示。"""
+        report_package = report_package if isinstance(report_package, dict) else {}
+        normalized_risk_level = str(risk_level or "").strip()
+        check_lookup = self._build_semantic_qa_check_lookup(report_package)
+        alerts: List[Dict[str, Any]] = []
+
+        def _append_alert(
+            check_id: str,
+            status: str,
+            title: str,
+            summary: str,
+            action_hint: str,
+            *,
+            affects_recommendation: bool = False,
+        ) -> None:
+            if len(alerts) >= limit:
+                return
+            alerts.append(
+                {
+                    "check_id": check_id,
+                    "status": status,
+                    "title": title,
+                    "summary": summary,
+                    "action_hint": action_hint,
+                    "affects_recommendation": affects_recommendation,
+                }
+            )
+
+        minimum_evidence_check = check_lookup.get("high_risk_without_minimum_evidence", {})
+        minimum_evidence_status = str(
+            minimum_evidence_check.get("status") or ""
+        ).strip().lower()
+        minimum_evidence_details = (
+            minimum_evidence_check.get("details", {})
+            if isinstance(minimum_evidence_check.get("details", {}), dict)
+            else {}
+        )
+        minimum_evidence_issue_ids = minimum_evidence_details.get("issue_ids", []) or []
+        if minimum_evidence_status == "fail":
+            issue_count = len(minimum_evidence_issue_ids) or 1
+            _append_alert(
+                "high_risk_without_minimum_evidence",
+                "fail",
+                "高风险问题证据支撑不足",
+                f"当前有{issue_count}项高风险问题缺少最低限度的触发依据或证据引用，正式结论应先收敛。",
+                "先补充 why_flagged 与 evidence_refs，再提高结论强度。",
+                affects_recommendation=normalized_risk_level == "高风险",
+            )
+
+        traceable_refs_check = check_lookup.get(
+            "high_risk_requires_traceable_evidence_refs", {}
+        )
+        traceable_refs_status = str(
+            traceable_refs_check.get("status") or ""
+        ).strip().lower()
+        traceable_refs_details = (
+            traceable_refs_check.get("details", {})
+            if isinstance(traceable_refs_check.get("details", {}), dict)
+            else {}
+        )
+        traceable_refs_issue_ids = traceable_refs_details.get("issue_ids", []) or []
+        if traceable_refs_status == "fail":
+            issue_count = len(traceable_refs_issue_ids) or 1
+            _append_alert(
+                "high_risk_requires_traceable_evidence_refs",
+                "fail",
+                "高风险问题缺少可追溯证据索引",
+                f"当前有{issue_count}项高风险问题仍依赖叙述性表达，未形成可回溯的证据索引。",
+                "补充交易回单、行号、交易ID等 traceable evidence_refs 后再出强定性结论。",
+                affects_recommendation=normalized_risk_level == "高风险",
+            )
+
+        strong_wording_check = check_lookup.get(
+            "strong_wording_requires_evidence_support", {}
+        )
+        strong_wording_status = str(
+            strong_wording_check.get("status") or ""
+        ).strip().lower()
+        strong_wording_details = (
+            strong_wording_check.get("details", {})
+            if isinstance(strong_wording_check.get("details", {}), dict)
+            else {}
+        )
+        supported_high_risk_count = int(
+            self._safe_float_value(
+                strong_wording_details.get("supported_high_risk_issue_count"),
+                self._count_evidence_supported_high_risk_issues(report_package),
+            )
+        )
+        should_infer_strong_wording = normalized_risk_level == "高风险" or not normalized_risk_level
+        if strong_wording_status == "fail" or (
+            should_infer_strong_wording and supported_high_risk_count < 2
+        ):
+            alert_status = "fail" if strong_wording_status == "fail" else "warn"
+            _append_alert(
+                "strong_wording_requires_evidence_support",
+                alert_status,
+                "强定性措辞证据支撑仍偏弱",
+                f"当前证据充分的高风险问题仅{supported_high_risk_count}项，暂不足以支撑“立即启动深入调查程序”这类强措辞。",
+                "当前正式建议应以补强证据和进一步核实为主。",
+                affects_recommendation=should_infer_strong_wording,
+            )
+
+        benign_check = check_lookup.get("benign_scenario_promoted_to_high_risk", {})
+        benign_status = str(benign_check.get("status") or "").strip().lower()
+        benign_details = (
+            benign_check.get("details", {})
+            if isinstance(benign_check.get("details", {}), dict)
+            else {}
+        )
+        benign_hits = benign_details.get("issue_hits", []) or []
+        if benign_status in {"warn", "fail"}:
+            hit_count = len(benign_hits) or 1
+            _append_alert(
+                "benign_scenario_promoted_to_high_risk",
+                benign_status,
+                "存在良性场景被抬升为高风险的可能",
+                f"当前发现{hit_count}处高风险表述可能混入工资、理财赎回、家庭往来等良性场景，需要人工复核。",
+                "复核业务语义，避免将常规交易直接提升为高风险问题。",
+                affects_recommendation=normalized_risk_level == "高风险",
+            )
+
+        appendix_title_check = check_lookup.get("appendix_formal_titles_consistent", {})
+        appendix_title_status = str(
+            appendix_title_check.get("status") or ""
+        ).strip().lower()
+        appendix_title_details = (
+            appendix_title_check.get("details", {})
+            if isinstance(appendix_title_check.get("details", {}), dict)
+            else {}
+        )
+        appendix_title_mismatches = appendix_title_details.get("mismatches", []) or []
+        if appendix_title_status == "fail":
+            mismatch_count = len(appendix_title_mismatches) or 1
+            _append_alert(
+                "appendix_formal_titles_consistent",
+                "fail",
+                "附录标题存在漂移",
+                f"当前发现{mismatch_count}处附录标题在索引、摘要与正式章节之间不一致。",
+                "复核附录标题映射，避免正式报告目录与正文脱节。",
+            )
+
+        appendix_count_check = check_lookup.get("appendix_formal_counts_coherent", {})
+        appendix_count_status = str(
+            appendix_count_check.get("status") or ""
+        ).strip().lower()
+        appendix_count_details = (
+            appendix_count_check.get("details", {})
+            if isinstance(appendix_count_check.get("details", {}), dict)
+            else {}
+        )
+        appendix_count_mismatches = appendix_count_details.get("mismatches", []) or []
+        if appendix_count_status == "fail":
+            mismatch_count = len(appendix_count_mismatches) or 1
+            _append_alert(
+                "appendix_formal_counts_coherent",
+                "fail",
+                "附录摘要计数与正式章节不一致",
+                f"当前发现{mismatch_count}处附录摘要指标低于正式章节实际展开内容。",
+                "复核附录 summary 指标，确保目录摘要与正式章节口径一致。",
+            )
+
+        return alerts
+
+    def _resolve_semantic_recommendation_mode(
+        self,
+        risk_level: str,
+        semantic_qa_alerts: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        """根据 QA 提示决定正式建议是否需要收敛措辞。"""
+        normalized_risk_level = str(risk_level or "").strip()
+        alerts = semantic_qa_alerts if isinstance(semantic_qa_alerts, list) else []
+        if normalized_risk_level and normalized_risk_level != "高风险":
+            return "default"
+        for alert in alerts:
+            if not isinstance(alert, dict):
+                continue
+            if bool(alert.get("affects_recommendation")):
+                return "cautious"
+        return "default"
+
     def _build_semantic_next_steps(
         self,
         report_package: Optional[Dict[str, Any]],
@@ -859,6 +1092,38 @@ class InvestigationReportBuilder:
                 }
             )
         return render_sections
+
+    def _build_appendix_render_sections(
+        self, report_package: Optional[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """提取可直接渲染的正式附录章节，当前优先支持附录C。"""
+        semantic_package = report_package if isinstance(report_package, dict) else {}
+        appendix_views = (
+            semantic_package.get("appendix_views", {})
+            if isinstance(semantic_package.get("appendix_views", {}), dict)
+            else {}
+        )
+
+        ordered_keys = [
+            "appendix_a_assets_income",
+            "appendix_b_income_loan",
+            "appendix_c_network_penetration",
+            "appendix_d_timeline_behavior",
+            "appendix_e_wallet_supplement",
+        ]
+        sections: List[Dict[str, Any]] = []
+        for key in ordered_keys:
+            view = appendix_views.get(key, {})
+            if not isinstance(view, dict):
+                continue
+            formal_chapter = view.get("formal_chapter", {})
+            if not isinstance(formal_chapter, dict):
+                continue
+            title = str(formal_chapter.get("title") or "").strip()
+            if not title:
+                continue
+            sections.append({"appendix_key": key, **formal_chapter})
+        return sections
 
     def _is_company(self, name: str) -> bool:
         """判断是否为公司"""
@@ -10271,6 +10536,23 @@ class InvestigationReportBuilder:
             render_report.get("report_package", {}),
             render_report.get("next_steps", []),
         )
+        render_report["_semantic_qa_alerts"] = self._build_semantic_qa_alerts(
+            render_report.get("report_package", {}),
+            str(
+                (render_report.get("conclusion", {}) or {}).get("risk_level")
+                or ""
+            ).strip(),
+        )
+        render_report["_semantic_recommendation_mode"] = self._resolve_semantic_recommendation_mode(
+            str(
+                (render_report.get("conclusion", {}) or {}).get("risk_level")
+                or ""
+            ).strip(),
+            render_report.get("_semantic_qa_alerts", []),
+        )
+        render_report["_semantic_appendix_render_sections"] = self._build_appendix_render_sections(
+            render_report.get("report_package", {})
+        )
 
         # 渲染HTML
         html = template.render(report=render_report)
@@ -13678,6 +13960,9 @@ class InvestigationReportBuilder:
             if isinstance(semantic_appendix_index, dict)
             else []
         )
+        semantic_appendix_render_sections = self._build_appendix_render_sections(
+            semantic_package
+        )
         company_render_sections = self._build_company_render_sections(
             semantic_package,
             company_sections,
@@ -13769,6 +14054,15 @@ class InvestigationReportBuilder:
                 )
             else:
                 risk_reason = "未发现可核查资金异常线索"
+
+        semantic_qa_alerts = self._build_semantic_qa_alerts(
+            semantic_package,
+            risk_level=risk_level,
+        )
+        semantic_recommendation_mode = self._resolve_semantic_recommendation_mode(
+            risk_level,
+            semantic_qa_alerts,
+        )
 
         # 构建报告内容
         lines = []
@@ -14740,6 +15034,323 @@ class InvestigationReportBuilder:
                     lines.append(f"  {idx}. {action_text}{suffix_text}")
             lines.append("")
 
+        for appendix in semantic_appendix_render_sections:
+            if not isinstance(appendix, dict):
+                continue
+            title = str(appendix.get("title") or "").strip()
+            if not title:
+                continue
+            lines.append(title)
+            lines.append("-" * 70)
+            lines.append("")
+            lead = str(appendix.get("lead") or "").strip()
+            if lead:
+                lines.append("【附录说明】")
+                lines.append(f"  {lead}")
+                lines.append("")
+
+            overview_metrics = appendix.get("overview_metrics", []) or []
+            if overview_metrics:
+                lines.append("【附录概览】")
+                for metric in overview_metrics:
+                    if not isinstance(metric, dict):
+                        continue
+                    label = str(metric.get("label") or "").strip()
+                    value = metric.get("value")
+                    if label:
+                        lines.append(f"  • {label}: {value}")
+                lines.append("")
+
+            appendix_key = str(appendix.get("appendix_key") or "").strip()
+            if appendix_key == "appendix_a_assets_income":
+                family_financial_rollup = appendix.get("family_financial_rollup", []) or []
+                if family_financial_rollup:
+                    lines.append("【家庭收支与待补成员】")
+                    for idx, item in enumerate(family_financial_rollup[:8], 1):
+                        if not isinstance(item, dict):
+                            continue
+                        family_name = str(item.get("family_name") or "").strip()
+                        if not family_name:
+                            continue
+                        lines.append(
+                            f"  {idx}. {family_name} | {item.get('risk_label', '')} | 成员{item.get('member_count', 0)}人 | 收入{self._safe_float_value(item.get('total_income')):,.2f} | 支出{self._safe_float_value(item.get('total_expense')):,.2f} | 结余{self._safe_float_value(item.get('income_gap')):,.2f}"
+                        )
+                        pending_members = [
+                            str(name).strip()
+                            for name in (item.get("pending_members", []) or [])
+                            if str(name).strip()
+                        ]
+                        if pending_members:
+                            lines.append("     ↳ 待补成员: " + "、".join(pending_members))
+                        key_issue_headlines = [
+                            str(text).strip()
+                            for text in (item.get("key_issue_headlines", []) or [])
+                            if str(text).strip()
+                        ]
+                        if key_issue_headlines:
+                            lines.append("     ↳ 重点问题: " + "；".join(key_issue_headlines[:2]))
+                    lines.append("")
+
+                person_gap_items = appendix.get("person_gap_items", []) or []
+                if person_gap_items:
+                    lines.append("【个人收支匹配重点】")
+                    for idx, item in enumerate(person_gap_items[:10], 1):
+                        if not isinstance(item, dict):
+                            continue
+                        entity_name = str(item.get("entity_name") or "").strip()
+                        if not entity_name:
+                            continue
+                        family_name = str(item.get("family_name") or "").strip()
+                        ratio = item.get("expense_income_ratio")
+                        ratio_text = (
+                            f"{float(ratio):.3f}" if isinstance(ratio, (int, float)) else "—"
+                        )
+                        lines.append(
+                            f"  {idx}. {entity_name} | {item.get('risk_label', '')} | 家庭:{family_name or '未归属'} | 真实收入{self._safe_float_value(item.get('real_income')):,.2f} | 真实支出{self._safe_float_value(item.get('real_expense')):,.2f} | 收支差额{self._safe_float_value(item.get('income_gap')):,.2f} | 支出/收入{ratio_text}"
+                        )
+                        key_issue_headlines = [
+                            str(text).strip()
+                            for text in (item.get("key_issue_headlines", []) or [])
+                            if str(text).strip()
+                        ]
+                        if key_issue_headlines:
+                            lines.append("     ↳ 关联问题: " + "；".join(key_issue_headlines[:2]))
+                    lines.append("")
+            elif appendix_key == "appendix_b_income_loan":
+                focus_entity_cards = appendix.get("focus_entity_cards", []) or []
+                if focus_entity_cards:
+                    lines.append("【异常收入与借贷重点对象】")
+                    for idx, item in enumerate(focus_entity_cards[:8], 1):
+                        if not isinstance(item, dict):
+                            continue
+                        entity_name = str(item.get("entity_name") or "").strip()
+                        if not entity_name:
+                            continue
+                        family_name = str(item.get("family_name") or "").strip()
+                        lines.append(
+                            f"  {idx}. {entity_name} | {item.get('risk_label', '')} | 问题{item.get('issue_count', 0)}项 | 最高优先级{item.get('top_priority', 0)}"
+                            + (f" | 家庭:{family_name}" if family_name else "")
+                        )
+                        categories = [
+                            str(text).strip()
+                            for text in (item.get("categories", []) or [])
+                            if str(text).strip()
+                        ]
+                        if categories:
+                            lines.append("     ↳ 问题类型: " + "、".join(categories[:4]))
+                        headlines = [
+                            str(text).strip()
+                            for text in (item.get("headlines", []) or [])
+                            if str(text).strip()
+                        ]
+                        if headlines:
+                            lines.append("     ↳ 代表问题: " + "；".join(headlines[:2]))
+                    lines.append("")
+
+                issue_cards = appendix.get("issue_cards", []) or []
+                if issue_cards:
+                    lines.append("【重点问题卡】")
+                    for idx, item in enumerate(issue_cards[:10], 1):
+                        if not isinstance(item, dict):
+                            continue
+                        headline = str(item.get("headline") or "").strip()
+                        if not headline:
+                            continue
+                        entity_name = str(item.get("entity_name") or "").strip()
+                        family_name = str(item.get("family_name") or "").strip()
+                        lines.append(
+                            f"  {idx}. {headline} [{item.get('category', '')} | {item.get('risk_label', '')} | 优先级{item.get('priority', 0)}]"
+                        )
+                        if entity_name or family_name:
+                            lines.append(
+                                f"     ↳ 对象: {entity_name or '待核实对象'}"
+                                + (f" | 家庭:{family_name}" if family_name else "")
+                            )
+                        why_flagged = [
+                            str(text).strip()
+                            for text in (item.get("why_flagged", []) or [])
+                            if str(text).strip()
+                        ]
+                        if why_flagged:
+                            lines.append("     ↳ 触发依据: " + "；".join(why_flagged[:3]))
+                        evidence_refs = [
+                            str(ref).strip()
+                            for ref in (item.get("evidence_refs", []) or [])
+                            if str(ref).strip()
+                        ]
+                        if evidence_refs:
+                            lines.append("     ↳ 证据索引: " + "、".join(evidence_refs[:3]))
+                    lines.append("")
+            elif appendix_key == "appendix_d_timeline_behavior":
+                timeline_cards = appendix.get("timeline_cards", []) or []
+                if timeline_cards:
+                    lines.append("【时序重点问题】")
+                    for idx, item in enumerate(timeline_cards[:8], 1):
+                        if not isinstance(item, dict):
+                            continue
+                        headline = str(item.get("headline") or "").strip()
+                        if not headline:
+                            continue
+                        entity_name = str(item.get("entity_name") or "").strip()
+                        company_name = str(item.get("company_name") or "").strip()
+                        lines.append(
+                            f"  {idx}. {headline} [{item.get('category', '')} | {item.get('risk_label', '')} | 优先级{item.get('priority', 0)}]"
+                        )
+                        scope_parts = [part for part in [entity_name, company_name] if part]
+                        if scope_parts:
+                            lines.append("     ↳ 对象范围: " + " | ".join(scope_parts))
+                    lines.append("")
+
+                behavior_cards = appendix.get("behavior_cards", []) or []
+                if behavior_cards:
+                    lines.append("【行为异常对象】")
+                    for idx, item in enumerate(behavior_cards[:8], 1):
+                        if not isinstance(item, dict):
+                            continue
+                        entity_name = str(item.get("entity_name") or "").strip()
+                        if not entity_name:
+                            continue
+                        lines.append(
+                            f"  {idx}. {entity_name} | {item.get('risk_label', '')}"
+                        )
+                        flags = [
+                            str(text).strip()
+                            for text in (item.get("behavioral_flags", []) or [])
+                            if str(text).strip()
+                        ]
+                        if flags:
+                            lines.append("     ↳ 异常标签: " + "、".join(flags[:5]))
+                    lines.append("")
+            elif appendix_key == "appendix_e_wallet_supplement":
+                wallet_cards = appendix.get("wallet_cards", []) or []
+                if wallet_cards:
+                    lines.append("【电子钱包补证概览】")
+                    for idx, item in enumerate(wallet_cards[:3], 1):
+                        if not isinstance(item, dict):
+                            continue
+                        lines.append(
+                            f"  {idx}. 状态:{item.get('status', '')} | 覆盖主体{item.get('subject_count', 0)}个 | 摘要交易{item.get('transaction_count', 0)}笔 | 关联问题{item.get('issue_count', 0)}项"
+                        )
+                        next_actions = [
+                            str(text).strip()
+                            for text in (item.get("next_actions", []) or [])
+                            if str(text).strip()
+                        ]
+                        if next_actions:
+                            lines.append("     ↳ 补证动作: " + "；".join(next_actions[:3]))
+                    lines.append("")
+            else:
+                priority_entities = appendix.get("priority_entities", []) or []
+                if priority_entities:
+                    lines.append("【网络重点对象】")
+                    for idx, item in enumerate(priority_entities[:8], 1):
+                        if not isinstance(item, dict):
+                            continue
+                        entity_name = str(item.get("entity_name") or "").strip()
+                        if not entity_name:
+                            continue
+                        family_name = str(item.get("family_name") or "").strip()
+                        reasons = [
+                            str(reason).strip()
+                            for reason in (item.get("top_reasons", []) or [])
+                            if str(reason).strip()
+                        ]
+                        issue_refs = [
+                            str(ref).strip()
+                            for ref in (item.get("issue_refs", []) or [])
+                            if str(ref).strip()
+                        ]
+                        base = (
+                            f"  {idx}. {entity_name} | {item.get('entity_type', 'unknown')} | "
+                            f"优先级{item.get('priority_score', 0)} | {item.get('risk_label', '') or item.get('risk_level', '')}"
+                        )
+                        if family_name:
+                            base += f" | 家庭:{family_name}"
+                        lines.append(base)
+                        if reasons:
+                            lines.append("     ↳ 关注原因: " + "；".join(reasons[:3]))
+                        if issue_refs:
+                            lines.append("     ↳ 关联问题卡: " + "、".join(issue_refs[:5]))
+                    lines.append("")
+
+                representative_issues = appendix.get("representative_issues", []) or []
+                if representative_issues:
+                    lines.append("【代表性关系与穿透问题】")
+                    for idx, item in enumerate(representative_issues[:8], 1):
+                        if not isinstance(item, dict):
+                            continue
+                        headline = str(item.get("headline") or "").strip()
+                        if not headline:
+                            continue
+                        lines.append(
+                            f"  {idx}. {headline} [{item.get('risk_label', '') or item.get('risk_level', '')} | 优先级{item.get('priority', 0)}]"
+                        )
+                        scope_line = str(item.get("scope_line") or "").strip()
+                        if scope_line:
+                            lines.append(f"     ↳ 核查范围: {scope_line}")
+                        why_flagged = [
+                            str(reason).strip()
+                            for reason in (item.get("why_flagged", []) or [])
+                            if str(reason).strip()
+                        ]
+                        if why_flagged:
+                            lines.append("     ↳ 触发依据: " + "；".join(why_flagged[:3]))
+                        evidence_refs = [
+                            str(ref).strip()
+                            for ref in (item.get("evidence_refs", []) or [])
+                            if str(ref).strip()
+                        ]
+                        if evidence_refs:
+                            lines.append("     ↳ 证据索引: " + "、".join(evidence_refs[:3]))
+                        counter_indicators = [
+                            str(reason).strip()
+                            for reason in (item.get("counter_indicators", []) or [])
+                            if str(reason).strip()
+                        ]
+                        if counter_indicators:
+                            lines.append("     ↳ 反证/限制: " + "；".join(counter_indicators[:2]))
+                    lines.append("")
+
+                company_hotspots = appendix.get("company_hotspots", []) or []
+                if company_hotspots:
+                    lines.append("【涉案公司网络热点】")
+                    for idx, item in enumerate(company_hotspots[:6], 1):
+                        if not isinstance(item, dict):
+                            continue
+                        entity_name = str(item.get("entity_name") or "").strip()
+                        if not entity_name:
+                            continue
+                        lines.append(
+                            f"  {idx}. {entity_name} | {item.get('risk_label', '')} | 优先级{item.get('priority_score', 0)}"
+                        )
+                        role_tags = [
+                            str(tag).strip()
+                            for tag in (item.get("role_tags", []) or [])
+                            if str(tag).strip()
+                        ]
+                        if role_tags:
+                            lines.append("     ↳ 角色标签: " + "、".join(role_tags[:5]))
+                        related_persons = [
+                            str(name).strip()
+                            for name in (item.get("related_persons", []) or [])
+                            if str(name).strip()
+                        ]
+                        if related_persons:
+                            lines.append("     ↳ 关联人员: " + "、".join(related_persons[:5]))
+                        summary = str(item.get("summary") or "").strip()
+                        if summary:
+                            lines.append(f"     ↳ 摘要: {summary}")
+                    lines.append("")
+
+            recommended_actions = appendix.get("recommended_actions", []) or []
+            if recommended_actions:
+                lines.append("【建议核查动作】")
+                for idx, action in enumerate(recommended_actions[:8], 1):
+                    action_text = str(action or "").strip()
+                    if action_text:
+                        lines.append(f"  {idx}. {action_text}")
+                lines.append("")
+
         log_landing_reviews = self._build_analysis_log_landing_review()
         if log_landing_reviews:
             lines.append("【分析执行日志落地复盘】")
@@ -14753,12 +15364,34 @@ class InvestigationReportBuilder:
                     lines.append(f"    ↳ 落地产物: {artifacts}")
             lines.append("")
 
+        if semantic_qa_alerts:
+            lines.append("【语义层QA提示】")
+            for idx, alert in enumerate(semantic_qa_alerts, 1):
+                if not isinstance(alert, dict):
+                    continue
+                title = str(alert.get("title") or "").strip()
+                summary = str(alert.get("summary") or "").strip()
+                action_hint = str(alert.get("action_hint") or "").strip()
+                if title or summary:
+                    line = f"  {idx}. {title}" if title else f"  {idx}."
+                    if summary:
+                        line += f"：{summary}" if title else f" {summary}"
+                    lines.append(line)
+                if action_hint:
+                    lines.append(f"     ↳ 建议动作: {action_hint}")
+            lines.append("")
+
         # 综合研判与建议
         lines.append("【综合研判与建议】")
         if risk_level == "高风险":
-            lines.append("  ➡ 建议: 立即启动深入调查程序")
-            lines.append("  • 重点关注现金碰撞/时序伴随及直接往来记录")
-            lines.append("  • 对大额收入来源进行逐笔核查")
+            if semantic_recommendation_mode == "cautious":
+                lines.append("  ➡ 建议: 先围绕高风险线索补强证据并开展进一步核实")
+                lines.append("  • 优先补充可追溯证据索引、交易回单及对手方材料")
+                lines.append("  • 对现金碰撞/时序伴随及直接往来线索逐项复核")
+            else:
+                lines.append("  ➡ 建议: 立即启动深入调查程序")
+                lines.append("  • 重点关注现金碰撞/时序伴随及直接往来记录")
+                lines.append("  • 对大额收入来源进行逐笔核查")
         elif risk_level == "中风险":
             lines.append("  ➡ 建议: 对可疑交易进行重点核查")
             lines.append("  • 关注资金流向的合规性")

@@ -16,6 +16,7 @@
 {% set appendix_views = semantic.appendix_views if semantic and semantic.appendix_views else {} %}
 {% set appendix_index = appendix_views['appendix_index'] if appendix_views and appendix_views['appendix_index'] else {} %}
 {% set appendix_items = appendix_index['items'] if appendix_index and appendix_index['items'] else [] %}
+{% set appendix_render_sections = report.get('_semantic_appendix_render_sections', []) %}
 {% set company_sections_render = report.get('_company_render_sections', report.company_sections if report.company_sections else []) %}
 {# 报告标题 #}
 <div class="report-title">关于{{ title_subject }}等信息查询结果分析报告</div>
@@ -180,12 +181,17 @@
 
                                 {# ==================== 下一步工作计划章节 ==================== #}
                                 {% set nextstep_num = conclusion_num + 1 %}
-                                <h1 class="section-title">{{ ['一','二','三','四','五','六','七','八','九','十'][nextstep_num-1]
-                                    if
-                                    nextstep_num <= 10 else nextstep_num }}、下一步工作计划</h1>
+                                        <h1 class="section-title">{{ ['一','二','三','四','五','六','七','八','九','十'][nextstep_num-1]
+                                            if
+                                            nextstep_num <= 10 else nextstep_num }}、下一步工作计划</h1>
 
                                         {% include 'next_steps.html' %}
                                         {% endif %}
+
+                                        {% for appendix in appendix_render_sections %}
+                                        {% set appendix_data = appendix %}
+                                        {% include 'appendix_section.html' %}
+                                        {% endfor %}
 
                                         {# 报告尾部区域（可选） #}
                                         {% if report.meta.show_footer %}

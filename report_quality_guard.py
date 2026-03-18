@@ -25,6 +25,96 @@ def _as_float(value: Any) -> float:
         return 0.0
 
 
+def _appendix_keys() -> List[str]:
+    return [
+        "appendix_a_assets_income",
+        "appendix_b_income_loan",
+        "appendix_c_network_penetration",
+        "appendix_d_timeline_behavior",
+        "appendix_e_wallet_supplement",
+    ]
+
+
+def _formal_content_counts(appendix_key: str, view: Dict[str, Any]) -> Dict[str, int]:
+    summary = _as_dict(view.get("summary"))
+    formal = _as_dict(view.get("formal_chapter"))
+    if appendix_key == "appendix_a_assets_income":
+        return {
+            "persons_count": len(_as_list(formal.get("person_gap_items"))),
+            "families_count": len(_as_list(formal.get("family_financial_rollup"))),
+        }
+    if appendix_key == "appendix_b_income_loan":
+        return {
+            "issue_count": len(_as_list(formal.get("issue_cards"))),
+            "focus_entity_count": len(_as_list(formal.get("focus_entity_cards"))),
+        }
+    if appendix_key == "appendix_c_network_penetration":
+        return {
+            "priority_entity_count": len(_as_list(formal.get("priority_entities"))),
+            "network_issue_count": len(_as_list(formal.get("representative_issues"))),
+            "company_hotspot_count": len(_as_list(formal.get("company_hotspots"))),
+        }
+    if appendix_key == "appendix_d_timeline_behavior":
+        return {
+            "timeline_issue_count": len(_as_list(formal.get("timeline_cards"))),
+            "behavior_entity_count": len(_as_list(formal.get("behavior_cards"))),
+        }
+    if appendix_key == "appendix_e_wallet_supplement":
+        wallet_cards = _as_list(formal.get("wallet_cards"))
+        subject_count = max(
+            (int(_as_float(_as_dict(item).get("subject_count"))) for item in wallet_cards),
+            default=0,
+        )
+        transaction_count = max(
+            (int(_as_float(_as_dict(item).get("transaction_count"))) for item in wallet_cards),
+            default=0,
+        )
+        issue_count = max(
+            (int(_as_float(_as_dict(item).get("issue_count"))) for item in wallet_cards),
+            default=0,
+        )
+        return {
+            "subject_count": subject_count,
+            "transaction_count": transaction_count,
+            "issue_count": issue_count,
+        }
+    return {
+        key: int(_as_float(value))
+        for key, value in summary.items()
+        if isinstance(value, (int, float, str))
+    }
+
+
+def _is_high_risk_issue(issue: Dict[str, Any]) -> bool:
+    risk_level = str(issue.get("risk_level") or "").strip().lower()
+    severity = _as_float(issue.get("severity"))
+    return risk_level in {"high", "critical"} or severity >= 75
+
+
+def _contains_benign_high_risk_token(text: str) -> List[str]:
+    content = str(text or "").strip()
+    if not content:
+        return []
+    tokens = [
+        "工资",
+        "薪资",
+        "社保",
+        "理财赎回",
+        "理财",
+        "自我转账",
+        "自转",
+        "放心借",
+        "白条",
+        "消费金融",
+        "普通消费",
+        "餐饮",
+        "家庭往来",
+        "报销",
+        "网贷放款",
+    ]
+    return [token for token in tokens if token in content]
+
+
 def _read_text(path: Optional[str]) -> str:
     if not path or not os.path.exists(path):
         return ""
@@ -183,16 +273,20 @@ def run_report_quality_checks(
         )
 
     high_risk_without_evidence = []
+    high_risk_without_traceable_refs = []
     for issue in _as_list(report_package.get("issues")):
         if not isinstance(issue, dict):
             continue
-        risk_level = str(issue.get("risk_level") or "").strip().lower()
-        severity = _as_float(issue.get("severity"))
-        if risk_level not in {"high", "critical"} and severity < 75:
+        if not _is_high_risk_issue(issue):
             continue
-        if _as_list(issue.get("evidence_refs")) or _as_list(issue.get("why_flagged")):
+        issue_id = str(issue.get("issue_id") or "unknown").strip()
+        evidence_refs = _as_list(issue.get("evidence_refs"))
+        why_flagged = _as_list(issue.get("why_flagged"))
+        if not evidence_refs:
+            high_risk_without_traceable_refs.append(issue_id)
+        if evidence_refs and why_flagged:
             continue
-        high_risk_without_evidence.append(issue.get("issue_id"))
+        high_risk_without_evidence.append(issue_id)
     if high_risk_without_evidence:
         checks.append(
             _build_check(
@@ -208,6 +302,100 @@ def run_report_quality_checks(
                 "high_risk_without_minimum_evidence",
                 "pass",
                 "High-risk issues satisfy minimum evidence/rationale requirements.",
+            )
+        )
+
+    if high_risk_without_traceable_refs:
+        checks.append(
+            _build_check(
+                "high_risk_requires_traceable_evidence_refs",
+                "fail",
+                "High-risk issues must carry traceable evidence_refs instead of relying on narrative only.",
+                details={"issue_ids": high_risk_without_traceable_refs},
+            )
+        )
+    else:
+        checks.append(
+            _build_check(
+                "high_risk_requires_traceable_evidence_refs",
+                "pass",
+                "High-risk issues carry traceable evidence references.",
+            )
+        )
+
+    strong_wording_tokens = [
+        token
+        for token in (
+            "立即启动深入调查程序",
+            "明确认定",
+            "可以认定",
+            "高度怀疑",
+        )
+        if token in combined_text
+    ]
+    supported_high_risk_count = 0
+    for issue in _as_list(report_package.get("issues")):
+        if not isinstance(issue, dict) or not _is_high_risk_issue(issue):
+            continue
+        if _as_list(issue.get("evidence_refs")) and _as_list(issue.get("why_flagged")):
+            supported_high_risk_count += 1
+    if strong_wording_tokens and supported_high_risk_count < 2:
+        checks.append(
+            _build_check(
+                "strong_wording_requires_evidence_support",
+                "fail",
+                "Strong wording appears in report narratives, but the semantic layer does not yet provide enough evidence-supported high-risk issues.",
+                details={
+                    "matched_tokens": strong_wording_tokens,
+                    "supported_high_risk_issue_count": supported_high_risk_count,
+                },
+            )
+        )
+    else:
+        checks.append(
+            _build_check(
+                "strong_wording_requires_evidence_support",
+                "pass",
+                "Strong wording is absent or adequately supported by evidence-rich high-risk issues.",
+                details={
+                    "matched_tokens": strong_wording_tokens,
+                    "supported_high_risk_issue_count": supported_high_risk_count,
+                },
+            )
+        )
+
+    benign_high_risk_hits: List[str] = []
+    for issue in _as_list(report_package.get("issues")):
+        if not isinstance(issue, dict) or not _is_high_risk_issue(issue):
+            continue
+        issue_id = str(issue.get("issue_id") or "unknown").strip()
+        text = "\n".join(
+            [
+                str(issue.get("headline") or "").strip(),
+                str(issue.get("narrative") or "").strip(),
+                "；".join(str(item).strip() for item in _as_list(issue.get("why_flagged"))),
+            ]
+        )
+        matched_tokens = _contains_benign_high_risk_token(text)
+        if matched_tokens:
+            benign_high_risk_hits.append(
+                f"{issue_id}:{'/'.join(matched_tokens)}"
+            )
+    if benign_high_risk_hits:
+        checks.append(
+            _build_check(
+                "benign_scenario_promoted_to_high_risk",
+                "warn",
+                "Potentially benign scenarios were promoted into high-risk issue wording and should be manually reviewed.",
+                details={"issue_hits": benign_high_risk_hits},
+            )
+        )
+    else:
+        checks.append(
+            _build_check(
+                "benign_scenario_promoted_to_high_risk",
+                "pass",
+                "No obvious benign-scenario keywords were promoted into high-risk issue wording.",
             )
         )
 
@@ -252,6 +440,78 @@ def run_report_quality_checks(
                 "pass",
                 "Company-first appendix view is available for downstream report rendering.",
                 details={"companies_count": companies_count},
+            )
+        )
+
+    appendix_index = _as_dict(appendix_views.get("appendix_index"))
+    appendix_index_lookup = {
+        str(item.get("appendix_key") or "").strip(): item
+        for item in _as_list(appendix_index.get("items"))
+        if isinstance(item, dict) and str(item.get("appendix_key") or "").strip()
+    }
+    appendix_title_mismatches: List[str] = []
+    appendix_count_mismatches: List[str] = []
+    for appendix_key in _appendix_keys():
+        view = _as_dict(appendix_views.get(appendix_key))
+        title = str(view.get("title") or "").strip()
+        formal = _as_dict(view.get("formal_chapter"))
+        formal_title = str(formal.get("title") or "").strip()
+        index_item = _as_dict(appendix_index_lookup.get(appendix_key))
+        index_title = str(index_item.get("title") or "").strip()
+        if not formal_title:
+            appendix_title_mismatches.append(f"{appendix_key}:missing_formal_title")
+        elif title and formal_title != title:
+            appendix_title_mismatches.append(
+                f"{appendix_key}:formal_title={formal_title}|view_title={title}"
+            )
+        if title and index_title and index_title != title:
+            appendix_title_mismatches.append(
+                f"{appendix_key}:index_title={index_title}|view_title={title}"
+            )
+
+        summary = _as_dict(view.get("summary"))
+        for field, formal_count in _formal_content_counts(appendix_key, view).items():
+            summary_count = int(_as_float(summary.get(field)))
+            if formal_count > 0 and summary_count < formal_count:
+                appendix_count_mismatches.append(
+                    f"{appendix_key}:{field}:summary={summary_count}<formal={formal_count}"
+                )
+
+    if appendix_title_mismatches:
+        checks.append(
+            _build_check(
+                "appendix_formal_titles_consistent",
+                "fail",
+                "Appendix titles drift between summary/index views and formal chapters.",
+                details={"mismatches": appendix_title_mismatches},
+            )
+        )
+    else:
+        checks.append(
+            _build_check(
+                "appendix_formal_titles_consistent",
+                "pass",
+                "Appendix summary/index titles are aligned with formal chapter titles.",
+                details={"appendix_keys": _appendix_keys()},
+            )
+        )
+
+    if appendix_count_mismatches:
+        checks.append(
+            _build_check(
+                "appendix_formal_counts_coherent",
+                "fail",
+                "Appendix summary metrics are lower than the content exposed in formal chapters.",
+                details={"mismatches": appendix_count_mismatches},
+            )
+        )
+    else:
+        checks.append(
+            _build_check(
+                "appendix_formal_counts_coherent",
+                "pass",
+                "Appendix summary metrics remain coherent with formal chapter detail counts.",
+                details={"appendix_keys": _appendix_keys()},
             )
         )
 

@@ -11,6 +11,7 @@
 {% set company_issue_overview = appendix_views['company_issue_overview'] if appendix_views and appendix_views['company_issue_overview'] else {} %}
 {% set company_issue_items = company_issue_overview['items'] if company_issue_overview and company_issue_overview['items'] else [] %}
 {% set company_issue_summary = company_issue_overview['summary'] if company_issue_overview and company_issue_overview['summary'] else {} %}
+{% set semantic_qa_alerts = report.get('_semantic_qa_alerts', []) %}
 
 {% if priority_board %}
 <p><strong>优先核查对象：</strong>
@@ -72,4 +73,18 @@
 <p>统一语义层已将问题卡、优先级排序、对象卷宗和公司问题总览汇总到同一报告包，正式报告结论优先以该语义包为准。</p>
 {% elif report.conclusion.summary_narrative %}
 <p>{{ report.conclusion.summary_narrative }}</p>
+{% endif %}
+
+{% if semantic_qa_alerts %}
+<div style="background: #fff7e6; border-left: 4px solid #d48806; padding: 15px; margin: 20px 0; border-radius: 4px;">
+    <p style="margin-top: 0;"><strong>语义层QA提示：</strong></p>
+    <ol class="indent-list" style="margin-bottom: 0;">
+        {% for alert in semantic_qa_alerts %}
+        <li>
+            {{ alert.title }}{% if alert.summary %}：{{ alert.summary }}{% endif %}
+            {% if alert.action_hint %}。建议动作：{{ alert.action_hint }}{% endif %}
+        </li>
+        {% endfor %}
+    </ol>
+</div>
 {% endif %}

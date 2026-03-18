@@ -1,0 +1,240 @@
+<h1 class="section-title">{{ appendix_data.title }}</h1>
+
+{% if appendix_data.lead %}
+<p>{{ appendix_data.lead }}</p>
+{% endif %}
+
+{% if appendix_data.overview_metrics %}
+<div style="background: #f8fbff; border-left: 4px solid #2f6fab; padding: 15px; margin: 20px 0; border-radius: 4px;">
+    <h3 style="margin-top: 0; color: #204d74;">附录概览</h3>
+    <ul style="margin: 0; padding-left: 20px; line-height: 1.8;">
+        {% for metric in appendix_data.overview_metrics %}
+        <li>{{ metric.label }}：{{ metric.value }}</li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}
+
+{% if appendix_data.appendix_key == 'appendix_a_assets_income' %}
+{% if appendix_data.family_financial_rollup %}
+<h3>家庭收支与待补成员</h3>
+<ol class="indent-list">
+    {% for item in appendix_data.family_financial_rollup %}
+    <li>
+        {{ item.family_name }}
+        {% if item.risk_label %}（{{ item.risk_label }}）{% endif %}
+        ，成员：{{ item.member_count }}人
+        ，真实收入：{{ item.total_income|format_money }}
+        ，真实支出：{{ item.total_expense|format_money }}
+        ，收支差额：{{ item.income_gap|format_money }}
+        {% if item.pending_members %}
+        。待补成员：{{ item.pending_members | join('、') }}
+        {% endif %}
+        {% if item.key_issue_headlines %}
+        。重点问题：{{ item.key_issue_headlines | join('；') }}
+        {% endif %}
+    </li>
+    {% endfor %}
+</ol>
+{% endif %}
+
+{% if appendix_data.person_gap_items %}
+<h3>个人收支匹配重点</h3>
+<ol class="indent-list">
+    {% for item in appendix_data.person_gap_items %}
+    <li>
+        {{ item.entity_name }}
+        {% if item.risk_label %}（{{ item.risk_label }}）{% endif %}
+        {% if item.family_name %}，家庭：{{ item.family_name }}{% endif %}
+        ，真实收入：{{ item.real_income|format_money }}
+        ，真实支出：{{ item.real_expense|format_money }}
+        ，收支差额：{{ item.income_gap|format_money }}
+        {% if item.expense_income_ratio is not none %}
+        ，支出/收入：{{ '%.3f'|format(item.expense_income_ratio) }}
+        {% endif %}
+        {% if item.key_issue_headlines %}
+        。关联问题：{{ item.key_issue_headlines | join('；') }}
+        {% endif %}
+        {% if item.issue_refs %}
+        。问题卡：{{ item.issue_refs | join('、') }}
+        {% endif %}
+    </li>
+    {% endfor %}
+</ol>
+{% endif %}
+
+{% elif appendix_data.appendix_key == 'appendix_b_income_loan' %}
+{% if appendix_data.focus_entity_cards %}
+<h3>异常收入与借贷重点对象</h3>
+<ol class="indent-list">
+    {% for item in appendix_data.focus_entity_cards %}
+    <li>
+        {{ item.entity_name }}
+        {% if item.risk_label %}（{{ item.risk_label }}）{% endif %}
+        ，问题数量：{{ item.issue_count }}
+        ，最高优先级：{{ item.top_priority }}
+        {% if item.family_name %}，家庭：{{ item.family_name }}{% endif %}
+        {% if item.categories %}
+        。问题类型：{{ item.categories | join('、') }}
+        {% endif %}
+        {% if item.headlines %}
+        。代表问题：{{ item.headlines | join('；') }}
+        {% endif %}
+    </li>
+    {% endfor %}
+</ol>
+{% endif %}
+
+{% if appendix_data.issue_cards %}
+<h3>重点问题卡</h3>
+<ol class="indent-list">
+    {% for item in appendix_data.issue_cards %}
+    <li>
+        {{ item.headline }}
+        {% if item.category %}（{{ item.category }}）{% endif %}
+        {% if item.risk_label %}，{{ item.risk_label }}{% endif %}
+        {% if item.priority is not none %}，优先级：{{ item.priority }}{% endif %}
+        {% if item.entity_name %}。对象：{{ item.entity_name }}{% endif %}
+        {% if item.family_name %}，家庭：{{ item.family_name }}{% endif %}
+        {% if item.why_flagged %}
+        。触发依据：{{ item.why_flagged | join('；') }}
+        {% endif %}
+        {% if item.evidence_refs %}
+        。证据索引：{{ item.evidence_refs | join('、') }}
+        {% endif %}
+    </li>
+    {% endfor %}
+</ol>
+{% endif %}
+
+{% elif appendix_data.appendix_key == 'appendix_d_timeline_behavior' %}
+{% if appendix_data.timeline_cards %}
+<h3>时序重点问题</h3>
+<ol class="indent-list">
+    {% for item in appendix_data.timeline_cards %}
+    <li>
+        {{ item.headline }}
+        {% if item.category %}（{{ item.category }}）{% endif %}
+        {% if item.risk_label %}，{{ item.risk_label }}{% endif %}
+        {% if item.priority is not none %}，优先级：{{ item.priority }}{% endif %}
+        {% if item.entity_name or item.company_name %}
+        。对象范围：{{ item.entity_name }}{% if item.company_name %} | {{ item.company_name }}{% endif %}
+        {% endif %}
+    </li>
+    {% endfor %}
+</ol>
+{% endif %}
+
+{% if appendix_data.behavior_cards %}
+<h3>行为异常对象</h3>
+<ol class="indent-list">
+    {% for item in appendix_data.behavior_cards %}
+    <li>
+        {{ item.entity_name }}
+        {% if item.risk_label %}（{{ item.risk_label }}）{% endif %}
+        {% if item.behavioral_flags %}
+        。异常标签：{{ item.behavioral_flags | join('、') }}
+        {% endif %}
+        {% if item.issue_refs %}
+        。问题卡：{{ item.issue_refs | join('、') }}
+        {% endif %}
+    </li>
+    {% endfor %}
+</ol>
+{% endif %}
+
+{% elif appendix_data.appendix_key == 'appendix_e_wallet_supplement' %}
+{% if appendix_data.wallet_cards %}
+<h3>电子钱包补证概览</h3>
+<ol class="indent-list">
+    {% for item in appendix_data.wallet_cards %}
+    <li>
+        状态：{{ item.status }}
+        ，覆盖主体：{{ item.subject_count }}
+        ，摘要交易：{{ item.transaction_count }}
+        ，关联问题：{{ item.issue_count }}
+        {% if item.next_actions %}
+        。补证动作：{{ item.next_actions | join('；') }}
+        {% endif %}
+    </li>
+    {% endfor %}
+</ol>
+{% endif %}
+
+{% elif appendix_data.priority_entities %}
+<h3>网络重点对象</h3>
+<ol class="indent-list">
+    {% for item in appendix_data.priority_entities %}
+    <li>
+        {{ item.entity_name }}
+        {% if item.risk_label %}（{{ item.risk_label }}）{% endif %}
+        {% if item.entity_type %}，对象类型：{{ item.entity_type }}{% endif %}
+        {% if item.priority_score is not none %}，优先级：{{ item.priority_score }}{% endif %}
+        {% if item.family_name %}，家庭：{{ item.family_name }}{% endif %}
+        {% if item.top_reasons %}
+        。关注原因：{{ item.top_reasons | join('；') }}
+        {% endif %}
+        {% if item.issue_refs %}
+        。关联问题卡：{{ item.issue_refs | join('、') }}
+        {% endif %}
+    </li>
+    {% endfor %}
+</ol>
+{% endif %}
+
+{% if appendix_data.appendix_key != 'appendix_a_assets_income' and appendix_data.representative_issues %}
+<h3>代表性关系与穿透问题</h3>
+<ol class="indent-list">
+    {% for item in appendix_data.representative_issues %}
+    <li>
+        {{ item.headline }}
+        {% if item.risk_label %}（{{ item.risk_label }}）{% endif %}
+        {% if item.priority is not none %}，优先级：{{ item.priority }}{% endif %}
+        {% if item.scope_line %}。核查范围：{{ item.scope_line }}{% endif %}
+        {% if item.why_flagged %}
+        。触发依据：{{ item.why_flagged | join('；') }}
+        {% endif %}
+        {% if item.evidence_refs %}
+        。证据索引：{{ item.evidence_refs | join('、') }}
+        {% endif %}
+        {% if item.counter_indicators %}
+        。反证/限制：{{ item.counter_indicators | join('；') }}
+        {% endif %}
+    </li>
+    {% endfor %}
+</ol>
+{% endif %}
+
+{% if appendix_data.appendix_key != 'appendix_a_assets_income' and appendix_data.company_hotspots %}
+<h3>涉案公司网络热点</h3>
+<ol class="indent-list">
+    {% for item in appendix_data.company_hotspots %}
+    <li>
+        {{ item.entity_name }}
+        {% if item.risk_label %}（{{ item.risk_label }}）{% endif %}
+        {% if item.priority_score is not none %}，优先级：{{ item.priority_score }}{% endif %}
+        {% if item.role_tags %}
+        。角色标签：{{ item.role_tags | join('、') }}
+        {% endif %}
+        {% if item.related_persons %}
+        。关联人员：{{ item.related_persons | join('、') }}
+        {% endif %}
+        {% if item.summary %}
+        。{{ item.summary }}
+        {% endif %}
+        {% if item.key_issue_headlines %}
+        。重点问题：{{ item.key_issue_headlines | join('；') }}
+        {% endif %}
+    </li>
+    {% endfor %}
+</ol>
+{% endif %}
+
+{% if appendix_data.recommended_actions %}
+<h3>建议核查动作</h3>
+<ol class="indent-list">
+    {% for action in appendix_data.recommended_actions %}
+    <li>{{ action }}</li>
+    {% endfor %}
+</ol>
+{% endif %}

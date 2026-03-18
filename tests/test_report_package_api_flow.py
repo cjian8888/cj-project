@@ -144,6 +144,26 @@ def test_save_html_report_refreshes_report_package_artifacts():
         assert report_package["priority_board"][0]["entity_name"] == "张三"
         assert report_package["issues"][0]["category"] == "直接往来"
         assert (
+            report_package["appendix_views"]["appendix_a_assets_income"]["formal_chapter"]["title"]
+            == "附录A 资产与收入匹配"
+        )
+        assert (
+            report_package["appendix_views"]["appendix_b_income_loan"]["formal_chapter"]["title"]
+            == "附录B 异常收入与借贷"
+        )
+        assert (
+            report_package["appendix_views"]["appendix_d_timeline_behavior"]["formal_chapter"]["title"]
+            == "附录D 时序与行为模式"
+        )
+        assert (
+            report_package["appendix_views"]["appendix_e_wallet_supplement"]["formal_chapter"]["title"]
+            == "附录E 电子钱包补证"
+        )
+        assert (
+            report_package["appendix_views"]["appendix_c_network_penetration"]["formal_chapter"]["title"]
+            == "附录C 关系网络与资金穿透"
+        )
+        assert (
             report_package["appendix_views"]["appendix_index"]["items"][2]["title"]
             == "附录C 关系网络与资金穿透"
         )

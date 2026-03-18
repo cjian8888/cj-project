@@ -8,6 +8,19 @@ report.next_steps = [
 #}
 
 {% set semantic_steps = report.get('_semantic_next_steps', []) %}
+{% set semantic_qa_alerts = report.get('_semantic_qa_alerts', []) %}
+{% set semantic_recommendation_mode = report.get('_semantic_recommendation_mode', 'default') %}
+
+{% if semantic_recommendation_mode == 'cautious' %}
+<div style="background: #fffbe6; border-left: 4px solid #faad14; padding: 12px 15px; margin: 0 0 16px 0; border-radius: 4px;">
+    <strong>当前建议已收敛：</strong>
+    依据语义层QA结果，当前正式建议以补强证据、完善索引和进一步核实为主，暂不直接使用更强定性措辞。
+</div>
+{% elif semantic_qa_alerts %}
+<div style="background: #f6ffed; border-left: 4px solid #52c41a; padding: 12px 15px; margin: 0 0 16px 0; border-radius: 4px;">
+    当前下一步计划已结合语义层QA结果生成，可优先按证据补强与问题复核路径执行。
+</div>
+{% endif %}
 
 {% if semantic_steps and semantic_steps|length > 0 %}
 <ol class="indent-list">
