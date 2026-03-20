@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
     Activity,
     AlertTriangle,
@@ -118,7 +118,7 @@ function TabButton({ label, icon: Icon, active, onClick }: TabButtonProps) {
         flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium
         transition-all duration-200
         ${active
-                    ? 'bg-blue-500/20 text-blue-400 shadow-lg shadow-blue-500/10'
+                    ? 'bg-blue-900/80 text-blue-50 ring-1 ring-blue-300/30 shadow-lg shadow-blue-950/20'
                     : 'theme-text-muted hover:theme-text-secondary hover:theme-bg-hover'
                 }
       `}
@@ -156,6 +156,122 @@ function SemanticGraphActionButton({
         </button>
     );
 }
+
+interface SemanticLinkActionButtonProps {
+    onClick: () => void;
+    label: string;
+    icon: React.ElementType;
+    disabled?: boolean;
+    variant?: 'risk' | 'report';
+}
+
+function SemanticLinkActionButton({
+    onClick,
+    label,
+    icon: Icon,
+    disabled = false,
+    variant = 'report',
+}: SemanticLinkActionButtonProps) {
+    const variantClassName = variant === 'risk'
+        ? 'border-amber-500/20 text-amber-300 bg-amber-500/10 hover:bg-amber-500/20'
+        : 'border-emerald-500/20 text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20';
+
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            disabled={disabled}
+            className={`
+                inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg
+                text-xs font-medium border transition-colors
+                ${variantClassName}
+                disabled:opacity-50 disabled:cursor-not-allowed
+            `}
+        >
+            <Icon className="w-3.5 h-3.5" />
+            {label}
+        </button>
+    );
+}
+
+interface SectionToggleButtonProps {
+    expanded: boolean;
+    fullCount: number;
+    previewCount: number;
+    unitLabel: string;
+    onClick: () => void;
+}
+
+function SectionToggleButton({
+    expanded,
+    fullCount,
+    previewCount,
+    unitLabel,
+    onClick,
+}: SectionToggleButtonProps) {
+    if (fullCount <= previewCount) {
+        return null;
+    }
+
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            className="
+                inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg
+                text-xs font-medium border theme-border theme-text-muted
+                hover:theme-text hover:theme-border-strong hover:bg-white/5 transition-colors
+            "
+        >
+            {expanded ? '收起' : `查看全部 ${fullCount} ${unitLabel}`}
+        </button>
+    );
+}
+
+const getNormalizedIssueId = (issue?: Pick<ReportIssue, 'issue_id'> | null): string => String(issue?.issue_id || '').trim();
+const REPORT_PRIORITY_PREVIEW_COUNT = 4;
+const REPORT_ISSUE_PREVIEW_COUNT = 4;
+const REPORT_DOSSIER_PREVIEW_COUNT = 4;
+
+const buildIssueLookup = (issues: ReportIssue[]): Record<string, ReportIssue> => {
+    const lookup: Record<string, ReportIssue> = {};
+    issues.forEach((issue) => {
+        const issueId = getNormalizedIssueId(issue);
+        if (issueId && !lookup[issueId]) {
+            lookup[issueId] = issue;
+        }
+    });
+    return lookup;
+};
+
+const getPriorityFamilyContextLabel = (item: ReportPriorityBoardItem): string => {
+    const entityName = String(item.entity_name || '').trim();
+    const familyName = String(item.family_name || '').trim();
+    if (!familyName || familyName === entityName || item.entity_type === 'family') {
+        return '';
+    }
+    return ` · 家庭归属：${familyName}`;
+};
+
+const withFocusedIssue = (
+    issues: ReportIssue[],
+    focusedIssueId: string,
+    lookup: Record<string, ReportIssue>,
+    limit?: number,
+): ReportIssue[] => {
+    if (!focusedIssueId) {
+        return typeof limit === 'number' ? issues.slice(0, limit) : issues;
+    }
+
+    const targetIssue = lookup[focusedIssueId];
+    const baseIssues = typeof limit === 'number' ? issues.slice(0, limit) : [...issues];
+    if (!targetIssue || baseIssues.some((issue) => getNormalizedIssueId(issue) === focusedIssueId)) {
+        return baseIssues;
+    }
+
+    const nextLimit = typeof limit === 'number' ? Math.max(limit, 1) : baseIssues.length + 1;
+    return [targetIssue, ...baseIssues].slice(0, nextLimit);
+};
 
 // ==================== Overview Tab ====================
 
@@ -1227,7 +1343,13 @@ function OverviewTab() {
                                     </p>
                                 </div>
                             </div>
-                            <button onClick={handleCloseModal} className="p-2 theme-hover rounded-lg transition-colors">
+                            <button
+                                type="button"
+                                onClick={handleCloseModal}
+                                aria-label="关闭明细弹窗"
+                                title="关闭明细弹窗"
+                                className="p-2 theme-hover rounded-lg transition-colors"
+                            >
                                 <X className="w-5 h-5 theme-text-muted" />
                             </button>
                         </div>
@@ -2071,9 +2193,11 @@ function OverviewTab() {
 // ==================== Risk Intel Tab ====================
 
 function RiskIntelTab() {
-    const { data, navigateToSemanticTarget } = useApp();
+    const { data, ui, navigateToSemanticTarget, clearSemanticNavigation } = useApp();
     const [filter, setFilter] = useState<'all' | RiskActivityType>('all');
     const [semanticFilter, setSemanticFilter] = useState<'all' | 'high' | 'company' | 'family' | 'person'>('all');
+    const [focusedIssueId, setFocusedIssueId] = useState('');
+    const issueCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
     const reportPackage = data.reportPackage as ReportPackage | null;
     const mainReportView = reportPackage?.main_report_view || null;
 
@@ -2132,6 +2256,7 @@ function RiskIntelTab() {
                     riskLabel: String(riskOverview.risk_label || '').trim(),
                     priorityScore: Number(riskOverview.priority_score || 0),
                     issueCount: Number(riskOverview.issue_count || 0),
+                    keyIssueCount: keyIssueCards.length,
                     transactionCount: Number(dossier.transaction_count || 0),
                     totalIncome: Number(dossier.total_income || 0),
                     totalExpense: Number(dossier.total_expense || 0),
@@ -2252,6 +2377,12 @@ function RiskIntelTab() {
         return filtered.slice(0, 12);
     }, [semanticFilter, semanticIssueCatalog]);
 
+    const semanticIssueLookup = useMemo(() => buildIssueLookup(semanticIssueCatalog), [semanticIssueCatalog]);
+    const displayedSemanticIssues = useMemo(
+        () => withFocusedIssue(filteredSemanticIssues, focusedIssueId, semanticIssueLookup, 12),
+        [filteredSemanticIssues, focusedIssueId, semanticIssueLookup],
+    );
+
     const getTypeLabel = (type: RiskActivityType) => {
         switch (type) {
             case 'direct': return '直接转账';
@@ -2318,17 +2449,49 @@ function RiskIntelTab() {
         ).trim();
     };
 
-    const navigateEntityToGraph = (entityName: string, source: string) => {
+    const navigateEntityToGraph = (entityName: string, source: string, issueId?: string) => {
         const normalizedEntityName = String(entityName || '').trim();
-        if (!normalizedEntityName) {
+        const normalizedIssueId = String(issueId || '').trim();
+        if (!normalizedEntityName && !normalizedIssueId) {
             return;
         }
         navigateToSemanticTarget({
             tab: 'graph',
-            entityName: normalizedEntityName,
+            entityName: normalizedEntityName || undefined,
+            issueId: normalizedIssueId || undefined,
             source,
         });
     };
+
+    useEffect(() => {
+        const pendingTarget = ui.semanticNavigation;
+        if (ui.activeTab !== 'risk' || pendingTarget?.tab !== 'risk') {
+            return;
+        }
+
+        const targetIssueId = String(pendingTarget.issueId || '').trim();
+        if (!targetIssueId) {
+            return;
+        }
+
+        let frameId = 0;
+        let nestedFrameId = 0;
+        setFocusedIssueId(targetIssueId);
+        frameId = window.requestAnimationFrame(() => {
+            nestedFrameId = window.requestAnimationFrame(() => {
+                issueCardRefs.current[targetIssueId]?.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'center',
+                });
+            });
+        });
+        clearSemanticNavigation();
+
+        return () => {
+            window.cancelAnimationFrame(frameId);
+            window.cancelAnimationFrame(nestedFrameId);
+        };
+    }, [clearSemanticNavigation, ui.activeTab, ui.semanticNavigation]);
 
     return (
         <div className="space-y-6">
@@ -2388,7 +2551,7 @@ function RiskIntelTab() {
                                                     <p className="text-sm font-semibold theme-text-secondary">{item.entity_name}</p>
                                                     <p className="text-xs theme-text-dim mt-1">
                                                         {getPriorityEntityTypeLabel(item)}
-                                                        {item.family_name ? ` · ${item.family_name}` : ''}
+                                                        {getPriorityFamilyContextLabel(item)}
                                                     </p>
                                                 </div>
                                                 <div className="text-right">
@@ -2475,10 +2638,25 @@ function RiskIntelTab() {
                                         ))}
                                     </div>
 
-                                    {filteredSemanticIssues.map((issue, index) => {
+                                    {displayedSemanticIssues.map((issue, index) => {
+                                        const issueId = getNormalizedIssueId(issue);
                                         const navigationEntity = getIssueNavigationEntity(issue);
+                                        const isFocusedIssue = Boolean(issueId && issueId === focusedIssueId);
                                         return (
-                                            <div key={`${issue.issue_id || issue.headline || 'issue'}-${index}`} className="rounded-xl border theme-border bg-gray-900/30 p-4 space-y-3">
+                                            <div
+                                                key={`${issue.issue_id || issue.headline || 'issue'}-${index}`}
+                                                ref={(node) => {
+                                                    if (issueId) {
+                                                        issueCardRefs.current[issueId] = node;
+                                                    }
+                                                }}
+                                                className={`
+                                                    rounded-xl border p-4 space-y-3 transition-all duration-200
+                                                    ${isFocusedIssue
+                                                        ? 'border-cyan-400/60 bg-cyan-500/10 shadow-lg shadow-cyan-500/10'
+                                                        : 'theme-border bg-gray-900/30'}
+                                                `}
+                                            >
                                             <div className="flex items-start justify-between gap-3">
                                                 <div className="space-y-1">
                                                     <div className="flex items-center gap-2 flex-wrap">
@@ -2565,20 +2743,33 @@ function RiskIntelTab() {
                                                     )}
                                                 </div>
                                             </div>
-                                            <div className="flex justify-end">
+                                            <div className="flex justify-end gap-2 flex-wrap">
+                                                <SemanticLinkActionButton
+                                                    icon={FileText}
+                                                    label="查看报告卡"
+                                                    variant="report"
+                                                    onClick={() => navigateToSemanticTarget({
+                                                        tab: 'report',
+                                                        issueId,
+                                                        entityName: navigationEntity || undefined,
+                                                        source: `risk:issue:${issueId || issue.headline || index}`,
+                                                    })}
+                                                    disabled={!issueId}
+                                                />
                                                 <SemanticGraphActionButton
                                                     onClick={() => navigateEntityToGraph(
                                                         navigationEntity,
-                                                        `risk:issue:${issue.issue_id || issue.headline || index}`,
+                                                        `risk:issue:${issueId || issue.headline || index}`,
+                                                        issueId,
                                                     )}
-                                                    disabled={!navigationEntity}
+                                                    disabled={!navigationEntity && !issueId}
                                                 />
                                             </div>
                                             </div>
                                         );
                                     })}
 
-                                    {filteredSemanticIssues.length === 0 ? (
+                                    {displayedSemanticIssues.length === 0 ? (
                                         <EmptyState type="data" message="当前筛选条件下暂无统一问题卡" />
                                     ) : null}
                                 </div>
@@ -2640,9 +2831,17 @@ function RiskIntelTab() {
                                             <div className="text-xs theme-text-dim">暂无公司摘要</div>
                                         )}
 
+                                        {company.keyIssueCount > 0 && (
+                                            <div className="flex flex-wrap gap-1.5">
+                                                <span className="text-[10px] px-2 py-0.5 rounded-full border border-amber-500/20 text-amber-300 bg-amber-500/10">
+                                                    代表问题 {company.keyIssueCount} 项
+                                                </span>
+                                            </div>
+                                        )}
+
                                         <div className="grid grid-cols-2 gap-2">
                                             <div className="rounded-lg bg-black/15 px-3 py-2">
-                                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">问题数</div>
+                                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">全量问题数</div>
                                                 <div className="mt-1 text-sm font-semibold text-white">{company.issueCount}</div>
                                             </div>
                                             <div className="rounded-lg bg-black/15 px-3 py-2">
@@ -2853,9 +3052,28 @@ interface ReportSemanticPanelProps {
     icon: React.ElementType;
     section?: ReportSemanticSection;
     accentClass: string;
+    actions?: Array<{
+        label: string;
+        icon: React.ElementType;
+        onClick: () => void;
+        disabled?: boolean;
+        variant?: 'primary' | 'secondary';
+    }>;
+    onHighlightSelect?: (item: ReportSemanticSection['highlights'][number]) => void;
+    highlightActionLabel?: string;
+    highlightActionIcon?: React.ElementType;
 }
 
-function ReportSemanticPanel({ title, icon: Icon, section, accentClass }: ReportSemanticPanelProps) {
+function ReportSemanticPanel({
+    title,
+    icon: Icon,
+    section,
+    accentClass,
+    actions = [],
+    onHighlightSelect,
+    highlightActionLabel = '查看详情',
+    highlightActionIcon: HighlightActionIcon = ChevronRight,
+}: ReportSemanticPanelProps) {
     if (!hasSemanticSectionContent(section)) {
         return null;
     }
@@ -2868,7 +3086,6 @@ function ReportSemanticPanel({ title, icon: Icon, section, accentClass }: Report
                 </div>
                 <div>
                     <h4 className="font-semibold theme-text-secondary">{title}</h4>
-                    <p className="text-xs theme-text-dim">报告中心语义导航摘要</p>
                 </div>
             </div>
 
@@ -2889,18 +3106,64 @@ function ReportSemanticPanel({ title, icon: Icon, section, accentClass }: Report
                 </div>
             ) : null}
 
+            {actions.length ? (
+                <div className="flex flex-wrap gap-2">
+                    {actions.map((action) => {
+                        const ActionIcon = action.icon;
+                        return (
+                            <button
+                                key={`${title}-${action.label}`}
+                                type="button"
+                                onClick={action.onClick}
+                                disabled={action.disabled}
+                                className={`
+                                    inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg
+                                    text-xs font-medium border transition-colors
+                                    ${action.variant === 'secondary'
+                                        ? 'theme-border theme-text-muted hover:theme-text hover:theme-border-strong hover:bg-white/5'
+                                        : 'border-cyan-500/20 text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20'}
+                                    disabled:opacity-50 disabled:cursor-not-allowed
+                                `}
+                            >
+                                <ActionIcon className="w-3.5 h-3.5" />
+                                {action.label}
+                            </button>
+                        );
+                    })}
+                </div>
+            ) : null}
+
             {section?.highlights?.length ? (
                 <div className="space-y-2">
                     {section.highlights.slice(0, 3).map((item) => (
-                        <div
+                        <button
                             key={`${title}-${item.title}`}
-                            className="rounded-xl border theme-border bg-black/10 px-3 py-2"
+                            type="button"
+                            onClick={() => onHighlightSelect?.(item)}
+                            disabled={!onHighlightSelect}
+                            className={`
+                                w-full text-left rounded-xl border px-3 py-2 transition-colors
+                                ${onHighlightSelect
+                                    ? 'theme-border bg-black/10 hover:theme-border-strong hover:bg-white/5'
+                                    : 'theme-border bg-black/10'}
+                                disabled:cursor-default
+                            `}
                         >
-                            <p className="text-sm font-medium theme-text-secondary">{item.title}</p>
-                            {item.summary ? (
-                                <p className="text-xs theme-text-dim mt-1 leading-relaxed">{item.summary}</p>
-                            ) : null}
-                        </div>
+                            <div className="flex items-start justify-between gap-3">
+                                <div>
+                                    <p className="text-sm font-medium theme-text-secondary">{item.title}</p>
+                                    {item.summary ? (
+                                        <p className="text-xs theme-text-dim mt-1 leading-relaxed">{item.summary}</p>
+                                    ) : null}
+                                </div>
+                                {onHighlightSelect ? (
+                                    <span className="inline-flex items-center gap-1 text-[11px] text-cyan-300 flex-shrink-0 mt-0.5">
+                                        <HighlightActionIcon className="w-3 h-3" />
+                                        {highlightActionLabel}
+                                    </span>
+                                ) : null}
+                            </div>
+                        </button>
                     ))}
                 </div>
             ) : null}
@@ -2908,25 +3171,519 @@ function ReportSemanticPanel({ title, icon: Icon, section, accentClass }: Report
     );
 }
 
+interface ReportCenterDossierCardData {
+    entityName: string;
+    dossierType: 'family' | 'person' | 'company';
+    summary: string;
+    explanationSummary?: string;
+    riskLevel: string;
+    priorityScore: number;
+    issueCount: number;
+    keyIssueCount: number;
+    transactionCount: number;
+    issueRefs: string[];
+}
+
+function getDossierExplanationSummary(
+    item: Record<string, unknown>,
+    dossierType: ReportCenterDossierCardData['dossierType'],
+): string {
+    if (dossierType === 'person') {
+        const explanation = ((item.financial_gap_explanation as Record<string, unknown> | undefined) || {});
+        return String(explanation.summary || '').trim();
+    }
+    if (dossierType === 'family') {
+        const explanation = ((item.family_financial_explanation as Record<string, unknown> | undefined) || {});
+        return String(explanation.summary || '').trim();
+    }
+    if (dossierType === 'company') {
+        const explanation = ((item.company_business_explanation as Record<string, unknown> | undefined) || {});
+        return String(explanation.summary || '').trim();
+    }
+    return '';
+}
+
+interface PreviewFileState {
+    name: string;
+    content: string;
+    type: 'text' | 'html';
+    report?: Report | null;
+}
+
+interface PreviewSummaryMetaItem {
+    label: string;
+    value: string;
+}
+
+interface PreviewSummaryPriorityItem {
+    name: string;
+    riskLevel: string;
+    riskLabel: string;
+    reason?: string;
+    issueRefs: string[];
+}
+
+interface PreviewSummaryIssueItem {
+    issueId: string;
+    headline: string;
+    entityName: string;
+    riskLevel: string;
+    riskLabel: string;
+    whyFlagged: string[];
+    evidenceRefs: string[];
+}
+
+interface PreviewSummaryHighlight {
+    title: string;
+    summary?: string;
+}
+
+interface ReportArtifactPreviewSummary {
+    kind: 'artifact' | 'report_package' | 'qa_check';
+    title?: string;
+    summary?: string;
+    badges: string[];
+    metadata: PreviewSummaryMetaItem[];
+    priorityItems: PreviewSummaryPriorityItem[];
+    issues: PreviewSummaryIssueItem[];
+    qaHighlights: PreviewSummaryHighlight[];
+}
+
+const REPORT_PREVIEW_DATETIME_PATTERN = /(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?/g;
+
+function asPreviewRecord(value: unknown): Record<string, unknown> {
+    return value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : {};
+}
+
+function asPreviewList<T = unknown>(value: unknown): T[] {
+    return Array.isArray(value) ? value as T[] : [];
+}
+
+function humanizePreviewText(value: unknown): string {
+    const text = String(value ?? '').trim();
+    if (!text) {
+        return '';
+    }
+    return text.replace(REPORT_PREVIEW_DATETIME_PATTERN, (_match, datePart: string, timePart: string) => (
+        timePart === '00:00:00' ? datePart : `${datePart} ${timePart}`
+    ));
+}
+
+function formatPreviewTimestamp(value: unknown): string {
+    return humanizePreviewText(value) || '--';
+}
+
+function uniquePreviewTexts(values: unknown[], limit?: number): string[] {
+    const results: string[] = [];
+    const seen = new Set<string>();
+
+    values.forEach((value) => {
+        const text = humanizePreviewText(value);
+        if (!text || seen.has(text)) {
+            return;
+        }
+        seen.add(text);
+        results.push(text);
+    });
+
+    return typeof limit === 'number' ? results.slice(0, limit) : results;
+}
+
+function safePreviewNumber(value: unknown, fallback: number = 0): number {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function tryParsePreviewJson(content: string): Record<string, unknown> | null {
+    try {
+        const parsed = JSON.parse(content);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+            ? parsed as Record<string, unknown>
+            : null;
+    } catch {
+        return null;
+    }
+}
+
+function toPreviewHighlights(items: unknown[]): PreviewSummaryHighlight[] {
+    return items
+        .map((item) => {
+            const record = asPreviewRecord(item);
+            const title = humanizePreviewText(record.title);
+            if (!title) {
+                return null;
+            }
+            const summary = humanizePreviewText(record.summary);
+            return {
+                title,
+                summary: summary || undefined,
+            };
+        })
+        .filter((item): item is PreviewSummaryHighlight => Boolean(item));
+}
+
+function buildArtifactPreviewSummary(report?: Report | null): ReportArtifactPreviewSummary | null {
+    const title = humanizePreviewText(report?.semanticTitle);
+    const summary = humanizePreviewText(report?.semanticSummary);
+    const badges = uniquePreviewTexts(report?.semanticBadges || [], 4);
+
+    if (!title && !summary && !badges.length) {
+        return null;
+    }
+
+    return {
+        kind: 'artifact',
+        title,
+        summary,
+        badges,
+        metadata: [],
+        priorityItems: [],
+        issues: [],
+        qaHighlights: [],
+    };
+}
+
+function buildReportPackagePreviewSummary(
+    payload: Record<string, unknown>,
+    report: Report | null | undefined,
+    semanticOverview: ReportSemanticOverview | null,
+): ReportArtifactPreviewSummary {
+    const meta = asPreviewRecord(payload.meta);
+    const mainReportView = asPreviewRecord(payload.main_report_view);
+    const qaChecks = asPreviewRecord(payload.qa_checks);
+    const qaSummary = asPreviewRecord(qaChecks.summary);
+    const qaMeta = asPreviewRecord(qaChecks.meta);
+    const artifactMeta = asPreviewRecord(payload.artifact_meta);
+    const issueSource = asPreviewList<Record<string, unknown>>(mainReportView.issues).length > 0
+        ? asPreviewList<Record<string, unknown>>(mainReportView.issues)
+        : asPreviewList<Record<string, unknown>>(payload.issues);
+    const issueCount = safePreviewNumber(mainReportView.issue_count, issueSource.length);
+    const highRiskIssueCount = safePreviewNumber(
+        mainReportView.high_risk_issue_count,
+        issueSource.filter((item) => ['high', 'critical'].includes(String(item.risk_level || '').trim().toLowerCase())).length,
+    );
+    const companyIssueCount = safePreviewNumber(mainReportView.company_issue_count);
+    const highRiskCompanyCount = safePreviewNumber(mainReportView.high_risk_company_count);
+    const traceableHighRiskCount = issueSource.filter((item) => {
+        const riskLevel = String(item.risk_level || '').trim().toLowerCase();
+        const evidenceRefs = uniquePreviewTexts(asPreviewList(item.evidence_refs));
+        return ['high', 'critical'].includes(riskLevel) && evidenceRefs.length > 0;
+    }).length;
+
+    const priorityItems = asPreviewList<Record<string, unknown>>(mainReportView.top_priority_entities)
+        .slice(0, 3)
+        .map((item) => ({
+            name: humanizePreviewText(item.entity_name),
+            riskLevel: String(item.risk_level || '').trim(),
+            riskLabel: humanizePreviewText(item.risk_label) || formatRiskLevel(String(item.risk_level || '')),
+            reason: uniquePreviewTexts(asPreviewList(item.top_reasons), 2).join('；') || undefined,
+            issueRefs: uniquePreviewTexts(asPreviewList(item.issue_refs), 4),
+        }))
+        .filter((item) => item.name);
+
+    const issues = issueSource
+        .slice(0, 3)
+        .map((item) => ({
+            issueId: humanizePreviewText(item.issue_id),
+            headline: humanizePreviewText(item.headline) || humanizePreviewText(item.narrative),
+            entityName: humanizePreviewText(item.entity_name || item.company_name || item.family_name),
+            riskLevel: String(item.risk_level || '').trim(),
+            riskLabel: humanizePreviewText(item.risk_label) || formatRiskLevel(String(item.risk_level || '')),
+            whyFlagged: uniquePreviewTexts(asPreviewList(item.why_flagged), 2),
+            evidenceRefs: uniquePreviewTexts(asPreviewList(item.evidence_refs), 2),
+        }))
+        .filter((item) => item.headline);
+
+    const badges = uniquePreviewTexts([
+        ...(report?.semanticBadges || []),
+        issueCount ? `重点问题 ${issueCount} 项` : '',
+        highRiskIssueCount ? `高风险 ${highRiskIssueCount} 项` : '',
+        companyIssueCount ? `涉案公司 ${companyIssueCount} 家` : '',
+        highRiskCompanyCount ? `高风险公司 ${highRiskCompanyCount} 家` : '',
+        safePreviewNumber(qaSummary.total) ? `QA ${safePreviewNumber(qaSummary.pass)}/${safePreviewNumber(qaSummary.total)} 通过` : '',
+    ], 6);
+
+    const metadata = [
+        { label: '案件名称', value: humanizePreviewText(meta.case_name) },
+        { label: '报告批次', value: formatPreviewTimestamp(artifactMeta.source_report_generated_at || meta.generated_at) },
+        { label: '语义包批次', value: formatPreviewTimestamp(artifactMeta.package_generated_at) },
+        { label: '缓存版本', value: humanizePreviewText(meta.cache_version) || '--' },
+        { label: 'QA规则版本', value: humanizePreviewText(artifactMeta.qa_guard_version || qaMeta.qa_guard_version) || '--' },
+        {
+            label: '高风险可追溯',
+            value: highRiskIssueCount > 0
+                ? `${traceableHighRiskCount}/${highRiskIssueCount} 项附证据索引`
+                : '当前无高风险问题',
+        },
+    ].filter((item) => item.value && item.value !== '--');
+
+    return {
+        kind: 'report_package',
+        title: humanizePreviewText(report?.semanticTitle) || '统一报告语义包',
+        summary: humanizePreviewText(mainReportView.summary_narrative) || humanizePreviewText(report?.semanticSummary),
+        badges,
+        metadata,
+        priorityItems,
+        issues,
+        qaHighlights: toPreviewHighlights(semanticOverview?.qa?.highlights || []),
+    };
+}
+
+function buildQaPreviewSummary(
+    report: Report | null | undefined,
+    semanticOverview: ReportSemanticOverview | null,
+    reportPackage: ReportPackage | null,
+    payload?: Record<string, unknown> | null,
+): ReportArtifactPreviewSummary {
+    const sourceSummary = payload
+        ? asPreviewRecord(payload.summary)
+        : asPreviewRecord(reportPackage?.qa_checks?.summary);
+    const sourceMeta = payload
+        ? asPreviewRecord(payload.meta)
+        : asPreviewRecord(reportPackage?.qa_checks?.meta);
+    const qaSection = semanticOverview?.qa;
+    const failCount = safePreviewNumber(sourceSummary.fail);
+    const warnCount = safePreviewNumber(sourceSummary.warn);
+    const passCount = safePreviewNumber(sourceSummary.pass);
+    const totalCount = safePreviewNumber(sourceSummary.total);
+
+    const metadata = [
+        { label: '检查批次', value: formatPreviewTimestamp(sourceMeta.generated_at) },
+        { label: 'QA规则版本', value: humanizePreviewText(sourceMeta.qa_guard_version) || '--' },
+        {
+            label: '检查分布',
+            value: totalCount
+                ? `通过 ${passCount} / 提示 ${warnCount} / 阻断 ${failCount}`
+                : '--',
+        },
+    ].filter((item) => item.value && item.value !== '--');
+
+    return {
+        kind: 'qa_check',
+        title: humanizePreviewText(report?.semanticTitle) || 'QA 一致性检查',
+        summary: humanizePreviewText(qaSection?.headline) || humanizePreviewText(report?.semanticSummary),
+        badges: uniquePreviewTexts([
+            ...(report?.semanticBadges || []),
+            ...(qaSection?.badges || []),
+        ], 6),
+        metadata,
+        priorityItems: [],
+        issues: [],
+        qaHighlights: toPreviewHighlights(qaSection?.highlights || []),
+    };
+}
+
+function PreviewSummaryPanel({ summary }: { summary: ReportArtifactPreviewSummary }) {
+    const kindLabel = summary.kind === 'report_package'
+        ? '语义包摘要'
+        : summary.kind === 'qa_check'
+            ? 'QA 摘要'
+            : '文件摘要';
+
+    return (
+        <div className="border-b theme-border theme-bg-muted/40 p-4 space-y-4">
+            <div className="space-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                    {summary.title ? (
+                        <p className="text-[11px] font-medium tracking-[0.2em] text-cyan-300 uppercase">
+                            {summary.title}
+                        </p>
+                    ) : null}
+                    <span className="text-[10px] px-2 py-0.5 rounded-full border theme-border theme-text-dim">
+                        {kindLabel}
+                    </span>
+                </div>
+                {summary.summary ? (
+                    <p className="text-sm theme-text leading-relaxed">{summary.summary}</p>
+                ) : null}
+                {summary.badges.length ? (
+                    <div className="flex flex-wrap gap-2">
+                        {summary.badges.map((badge) => (
+                            <span
+                                key={`${summary.kind}-${badge}`}
+                                className="text-[11px] px-2.5 py-1 rounded-full border border-cyan-500/20 text-cyan-300 bg-cyan-500/10"
+                            >
+                                {badge}
+                            </span>
+                        ))}
+                    </div>
+                ) : null}
+            </div>
+
+            {summary.metadata.length ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                    {summary.metadata.map((item) => (
+                        <div
+                            key={`${summary.kind}-${item.label}`}
+                            className="rounded-xl border theme-border bg-black/10 px-3 py-2"
+                        >
+                            <div className="text-[10px] uppercase tracking-wide theme-text-dim">{item.label}</div>
+                            <div className="mt-1 text-sm font-medium theme-text-secondary">{item.value}</div>
+                        </div>
+                    ))}
+                </div>
+            ) : null}
+
+            {summary.priorityItems.length ? (
+                <div className="space-y-2">
+                    <h4 className="text-sm font-semibold theme-text-secondary">优先核查对象</h4>
+                    <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
+                        {summary.priorityItems.map((item) => (
+                            <div
+                                key={`${summary.kind}-${item.name}`}
+                                className="rounded-xl border theme-border bg-black/10 p-3 space-y-2"
+                            >
+                                <div className="flex items-start justify-between gap-2">
+                                    <p className="text-sm font-medium theme-text-secondary">{item.name}</p>
+                                    <span className={getRiskLevelBadgeStyle(item.riskLabel || item.riskLevel)}>
+                                        {item.riskLabel || formatRiskLevel(item.riskLevel)}
+                                    </span>
+                                </div>
+                                {item.reason ? (
+                                    <p className="text-xs theme-text-muted leading-relaxed">{item.reason}</p>
+                                ) : null}
+                                {item.issueRefs.length ? (
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {item.issueRefs.map((ref) => (
+                                            <span
+                                                key={`${item.name}-${ref}`}
+                                                className="text-[10px] px-2 py-0.5 rounded-full border border-emerald-500/20 text-emerald-300 bg-emerald-500/10 font-mono"
+                                            >
+                                                {ref}
+                                            </span>
+                                        ))}
+                                    </div>
+                                ) : null}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            ) : null}
+
+            {summary.issues.length ? (
+                <div className="space-y-2">
+                    <h4 className="text-sm font-semibold theme-text-secondary">问题卡追溯摘录</h4>
+                    <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
+                        {summary.issues.map((item) => (
+                            <div
+                                key={`${summary.kind}-${item.issueId || item.headline}`}
+                                className="rounded-xl border theme-border bg-black/10 p-3 space-y-2"
+                            >
+                                <div className="flex items-start justify-between gap-2">
+                                    <div>
+                                        <p className="text-sm font-medium theme-text-secondary">{item.headline}</p>
+                                        <p className="text-[11px] theme-text-dim mt-1">
+                                            {[item.entityName, item.issueId].filter(Boolean).join(' · ')}
+                                        </p>
+                                    </div>
+                                    <span className={getRiskLevelBadgeStyle(item.riskLabel || item.riskLevel)}>
+                                        {item.riskLabel || formatRiskLevel(item.riskLevel)}
+                                    </span>
+                                </div>
+                                {item.whyFlagged.length ? (
+                                    <div className="space-y-1">
+                                        {item.whyFlagged.map((reason) => (
+                                            <p key={`${item.issueId}-${reason}`} className="text-xs theme-text-muted leading-relaxed">
+                                                • {reason}
+                                            </p>
+                                        ))}
+                                    </div>
+                                ) : null}
+                                {item.evidenceRefs.length ? (
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {item.evidenceRefs.map((ref) => (
+                                            <span
+                                                key={`${item.issueId}-${ref}`}
+                                                className="text-[10px] px-2 py-0.5 rounded-full border border-amber-500/20 text-amber-300 bg-amber-500/10"
+                                            >
+                                                {ref}
+                                            </span>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <p className="text-[11px] theme-text-dim">当前摘录未附证据索引</p>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            ) : null}
+
+            {summary.qaHighlights.length ? (
+                <div className="space-y-2">
+                    <h4 className="text-sm font-semibold theme-text-secondary">一致性检查重点</h4>
+                    <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                        {summary.qaHighlights.map((item) => (
+                            <div
+                                key={`${summary.kind}-${item.title}`}
+                                className="rounded-xl border theme-border bg-black/10 px-3 py-2"
+                            >
+                                <p className="text-sm font-medium theme-text-secondary">{item.title}</p>
+                                {item.summary ? (
+                                    <p className="text-xs theme-text-dim mt-1 leading-relaxed">{item.summary}</p>
+                                ) : null}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            ) : null}
+        </div>
+    );
+}
+
 function AuditReportTab() {
+    const { data, ui, navigateToSemanticTarget, clearSemanticNavigation } = useApp();
     const [reports, setReports] = useState<Report[]>([]);
     const [reportGroups, setReportGroups] = useState<ReportGroup[]>([]);
     const [semanticOverview, setSemanticOverview] = useState<ReportSemanticOverview | null>(null);
     const [loading, setLoading] = useState(true);
+    const [refreshing, setRefreshing] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [downloading, setDownloading] = useState<string | null>(null);
     // P2-3: 预览状态
-    const [previewFile, setPreviewFile] = useState<{ name: string; content: string; type: 'text' | 'html' } | null>(null);
+    const [previewFile, setPreviewFile] = useState<PreviewFileState | null>(null);
     const [previewLoading, setPreviewLoading] = useState(false);
+    const [focusedIssueId, setFocusedIssueId] = useState('');
+    const [showAllPriorityBoard, setShowAllPriorityBoard] = useState(false);
+    const [showAllIssues, setShowAllIssues] = useState(false);
+    const [showAllDossiers, setShowAllDossiers] = useState(false);
+    const issueCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
+    const reportSectionRefs = useRef<Record<string, HTMLDivElement | null>>({});
+    const fetchedReportPackageKeyRef = useRef('');
+    const reportPackage = data.reportPackage as ReportPackage | null;
+    const mainReportView = reportPackage?.main_report_view || null;
+    const reportPackageRefreshKey = useMemo(
+        () => String(
+            reportPackage?.artifact_meta?.package_generated_at
+            || reportPackage?.meta?.generated_at
+            || ''
+        ).trim(),
+        [reportPackage],
+    );
 
-    // 从后端获取报告列表
-    useEffect(() => {
-        fetchReports();
+    const resetReportCenterState = useCallback(() => {
+        setReports([]);
+        setReportGroups([]);
+        setSemanticOverview(null);
+        setPreviewFile(null);
+        setFocusedIssueId('');
+        setShowAllPriorityBoard(false);
+        setShowAllIssues(false);
+        setShowAllDossiers(false);
+        setError(null);
+        setLoading(false);
+        setRefreshing(false);
     }, []);
 
-    const fetchReports = async () => {
+    const fetchReports = useCallback(async ({ background = false }: { background?: boolean } = {}) => {
         try {
-            setLoading(true);
+            if (background) {
+                setRefreshing(true);
+            } else {
+                setLoading(true);
+            }
             setError(null);
             try {
                 const manifest = await api.getReportManifest();
@@ -2952,17 +3709,329 @@ function AuditReportTab() {
         } catch (err) {
             const errorMsg = err instanceof Error ? err.message : '获取报告列表失败';
             setError(errorMsg);
-            setSemanticOverview(null);
+            if (!background) {
+                setSemanticOverview(null);
+            }
             console.error('获取报告列表失败:', err);
         } finally {
-            setLoading(false);
+            if (background) {
+                setRefreshing(false);
+            } else {
+                setLoading(false);
+            }
         }
-    };
+    }, []);
 
-    const showSemanticOverview = hasSemanticSectionContent(semanticOverview?.mainReport)
+    // 报告中心依赖 reportPackage 生命周期；清缓存时需要一并清空本地态。
+    useEffect(() => {
+        if (!reportPackageRefreshKey) {
+            fetchedReportPackageKeyRef.current = '';
+            resetReportCenterState();
+            return;
+        }
+        if (fetchedReportPackageKeyRef.current === reportPackageRefreshKey) {
+            return;
+        }
+        fetchedReportPackageKeyRef.current = reportPackageRefreshKey;
+        void fetchReports();
+    }, [fetchReports, reportPackageRefreshKey, resetReportCenterState]);
+
+    const reportGroupLookup = useMemo(() => {
+        return reportGroups.reduce<Record<string, ReportGroup>>((lookup, group) => {
+            lookup[group.key] = group;
+            return lookup;
+        }, {});
+    }, [reportGroups]);
+    const reportLookup = useMemo(() => {
+        return reports.reduce<Record<string, Report>>((lookup, item) => {
+            lookup[item.name] = item;
+            return lookup;
+        }, {});
+    }, [reports]);
+    const hasLoadedReports = reports.length > 0 || reportGroups.some((group) => group.count > 0 || group.items.length > 0);
+    const showReportLoadingState = loading && !hasLoadedReports;
+    const showBlockingReportError = Boolean(error) && !hasLoadedReports;
+    const showRefreshError = Boolean(error) && hasLoadedReports;
+
+    const priorityBoard = useMemo(() => {
+        const items = Array.isArray(reportPackage?.priority_board) ? reportPackage.priority_board : [];
+        return [...items]
+            .filter((item): item is ReportPriorityBoardItem => Boolean(item?.entity_name))
+            .sort((left, right) => Number(right.priority_score || 0) - Number(left.priority_score || 0))
+            .slice(0, 6);
+    }, [reportPackage]);
+    const visiblePriorityBoard = useMemo(
+        () => (showAllPriorityBoard ? priorityBoard : priorityBoard.slice(0, REPORT_PRIORITY_PREVIEW_COUNT)),
+        [priorityBoard, showAllPriorityBoard],
+    );
+
+    const issueCatalog = useMemo(() => {
+        const mainIssues = Array.isArray(mainReportView?.issues) ? mainReportView.issues : [];
+        const reportIssues = Array.isArray(reportPackage?.issues) ? reportPackage.issues : [];
+        const source = mainIssues.length > 0 ? mainIssues : reportIssues;
+        return [...source]
+            .filter((item): item is ReportIssue => Boolean(item?.issue_id || item?.headline || item?.narrative))
+            .sort((left, right) => {
+                const rightPriority = Number(right.priority || 0);
+                const leftPriority = Number(left.priority || 0);
+                if (rightPriority !== leftPriority) {
+                    return rightPriority - leftPriority;
+                }
+                return Number(right.severity || 0) - Number(left.severity || 0);
+            });
+    }, [mainReportView, reportPackage]);
+
+    const issueCatalogLookup = useMemo(() => buildIssueLookup(issueCatalog), [issueCatalog]);
+    const displayedIssueCatalog = useMemo(
+        () => withFocusedIssue(
+            issueCatalog,
+            focusedIssueId,
+            issueCatalogLookup,
+            showAllIssues ? undefined : REPORT_ISSUE_PREVIEW_COUNT,
+        ),
+        [focusedIssueId, issueCatalog, issueCatalogLookup, showAllIssues],
+    );
+
+    const dossierCounts = useMemo(() => ({
+        family: Array.isArray(reportPackage?.family_dossiers) ? reportPackage.family_dossiers.length : 0,
+        person: Array.isArray(reportPackage?.person_dossiers) ? reportPackage.person_dossiers.length : 0,
+        company: Array.isArray(reportPackage?.company_dossiers) ? reportPackage.company_dossiers.length : 0,
+    }), [reportPackage]);
+
+    const dossierHighlights = useMemo(() => {
+        const createCards = (
+            items: Array<Record<string, unknown>>,
+            dossierType: ReportCenterDossierCardData['dossierType'],
+        ): ReportCenterDossierCardData[] => {
+            return items
+                .map((item) => {
+                    const riskOverview = ((item.risk_overview as Record<string, unknown> | undefined) || {});
+                    const entityName = String(
+                        item.entity_name
+                        || item.family_name
+                        || item.name
+                        || ''
+                    ).trim();
+                    return {
+                        entityName,
+                        dossierType,
+                        summary: String(item.summary || '').trim(),
+                        explanationSummary: getDossierExplanationSummary(item, dossierType) || undefined,
+                        riskLevel: String(riskOverview.risk_level || '').trim() || 'low',
+                        priorityScore: Number(riskOverview.priority_score || 0),
+                        issueCount: Number(riskOverview.issue_count || 0),
+                        keyIssueCount: Array.isArray(item.key_issue_cards) ? item.key_issue_cards.length : 0,
+                        transactionCount: Number(item.transaction_count || 0),
+                        issueRefs: Array.isArray(item.issue_refs)
+                            ? item.issue_refs.map((ref) => String(ref || '').trim()).filter(Boolean)
+                            : [],
+                    };
+                })
+                .filter((item) => item.entityName)
+                .sort((left, right) => {
+                    if (right.priorityScore !== left.priorityScore) {
+                        return right.priorityScore - left.priorityScore;
+                    }
+                    return right.issueCount - left.issueCount;
+                })
+                .slice(0, 2);
+        };
+
+        return [
+            ...createCards((Array.isArray(reportPackage?.family_dossiers) ? reportPackage.family_dossiers : []) as Array<Record<string, unknown>>, 'family'),
+            ...createCards((Array.isArray(reportPackage?.person_dossiers) ? reportPackage.person_dossiers : []) as Array<Record<string, unknown>>, 'person'),
+            ...createCards((Array.isArray(reportPackage?.company_dossiers) ? reportPackage.company_dossiers : []) as Array<Record<string, unknown>>, 'company'),
+        ]
+            .sort((left, right) => {
+                if (right.priorityScore !== left.priorityScore) {
+                    return right.priorityScore - left.priorityScore;
+                }
+                return right.issueCount - left.issueCount;
+            })
+            .slice(0, 6);
+    }, [reportPackage]);
+    const visibleDossierHighlights = useMemo(
+        () => (showAllDossiers ? dossierHighlights : dossierHighlights.slice(0, REPORT_DOSSIER_PREVIEW_COUNT)),
+        [dossierHighlights, showAllDossiers],
+    );
+
+    const primaryReportGroup = reportGroupLookup.primary_reports;
+    const appendicesGroup = reportGroupLookup.appendices;
+    const qaArtifactsGroup = reportGroupLookup.qa_artifacts;
+    const firstPreviewablePrimaryReport = primaryReportGroup?.items.find((item) => item.isPreviewable) || primaryReportGroup?.items[0] || null;
+    const firstPreviewableAppendix = appendicesGroup?.items.find((item) => item.isPreviewable) || appendicesGroup?.items[0] || null;
+    const qaConsistencyPreview = qaArtifactsGroup?.items.find((item) => item.name.endsWith('report_consistency_check.txt'))
+        || qaArtifactsGroup?.items.find((item) => item.name.endsWith('report_consistency_check.json'))
+        || qaArtifactsGroup?.items.find((item) => item.isPreviewable)
+        || null;
+    const reportPackagePreview = qaArtifactsGroup?.items.find((item) => item.name.endsWith('report_package.json')) || null;
+
+    const appendixPreviewLookup = useMemo(() => {
+        const lookup: Record<string, Report> = {};
+        (appendicesGroup?.items || []).forEach((item) => {
+            const semanticTitle = String(item.semanticTitle || '').trim();
+            if (semanticTitle && item.isPreviewable && !lookup[semanticTitle]) {
+                lookup[semanticTitle] = item;
+            }
+        });
+        return lookup;
+    }, [appendicesGroup]);
+
+    const mainSummary = String(mainReportView?.summary_narrative || '').trim();
+    const issueCount = Number(mainReportView?.issue_count || issueCatalog.length || 0);
+    const highRiskIssueCount = Number(
+        mainReportView?.high_risk_issue_count
+        || issueCatalog.filter((issue) => ['high', 'critical'].includes(String(issue.risk_level || '').trim().toLowerCase())).length
+        || 0
+    );
+    const qaSummary = reportPackage?.qa_checks?.summary;
+    const hasReportCenterData = Boolean(
+        mainSummary
+        || priorityBoard.length
+        || issueCatalog.length
+        || dossierHighlights.length
+        || dossierCounts.family
+        || dossierCounts.person
+        || dossierCounts.company
+    );
+    const showMainReportSemanticPanel = !hasReportCenterData && hasSemanticSectionContent(semanticOverview?.mainReport);
+    const showSemanticOverview = showMainReportSemanticPanel
         || hasSemanticSectionContent(semanticOverview?.appendices)
         || hasSemanticSectionContent(semanticOverview?.qa)
         || hasSemanticSectionContent(semanticOverview?.dossiers);
+    const previewSummary = useMemo(() => {
+        if (!previewFile) {
+            return null;
+        }
+
+        const reportMeta = previewFile.report || reportLookup[previewFile.name] || null;
+        if (previewFile.name.endsWith('report_package.json')) {
+            const parsedPayload = tryParsePreviewJson(previewFile.content);
+            if (parsedPayload) {
+                return buildReportPackagePreviewSummary(parsedPayload, reportMeta, semanticOverview);
+            }
+            return buildArtifactPreviewSummary(reportMeta);
+        }
+
+        if (previewFile.name.endsWith('report_consistency_check.json')) {
+            return buildQaPreviewSummary(
+                reportMeta,
+                semanticOverview,
+                reportPackage,
+                tryParsePreviewJson(previewFile.content),
+            );
+        }
+
+        if (previewFile.name.endsWith('report_consistency_check.txt')) {
+            return buildQaPreviewSummary(reportMeta, semanticOverview, reportPackage);
+        }
+
+        return buildArtifactPreviewSummary(reportMeta);
+    }, [previewFile, reportLookup, reportPackage, semanticOverview]);
+    const previewUsesCollapsedRaw = Boolean(
+        previewSummary
+        && previewFile?.type === 'text'
+        && previewSummary.kind !== 'artifact',
+    );
+
+    const getIssueEntityName = (issue: ReportIssue) => {
+        return String(
+            issue.scope?.entity
+            || issue.scope?.company
+            || issue.scope?.family
+            || issue.entity_name
+            || issue.company_name
+            || issue.family_name
+            || ''
+        ).trim();
+    };
+
+    const getIssueRange = (issue: ReportIssue) => {
+        const start = String(issue.time_range?.start || '').trim();
+        const end = String(issue.time_range?.end || '').trim();
+        if (start && end && start !== end) {
+            return `${start} 至 ${end}`;
+        }
+        return start || end || '';
+    };
+
+    const getPriorityEntityType = (item: ReportPriorityBoardItem) => {
+        switch (item.entity_type) {
+            case 'company':
+                return '公司对象';
+            case 'family':
+                return '家庭对象';
+            default:
+                return '个人对象';
+        }
+    };
+
+    const getDossierTypeLabel = (type: ReportCenterDossierCardData['dossierType']) => {
+        switch (type) {
+            case 'family':
+                return '家庭卷宗';
+            case 'company':
+                return '公司卷宗';
+            case 'person':
+            default:
+                return '个人卷宗';
+        }
+    };
+
+    const navigateEntityToGraph = (entityName: string, source: string, issueId?: string) => {
+        const normalizedEntityName = String(entityName || '').trim();
+        const normalizedIssueId = String(issueId || '').trim();
+        if (!normalizedEntityName && !normalizedIssueId) {
+            return;
+        }
+        navigateToSemanticTarget({
+            tab: 'graph',
+            entityName: normalizedEntityName || undefined,
+            issueId: normalizedIssueId || undefined,
+            source,
+        });
+    };
+
+    const setReportSectionRef = (key: string) => (node: HTMLDivElement | null) => {
+        reportSectionRefs.current[key] = node;
+    };
+
+    const scrollToReportSection = (key: string) => {
+        reportSectionRefs.current[key]?.scrollIntoView({
+            behavior: 'smooth',
+            block: 'start',
+        });
+    };
+
+    useEffect(() => {
+        const pendingTarget = ui.semanticNavigation;
+        if (ui.activeTab !== 'report' || pendingTarget?.tab !== 'report') {
+            return;
+        }
+
+        const targetIssueId = String(pendingTarget.issueId || '').trim();
+        if (!targetIssueId) {
+            return;
+        }
+
+        let frameId = 0;
+        let nestedFrameId = 0;
+        setFocusedIssueId(targetIssueId);
+        frameId = window.requestAnimationFrame(() => {
+            nestedFrameId = window.requestAnimationFrame(() => {
+                issueCardRefs.current[targetIssueId]?.scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'center',
+                });
+            });
+        });
+        clearSemanticNavigation();
+
+        return () => {
+            window.cancelAnimationFrame(frameId);
+            window.cancelAnimationFrame(nestedFrameId);
+        };
+    }, [clearSemanticNavigation, ui.activeTab, ui.semanticNavigation]);
 
     // 下载报告
     const handleDownload = async (filename: string) => {
@@ -2989,7 +4058,7 @@ function AuditReportTab() {
     };
 
     // P2-3: 预览报告
-    const handlePreview = async (filename: string) => {
+    const handlePreview = async (filename: string, report?: Report | null) => {
         // 只支持 txt/html/markdown/json 文件预览
         const ext = filename.toLowerCase().split('.').pop();
         if (!['txt', 'html', 'htm', 'md', 'json'].includes(ext || '')) {
@@ -3007,7 +4076,8 @@ function AuditReportTab() {
                 setPreviewFile({
                     name: filename,
                     content: result.content,
-                    type: result.type === 'text' ? 'text' : 'html'
+                    type: result.type === 'text' ? 'text' : 'html',
+                    report: report || reportLookup[filename] || null,
                 });
             } else {
                 throw new Error('预览API返回无效数据');
@@ -3020,8 +4090,30 @@ function AuditReportTab() {
         }
     };
 
+    const openReportArtifact = async (report?: Report | null) => {
+        if (!report) {
+            return;
+        }
+        if (report.isPreviewable) {
+            await handlePreview(report.name, report);
+            return;
+        }
+        await handleDownload(report.name);
+    };
+
+    const handleAppendixHighlightSelect = async (title: string) => {
+        const matchedReport = appendixPreviewLookup[title] || firstPreviewableAppendix;
+        if (matchedReport) {
+            await openReportArtifact(matchedReport);
+            return;
+        }
+        scrollToReportSection('group:appendices');
+    };
+
     return (
         <div className="space-y-6">
+            <h2 className="sr-only">审计报告工作区</h2>
+
             {/* P2-3: 预览 Modal */}
             {previewFile && (
                 <div
@@ -3054,7 +4146,10 @@ function AuditReportTab() {
                                     下载
                                 </button>
                                 <button
+                                    type="button"
                                     onClick={() => setPreviewFile(null)}
+                                    aria-label="关闭报告预览"
+                                    title="关闭报告预览"
                                     className="p-2 hover:theme-bg-muted rounded-lg transition-colors"
                                 >
                                     <X className="w-5 h-5 theme-text-muted" />
@@ -3063,25 +4158,470 @@ function AuditReportTab() {
                         </div>
 
                         {/* Modal Content */}
-                        <div className={`flex-1 overflow-auto ${previewFile.type === 'html' ? 'bg-white' : 'theme-bg-base'}`}>
+                        <div className="flex-1 min-h-0 theme-bg-base">
                             {previewFile.type === 'html' ? (
-                                <iframe
-                                    srcDoc={previewFile.content}
-                                    className="w-full h-full border-none"
-                                    title={previewFile.name}
-                                    sandbox="allow-same-origin"
-                                />
+                                <div className="flex h-full min-h-0 flex-col">
+                                    {previewSummary ? <PreviewSummaryPanel summary={previewSummary} /> : null}
+                                    <div className="flex-1 min-h-[420px] bg-white">
+                                        <iframe
+                                            srcDoc={previewFile.content}
+                                            className="w-full h-full border-none"
+                                            title={previewFile.name}
+                                            sandbox="allow-same-origin"
+                                        />
+                                    </div>
+                                </div>
                             ) : (
-                                <pre className="p-6 text-sm theme-text whitespace-pre-wrap font-mono leading-relaxed">
-                                    {previewFile.content}
-                                </pre>
+                                <div className="h-full overflow-auto">
+                                    {previewSummary ? <PreviewSummaryPanel summary={previewSummary} /> : null}
+                                    {previewUsesCollapsedRaw ? (
+                                        <details className="m-4 rounded-2xl border theme-border bg-black/10 overflow-hidden">
+                                            <summary className="cursor-pointer px-4 py-3 text-sm font-medium theme-text-secondary">
+                                                查看原始文件内容
+                                            </summary>
+                                            <pre className="border-t theme-border p-4 text-sm theme-text whitespace-pre-wrap font-mono leading-relaxed overflow-x-auto">
+                                                {previewFile.content}
+                                            </pre>
+                                        </details>
+                                    ) : (
+                                        <pre className="p-6 text-sm theme-text whitespace-pre-wrap font-mono leading-relaxed overflow-x-auto">
+                                            {previewFile.content}
+                                        </pre>
+                                    )}
+                                </div>
                             )}
                         </div>
                     </div>
                 </div>
             )}
 
-            <div className="card">
+            {hasReportCenterData && (
+                <>
+                    <div
+                        ref={setReportSectionRef('report-summary')}
+                        className="card border border-cyan-500/20 bg-gradient-to-r from-cyan-500/10 via-blue-500/5 to-transparent"
+                    >
+                        <div className="flex items-start gap-4">
+                            <div className="p-3 rounded-xl bg-cyan-500/15 flex-shrink-0">
+                                <FileText className="w-6 h-6 text-cyan-400" />
+                            </div>
+                            <div className="flex-1 space-y-3">
+                                <div>
+                                    <h3 className="font-semibold text-white">正式报告中心</h3>
+                                    <p className="text-xs theme-text-dim mt-1">报告页第一屏直接消费统一语义层 `report_package`</p>
+                                </div>
+                                <p className="text-sm theme-text-secondary leading-7">
+                                    {mainSummary || '统一语义层已生成正式报告包，当前可直接浏览主问题、优先对象与卷宗覆盖。'}
+                                </p>
+                                <div className="flex flex-wrap gap-2">
+                                    <span className="text-[11px] px-2.5 py-1 rounded-full border border-cyan-500/20 text-cyan-300 bg-cyan-500/10">
+                                        正式问题 {issueCount} 项
+                                    </span>
+                                    <span className="text-[11px] px-2.5 py-1 rounded-full border border-red-500/20 text-red-300 bg-red-500/10">
+                                        高风险 {highRiskIssueCount} 项
+                                    </span>
+                                    <span className="text-[11px] px-2.5 py-1 rounded-full border border-emerald-500/20 text-emerald-300 bg-emerald-500/10">
+                                        卷宗覆盖 {dossierCounts.family + dossierCounts.person + dossierCounts.company} 份
+                                    </span>
+                                    {Number(qaSummary?.fail || 0) > 0 && (
+                                        <span className="text-[11px] px-2.5 py-1 rounded-full border border-amber-500/20 text-amber-300 bg-amber-500/10">
+                                            QA 阻断 {Number(qaSummary?.fail || 0)} 项
+                                        </span>
+                                    )}
+                                </div>
+                                <div className="flex flex-wrap gap-2 pt-1">
+                                    <SemanticLinkActionButton
+                                        icon={AlertTriangle}
+                                        label="问题卡"
+                                        variant="risk"
+                                        onClick={() => scrollToReportSection('report-issues')}
+                                    />
+                                    <SemanticLinkActionButton
+                                        icon={Folder}
+                                        label="卷宗覆盖"
+                                        onClick={() => scrollToReportSection('report-dossiers')}
+                                    />
+                                    <SemanticLinkActionButton
+                                        icon={Download}
+                                        label="导出文件"
+                                        onClick={() => scrollToReportSection('report-export')}
+                                    />
+                                    <SemanticLinkActionButton
+                                        icon={Eye}
+                                        label="预览主报告"
+                                        onClick={() => { void openReportArtifact(firstPreviewablePrimaryReport); }}
+                                        disabled={!firstPreviewablePrimaryReport}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 xl:grid-cols-5 gap-6">
+                        <div ref={setReportSectionRef('report-priority')} className="xl:col-span-2 card">
+                            <div className="flex items-start justify-between gap-4 mb-5">
+                                <div className="flex items-center gap-3">
+                                    <div className="p-2 rounded-lg bg-cyan-500/10">
+                                        <Users className="w-5 h-5 text-cyan-400" />
+                                    </div>
+                                    <div>
+                                        <h3 className="font-semibold text-white">优先对象</h3>
+                                        <p className="text-xs theme-text-dim">正式主报告排序口径</p>
+                                    </div>
+                                </div>
+                                <div className="flex flex-wrap items-center justify-end gap-2">
+                                    <span className="text-[11px] px-2.5 py-1 rounded-full border theme-border theme-text-dim">
+                                        {priorityBoard.length} 个对象
+                                    </span>
+                                    <SectionToggleButton
+                                        expanded={showAllPriorityBoard}
+                                        fullCount={priorityBoard.length}
+                                        previewCount={REPORT_PRIORITY_PREVIEW_COUNT}
+                                        unitLabel="个对象"
+                                        onClick={() => setShowAllPriorityBoard((current) => !current)}
+                                    />
+                                </div>
+                            </div>
+
+                            {priorityBoard.length > 0 ? (
+                                <div className="space-y-3">
+                                    {visiblePriorityBoard.map((item, index) => (
+                                        <div
+                                            key={`${item.entity_name}-${index}`}
+                                            className="rounded-xl border theme-border bg-gray-900/30 p-4 space-y-3 hover:theme-border-strong transition-colors"
+                                        >
+                                            <div className="flex items-start justify-between gap-3">
+                                                <div>
+                                                    <p className="text-sm font-semibold theme-text-secondary">{item.entity_name}</p>
+                                                    <p className="text-xs theme-text-dim mt-1">
+                                                        {getPriorityEntityType(item)}
+                                                        {getPriorityFamilyContextLabel(item)}
+                                                    </p>
+                                                </div>
+                                                <div className="text-right">
+                                                    <span className={getRiskLevelBadgeStyle(item.risk_level || 'low')}>
+                                                        {formatRiskLevel(item.risk_level || 'low')}
+                                                    </span>
+                                                    <p className="font-mono text-cyan-300 text-sm mt-2">
+                                                        {Number(item.priority_score || 0).toFixed(1)}
+                                                    </p>
+                                                </div>
+                                            </div>
+
+                                            {item.top_reasons?.length ? (
+                                                <div className="rounded-lg bg-black/15 px-3 py-2.5 space-y-1.5">
+                                                    {item.top_reasons.slice(0, 3).map((reason) => (
+                                                        <div key={`${item.entity_name}-${reason}`} className="text-xs theme-text-muted leading-relaxed">
+                                                            {sanitizeValue(reason)}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            ) : (
+                                                <div className="text-xs theme-text-dim">暂无优先原因摘要</div>
+                                            )}
+
+                                            {item.issue_refs?.length ? (
+                                                <div className="flex flex-wrap gap-1.5">
+                                                    {item.issue_refs.slice(0, 4).map((ref) => (
+                                                        <span
+                                                            key={`${item.entity_name}-${ref}`}
+                                                            className="text-[10px] px-2 py-0.5 rounded-full border border-cyan-500/20 text-cyan-300 bg-cyan-500/10 font-mono"
+                                                        >
+                                                            {ref}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            ) : null}
+
+                                            <div className="flex justify-end">
+                                                <SemanticGraphActionButton
+                                                    label="图谱"
+                                                    onClick={() => navigateEntityToGraph(item.entity_name, `report:priority:${item.entity_name}`)}
+                                                />
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <EmptyState type="data" message="正式报告暂未返回优先对象" />
+                            )}
+                        </div>
+
+                        <div ref={setReportSectionRef('report-issues')} className="xl:col-span-3 card">
+                            <div className="flex items-start justify-between gap-4 mb-5">
+                                <div className="flex items-center gap-3">
+                                    <div className="p-2 rounded-lg bg-orange-500/10">
+                                        <AlertTriangle className="w-5 h-5 text-orange-400" />
+                                    </div>
+                                    <div>
+                                        <h3 className="font-semibold text-white">正式问题卡</h3>
+                                        <p className="text-xs theme-text-dim">主报告问题列表与风险页共享统一语义口径</p>
+                                    </div>
+                                </div>
+                                <div className="flex flex-wrap items-center justify-end gap-2">
+                                    <span className="text-[11px] px-2.5 py-1 rounded-full border theme-border theme-text-dim">
+                                        {issueCatalog.length} 个问题
+                                    </span>
+                                    <SectionToggleButton
+                                        expanded={showAllIssues}
+                                        fullCount={issueCatalog.length}
+                                        previewCount={REPORT_ISSUE_PREVIEW_COUNT}
+                                        unitLabel="项问题"
+                                        onClick={() => setShowAllIssues((current) => !current)}
+                                    />
+                                </div>
+                            </div>
+
+                            {issueCatalog.length > 0 ? (
+                                <div className="space-y-4">
+                                    {displayedIssueCatalog.map((issue, index) => {
+                                        const issueId = getNormalizedIssueId(issue);
+                                        const issueEntityName = getIssueEntityName(issue);
+                                        const isFocusedIssue = Boolean(issueId && issueId === focusedIssueId);
+                                        return (
+                                            <div
+                                                key={`${issue.issue_id || issue.headline || 'issue'}-${index}`}
+                                                ref={(node) => {
+                                                    if (issueId) {
+                                                        issueCardRefs.current[issueId] = node;
+                                                    }
+                                                }}
+                                                className={`
+                                                    rounded-xl border p-4 space-y-3.5 transition-all duration-200
+                                                    ${isFocusedIssue
+                                                        ? 'border-cyan-400/60 bg-cyan-500/10 shadow-lg shadow-cyan-500/10'
+                                                        : 'theme-border bg-gray-900/30'}
+                                                `}
+                                            >
+                                                <div className="flex items-start justify-between gap-3">
+                                                    <div className="space-y-1">
+                                                        <div className="flex items-center gap-2 flex-wrap">
+                                                            <span className={getRiskLevelBadgeStyle(issue.risk_level || 'low')}>
+                                                                {formatRiskLevel(issue.risk_level || 'low')}
+                                                            </span>
+                                                            <span className="text-[10px] px-2 py-0.5 rounded-full border theme-border theme-text-dim">
+                                                                {sanitizeValue(issue.category || issue.theme || '正式问题')}
+                                                            </span>
+                                                            {issue.issue_id ? (
+                                                                <span className="text-[10px] font-mono theme-text-dim">{issue.issue_id}</span>
+                                                            ) : null}
+                                                        </div>
+                                                        <h4 className="text-sm font-semibold theme-text-secondary leading-6">
+                                                            {sanitizeValue(issue.headline || issue.narrative || '待核查问题')}
+                                                        </h4>
+                                                        <div className="text-xs theme-text-dim">
+                                                            {sanitizeValue(issueEntityName || '未指定对象')}
+                                                            {getIssueRange(issue) ? ` · ${getIssueRange(issue)}` : ''}
+                                                            {Number(issue.amount_impact || 0) > 0 ? ` · ${formatCurrency(Number(issue.amount_impact || 0))}` : ''}
+                                                        </div>
+                                                    </div>
+                                                    <div className="text-right min-w-[84px]">
+                                                        <div className="text-[10px] theme-text-dim">优先级</div>
+                                                        <div className="font-mono text-orange-300 text-lg font-semibold">
+                                                            {Number(issue.priority || 0).toFixed(1)}
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                {issue.narrative ? (
+                                                    <p className="text-sm theme-text-muted leading-6">
+                                                        {sanitizeValue(issue.narrative)}
+                                                    </p>
+                                                ) : null}
+
+                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                    <div className="rounded-lg bg-black/15 px-3 py-3">
+                                                        <div className="text-xs theme-text-dim mb-2">触发依据</div>
+                                                        {issue.why_flagged?.length ? (
+                                                            <div className="space-y-1.5">
+                                                                {issue.why_flagged.slice(0, 3).map((reason) => (
+                                                                    <div key={`${issue.issue_id || issue.headline}-why-${reason}`} className="text-xs theme-text-secondary">
+                                                                        {sanitizeValue(reason)}
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        ) : (
+                                                            <div className="text-xs theme-text-dim">暂无触发依据</div>
+                                                        )}
+                                                    </div>
+
+                                                    <div className="rounded-lg bg-black/15 px-3 py-3">
+                                                        <div className="text-xs theme-text-dim mb-2">证据引用</div>
+                                                        {issue.evidence_refs?.length ? (
+                                                            <div className="flex flex-wrap gap-1.5">
+                                                                {issue.evidence_refs.slice(0, 4).map((ref) => (
+                                                                    <span
+                                                                        key={`${issue.issue_id || issue.headline}-evidence-${ref}`}
+                                                                        className="text-[10px] px-2 py-0.5 rounded-full border border-orange-500/20 text-orange-300 bg-orange-500/10 font-mono"
+                                                                    >
+                                                                        {ref}
+                                                                    </span>
+                                                                ))}
+                                                            </div>
+                                                        ) : (
+                                                            <div className="text-xs theme-text-dim">暂无证据引用</div>
+                                                        )}
+                                                    </div>
+                                                </div>
+
+                                                <div className="flex justify-end gap-2 flex-wrap pt-1 border-t border-white/5">
+                                                    <SemanticLinkActionButton
+                                                        icon={AlertTriangle}
+                                                        label="风险卡"
+                                                        variant="risk"
+                                                        onClick={() => navigateToSemanticTarget({
+                                                            tab: 'risk',
+                                                            issueId,
+                                                            entityName: issueEntityName || undefined,
+                                                            source: `report:issue:${issueId || issue.headline || index}`,
+                                                        })}
+                                                        disabled={!issueId}
+                                                    />
+                                                    <SemanticGraphActionButton
+                                                        label="图谱"
+                                                        onClick={() => navigateEntityToGraph(
+                                                            issueEntityName,
+                                                            `report:issue:${issueId || issue.headline || index}`,
+                                                            issueId,
+                                                        )}
+                                                        disabled={!issueEntityName && !issueId}
+                                                    />
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            ) : (
+                                <EmptyState type="data" message="正式报告暂未返回问题卡" />
+                            )}
+                        </div>
+                    </div>
+
+                    <div ref={setReportSectionRef('report-dossiers')} className="card">
+                        <div className="flex items-start justify-between gap-4 mb-5">
+                            <div className="flex items-center gap-3">
+                                <div className="p-2 rounded-lg bg-emerald-500/10">
+                                    <Folder className="w-5 h-5 text-emerald-400" />
+                                </div>
+                                <div>
+                                    <h3 className="font-semibold text-white">卷宗覆盖</h3>
+                                    <p className="text-xs theme-text-dim">统一显示家庭、个人、公司卷宗的代表对象</p>
+                                </div>
+                            </div>
+                            <div className="flex flex-wrap items-center justify-end gap-2">
+                                <span className="text-[11px] px-2.5 py-1 rounded-full border theme-border theme-text-dim">
+                                    已展示 {visibleDossierHighlights.length}/{dossierHighlights.length}
+                                </span>
+                                <SectionToggleButton
+                                    expanded={showAllDossiers}
+                                    fullCount={dossierHighlights.length}
+                                    previewCount={REPORT_DOSSIER_PREVIEW_COUNT}
+                                    unitLabel="份卷宗"
+                                    onClick={() => setShowAllDossiers((current) => !current)}
+                                />
+                            </div>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2 mb-4">
+                            <span className="text-[11px] px-2.5 py-1 rounded-full border border-emerald-500/20 text-emerald-300 bg-emerald-500/10">
+                                家庭 {dossierCounts.family}
+                            </span>
+                            <span className="text-[11px] px-2.5 py-1 rounded-full border border-cyan-500/20 text-cyan-300 bg-cyan-500/10">
+                                个人 {dossierCounts.person}
+                            </span>
+                            <span className="text-[11px] px-2.5 py-1 rounded-full border border-blue-500/20 text-blue-300 bg-blue-500/10">
+                                公司 {dossierCounts.company}
+                            </span>
+                        </div>
+
+                        {dossierHighlights.length > 0 ? (
+                            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+                                {visibleDossierHighlights.map((item, index) => (
+                                    <div
+                                        key={`${item.dossierType}-${item.entityName}-${index}`}
+                                        className="rounded-xl border theme-border bg-gray-900/30 p-4 space-y-3 hover:theme-border-strong transition-colors"
+                                    >
+                                        <div className="flex items-start justify-between gap-3">
+                                            <div>
+                                                <p className="text-sm font-semibold theme-text-secondary">{item.entityName}</p>
+                                                <p className="text-xs theme-text-dim mt-1">{getDossierTypeLabel(item.dossierType)}</p>
+                                            </div>
+                                            <div className="text-right">
+                                                <span className={getRiskLevelBadgeStyle(item.riskLevel || 'low')}>
+                                                    {formatRiskLevel(item.riskLevel || 'low')}
+                                                </span>
+                                                <p className="font-mono text-emerald-300 text-sm mt-2">
+                                                    {item.priorityScore.toFixed(1)}
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        {item.summary ? (
+                                            <p className="text-xs theme-text-muted leading-6 rounded-lg bg-black/15 px-3 py-2.5">
+                                                {sanitizeValue(item.summary)}
+                                            </p>
+                                        ) : (
+                                            <div className="text-xs theme-text-dim rounded-lg bg-black/15 px-3 py-2.5">暂无卷宗摘要</div>
+                                        )}
+
+                                        {item.explanationSummary ? (
+                                            <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/10 px-3 py-2.5">
+                                                <div className="text-[10px] uppercase tracking-wide text-cyan-200/80">解释摘要</div>
+                                                <p className="mt-1 text-xs leading-6 text-cyan-50/90">
+                                                    {sanitizeValue(item.explanationSummary)}
+                                                </p>
+                                            </div>
+                                        ) : null}
+
+                                        {item.keyIssueCount > 0 && (
+                                            <div className="flex flex-wrap gap-1.5">
+                                                <span className="text-[10px] px-2 py-0.5 rounded-full border border-amber-500/20 text-amber-300 bg-amber-500/10">
+                                                    代表问题 {item.keyIssueCount} 项
+                                                </span>
+                                            </div>
+                                        )}
+
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <div className="rounded-lg bg-black/15 px-3 py-2">
+                                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">全量问题数</div>
+                                                <div className="mt-1 text-sm font-semibold text-white">{item.issueCount}</div>
+                                            </div>
+                                            <div className="rounded-lg bg-black/15 px-3 py-2">
+                                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">交易笔数</div>
+                                                <div className="mt-1 text-sm font-semibold text-white">{item.transactionCount}</div>
+                                            </div>
+                                        </div>
+
+                                        {item.issueRefs.length ? (
+                                            <div className="flex flex-wrap gap-1.5">
+                                                {item.issueRefs.slice(0, 4).map((ref) => (
+                                                    <span
+                                                        key={`${item.entityName}-${ref}`}
+                                                        className="text-[10px] px-2 py-0.5 rounded-full border border-emerald-500/20 text-emerald-300 bg-emerald-500/10 font-mono"
+                                                    >
+                                                        {ref}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        ) : null}
+
+                                        <div className="flex justify-end">
+                                            <SemanticGraphActionButton
+                                                label="图谱"
+                                                onClick={() => navigateEntityToGraph(item.entityName, `report:dossier:${item.dossierType}:${item.entityName}`)}
+                                            />
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <EmptyState type="data" message="正式报告暂未返回卷宗覆盖摘要" />
+                        )}
+                    </div>
+                </>
+            )}
+
+            <div ref={setReportSectionRef('report-export')} className="card">
                 <div className="flex items-center justify-between mb-6">
                     <div className="flex items-center gap-3">
                         <div className="p-2 rounded-lg bg-green-500/10">
@@ -3093,30 +4633,30 @@ function AuditReportTab() {
                         </div>
                     </div>
                     <button
-                        onClick={fetchReports}
-                        disabled={loading}
+                        onClick={() => { void fetchReports({ background: hasLoadedReports }); }}
+                        disabled={loading || refreshing}
                         className="btn-secondary text-xs"
                     >
-                        <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
+                        <RefreshCw className={`w-3 h-3 ${(loading || refreshing) ? 'animate-spin' : ''}`} />
                         刷新
                     </button>
                 </div>
 
-                {loading ? (
+                {showReportLoadingState ? (
                     <div className="flex flex-col items-center justify-center py-16 text-center">
                         <div className="w-12 h-12 rounded-2xl theme-bg-muted/50 flex items-center justify-center mb-4">
                             <RefreshCw className="w-6 h-6 theme-text-dim animate-spin mb-4" />
                             <span className="ml-3 theme-text-muted font-medium">加载报告列表...</span>
                         </div>
                     </div>
-                ) : error ? (
+                ) : showBlockingReportError ? (
                     <div className="flex flex-col items-center justify-center py-16 text-center">
                         <div className="w-16 h-16 rounded-2xl bg-red-500/10 flex items-center justify-center mb-4">
                             <AlertTriangle className="w-8 h-8 text-red-500" />
                             <p className="theme-text-muted font-medium">加载失败</p>
                             <p className="theme-text-dim text-sm mt-1">{error}</p>
                             <button
-                                onClick={fetchReports}
+                                onClick={() => { void fetchReports(); }}
                                 className="mt-4 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-medium transition-colors"
                             >
                                 重试
@@ -3127,37 +4667,127 @@ function AuditReportTab() {
                     <EmptyState type="data" message="暂无报告" />
                 ) : (
                     <div className="space-y-6">
+                        {showRefreshError && (
+                            <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+                                <div className="flex items-start gap-3">
+                                    <AlertTriangle className="mt-0.5 h-4 w-4 flex-none text-amber-300" />
+                                    <div>
+                                        <p className="text-sm font-medium text-amber-100">刷新失败，当前保留上次成功加载的报告清单。</p>
+                                        <p className="mt-1 text-xs theme-text-dim">{error}</p>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
                         {showSemanticOverview && (
                             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                                <ReportSemanticPanel
-                                    title="主报告导航"
-                                    icon={FileText}
-                                    section={semanticOverview?.mainReport}
-                                    accentClass="bg-blue-500/10 text-blue-400"
-                                />
+                                {showMainReportSemanticPanel && (
+                                    <ReportSemanticPanel
+                                        title="主报告导航"
+                                        icon={FileText}
+                                        section={semanticOverview?.mainReport}
+                                        accentClass="bg-blue-500/10 text-blue-400"
+                                        actions={[
+                                            {
+                                                label: '查看正式问题卡',
+                                                icon: AlertTriangle,
+                                                onClick: () => scrollToReportSection('report-issues'),
+                                            },
+                                            {
+                                                label: '预览主报告',
+                                                icon: Eye,
+                                                onClick: () => { void openReportArtifact(firstPreviewablePrimaryReport); },
+                                                disabled: !firstPreviewablePrimaryReport,
+                                                variant: 'secondary',
+                                            },
+                                        ]}
+                                        onHighlightSelect={(item) => navigateEntityToGraph(
+                                            item.title,
+                                            `report:semantic:main:${item.title}`,
+                                        )}
+                                        highlightActionLabel="图谱"
+                                        highlightActionIcon={Network}
+                                    />
+                                )}
                                 <ReportSemanticPanel
                                     title="附录导航"
                                     icon={Folder}
                                     section={semanticOverview?.appendices}
                                     accentClass="bg-emerald-500/10 text-emerald-400"
+                                    actions={[
+                                        {
+                                            label: '查看附录文件',
+                                            icon: Folder,
+                                            onClick: () => scrollToReportSection('group:appendices'),
+                                        },
+                                        {
+                                            label: '预览首个附录',
+                                            icon: Eye,
+                                            onClick: () => { void openReportArtifact(firstPreviewableAppendix); },
+                                            disabled: !firstPreviewableAppendix,
+                                            variant: 'secondary',
+                                        },
+                                    ]}
+                                    onHighlightSelect={(item) => { void handleAppendixHighlightSelect(item.title); }}
+                                    highlightActionLabel="预览主题"
+                                    highlightActionIcon={Eye}
                                 />
                                 <ReportSemanticPanel
                                     title="QA 门控"
                                     icon={AlertTriangle}
                                     section={semanticOverview?.qa}
                                     accentClass="bg-amber-500/10 text-amber-400"
+                                    actions={[
+                                        {
+                                            label: '查看 QA 文件',
+                                            icon: Folder,
+                                            onClick: () => scrollToReportSection('group:qa_artifacts'),
+                                        },
+                                        {
+                                            label: '预览一致性检查',
+                                            icon: Eye,
+                                            onClick: () => { void openReportArtifact(qaConsistencyPreview); },
+                                            disabled: !qaConsistencyPreview,
+                                            variant: 'secondary',
+                                        },
+                                        {
+                                            label: '预览语义包',
+                                            icon: FileText,
+                                            onClick: () => { void openReportArtifact(reportPackagePreview); },
+                                            disabled: !reportPackagePreview,
+                                            variant: 'secondary',
+                                        },
+                                    ]}
+                                    onHighlightSelect={() => { void openReportArtifact(qaConsistencyPreview); }}
+                                    highlightActionLabel="查看检查"
+                                    highlightActionIcon={Eye}
                                 />
                                 <ReportSemanticPanel
                                     title="卷宗覆盖"
                                     icon={Users}
                                     section={semanticOverview?.dossiers}
                                     accentClass="bg-cyan-500/10 text-cyan-400"
+                                    actions={[
+                                        {
+                                            label: '查看卷宗覆盖',
+                                            icon: Users,
+                                            onClick: () => scrollToReportSection('report-dossiers'),
+                                        },
+                                        {
+                                            label: '查看正式问题卡',
+                                            icon: AlertTriangle,
+                                            onClick: () => scrollToReportSection('report-issues'),
+                                            variant: 'secondary',
+                                        },
+                                    ]}
+                                    onHighlightSelect={() => scrollToReportSection('report-dossiers')}
+                                    highlightActionLabel="查看卷宗"
+                                    highlightActionIcon={Users}
                                 />
                             </div>
                         )}
 
                         {reportGroups.map((group) => (
-                            <div key={group.key} className="space-y-3">
+                            <div key={group.key} ref={setReportSectionRef(`group:${group.key}`)} className="space-y-3">
                                 <div className="flex items-center justify-between">
                                     <div>
                                         <h4 className="font-semibold theme-text-secondary">{group.label}</h4>
@@ -3258,7 +4888,7 @@ function AuditReportTab() {
                                                 <div className="flex items-center gap-2">
                                                     {canPreview && (
                                                         <button
-                                                            onClick={() => handlePreview(report.name)}
+                                                            onClick={() => handlePreview(report.name, report)}
                                                             disabled={previewLoading}
                                                             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-cyan-500/20 border border-cyan-500/30 text-cyan-400 hover:bg-cyan-500/30 hover:border-cyan-400 transition-colors"
                                                         >

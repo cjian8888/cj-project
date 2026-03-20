@@ -184,7 +184,7 @@ class PrimaryTargetsService:
             (persons, companies)
         """
         cache, msg = self.load_analysis_cache()
-        if not cache:
+        if cache is None:
             return [], []
 
         profiles = cache.get("profiles", {})
@@ -208,7 +208,7 @@ class PrimaryTargetsService:
             family_summary 字典，如果不存在返回 None
         """
         cache, msg = self.load_analysis_cache()
-        if not cache:
+        if cache is None:
             return None
 
         derived = cache.get("derived", {})
@@ -230,7 +230,7 @@ class PrimaryTargetsService:
             (config, message)
         """
         cache, msg = self.load_analysis_cache()
-        if not cache:
+        if cache is None:
             return None, msg
 
         profiles = cache.get("profiles", {})

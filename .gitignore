@@ -39,6 +39,7 @@ logs/
 
 # --- Project Specific ---
 output/
+output_recheck_*/
 *.xlsx
 *.csv
 MISSION_SNAPSHOT.md

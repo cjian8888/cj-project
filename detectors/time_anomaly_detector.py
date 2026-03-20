@@ -187,8 +187,17 @@ class TimeAnomalyDetector(BaseDetector):
 
     def _extract_transactions_from_dataframe(self, df: Any) -> List[Dict[str, Any]]:
         """将 cleaned_data 中的 DataFrame 行转换为检测器标准交易结构。"""
-        if df is None or not hasattr(df, "iterrows") or "date" not in getattr(df, "columns", []):
+        if df is None or not hasattr(df, "iterrows"):
             return []
+
+        date_col = self._pick_column(df, "date", "交易时间", "交易日期", "日期")
+        if not date_col:
+            return []
+
+        counterparty_col = self._pick_column(df, "counterparty", "交易对手", "对手方")
+        description_col = self._pick_column(df, "description", "交易摘要", "摘要")
+        account_col = self._pick_column(df, "account", "本方账号", "账号")
+        bank_col = self._pick_column(df, "银行来源", "所属银行", "bank")
 
         transactions: List[Dict[str, Any]] = []
         for _, row in df.iterrows():
@@ -198,25 +207,28 @@ class TimeAnomalyDetector(BaseDetector):
 
             transactions.append(
                 {
-                    "tx_date": row.get("date"),
+                    "tx_date": row.get(date_col),
                     "amount": amount,
                     "tx_type": self._extract_tx_type(row),
-                    "counterparty": self._clean_text(
-                        row.get("counterparty", row.get("交易对手", ""))
-                    ),
-                    "description": self._clean_text(
-                        row.get("description", row.get("交易摘要", ""))
-                    ),
-                    "account": self._clean_text(
-                        row.get("account", row.get("本方账号", ""))
-                    ),
-                    "bank": self._clean_text(
-                        row.get("银行来源", row.get("bank", ""))
-                    ),
+                    "counterparty": self._clean_text(row.get(counterparty_col, "")),
+                    "description": self._clean_text(row.get(description_col, "")),
+                    "account": self._clean_text(row.get(account_col, "")),
+                    "bank": self._clean_text(row.get(bank_col, "")),
                 }
             )
 
         return transactions
+
+    @staticmethod
+    def _pick_column(container: Any, *candidates: str) -> str:
+        """从 DataFrame/Series 中挑选第一个存在的列名。"""
+        columns = getattr(container, "columns", None)
+        if columns is None:
+            columns = getattr(container, "index", [])
+        for column in candidates:
+            if column in columns:
+                return column
+        return ""
 
     def _extract_amount_from_row(self, row: Any) -> float:
         """从 DataFrame 行中提取绝对金额。"""

@@ -3,9 +3,18 @@
 """QA guard for report-package semantic outputs."""
 
 import os
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from report_text_formatter import (
+    format_report_datetime,
+    format_report_qa_check_display,
+    format_report_qa_detail_label,
+    format_report_qa_detail_value,
+)
 from unified_risk_model import build_risk_schema, normalize_risk_level
+
+REPORT_QA_GUARD_VERSION = "2026-03-19.1"
 
 
 def _as_dict(value: Any) -> Dict[str, Any]:
@@ -125,6 +134,77 @@ def _read_text(path: Optional[str]) -> str:
         return ""
 
 
+def _collect_person_gap_explanation_entries(
+    report_package: Dict[str, Any]
+) -> List[Dict[str, str]]:
+    entries: List[Dict[str, str]] = []
+    for dossier in _as_list(report_package.get("person_dossiers")):
+        if not isinstance(dossier, dict):
+            continue
+        entity_name = str(
+            dossier.get("entity_name") or dossier.get("name") or ""
+        ).strip()
+        explanation = _as_dict(dossier.get("financial_gap_explanation"))
+        summary = str(explanation.get("summary") or "").strip()
+        if not entity_name or not summary:
+            continue
+        entries.append({"entity_name": entity_name, "summary": summary})
+    return entries
+
+
+def _missing_person_gap_explanations(
+    entries: List[Dict[str, str]], content: str
+) -> List[str]:
+    text = str(content or "")
+    if not text:
+        return [entry["entity_name"] for entry in entries if entry.get("entity_name")]
+    missing_entities: List[str] = []
+    for entry in entries:
+        entity_name = str(entry.get("entity_name") or "").strip()
+        summary = str(entry.get("summary") or "").strip()
+        if entity_name and summary and summary not in text:
+            missing_entities.append(entity_name)
+    return missing_entities
+
+
+def _extract_report_index_guidance(report_dir: str) -> Dict[str, Any]:
+    index_path = os.path.join(report_dir or "", "报告目录清单.txt")
+    content = _read_text(index_path)
+    if not content:
+        return {
+            "index_path": index_path,
+            "exists": False,
+            "primary_guidance": "",
+            "falls_back_to_txt": False,
+            "points_to_missing_html": False,
+        }
+
+    primary_guidance = ""
+    for raw_line in content.splitlines():
+        line = str(raw_line or "").strip()
+        if "优先查看" in line:
+            primary_guidance = line
+            break
+
+    guidance_lower = primary_guidance.lower()
+    points_to_missing_html = (
+        bool(primary_guidance)
+        and ("html综合报告" in primary_guidance or ".html" in guidance_lower)
+    )
+    falls_back_to_txt = (
+        bool(primary_guidance)
+        and ".txt" in guidance_lower
+        and not points_to_missing_html
+    )
+    return {
+        "index_path": index_path,
+        "exists": True,
+        "primary_guidance": primary_guidance,
+        "falls_back_to_txt": falls_back_to_txt,
+        "points_to_missing_html": points_to_missing_html,
+    }
+
+
 def _count_cycle_evidence(analysis_cache: Dict[str, Any]) -> int:
     derived_data = _as_dict(analysis_cache.get("derived_data"))
     penetration = _as_dict(derived_data.get("penetration"))
@@ -197,18 +277,128 @@ def run_report_quality_checks(
             )
         )
     else:
+        index_guidance = _extract_report_index_guidance(report_dir)
+        if index_guidance["falls_back_to_txt"]:
+            checks.append(
+                _build_check(
+                    "html_missing_but_index_points_html",
+                    "pass",
+                    "No HTML report was generated, but the report index correctly falls back to the formal TXT report.",
+                    details={"html_files": [], **index_guidance},
+                )
+            )
+        else:
+            checks.append(
+                _build_check(
+                    "html_missing_but_index_points_html",
+                    "warn",
+                    "No HTML report was generated; current index flow still has a known risk of pointing readers to HTML first.",
+                    details={"html_files": [], **index_guidance},
+                )
+            )
+
+    report_text = _read_text(formal_report_path)
+    person_gap_entries = _collect_person_gap_explanation_entries(report_package)
+
+    if person_gap_entries:
+        if report_text:
+            missing_txt_entities = _missing_person_gap_explanations(
+                person_gap_entries, report_text
+            )
+            if missing_txt_entities:
+                checks.append(
+                    _build_check(
+                        "person_gap_explanations_visible_in_formal_txt",
+                        "fail",
+                        "Formal TXT report is missing some person-level financial gap explanations.",
+                        details={
+                            "missing_entities": missing_txt_entities,
+                            "expected_count": len(person_gap_entries),
+                        },
+                    )
+                )
+            else:
+                checks.append(
+                    _build_check(
+                        "person_gap_explanations_visible_in_formal_txt",
+                        "pass",
+                        "Formal TXT report carries all person-level financial gap explanations.",
+                        details={"expected_count": len(person_gap_entries)},
+                    )
+                )
+        else:
+            checks.append(
+                _build_check(
+                    "person_gap_explanations_visible_in_formal_txt",
+                    "pass",
+                    "Formal TXT report is unavailable; person-level financial gap explanation surface check was skipped.",
+                    details={"expected_count": len(person_gap_entries)},
+                )
+            )
+    else:
         checks.append(
             _build_check(
-                "html_missing_but_index_points_html",
-                "warn",
-                "No HTML report was generated; current index flow still has a known risk of pointing readers to HTML first.",
-                details={"html_files": []},
+                "person_gap_explanations_visible_in_formal_txt",
+                "pass",
+                "No person-level financial gap explanations were materialized in the report package.",
+                details={"expected_count": 0},
             )
         )
 
-    report_text = _read_text(formal_report_path)
+    if person_gap_entries and html_files:
+        html_content = "\n".join(
+            _read_text(os.path.join(report_dir, name)) for name in html_files
+        )
+        missing_html_entities = _missing_person_gap_explanations(
+            person_gap_entries, html_content
+        )
+        if missing_html_entities:
+            checks.append(
+                _build_check(
+                    "person_gap_explanations_visible_in_html_report",
+                    "fail",
+                    "HTML report is missing some person-level financial gap explanations.",
+                    details={
+                        "missing_entities": missing_html_entities,
+                        "expected_count": len(person_gap_entries),
+                        "html_files": html_files,
+                    },
+                )
+            )
+        else:
+            checks.append(
+                _build_check(
+                    "person_gap_explanations_visible_in_html_report",
+                    "pass",
+                    "HTML report carries all person-level financial gap explanations.",
+                    details={
+                        "expected_count": len(person_gap_entries),
+                        "html_files": html_files,
+                    },
+                )
+            )
+    elif person_gap_entries:
+        checks.append(
+            _build_check(
+                "person_gap_explanations_visible_in_html_report",
+                "pass",
+                "No HTML report is available; HTML-specific person financial gap explanation surface check was skipped.",
+                details={"expected_count": len(person_gap_entries), "html_files": html_files},
+            )
+        )
+    else:
+        checks.append(
+            _build_check(
+                "person_gap_explanations_visible_in_html_report",
+                "pass",
+                "No person-level financial gap explanations were materialized in the report package.",
+                details={"expected_count": 0, "html_files": html_files},
+            )
+        )
     summary_narrative = str(
-        _as_dict(report.get("conclusion")).get("summary_narrative") or ""
+        _as_dict(report_package.get("main_report_view")).get("summary_narrative")
+        or _as_dict(report.get("conclusion")).get("summary_narrative")
+        or ""
     ).strip()
     issue_headlines = [
         str(issue.get("headline") or "").strip()
@@ -369,13 +559,11 @@ def run_report_quality_checks(
         if not isinstance(issue, dict) or not _is_high_risk_issue(issue):
             continue
         issue_id = str(issue.get("issue_id") or "unknown").strip()
-        text = "\n".join(
-            [
-                str(issue.get("headline") or "").strip(),
-                str(issue.get("narrative") or "").strip(),
-                "；".join(str(item).strip() for item in _as_list(issue.get("why_flagged"))),
-            ]
-        )
+        headline = str(issue.get("headline") or "").strip()
+        narrative = str(issue.get("narrative") or "").strip()
+        # 仅以问题主标题为主做良性词提升检查，避免背景备注或流水摘要中的
+        # “工资/报销”等说明性文本误触发高风险措辞告警。
+        text = headline or narrative
         matched_tokens = _contains_benign_high_risk_token(text)
         if matched_tokens:
             benign_high_risk_hits.append(
@@ -605,6 +793,10 @@ def run_report_quality_checks(
     return {
         "summary": summary,
         "checks": checks,
+        "meta": {
+            "qa_guard_version": REPORT_QA_GUARD_VERSION,
+            "generated_at": datetime.now().isoformat(),
+        },
     }
 
 
@@ -619,13 +811,15 @@ def render_report_quality_summary_text(report_package: Dict[str, Any]) -> str:
 
     lines: List[str] = []
     lines.append("=" * 70)
-    lines.append("REPORT PACKAGE QA SUMMARY")
+    lines.append("报告一致性检查摘要")
     lines.append("=" * 70)
     lines.append("")
-    lines.append(f"Case: {meta.get('case_name') or 'N/A'}")
-    lines.append(f"Generated At: {meta.get('generated_at') or 'N/A'}")
+    lines.append(f"案件名称: {meta.get('case_name') or 'N/A'}")
     lines.append(
-        "Coverage: persons={persons}, companies={companies}, families={families}".format(
+        f"生成时间: {format_report_datetime(meta.get('generated_at')) or 'N/A'}"
+    )
+    lines.append(
+        "覆盖范围: 个人{persons}名 / 企业{companies}家 / 家庭{families}个".format(
             persons=int(coverage.get("persons_count", 0) or 0),
             companies=int(coverage.get("companies_count", 0) or 0),
             families=int(coverage.get("families_count", 0) or 0),
@@ -633,7 +827,7 @@ def render_report_quality_summary_text(report_package: Dict[str, Any]) -> str:
     )
     lines.append("")
     lines.append(
-        "Summary: total={total}, pass={passed}, warn={warn}, fail={fail}".format(
+        "检查结论: 共{total}项，其中通过{passed}项，提示{warn}项，阻断{fail}项".format(
             total=int(summary.get("total", len(checks)) or 0),
             passed=int(summary.get("pass", 0) or 0),
             warn=int(summary.get("warn", 0) or 0),
@@ -641,22 +835,25 @@ def render_report_quality_summary_text(report_package: Dict[str, Any]) -> str:
         )
     )
     lines.append("")
-    lines.append("Checks:")
+    lines.append("检查明细:")
 
     for item in checks:
         if not isinstance(item, dict):
             continue
-        status = str(item.get("status") or "unknown").upper()
-        check_id = str(item.get("check_id") or "unknown").strip()
-        message = str(item.get("message") or "").strip()
-        lines.append(f"- [{status}] {check_id}: {message}")
+        status = str(item.get("status") or "unknown").strip().lower()
+        status_label = {
+            "pass": "通过",
+            "warn": "提示",
+            "fail": "阻断",
+        }.get(status, "待确认")
+        display = format_report_qa_check_display(item)
+        lines.append(f"- [{status_label}] {display['title']}")
+        lines.append(f"  {display['summary']}")
         details = _as_dict(item.get("details"))
         for key, value in details.items():
-            if isinstance(value, list):
-                detail_text = ", ".join(str(v) for v in value) if value else "[]"
-            else:
-                detail_text = str(value)
-            lines.append(f"  {key}: {detail_text}")
+            detail_label = format_report_qa_detail_label(key)
+            detail_text = format_report_qa_detail_value(key, value)
+            lines.append(f"  {detail_label}: {detail_text}")
 
     lines.append("")
     lines.append("=" * 70)

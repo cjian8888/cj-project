@@ -53,14 +53,14 @@ def _extract_evidence_refs(item: Dict[str, Any]) -> List[str]:
     ).strip()
     source_row = item.get("source_row_index", item.get("sourceRowIndex"))
     if source_file and source_row not in (None, ""):
-        refs.append(f"{source_file}#L{int(_as_float(source_row))}")
+        refs.append(f"{source_file}（解析记录第{int(_as_float(source_row))}行）")
     elif source_file:
         refs.append(source_file)
     transaction_id = str(
         item.get("transaction_id") or item.get("transactionId") or ""
     ).strip()
     if transaction_id:
-        refs.append(f"tx:{transaction_id}")
+        refs.append(f"交易标识 {transaction_id}")
     return refs
 
 
@@ -132,6 +132,31 @@ def _top_reasons_from_summary(text: str) -> List[str]:
         for segment in content.replace("；", "，").split("，")
         if segment.strip()
     ][:3]
+
+
+def _contains_benign_context_tokens(text: str) -> List[str]:
+    content = str(text or "").strip()
+    if not content:
+        return []
+    tokens = [
+        "工资",
+        "薪资",
+        "社保",
+        "理财赎回",
+        "理财",
+        "自我转账",
+        "自转",
+        "放心借",
+        "白条",
+        "消费金融",
+        "普通消费",
+        "餐饮",
+        "家庭往来",
+        "报销",
+        "网贷放款",
+        "备用金",
+    ]
+    return [token for token in tokens if token in content]
 
 
 def build_report_issues(
@@ -226,6 +251,44 @@ def build_report_issues(
             "company": entity_name if entity_name in companies else "",
         }
         description = str(item.get("description") or item.get("headline") or "").strip()
+        evidence_refs = [
+            str(ref).strip()
+            for ref in (
+                _as_list(item.get("evidence_refs"))
+                + _as_list(item.get("evidenceRefs"))
+                + _extract_evidence_refs(item)
+            )
+            if str(ref).strip()
+        ]
+        evidence_refs = list(dict.fromkeys(evidence_refs))
+        why_flagged = [
+            str(reason).strip()
+            for reason in (
+                _as_list(item.get("why_flagged"))
+                + _as_list(item.get("whyFlagged"))
+            )
+            if str(reason).strip()
+        ]
+        if not why_flagged and description:
+            why_flagged = [description]
+        requested_risk_level = str(
+            item.get("severity") or item.get("risk_level") or "medium"
+        )
+        normalized_requested_risk = _normalize_risk_level(requested_risk_level)
+        benign_tokens = _contains_benign_context_tokens(description)
+        counter_indicators: List[str] = []
+        effective_risk_level = requested_risk_level
+        confidence = 0.68
+        if normalized_requested_risk in {"high", "critical"} and not evidence_refs:
+            effective_risk_level = "medium"
+            confidence = 0.58
+            counter_indicators.append(
+                "当前条目仅来自正式报告综合研判摘要，尚未附 traceable evidence_refs，暂不提升为高风险结论。"
+            )
+        if benign_tokens:
+            counter_indicators.append(
+                f"标题或描述涉及{'/'.join(benign_tokens)}等可能的日常场景，需结合业务背景审慎判断。"
+            )
         register_issue(
             "CON",
             "综合研判",
@@ -233,10 +296,12 @@ def build_report_issues(
             or "综合问题",
             scope,
             description or "正式报告研判指出存在待核查问题",
-            risk_level=str(item.get("severity") or item.get("risk_level") or "medium"),
-            confidence=0.68,
-            why_flagged=[description] if description else [],
+            risk_level=effective_risk_level,
+            confidence=confidence,
+            why_flagged=why_flagged,
+            counter_indicators=counter_indicators or None,
             narrative=description,
+            evidence_refs=evidence_refs,
             source_modules=["report_conclusion"],
         )
 
@@ -323,6 +388,19 @@ def build_report_issues(
             or ""
         ).strip()
         amount = _as_float(item.get("amount"))
+        description = str(item.get("description") or "").strip()
+        benign_tokens = _contains_benign_context_tokens(description)
+        why_flagged = [f"交易日期: {item.get('date') or '未提供'}"]
+        if description and not benign_tokens:
+            why_flagged.append(description)
+        counter_indicators = None
+        narrative = description or "发现直接资金往来，需要核查交易背景。"
+        if benign_tokens:
+            counter_indicators = [
+                f"交易附言含{'/'.join(benign_tokens)}等日常语义，不能单独作为风险依据。",
+                "需结合工资台账、报销凭证或业务合同复核交易性质。",
+            ]
+            narrative = "发现直接资金往来，需要结合交易附言与业务背景复核真实性质。"
         scope = _candidate_scope(from_name, to_name, family_map, persons, companies)
         register_issue(
             "FLOW",
@@ -333,11 +411,9 @@ def build_report_issues(
             risk_level=str(item.get("riskLevel") or "medium"),
             confidence=0.78 if _extract_evidence_refs(item) else 0.66,
             amount_impact=amount,
-            why_flagged=[
-                f"交易日期: {item.get('date') or '未提供'}",
-                str(item.get("description") or "存在直接资金往来").strip(),
-            ],
-            narrative=str(item.get("description") or "发现直接资金往来，需要核查交易背景。").strip(),
+            why_flagged=why_flagged,
+            counter_indicators=counter_indicators,
+            narrative=narrative,
             evidence_refs=_extract_evidence_refs(item),
             next_actions=["调取交易回单、合同及对手方背景材料。"],
             source_modules=["related_party_analyzer"],

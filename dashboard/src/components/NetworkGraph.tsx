@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Network, DataSet } from 'vis-network/standalone';
 import type { Data, Node, Edge, Options } from 'vis-network/standalone';
-import { API_BASE_URL } from '../services/api';
+import { API_BASE_URL, api } from '../services/api';
 import {
   AlertTriangle,
   CreditCard,
@@ -356,6 +356,40 @@ interface SemanticDossierSnapshot {
     priority?: number;
   }>;
   keyIssueHeadlines: string[];
+  financialGapExplanation?: {
+    summary?: string;
+    rawBalanceSummary?: string;
+    realBalanceSummary?: string;
+    incomeGap?: number;
+    expenseGap?: number;
+    incomeOffsetRows: Array<{
+      bucket?: string;
+      direction?: 'income' | 'expense';
+      label: string;
+      amount?: number;
+      amountWan?: number;
+      confidence?: string;
+      confidenceText?: string;
+      ruleText?: string;
+    }>;
+    expenseOffsetRows: Array<{
+      bucket?: string;
+      direction?: 'income' | 'expense';
+      label: string;
+      amount?: number;
+      amountWan?: number;
+      confidence?: string;
+      confidenceText?: string;
+      ruleText?: string;
+    }>;
+  };
+}
+
+interface StaticReportPreview {
+  filename: string;
+  type: 'html' | 'text';
+  url?: string;
+  content?: string;
 }
 
 const normalizeSemanticName = (value: unknown): string => String(value || '').trim();
@@ -382,6 +416,59 @@ const asKeyIssueCards = (value: unknown): SemanticDossierSnapshot['keyIssueCards
     }).filter((card) => card.issueId || card.headline)
     : []
 );
+const asFinancialGapOffsetRows = (
+  value: unknown,
+): NonNullable<SemanticDossierSnapshot['financialGapExplanation']>['incomeOffsetRows'] => (
+  Array.isArray(value)
+    ? value.map((item) => {
+      const row = (item as Record<string, unknown>) || {};
+      return {
+        bucket: String(row.bucket || '').trim() || undefined,
+        direction: row.direction === 'expense' ? 'expense' : 'income',
+        label: String(row.label || '').trim(),
+        amount: asSemanticNumber(row.amount),
+        amountWan: asSemanticNumber(row.amount_wan),
+        confidence: String(row.confidence || '').trim() || undefined,
+        confidenceText: String(row.confidence_text || '').trim() || undefined,
+        ruleText: String(row.rule_text || '').trim() || undefined,
+      };
+    }).filter((row) => row.label)
+    : []
+);
+const asFinancialGapExplanation = (
+  value: unknown,
+): SemanticDossierSnapshot['financialGapExplanation'] | undefined => {
+  const explanation = (value as Record<string, unknown>) || {};
+  const summary = String(explanation.summary || '').trim();
+  const rawBalanceSummary = String(explanation.raw_balance_summary || '').trim();
+  const realBalanceSummary = String(explanation.real_balance_summary || '').trim();
+  const incomeOffsetRows = asFinancialGapOffsetRows(explanation.income_offset_rows);
+  const expenseOffsetRows = asFinancialGapOffsetRows(explanation.expense_offset_rows);
+  const incomeGap = asSemanticNumber(explanation.income_gap);
+  const expenseGap = asSemanticNumber(explanation.expense_gap);
+
+  if (
+    !summary
+    && !rawBalanceSummary
+    && !realBalanceSummary
+    && incomeGap === undefined
+    && expenseGap === undefined
+    && !incomeOffsetRows.length
+    && !expenseOffsetRows.length
+  ) {
+    return undefined;
+  }
+
+  return {
+    summary: summary || undefined,
+    rawBalanceSummary: rawBalanceSummary || undefined,
+    realBalanceSummary: realBalanceSummary || undefined,
+    incomeGap,
+    expenseGap,
+    incomeOffsetRows,
+    expenseOffsetRows,
+  };
+};
 
 const groupLabelForDisplay = (group: string) => {
   switch (group) {
@@ -395,21 +482,22 @@ const groupLabelForDisplay = (group: string) => {
 };
 
 function NetworkGraph({ onLog }: NetworkGraphProps) {
-  const { data: appData, ui, clearSemanticNavigation } = useApp();
+  const { data: appData, ui, navigateToSemanticTarget, clearSemanticNavigation } = useApp();
   const reportPackage = appData.reportPackage as ReportPackage | null;
-  const htmlReportName = '资金流向可视化.html';
+  const mainReportView = reportPackage?.main_report_view || null;
   const excelReportName = '资金核查底稿.xlsx';
-  const htmlReportUrl = `${API_BASE_URL}/api/reports/preview/${encodeURIComponent(htmlReportName)}`;
   const excelReportUrl = `${API_BASE_URL}/api/reports/download/${encodeURIComponent(excelReportName)}`;
   const networkRef = useRef<HTMLDivElement>(null);
   const networkInstance = useRef<Network | null>(null);
+  const staticReportBootstrappedRef = useRef(false);
+  const graphDataBootstrappedRef = useRef(false);
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<{ label: string; group: string; entityName: string } | null>(null);
   const [activeSelection, setActiveSelection] = useState<LinkedSelection | null>(null);
   const [viewMode, setViewMode] = useState<'graph' | 'report'>('graph');
-  const [reportUrl, setReportUrl] = useState<string | null>(null);
+  const [reportPreview, setReportPreview] = useState<StaticReportPreview | null>(null);
   // P0-1: 交易详情 Modal 状态
   const [transactionDetail, setTransactionDetail] = useState<TransactionDetail | null>(null);
   // 导出快照引用（保留用于未来功能）
@@ -435,9 +523,40 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
     return lookup;
   }, [reportPackage]);
 
+  const semanticIssueCatalog = useMemo(() => {
+    const mergedIssues: ReportIssue[] = [];
+    const seenKeys = new Set<string>();
+    const appendIssue = (issue: ReportIssue) => {
+      const issueId = String(issue.issue_id || '').trim();
+      const fallbackKey = `${String(issue.headline || '').trim()}::${String(issue.narrative || '').trim()}`;
+      const key = issueId || fallbackKey;
+      if (!key || seenKeys.has(key)) {
+        return;
+      }
+      seenKeys.add(key);
+      mergedIssues.push(issue);
+    };
+
+    const mainIssues = Array.isArray(mainReportView?.issues) ? mainReportView.issues : [];
+    const reportIssues = Array.isArray(reportPackage?.issues) ? reportPackage.issues : [];
+    mainIssues.forEach(appendIssue);
+    reportIssues.forEach(appendIssue);
+    return mergedIssues;
+  }, [mainReportView, reportPackage]);
+
+  const semanticIssueLookup = useMemo(() => {
+    const lookup: Record<string, ReportIssue> = {};
+    semanticIssueCatalog.forEach((issue) => {
+      const issueId = String(issue.issue_id || '').trim();
+      if (issueId && !lookup[issueId]) {
+        lookup[issueId] = issue;
+      }
+    });
+    return lookup;
+  }, [semanticIssueCatalog]);
+
   const semanticIssuesByEntity = useMemo(() => {
     const lookup: Record<string, ReportIssue[]> = {};
-    const issues = Array.isArray(reportPackage?.issues) ? reportPackage.issues : [];
 
     const appendIssue = (name: string, issue: ReportIssue) => {
       const key = normalizeSemanticName(name);
@@ -451,7 +570,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
       lookup[key] = bucket;
     };
 
-    issues.forEach((issue) => {
+    semanticIssueCatalog.forEach((issue) => {
       const scope = issue.scope || {};
       appendIssue(scope.entity || '', issue);
       appendIssue(scope.company || '', issue);
@@ -466,7 +585,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
     });
 
     return lookup;
-  }, [reportPackage]);
+  }, [semanticIssueCatalog]);
 
   const semanticDossierLookup = useMemo(() => {
     const lookup: Record<string, SemanticDossierSnapshot> = {};
@@ -542,6 +661,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
         roleTags: [],
         keyIssueCards,
         keyIssueHeadlines: keyIssueCards.map((card) => card.headline || '').filter(Boolean),
+        financialGapExplanation: asFinancialGapExplanation(item.financial_gap_explanation),
       });
     });
 
@@ -854,6 +974,19 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
     return resolveSemanticEntityNameFromNode(matchedNode) || String(nodeId).trim();
   };
 
+  const getIssueEntityName = (issue?: ReportIssue | null) => {
+    const scope = issue?.scope || {};
+    return normalizeSemanticName(
+      scope.entity
+      || scope.company
+      || scope.family
+      || issue?.entity_name
+      || issue?.company_name
+      || issue?.family_name
+      || ''
+    );
+  };
+
   const focusGraphNodes = (names: string[], label: string) => {
     if (!networkInstance.current) {
       return;
@@ -1082,17 +1215,85 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
     focusGraphNodes([entity.name], `重点对象 ${entity.name}`);
   };
 
+  const destroyNetworkInstance = () => {
+    if (networkInstance.current) {
+      networkInstance.current.destroy();
+      networkInstance.current = null;
+    }
+  };
+
   useEffect(() => {
-    // Check if report exists (only run once on mount)
-    fetch(htmlReportUrl, { method: 'HEAD' })
-      .then(res => {
-        if (res.ok) {
-          setReportUrl(htmlReportUrl);
-          // Always keep graph view as default, don't auto-switch to report
+    if (staticReportBootstrappedRef.current) {
+      return;
+    }
+    staticReportBootstrappedRef.current = true;
+    let disposed = false;
+
+    const loadStaticReport = async () => {
+      try {
+        const manifest = await api.getReportManifest();
+        const reports = Array.isArray(manifest.reports) ? manifest.reports : [];
+        const preferredReport = reports.find((item) => {
+          const extension = String(item.extension || '').toLowerCase();
+          return item.groupKey === 'primary_reports' && (extension === '.html' || extension === '.htm');
+        }) || reports.find((item) => item.groupKey === 'primary_reports' && item.isPreviewable) || reports.find((item) => {
+          const extension = String(item.extension || '').toLowerCase();
+          return item.isPreviewable && (extension === '.html' || extension === '.htm');
+        }) || reports.find((item) => {
+          return item.isPreviewable;
+        });
+
+        if (disposed || !preferredReport) {
+          if (!disposed) {
+            setReportPreview(null);
+            setViewMode('graph');
+          }
+          return;
         }
-      })
-      .catch(() => { });
-  }, [htmlReportUrl]); // Empty deps except derived URL
+
+        const reportFilename = String(preferredReport.filename || preferredReport.name || '').trim();
+        if (!reportFilename) {
+          setReportPreview(null);
+          setViewMode('graph');
+          return;
+        }
+
+        const extension = String(preferredReport.extension || '').toLowerCase();
+        if (extension === '.html' || extension === '.htm') {
+          setReportPreview({
+            filename: reportFilename,
+            type: 'html',
+            url: `${API_BASE_URL}/api/reports/preview/${encodeURIComponent(reportFilename)}`,
+          });
+          return;
+        }
+
+        const preview = await api.previewReport(reportFilename);
+        if (!preview.success || typeof preview.content !== 'string') {
+          throw new Error('静态报告预览数据无效');
+        }
+
+        if (!disposed) {
+          setReportPreview({
+            filename: reportFilename,
+            type: 'text',
+            content: preview.content,
+          });
+        }
+      } catch {
+        if (!disposed) {
+          setReportPreview(null);
+          setViewMode('graph');
+        }
+      }
+    };
+
+    void loadStaticReport();
+
+    return () => {
+      disposed = true;
+    };
+  }, []);
 
   // 获取图谱数据
   const fetchGraphData = async () => {
@@ -1138,23 +1339,21 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
 
   // 自动加载数据
   useEffect(() => {
+    if (graphDataBootstrappedRef.current) {
+      return;
+    }
+    graphDataBootstrappedRef.current = true;
     fetchGraphData();
   }, []);
 
   // 初始化图表
   useEffect(() => {
-    if (!networkRef.current || !graphData) return;
+    if (viewMode !== 'graph') {
+      destroyNetworkInstance();
+      return;
+    }
 
-    // 调试日志
-    console.log('[NetworkGraph] 初始化图表:', {
-      nodeCount: graphData.nodes?.length || 0,
-      edgeCount: graphData.edges?.length || 0,
-      containerExists: !!networkRef.current,
-      containerSize: networkRef.current ? {
-        width: networkRef.current.offsetWidth,
-        height: networkRef.current.offsetHeight
-      } : null
-    });
+    if (!networkRef.current || !graphData) return;
 
     // 如果没有节点数据，不初始化
     if (!graphData.nodes || graphData.nodes.length === 0) {
@@ -1164,10 +1363,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
 
     try {
       // Clean up previous instance
-      if (networkInstance.current) {
-        networkInstance.current.destroy();
-        networkInstance.current = null;
-      }
+      destroyNetworkInstance();
 
       // 配置 Dark Sci-Fi 样式（完美复刻 HTML 版本）
       const options: Options = {
@@ -1356,14 +1552,10 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
 
       const data: Data = { nodes, edges };
 
-      console.log('[NetworkGraph] 创建网络实例，节点:', processedNodes.length, '边:', processedEdges.length);
-
       // 创建网络实例
       networkInstance.current = new Network(networkRef.current, data, options);
 
-      // 稳定化完成后日志
       networkInstance.current.on('stabilizationIterationsDone', () => {
-        console.log('[NetworkGraph] 网络稳定化完成');
         onLog?.('网络图谱渲染完成');
       });
 
@@ -1403,37 +1595,50 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
         }
       });
 
-      // 调试：打印创建成功
-      console.log('[NetworkGraph] 网络实例创建成功');
-
     } catch (err) {
       console.error('[NetworkGraph] 初始化失败:', err);
       setError('图表初始化失败: ' + (err instanceof Error ? err.message : String(err)));
     }
 
     return () => {
-      if (networkInstance.current) {
-        networkInstance.current.destroy();
-        networkInstance.current = null;
-      }
+      destroyNetworkInstance();
     };
-  }, [graphData]);
+  }, [graphData, viewMode]);
 
   useEffect(() => {
     const pendingTarget = ui.semanticNavigation;
     if (ui.activeTab !== 'graph' || pendingTarget?.tab !== 'graph') {
       return;
     }
-    const targetEntityName = String(pendingTarget?.entityName || '').trim();
-    if (!targetEntityName || !networkInstance.current) {
+    if (!networkInstance.current) {
       return;
     }
 
-    focusGraphNodes([targetEntityName], `语义定位 ${targetEntityName}`);
+    const targetIssueId = String(pendingTarget?.issueId || '').trim();
+    const targetEntityName = targetIssueId
+      ? getIssueEntityName(semanticIssueLookup[targetIssueId])
+      : '';
+    const fallbackEntityName = String(pendingTarget?.entityName || '').trim();
+    const resolvedEntityName = targetEntityName || fallbackEntityName;
+
+    if (!resolvedEntityName) {
+      if (targetIssueId) {
+        onLog?.(`问题卡 ${targetIssueId} 未找到关联实体，无法定位图谱`);
+        clearSemanticNavigation();
+      }
+      return;
+    }
+
+    focusGraphNodes(
+      [resolvedEntityName],
+      targetIssueId ? `问题卡 ${targetIssueId}` : `语义定位 ${resolvedEntityName}`,
+    );
     clearSemanticNavigation();
   }, [
     clearSemanticNavigation,
     graphData,
+    onLog,
+    semanticIssueLookup,
     ui.activeTab,
     ui.semanticNavigation,
   ]);
@@ -1672,7 +1877,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
               <p className="text-xs theme-text-dim leading-relaxed max-w-[200px] mb-4">
                 请先在侧边栏点击"启动引擎"运行分析，完成后数据将自动加载
               </p>
-              {reportUrl && (
+              {reportPreview && (
                 <button
                   onClick={() => setViewMode('report')}
                   className="text-cyan-400 text-xs underline hover:text-cyan-300"
@@ -1837,6 +2042,52 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                               </div>
                             ) : null}
                           </div>
+                          {selectedNodeSemantic.dossier?.financialGapExplanation ? (
+                            <div className="rounded-md border border-sky-400/20 bg-sky-500/10 px-3 py-2.5 space-y-2">
+                              <div className="text-[10px] uppercase tracking-wide text-sky-200/80">
+                                收支口径解释
+                              </div>
+                              {selectedNodeSemantic.dossier.financialGapExplanation.summary ? (
+                                <div className="text-xs leading-relaxed text-sky-50/90">
+                                  {selectedNodeSemantic.dossier.financialGapExplanation.summary}
+                                </div>
+                              ) : null}
+                              {selectedNodeSemantic.dossier.financialGapExplanation.incomeOffsetRows.length ? (
+                                <div className="space-y-1">
+                                  <div className="text-[10px] uppercase tracking-wide theme-text-dim">
+                                    流入侧主要剔除
+                                  </div>
+                                  {selectedNodeSemantic.dossier.financialGapExplanation.incomeOffsetRows.slice(0, 2).map((row) => (
+                                    <div
+                                      key={`${selectedNodeSemantic.entityName}-income-${row.label}`}
+                                      className="text-xs leading-relaxed text-sky-100/85"
+                                    >
+                                      {row.label} {row.amount !== undefined ? formatAmount(row.amount) : ''}
+                                      {row.confidenceText ? ` · 置信度${row.confidenceText}` : ''}
+                                      {row.ruleText ? ` · ${row.ruleText}` : ''}
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : null}
+                              {selectedNodeSemantic.dossier.financialGapExplanation.expenseOffsetRows.length ? (
+                                <div className="space-y-1">
+                                  <div className="text-[10px] uppercase tracking-wide theme-text-dim">
+                                    流出侧主要剔除
+                                  </div>
+                                  {selectedNodeSemantic.dossier.financialGapExplanation.expenseOffsetRows.slice(0, 2).map((row) => (
+                                    <div
+                                      key={`${selectedNodeSemantic.entityName}-expense-${row.label}`}
+                                      className="text-xs leading-relaxed text-sky-100/85"
+                                    >
+                                      {row.label} {row.amount !== undefined ? formatAmount(row.amount) : ''}
+                                      {row.confidenceText ? ` · 置信度${row.confidenceText}` : ''}
+                                      {row.ruleText ? ` · ${row.ruleText}` : ''}
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
                           {selectedNodeSemantic.priority?.family_name ? (
                             <div className="text-xs theme-text-dim">
                               所属家庭: {selectedNodeSemantic.priority.family_name}
@@ -1974,6 +2225,44 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                                   证据引用: {issue.evidence_refs.slice(0, 2).join('；')}
                                 </div>
                               ) : null}
+                              <div className="mt-3 flex justify-end gap-2 flex-wrap">
+                                <button
+                                  type="button"
+                                  onClick={() => navigateToSemanticTarget({
+                                    tab: 'risk',
+                                    issueId: String(issue.issue_id || '').trim(),
+                                    entityName: getIssueEntityName(issue) || selectedNodeSemantic.entityName,
+                                    source: `graph:issue:${String(issue.issue_id || issue.headline || idx).trim()}`,
+                                  })}
+                                  disabled={!String(issue.issue_id || '').trim()}
+                                  className="
+                                    inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg
+                                    text-xs font-medium border border-amber-500/20 text-amber-300 bg-amber-500/10
+                                    hover:bg-amber-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed
+                                  "
+                                >
+                                  <AlertTriangle className="w-3.5 h-3.5" />
+                                  查看风险卡
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => navigateToSemanticTarget({
+                                    tab: 'report',
+                                    issueId: String(issue.issue_id || '').trim(),
+                                    entityName: getIssueEntityName(issue) || selectedNodeSemantic.entityName,
+                                    source: `graph:issue:${String(issue.issue_id || issue.headline || idx).trim()}`,
+                                  })}
+                                  disabled={!String(issue.issue_id || '').trim()}
+                                  className="
+                                    inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg
+                                    text-xs font-medium border border-emerald-500/20 text-emerald-300 bg-emerald-500/10
+                                    hover:bg-emerald-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed
+                                  "
+                                >
+                                  <FileText className="w-3.5 h-3.5" />
+                                  查看报告卡
+                                </button>
+                              </div>
                             </div>
                           ))}
                         </div>
@@ -3366,6 +3655,28 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                 联动路径: {activeSelection.path || activeSelection.label}
               </div>
             )}
+            {reportPreview && (
+              <div className="flex items-center rounded-lg border border-white/10 bg-white/5 p-1">
+                <button
+                  onClick={() => setViewMode('graph')}
+                  className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${viewMode === 'graph'
+                    ? 'bg-cyan-500 text-white'
+                    : 'theme-text-muted hover:text-white'
+                    }`}
+                >
+                  图谱
+                </button>
+                <button
+                  onClick={() => setViewMode('report')}
+                  className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${viewMode === 'report'
+                    ? 'bg-cyan-500 text-white'
+                    : 'theme-text-muted hover:text-white'
+                    }`}
+                >
+                  报告
+                </button>
+              </div>
+            )}
             {selectedNode && (
               <div className="text-sm text-cyan-400">
                 选中: {selectedNode.label} ({groupLabelForDisplay(selectedNode.group)})
@@ -3376,12 +3687,34 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
 
         {/* 图表区域 (固定高度) */}
         <div className="h-[600px] flex-shrink-0 relative border-b border-white/10 theme-bg-base/50">
-          {viewMode === 'report' && reportUrl ? (
-            <iframe
-              src={reportUrl}
-              className="w-full h-full border-none bg-white"
-              title="Funds Flow Report"
-            />
+          {viewMode === 'report' && reportPreview ? (
+            <div
+              key="report-preview"
+              className="flex h-full flex-col"
+            >
+              <div className="flex items-center justify-between border-b border-white/10 bg-white/5 px-4 py-2">
+                <div className="min-w-0">
+                  <div className="text-[11px] uppercase tracking-wider theme-text-dim">静态报告</div>
+                  <div className="truncate text-sm font-medium theme-text">{reportPreview.filename}</div>
+                </div>
+                <div className="text-xs theme-text-muted">
+                  {reportPreview.type === 'html' ? 'HTML 预览' : '文本预览'}
+                </div>
+              </div>
+              {reportPreview.type === 'html' && reportPreview.url ? (
+                <iframe
+                  src={reportPreview.url}
+                  className="h-full w-full border-none bg-white"
+                  title="Funds Flow Report"
+                />
+              ) : (
+                <div className="h-full overflow-auto bg-slate-950/70 px-4 py-3">
+                  <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-6 text-slate-100">
+                    {reportPreview.content}
+                  </pre>
+                </div>
+              )}
+            </div>
           ) : (
             <>
               {loading && (
@@ -3402,7 +3735,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                   >
                     重新加载
                   </button>
-                  {reportUrl && (
+                  {reportPreview && (
                     <button
                       onClick={() => setViewMode('report')}
                       className="mt-4 theme-text-muted text-sm hover:text-white underline"
@@ -3425,7 +3758,12 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                 </div>
               )}
 
-              <div ref={networkRef} className="w-full" style={{ height: '580px' }} />
+              <div
+                key="graph-network"
+                ref={networkRef}
+                className="w-full"
+                style={{ height: '580px' }}
+              />
             </>
           )}
         </div>

@@ -195,7 +195,7 @@ export function Sidebar() {
                             </div>
                             <span className="text-green-400">分析完成</span>
                             {analysis.lastRunTime && (
-                                <span className="theme-text-dim ml-auto">
+                            <span className="theme-text-muted ml-auto">
                                     {analysis.lastRunTime.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
                                 </span>
                             )}
@@ -234,11 +234,13 @@ export function Sidebar() {
                     >
                         <div className="space-y-3">
                             <div>
-                                <label className="text-[11px] font-medium theme-text-dim uppercase tracking-wider mb-1.5 block">
+                                <label htmlFor="sidebar-input-directory" className="text-[11px] font-medium theme-text-dim uppercase tracking-wider mb-1.5 block">
                                     输入目录
                                 </label>
                                 <div className="flex rounded-lg border theme-border overflow-hidden focus-within:border-blue-500/50 focus-within:ring-1 focus-within:ring-blue-500/30 transition-all theme-bg-muted/40">
                                     <input
+                                        id="sidebar-input-directory"
+                                        name="inputDirectory"
                                         type="text"
                                         value={config.dataSources.inputDirectory}
                                         onChange={(e) => updateDataSources({ inputDirectory: e.target.value })}
@@ -256,11 +258,13 @@ export function Sidebar() {
                                 </div>
                             </div>
                             <div>
-                                <label className="text-[11px] font-medium theme-text-dim uppercase tracking-wider mb-1.5 block">
+                                <label htmlFor="sidebar-output-directory" className="text-[11px] font-medium theme-text-dim uppercase tracking-wider mb-1.5 block">
                                     输出目录
                                 </label>
                                 <div className="flex rounded-lg border theme-border overflow-hidden focus-within:border-cyan-500/50 focus-within:ring-1 focus-within:ring-cyan-500/30 transition-all theme-bg-muted/40">
                                     <input
+                                        id="sidebar-output-directory"
+                                        name="outputDirectory"
                                         type="text"
                                         value={config.dataSources.outputDirectory}
                                         onChange={(e) => updateDataSources({ outputDirectory: e.target.value })}
@@ -289,11 +293,13 @@ export function Sidebar() {
                     >
                         <div className="space-y-3">
                             <div>
-                                <label className="text-[11px] font-medium theme-text-dim uppercase tracking-wider mb-1.5 flex justify-between">
+                                <label htmlFor="sidebar-cash-threshold" className="text-[11px] font-medium theme-text-dim uppercase tracking-wider mb-1.5 flex justify-between">
                                     <span>大额现金阈值</span>
                                     <span className="text-cyan-400 font-mono">¥{config.thresholds.cashThreshold.toLocaleString()}</span>
                                 </label>
                                 <input
+                                    id="sidebar-cash-threshold"
+                                    name="cashThreshold"
                                     type="range"
                                     min={10000}
                                     max={500000}
@@ -308,11 +314,13 @@ export function Sidebar() {
                                 </div>
                             </div>
                             <div>
-                                <label className="text-[11px] font-medium theme-text-dim uppercase tracking-wider mb-1.5 flex justify-between">
+                                <label htmlFor="sidebar-time-window" className="text-[11px] font-medium theme-text-dim uppercase tracking-wider mb-1.5 flex justify-between">
                                     <span>时间窗口</span>
                                     <span className="text-cyan-400 font-mono">{config.thresholds.timeWindow}h</span>
                                 </label>
                                 <input
+                                    id="sidebar-time-window"
+                                    name="timeWindow"
                                     type="range"
                                     min={1}
                                     max={168}
@@ -400,12 +408,12 @@ export function Sidebar() {
                     <div className="flex items-center justify-between text-xs">
                         <div className="flex items-center gap-2">
                             <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                            <span className="theme-text-dim">系统在线</span>
+                            <span className="theme-text-secondary">系统在线</span>
                         </div>
-                        <span className="theme-text-dim font-mono">{APP_VERSION}</span>
+                        <span className="theme-text-secondary font-mono">{APP_VERSION}</span>
                     </div>
                     {analysis.lastRunTime && (
-                        <p className="text-[10px] theme-text-dim mt-2">
+                        <p className="text-[10px] theme-text-secondary mt-2">
                             上次运行: {analysis.lastRunTime.toLocaleTimeString()}
                         </p>
                     )}
@@ -446,7 +454,7 @@ function ConfigSection({ title, expanded, onToggle, accentColor, badge, children
                         {title}
                     </span>
                     {badge && (
-                        <span className="px-1.5 py-0.5 text-[10px] font-mono theme-text-dim theme-bg-muted rounded">
+                        <span className="px-1.5 py-0.5 text-[10px] font-mono theme-text-secondary bg-black/20 border theme-border rounded">
                             {badge}
                         </span>
                     )}
@@ -477,6 +485,7 @@ function ModuleToggle({ label, icon: Icon, checked, onChange }: ModuleToggleProp
             <div className="relative">
                 <input
                     type="checkbox"
+                    name={`module-toggle-${label}`}
                     checked={checked}
                     onChange={onChange}
                     className="sr-only"

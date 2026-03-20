@@ -9,6 +9,7 @@ type WSStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
 export function Header() {
     const { analysis, ui, toggleTheme } = useApp();
     const [wsStatus, setWsStatus] = useState<WSStatus>(ws.status);
+    const backendConnected = analysis.backendConnection === 'online';
 
     // 订阅 WebSocket 状态变化
     useEffect(() => {
@@ -21,10 +22,23 @@ export function Header() {
             case 'connected':
                 return { icon: Wifi, color: 'text-green-400', bg: 'bg-green-500/10', border: 'border-green-500/30', label: '已连接', pulse: false };
             case 'connecting':
-                return { icon: Wifi, color: 'text-amber-400', bg: 'bg-amber-500/10', border: 'border-amber-500/30', label: '连接中', pulse: true };
+                return {
+                    icon: Wifi,
+                    color: backendConnected ? 'text-cyan-300' : 'text-amber-400',
+                    bg: backendConnected ? 'bg-cyan-500/10' : 'bg-amber-500/10',
+                    border: backendConnected ? 'border-cyan-500/30' : 'border-amber-500/30',
+                    label: backendConnected ? '实时连接中' : '连接中',
+                    pulse: true,
+                };
             case 'error':
+                if (backendConnected) {
+                    return { icon: Wifi, color: 'text-cyan-300', bg: 'bg-cyan-500/10', border: 'border-cyan-500/30', label: '数据已连接', pulse: false };
+                }
                 return { icon: WifiOff, color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/30', label: '连接失败', pulse: false };
             default:
+                if (backendConnected) {
+                    return { icon: Wifi, color: 'text-cyan-300', bg: 'bg-cyan-500/10', border: 'border-cyan-500/30', label: '数据已连接', pulse: false };
+                }
                 return { icon: WifiOff, color: 'theme-text-muted', bg: 'theme-bg-muted', border: 'theme-border', label: '未连接', pulse: false };
         }
     };
@@ -62,14 +76,20 @@ export function Header() {
                 {/* Center Section - Search (Disabled - Under Development) */}
                 <div className="hidden lg:flex items-center flex-1 max-w-md mx-8">
                     <div className="relative w-full group">
+                        <label htmlFor="dashboard-search-disabled" className="sr-only">
+                            搜索功能（开发中）
+                        </label>
                         <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 theme-text-dim" />
                         <input
+                            id="dashboard-search-disabled"
+                            name="dashboardSearchDisabled"
                             type="text"
                             placeholder="搜索功能开发中..."
+                            aria-label="搜索功能开发中"
                             disabled
                             className="w-full pl-10 pr-4 py-2.5 theme-bg-muted border theme-border rounded-xl text-sm theme-text-dim placeholder:theme-text-dim cursor-not-allowed"
                         />
-                        <span className="absolute right-3 top-1/2 -translate-y-1/2 px-2 py-0.5 text-[9px] font-medium text-amber-500/80 bg-amber-500/10 border border-amber-500/20 rounded">
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 px-2 py-0.5 text-[9px] font-medium text-amber-100 bg-amber-950/70 border border-amber-400/40 rounded">
                             待开发
                         </span>
                     </div>
@@ -81,7 +101,9 @@ export function Header() {
                     <button
                         onClick={() => wsStatus !== 'connected' && ws.reconnect()}
                         className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-medium transition-all ${wsConfig.bg} ${wsConfig.color} border ${wsConfig.border} ${wsStatus !== 'connected' ? 'cursor-pointer hover:opacity-80' : 'cursor-default'}`}
-                        title={wsStatus !== 'connected' ? '点击重连' : '实时连接正常'}
+                        title={wsStatus !== 'connected'
+                            ? (backendConnected ? 'HTTP接口正常，点击重连实时日志' : '点击重连')
+                            : '实时连接正常'}
                     >
                         <WSIcon className={`w-3.5 h-3.5 ${wsConfig.pulse ? 'animate-pulse' : ''}`} />
                         <span className="hidden md:inline">{wsConfig.label}</span>

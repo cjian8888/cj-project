@@ -30,15 +30,29 @@ import config
 import family_assets_helper
 import utils
 import yaml
-from report_dossier_builder import build_report_dossiers
+from report_dossier_builder import (
+    _build_person_financial_gap_explanation,
+    build_report_dossiers,
+)
 from report_fact_normalizer import normalize_report_facts
 from report_issue_engine import build_report_issues
 from report_quality_guard import (
+    REPORT_QA_GUARD_VERSION,
     render_report_quality_summary_text,
     run_report_quality_checks,
 )
+from report_text_formatter import (
+    humanize_report_artifact_payload,
+    humanize_report_text,
+)
 from report_view_builder import build_report_package_view
-from unified_risk_model import priority_band_label, risk_level_label
+from unified_risk_model import (
+    normalize_risk_level,
+    pick_highest_risk_level,
+    priority_band_label,
+    risk_level_label,
+    risk_level_rank,
+)
 from utils.phrase_loader import PhraseLoader
 from report_schema import (
     InvestigationReport,
@@ -610,12 +624,35 @@ class InvestigationReportBuilder:
             "qa_dir": os.path.join(reports_dir, "qa"),
         }
 
+    def _resolve_existing_formal_report_path(
+        self, report_path: Optional[str] = None
+    ) -> Optional[str]:
+        """优先解析已存在的正式 TXT 报告路径，供 QA 复核复用。"""
+        candidate_paths: List[str] = []
+        if report_path:
+            candidate_paths.append(os.path.abspath(report_path))
+
+        report_dirs = self._resolve_report_dirs(report_path)
+        default_txt_path = os.path.join(
+            report_dirs["reports_dir"], "核查结果分析报告.txt"
+        )
+        if default_txt_path not in candidate_paths:
+            candidate_paths.append(default_txt_path)
+
+        for candidate in candidate_paths:
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+
     def build_report_package(
         self,
         report: Optional[Dict[str, Any]] = None,
         formal_report_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """构建第一阶段统一报告语义包。"""
+        effective_formal_report_path = self._resolve_existing_formal_report_path(
+            formal_report_path
+        )
         analysis_cache = self._build_analysis_cache_snapshot()
         report_data = report if isinstance(report, dict) else {}
         normalized_facts = normalize_report_facts(
@@ -634,7 +671,9 @@ class InvestigationReportBuilder:
             report=report_data,
             issues=issue_payload.get("issues", []),
         )
-        report_dirs = self._resolve_report_dirs(formal_report_path)
+        report_dirs = self._resolve_report_dirs(
+            effective_formal_report_path or formal_report_path
+        )
         report_package = build_report_package_view(
             normalized_facts,
             issue_payload,
@@ -646,8 +685,26 @@ class InvestigationReportBuilder:
             report_package,
             report=report_data,
             report_dir=report_dirs["reports_dir"],
-            formal_report_path=formal_report_path,
+            formal_report_path=effective_formal_report_path,
         )
+        report_meta = report_package.get("meta", {})
+        if not isinstance(report_meta, dict):
+            report_meta = {}
+        qa_meta = report_package.get("qa_checks", {})
+        if not isinstance(qa_meta, dict):
+            qa_meta = {}
+        qa_runtime_meta = qa_meta.get("meta", {})
+        if not isinstance(qa_runtime_meta, dict):
+            qa_runtime_meta = {}
+        report_package["artifact_meta"] = {
+            "package_generated_at": datetime.now().isoformat(),
+            "source_report_generated_at": str(
+                report_meta.get("generated_at") or ""
+            ).strip(),
+            "qa_guard_version": str(
+                qa_runtime_meta.get("qa_guard_version") or REPORT_QA_GUARD_VERSION
+            ).strip(),
+        }
         return report_package
 
     def save_report_package_artifacts(
@@ -656,11 +713,16 @@ class InvestigationReportBuilder:
         formal_report_path: Optional[str] = None,
     ) -> Dict[str, str]:
         """落地 report_package 与一致性检查文件。"""
-        report_dirs = self._resolve_report_dirs(formal_report_path)
+        effective_formal_report_path = self._resolve_existing_formal_report_path(
+            formal_report_path
+        )
+        report_dirs = self._resolve_report_dirs(
+            effective_formal_report_path or formal_report_path
+        )
         os.makedirs(report_dirs["qa_dir"], exist_ok=True)
         report_package = self.build_report_package(
             report=report,
-            formal_report_path=formal_report_path,
+            formal_report_path=effective_formal_report_path or formal_report_path,
         )
         report_package_path = os.path.join(report_dirs["qa_dir"], "report_package.json")
         consistency_path = os.path.join(
@@ -669,17 +731,43 @@ class InvestigationReportBuilder:
         consistency_summary_path = os.path.join(
             report_dirs["qa_dir"], "report_consistency_check.txt"
         )
+        report_package_artifact = humanize_report_artifact_payload(report_package)
+        qa_checks_artifact = report_package_artifact.get("qa_checks", {})
+        if not isinstance(qa_checks_artifact, dict):
+            qa_checks_artifact = {}
         with open(report_package_path, "w", encoding="utf-8") as handle:
-            json.dump(report_package, handle, ensure_ascii=False, indent=2)
+            json.dump(report_package_artifact, handle, ensure_ascii=False, indent=2)
         with open(consistency_path, "w", encoding="utf-8") as handle:
             json.dump(
-                report_package.get("qa_checks", {}),
+                qa_checks_artifact,
                 handle,
                 ensure_ascii=False,
                 indent=2,
             )
         with open(consistency_summary_path, "w", encoding="utf-8") as handle:
             handle.write(render_report_quality_summary_text(report_package))
+
+        artifact_meta = report_package.get("artifact_meta", {})
+        if not isinstance(artifact_meta, dict):
+            artifact_meta = {}
+        artifact_generated_at = str(
+            artifact_meta.get("package_generated_at")
+            or artifact_meta.get("source_report_generated_at")
+            or ""
+        ).strip()
+        if artifact_generated_at:
+            try:
+                normalized_timestamp = datetime.fromisoformat(
+                    artifact_generated_at.replace("Z", "+00:00")
+                ).timestamp()
+                for artifact_path in (
+                    report_package_path,
+                    consistency_path,
+                    consistency_summary_path,
+                ):
+                    os.utime(artifact_path, (normalized_timestamp, normalized_timestamp))
+            except (OSError, TypeError, ValueError):
+                pass
         return {
             "report_package_path": report_package_path,
             "consistency_path": consistency_path,
@@ -714,6 +802,136 @@ class InvestigationReportBuilder:
     def _map_semantic_priority_label(priority_score: Any, risk_level: Any = "") -> str:
         """将语义层优先级映射为报告可读文本。"""
         return priority_band_label(priority_score, risk_level)
+
+    def _legacy_summary_is_semantically_supported(
+        self,
+        report_package: Optional[Dict[str, Any]],
+        legacy_summary_narrative: str,
+    ) -> bool:
+        """判断 legacy 综合研判是否与当前语义层事实明显冲突。"""
+        summary_text = str(legacy_summary_narrative or "").strip()
+        if not summary_text:
+            return False
+
+        semantic_package = report_package if isinstance(report_package, dict) else {}
+        semantic_text = json.dumps(
+            {
+                "issues": semantic_package.get("issues", []),
+                "priority_board": semantic_package.get("priority_board", []),
+                "company_dossiers": semantic_package.get("company_dossiers", []),
+                "appendix_views": semantic_package.get("appendix_views", {}),
+            },
+            ensure_ascii=False,
+        )
+
+        cycle_tokens = [token for token in ("闭环", "团伙") if token in summary_text]
+        if cycle_tokens and not all(token in semantic_text for token in cycle_tokens):
+            return False
+
+        strong_wording_tokens = [
+            token
+            for token in (
+                "立即启动深入调查程序",
+                "明确认定",
+                "可以认定",
+                "高度怀疑",
+            )
+            if token in summary_text
+        ]
+        if strong_wording_tokens:
+            supported_high_risk_count = 0
+            for issue in semantic_package.get("issues", []) or []:
+                if not isinstance(issue, dict):
+                    continue
+                risk_level = str(issue.get("risk_level") or "").strip().lower()
+                severity = self._safe_float_value(issue.get("severity"), 0.0)
+                if risk_level not in {"high", "critical"} and severity < 75:
+                    continue
+                evidence_refs = issue.get("evidence_refs", [])
+                why_flagged = issue.get("why_flagged", [])
+                if isinstance(evidence_refs, list) and evidence_refs and isinstance(
+                    why_flagged, list
+                ) and why_flagged:
+                    supported_high_risk_count += 1
+            if supported_high_risk_count < 2:
+                return False
+
+        return True
+
+    def _build_default_semantic_summary_narrative(
+        self, semantic_view: Optional[Dict[str, Any]]
+    ) -> str:
+        """根据语义视图当前字段重建默认综合研判文案。"""
+        semantic_view = semantic_view if isinstance(semantic_view, dict) else {}
+        issue_count = int(
+            self._safe_float_value(semantic_view.get("issue_count"), 0.0)
+        )
+        high_risk_issue_count = int(
+            self._safe_float_value(semantic_view.get("high_risk_issue_count"), 0.0)
+        )
+        company_issue_count = int(
+            self._safe_float_value(semantic_view.get("company_issue_count"), 0.0)
+        )
+        high_risk_company_count = int(
+            self._safe_float_value(
+                semantic_view.get("high_risk_company_count"),
+                0.0,
+            )
+        )
+        top_priority_entities = (
+            semantic_view.get("top_priority_entities", [])
+            if isinstance(semantic_view.get("top_priority_entities", []), list)
+            else []
+        )
+        top_entity_names = [
+            str(item.get("entity_name") or "").strip()
+            for item in top_priority_entities[:3]
+            if isinstance(item, dict) and str(item.get("entity_name") or "").strip()
+        ]
+
+        if issue_count or company_issue_count:
+            narrative_parts = [f"统一语义层共归集{issue_count}项重点问题"]
+            if high_risk_issue_count:
+                narrative_parts.append(f"其中高风险{high_risk_issue_count}项")
+            if company_issue_count:
+                narrative_parts.append(f"涉案公司问题{company_issue_count}家")
+            if high_risk_company_count:
+                narrative_parts.append(f"高风险公司{high_risk_company_count}家")
+            if top_entity_names:
+                narrative_parts.append(
+                    f"优先核查对象为{'、'.join(top_entity_names)}"
+                )
+            return "；".join(narrative_parts) + "。"
+        return "统一语义层未归集到需要进入正式报告的重点问题。"
+
+    def _semantic_summary_looks_auto_generated(
+        self, semantic_view: Optional[Dict[str, Any]]
+    ) -> bool:
+        """识别 main_report_view 是否仍是默认汇总文案。"""
+        semantic_view = semantic_view if isinstance(semantic_view, dict) else {}
+        current_summary = str(semantic_view.get("summary_narrative") or "").strip()
+        if not current_summary:
+            return False
+        default_summary = self._build_default_semantic_summary_narrative(semantic_view)
+        return current_summary == default_summary
+
+    @staticmethod
+    def _semantic_next_steps_are_default_placeholders(
+        semantic_next_steps: Optional[List[Dict[str, Any]]]
+    ) -> bool:
+        """识别下一步建议是否仍是旧结构归一化生成的默认占位动作。"""
+        semantic_next_steps = (
+            semantic_next_steps if isinstance(semantic_next_steps, list) else []
+        )
+        action_texts = [
+            str(step.get("action_text") or "").strip().rstrip("。. ")
+            for step in semantic_next_steps
+            if isinstance(step, dict) and str(step.get("action_text") or "").strip()
+        ]
+        if not action_texts:
+            return False
+        placeholder_actions = {"补调凭证材料并核实相关交易背景"}
+        return all(action_text in placeholder_actions for action_text in action_texts)
 
     def _build_semantic_conclusion_view(
         self,
@@ -758,9 +976,29 @@ class InvestigationReportBuilder:
             or bool(semantic_priority_entities)
             or bool(semantic_company_items)
         )
+        legacy_summary_allowed = False
+        if legacy_summary_narrative:
+            legacy_summary_allowed = self._legacy_summary_is_semantically_supported(
+                report_package, legacy_summary_narrative
+            )
+        semantic_summary_is_default = self._semantic_summary_looks_auto_generated(
+            semantic_view
+        )
         if semantic_prefer_over_legacy:
             return semantic_view
-        if prefer_legacy_if_present and legacy_summary_narrative:
+        if semantic_view and has_material_semantic:
+            if (
+                prefer_legacy_if_present
+                and legacy_summary_allowed
+                and semantic_summary_is_default
+            ):
+                merged_view = dict(semantic_view)
+                merged_view["summary_narrative"] = legacy_summary_narrative
+                return merged_view
+            return semantic_view
+        if semantic_view and not legacy_summary_narrative:
+            return semantic_view
+        if legacy_summary_allowed:
             return {
                 "summary_narrative": legacy_summary_narrative,
                 "aggregation_summary": legacy_conclusion.get("aggregation_summary", {})
@@ -769,14 +1007,18 @@ class InvestigationReportBuilder:
                 "issues": legacy_conclusion.get("issues", [])
                 if isinstance(legacy_conclusion.get("issues", []), list)
                 else [],
-                "top_priority_entities": [],
-                "company_issue_summary": {},
-                "company_issue_items": [],
+                "top_priority_entities": semantic_priority_entities
+                if isinstance(semantic_priority_entities, list)
+                else [],
+                "company_issue_summary": semantic_view.get("company_issue_summary", {})
+                if isinstance(semantic_view.get("company_issue_summary", {}), dict)
+                else {},
+                "company_issue_items": semantic_company_items
+                if isinstance(semantic_company_items, list)
+                else [],
             }
-        if semantic_view and (has_material_semantic or not legacy_summary_narrative):
-            return semantic_view
         return {
-            "summary_narrative": legacy_summary_narrative,
+            "summary_narrative": legacy_summary_narrative if legacy_summary_allowed else "",
             "aggregation_summary": legacy_conclusion.get("aggregation_summary", {})
             if isinstance(legacy_conclusion.get("aggregation_summary", {}), dict)
             else {},
@@ -1030,12 +1272,7 @@ class InvestigationReportBuilder:
     ) -> List[Dict[str, Any]]:
         """优先从语义层问题卡生成下一步建议，缺失时回退到旧结构。"""
         report_package = report_package if isinstance(report_package, dict) else {}
-        if (
-            prefer_legacy_if_present
-            and isinstance(legacy_next_steps, list)
-            and legacy_next_steps
-        ):
-            return legacy_next_steps
+        legacy_steps = legacy_next_steps if isinstance(legacy_next_steps, list) else []
         semantic_steps: List[Dict[str, Any]] = []
         seen_actions = set()
         for issue in report_package.get("issues", []) or []:
@@ -1061,9 +1298,15 @@ class InvestigationReportBuilder:
                 break
             if len(semantic_steps) >= limit:
                 break
+        if (
+            prefer_legacy_if_present
+            and legacy_steps
+            and self._semantic_next_steps_are_default_placeholders(semantic_steps)
+        ):
+            return legacy_steps
         if semantic_steps:
             return semantic_steps
-        return legacy_next_steps if isinstance(legacy_next_steps, list) else []
+        return legacy_steps
 
     def _build_company_render_sections(
         self,
@@ -1098,18 +1341,81 @@ class InvestigationReportBuilder:
             if company_name not in ordered_names:
                 ordered_names.append(company_name)
 
+        main_report_view = (
+            semantic_package.get("main_report_view", {})
+            if isinstance(semantic_package.get("main_report_view", {}), dict)
+            else {}
+        )
+        company_issue_lookup: Dict[str, Dict[str, Any]] = {}
+        for item in main_report_view.get("company_issue_items", []) or []:
+            if not isinstance(item, dict):
+                continue
+            company_name = str(item.get("entity_name") or "").strip()
+            if company_name:
+                company_issue_lookup[company_name] = item
+                if company_name not in ordered_names:
+                    ordered_names.append(company_name)
+
         render_sections: List[Dict[str, Any]] = []
         for company_name in ordered_names:
             legacy = legacy_lookup.get(company_name, {})
             legacy_dimensions = legacy.get("dimensions", {}) if isinstance(legacy, dict) else {}
             dossier = dossier_lookup.get(company_name, {})
+            company_issue_item = company_issue_lookup.get(company_name, {})
             risk_overview = dossier.get("risk_overview", {}) if isinstance(dossier, dict) else {}
-            semantic_summary = str(dossier.get("summary") or "").strip()
+            semantic_summary = str(
+                company_issue_item.get("summary") or dossier.get("summary") or ""
+            ).strip()
             legacy_narrative = str(legacy.get("narrative") or "").strip()
             narrative = (
                 semantic_summary
                 or legacy_narrative
                 or f"{company_name}已纳入统一语义层公司卷宗。"
+            )
+            role_tags = (
+                company_issue_item.get("role_tags")
+                if isinstance(company_issue_item, dict)
+                and isinstance(company_issue_item.get("role_tags"), list)
+                and company_issue_item.get("role_tags")
+                else dossier.get("role_tags", [])
+                if isinstance(dossier, dict)
+                else []
+            )
+            related_persons = (
+                company_issue_item.get("related_persons")
+                if isinstance(company_issue_item, dict)
+                and isinstance(company_issue_item.get("related_persons"), list)
+                and company_issue_item.get("related_persons")
+                else dossier.get("related_persons", [])
+                if isinstance(dossier, dict)
+                else []
+            )
+            related_companies = (
+                company_issue_item.get("related_companies")
+                if isinstance(company_issue_item, dict)
+                and isinstance(company_issue_item.get("related_companies"), list)
+                and company_issue_item.get("related_companies")
+                else dossier.get("related_companies", [])
+                if isinstance(dossier, dict)
+                else []
+            )
+            key_issue_cards = (
+                company_issue_item.get("key_issue_cards")
+                if isinstance(company_issue_item, dict)
+                and isinstance(company_issue_item.get("key_issue_cards"), list)
+                and company_issue_item.get("key_issue_cards")
+                else dossier.get("key_issue_cards", [])
+                if isinstance(dossier, dict)
+                else []
+            )
+            issue_refs = (
+                company_issue_item.get("issue_refs")
+                if isinstance(company_issue_item, dict)
+                and isinstance(company_issue_item.get("issue_refs"), list)
+                and company_issue_item.get("issue_refs")
+                else dossier.get("issue_refs", [])
+                if isinstance(dossier, dict)
+                else []
             )
             render_sections.append(
                 {
@@ -1139,15 +1445,9 @@ class InvestigationReportBuilder:
                     "semantic_dossier": {
                         "summary": semantic_summary or legacy_narrative,
                         "risk_overview": risk_overview if isinstance(risk_overview, dict) else {},
-                        "role_tags": (
-                            dossier.get("role_tags", []) if isinstance(dossier, dict) else []
-                        ),
-                        "related_persons": (
-                            dossier.get("related_persons", []) if isinstance(dossier, dict) else []
-                        ),
-                        "related_companies": (
-                            dossier.get("related_companies", []) if isinstance(dossier, dict) else []
-                        ),
+                        "role_tags": role_tags,
+                        "related_persons": related_persons,
+                        "related_companies": related_companies,
                         "major_inflows": (
                             dossier.get("major_inflows", []) if isinstance(dossier, dict) else []
                         ),
@@ -1157,12 +1457,8 @@ class InvestigationReportBuilder:
                         "behavioral_flags": (
                             dossier.get("behavioral_flags", []) if isinstance(dossier, dict) else []
                         ),
-                        "key_issue_cards": (
-                            dossier.get("key_issue_cards", []) if isinstance(dossier, dict) else []
-                        ),
-                        "issue_refs": (
-                            dossier.get("issue_refs", []) if isinstance(dossier, dict) else []
-                        ),
+                        "key_issue_cards": key_issue_cards,
+                        "issue_refs": issue_refs,
                     },
                     "render_source": (
                         "merged"
@@ -2602,6 +2898,86 @@ class InvestigationReportBuilder:
 
     # ==================== 六维一体数据整合修复方法 ====================
 
+    @staticmethod
+    def _is_optimistic_personal_feature_text(value: Any) -> bool:
+        """识别可与收支结论冲突的乐观型个人资金特征话术。"""
+        text = str(value or "").strip()
+        if not text:
+            return False
+
+        negative_tokens = (
+            "不匹配",
+            "失衡",
+            "缺口",
+            "存在异常消费",
+            "明显异常消费",
+            "收支异常",
+            "来源待核实",
+            "待核实",
+            "待核查",
+            "高风险",
+            "中风险",
+            "关注级",
+            "严重",
+            "不正常",
+        )
+        if any(token in text for token in negative_tokens):
+            return False
+
+        positive_tokens = (
+            "无明显异常",
+            "无异常消费",
+            "基本正常",
+            "低风险",
+            "正常",
+            "合理",
+            "收支结构合理",
+            "资金行为正常",
+            "消费水平与收入匹配",
+            "工资收入覆盖正常",
+            "匹配",
+        )
+        return any(token in text for token in positive_tokens)
+
+    def _resolve_person_overview_risk_level(
+        self, name: str, data_section: Dict
+    ) -> str:
+        """聚合收支、资金特征与五维结果，生成概览卡统一风险口径。"""
+        if not isinstance(data_section, dict):
+            return "low"
+
+        income_match = data_section.get("income_match_analysis", {})
+        if not isinstance(income_match, dict):
+            income_match = {}
+        personal_feature = data_section.get("personal_fund_feature_analysis", {})
+        if not isinstance(personal_feature, dict):
+            personal_feature = {}
+        five_dimension = data_section.get("five_dimension_score", {})
+        if not isinstance(five_dimension, dict):
+            five_dimension = {}
+        profile = self.profiles.get(name, {}) if isinstance(name, str) else {}
+        if not isinstance(profile, dict):
+            profile = {}
+        profile_income_match = profile.get("income_expense_match_analysis", {})
+        if not isinstance(profile_income_match, dict):
+            profile_income_match = {}
+        profile_personal_feature = profile.get("personal_fund_feature_analysis", {})
+        if not isinstance(profile_personal_feature, dict):
+            profile_personal_feature = {}
+
+        aggregated = pick_highest_risk_level(
+            [
+                income_match.get("risk_level") or income_match.get("review_severity"),
+                profile_income_match.get("risk_level")
+                or profile_income_match.get("review_severity"),
+                personal_feature.get("risk_level"),
+                profile_personal_feature.get("risk_level"),
+                five_dimension.get("risk_level"),
+            ],
+            default="low",
+        )
+        return "high" if aggregated == "critical" else aggregated
+
     def _build_unified_person_analysis_v2(
         self, name: str, existing_section: Dict
     ) -> Dict:
@@ -2650,9 +3026,8 @@ class InvestigationReportBuilder:
             (salary_total_wan / real_income_wan * 100) if real_income_wan > 0 else 0
         )
 
-        # 风险等级判定（基于五维评分）
-        five_dim = data_section.get("five_dimension_score", {})
-        risk_level = five_dim.get("risk_level", "low")
+        # 风险等级判定（聚合收支匹配、个人资金特征、五维评分）
+        risk_level = self._resolve_person_overview_risk_level(name, data_section)
 
         overview = {
             "name": name,
@@ -3182,10 +3557,13 @@ class InvestigationReportBuilder:
         warnings = []
 
         # 1. 收支不匹配
-        income = profile.get("totalIncome", 0) or 0
-        expense = profile.get("totalExpense", 0) or 0
-        if income > 0 and expense > income * 1.5:
-            warnings.append("支出严重超过收入，需核实资金来源")
+        snapshot = self._get_real_income_expense_snapshot(profile)
+        real_income = snapshot["real_income"]
+        real_expense = snapshot["real_expense"]
+        if real_income > 0 and real_expense > real_income * 1.2:
+            warnings.append("真实支出明显高于真实收入，需核实缺口资金来源")
+        elif real_income <= 0 and real_expense > 0:
+            warnings.append("未识别到真实收入但存在真实支出，需核实资金来源")
 
         # 2. 大额现金
         cash_total = profile.get("cashTotal", 0) or 0
@@ -3429,63 +3807,196 @@ class InvestigationReportBuilder:
         self, name: str, profile: Dict
     ):
         """收支匹配度分析（统一版本）"""
-        total_income = profile.get("totalIncome", 0) or 0
-        total_expense = profile.get("totalExpense", 0) or 0
-        if total_income > 0:
-            ratio = total_expense / total_income
-            if ratio >= 0.8 and ratio <= 1.2:
-                score = 25
-                verdict = "收支平衡，结构合理"
-            elif ratio >= 0.5 and ratio <= 1.5:
-                score = 15
-                verdict = "收支基本匹配"
-            else:
-                score = 5
-                verdict = "收支明显不匹配"
-        else:
-            score = 10
-            verdict = "数据不足"
+        snapshot = self._get_real_income_expense_snapshot(profile)
+        real_income = snapshot["real_income"]
+        real_expense = snapshot["real_expense"]
+        salary_total = snapshot["salary_total"]
+        coverage_ratio = snapshot["salary_coverage_ratio"]
+        expense_income_ratio = snapshot["expense_income_ratio"]
 
-        return LegacyDimensionScore(score=score, verdict=verdict, details="")
+        if real_income <= 0 and real_expense <= 0:
+            return LegacyDimensionScore(
+                score=10, verdict="数据不足", details="未获取到有效真实收支数据。"
+            )
+
+        if coverage_ratio >= 0.8 and expense_income_ratio <= 1.05:
+            score = 5
+            verdict = "收支基本匹配"
+        elif coverage_ratio >= 0.5 and expense_income_ratio <= 1.2:
+            score = 15
+            verdict = "工资覆盖偏低，需关注其他收入来源"
+        else:
+            score = 25
+            verdict = "收支明显不匹配"
+
+        details = (
+            f"真实收入{real_income / 10000:.2f}万元，真实支出{real_expense / 10000:.2f}万元，"
+            f"工资覆盖率{coverage_ratio * 100:.1f}%。"
+        )
+        if salary_total > 0:
+            details += f" 工资收入{salary_total / 10000:.2f}万元。"
+
+        return LegacyDimensionScore(score=score, verdict=verdict, details=details)
 
     def _analyze_lending_behavior_unified(
         self, name: str, profile: Dict
     ):
         """借贷行为分析（统一版本）"""
-        # 简化版本
-        score = 20  # 默认分数
-        verdict = "无明显异常借贷行为"
-        details = ""
+        summary = profile.get("summary", {})
+        if not isinstance(summary, dict):
+            summary = {}
+        offset_detail = summary.get("offset_detail", {})
+        if not isinstance(offset_detail, dict):
+            offset_detail = {}
 
+        loan_inflow = self._safe_float_value(offset_detail.get("loan", 0), 0.0)
+        if loan_inflow >= 500000:
+            score = 25
+            verdict = "存在大额借贷资金流入"
+            details = f"识别借贷相关流入约{loan_inflow / 10000:.2f}万元。"
+        elif loan_inflow > 0:
+            score = 15
+            verdict = "存在借贷资金流入"
+            details = f"识别借贷相关流入约{loan_inflow / 10000:.2f}万元。"
+        else:
+            score = 5
+            verdict = "未见明显异常借贷行为"
+            details = ""
         return LegacyDimensionScore(score=score, verdict=verdict, details=details)
 
     def _analyze_consumption_pattern_unified(
         self, name: str, profile: Dict
     ):
         """消费特征分析（统一版本）"""
-        score = 15  # 默认分数
-        verdict = "消费模式正常"
-        details = ""
+        snapshot = self._get_real_income_expense_snapshot(profile)
+        real_income = snapshot["real_income"]
+        real_expense = snapshot["real_expense"]
+        expense_income_ratio = snapshot["expense_income_ratio"]
 
+        if real_expense <= 0:
+            score = 5
+            verdict = "未见明显消费异常"
+        elif expense_income_ratio >= 1.2:
+            score = 25
+            verdict = "消费支出明显偏高"
+        elif expense_income_ratio >= 0.8:
+            score = 15
+            verdict = "消费支出相对较高"
+        else:
+            score = 5
+            verdict = "消费模式基本正常"
+        details = (
+            f"真实支出{real_expense / 10000:.2f}万元，"
+            f"支出/收入比{expense_income_ratio:.2f}。"
+            if real_income > 0 or real_expense > 0
+            else ""
+        )
         return LegacyDimensionScore(score=score, verdict=verdict, details=details)
 
     def _analyze_fund_flow_unified(self, name: str, profile: Dict):
         """资金流向分析（统一版本）"""
-        score = 25  # 默认分数
-        verdict = "资金流向正常"
-        details = ""
+        summary = profile.get("summary", {})
+        if not isinstance(summary, dict):
+            summary = {}
+        offset_detail = summary.get("offset_detail", {})
+        if not isinstance(offset_detail, dict):
+            offset_detail = {}
+        transaction_count = int(
+            summary.get("transaction_count", profile.get("transactionCount", 0)) or 0
+        )
+        self_transfer = self._safe_float_value(
+            offset_detail.get("self_transfer", 0), 0.0
+        )
+        bank_accounts = profile.get("bank_accounts", [])
+        account_count = len(bank_accounts) if isinstance(bank_accounts, list) else 0
 
+        if self_transfer >= 500000 or transaction_count >= 1000 or account_count >= 5:
+            score = 25
+            verdict = "资金流向复杂"
+        elif self_transfer > 0 or transaction_count >= 300 or account_count >= 3:
+            score = 15
+            verdict = "存在一定资金流转"
+        else:
+            score = 5
+            verdict = "资金流向基本正常"
+        details = (
+            f"交易{transaction_count}笔，涉及账户{account_count}个，"
+            f"本人互转剔除{self_transfer / 10000:.2f}万元。"
+        )
         return LegacyDimensionScore(score=score, verdict=verdict, details=details)
 
     def _analyze_cash_operation_unified(
         self, name: str, profile: Dict
     ):
         """现金操作分析（统一版本）"""
-        score = 15  # 默认分数
-        verdict = "现金操作正常"
-        details = ""
+        cash_total = self._safe_float_value(profile.get("cashTotal", 0), 0.0)
+        large_cash = profile.get("large_cash", [])
+        large_cash_count = len(large_cash) if isinstance(large_cash, list) else 0
 
+        if cash_total >= 500000 or large_cash_count >= 3:
+            score = 25
+            verdict = "存在大额现金操作"
+        elif cash_total > 0 or large_cash_count > 0:
+            score = 15
+            verdict = "存在一定现金操作"
+        else:
+            score = 5
+            verdict = "现金操作正常"
+        details = (
+            f"现金总额{cash_total / 10000:.2f}万元，大额现金记录{large_cash_count}笔。"
+            if cash_total > 0 or large_cash_count > 0
+            else ""
+        )
         return LegacyDimensionScore(score=score, verdict=verdict, details=details)
+
+    def _get_real_income_expense_snapshot(self, profile: Dict) -> Dict[str, float]:
+        """统一提取个人真实收支与工资覆盖快照。"""
+        summary = profile.get("summary", {})
+        if not isinstance(summary, dict):
+            summary = {}
+
+        raw_income = self._safe_float_value(
+            summary.get("total_income", profile.get("totalIncome", 0)), 0.0
+        )
+        raw_expense = self._safe_float_value(
+            summary.get("total_expense", profile.get("totalExpense", 0)), 0.0
+        )
+        real_income = self._safe_float_value(
+            summary.get("real_income", raw_income), raw_income
+        )
+        real_expense = self._safe_float_value(
+            summary.get("real_expense", raw_expense), raw_expense
+        )
+
+        yearly_salary = profile.get("yearly_salary", {})
+        if not isinstance(yearly_salary, dict):
+            yearly_salary = {}
+        salary_summary = yearly_salary.get("summary", {})
+        if not isinstance(salary_summary, dict):
+            salary_summary = {}
+        salary_total = self._safe_float_value(
+            salary_summary.get("total", profile.get("salaryTotal", 0)), 0.0
+        )
+
+        salary_coverage_ratio = (
+            salary_total / real_expense if real_expense > 0 else 1.0
+        )
+        if real_income > 0:
+            expense_income_ratio = real_expense / real_income
+        elif real_expense > 0:
+            expense_income_ratio = float("inf")
+        else:
+            expense_income_ratio = 0.0
+
+        return {
+            "raw_income": raw_income,
+            "raw_expense": raw_expense,
+            "real_income": real_income,
+            "real_expense": real_expense,
+            "salary_total": salary_total,
+            "salary_coverage_ratio": salary_coverage_ratio,
+            "expense_income_ratio": expense_income_ratio,
+        }
 
     def _build_analysis_unit_section(self, unit: AnalysisUnit) -> Dict:
         """
@@ -10511,13 +11022,30 @@ class InvestigationReportBuilder:
 
         def risk_class(level):
             """根据风险等级返回CSS类名"""
+            normalized_level = normalize_risk_level(level)
             class_map = {
                 "high": "risk-high",
                 "medium": "risk-medium",
                 "low": "risk-low",
                 "critical": "risk-high",
             }
-            return class_map.get(level, "risk-low")
+            return class_map.get(normalized_level, "risk-low")
+
+        def format_risk_label(value):
+            """将风险等级统一转换为正式报告中文标签。"""
+            return self._format_report_risk_label(value)
+
+        def format_external_source_name(value):
+            """将外部数据源键名转换为正式报告可读名称。"""
+            return self._format_report_external_source_name(value)
+
+        def format_external_source_list(value):
+            """将外部数据源列表转换为正式报告可读名称。"""
+            return self._format_report_external_source_list(value)
+
+        def format_entity_type(value):
+            """将对象类型转换为正式报告中文标签。"""
+            return self._format_report_entity_type(value)
 
         def format_display_date(value):
             """统一清洗模板中的日期/日期时间展示。"""
@@ -10584,6 +11112,10 @@ class InvestigationReportBuilder:
 
         env.filters["format_money"] = format_money
         env.filters["risk_class"] = risk_class
+        env.filters["format_risk_label"] = format_risk_label
+        env.filters["format_external_source_name"] = format_external_source_name
+        env.filters["format_external_source_list"] = format_external_source_list
+        env.filters["format_entity_type"] = format_entity_type
         env.filters["format_display_date"] = format_display_date
         env.filters["format_area"] = format_area
 
@@ -11012,11 +11544,21 @@ class InvestigationReportBuilder:
             "；".join(yearly_breakdown) if yearly_breakdown else "无工资记录"
         )
 
-        # 计算总额
+        yearly_total = 0.0
+        if years_with_data:
+            for year in years_with_data:
+                year_item = yearly_data.get(year, {})
+                if isinstance(year_item, dict):
+                    yearly_total += float(year_item.get("total", 0) or 0)
+                else:
+                    yearly_total += float(year_item or 0)
+
+        # 工资奖金收入模块必须优先使用年度工资汇总口径，不能被真实收入分类上限裁剪。
         total_salary = (
-            self._resolve_salary_total(profile, 0.0)
-            or summary.get("total", 0)
-            or profile.get("salaryTotal", 0)
+            float(summary.get("total", 0) or 0)
+            or yearly_total
+            or float(profile.get("salaryTotal", 0) or 0)
+            or self._resolve_salary_total(profile, 0.0)
         )
         years_count = len(years_with_data)
         avg_yearly = (total_salary / years_count) if years_count > 0 else 0
@@ -11822,6 +12364,12 @@ class InvestigationReportBuilder:
     def _build_income_match_analysis_v4(self, name: str, profile: Dict) -> Dict:
         """构建家庭存款与家庭收入匹配分析"""
         summary = profile.get("summary", {})
+        account_layer_summary = profile.get("account_layer_summary")
+        if not isinstance(account_layer_summary, dict):
+            account_layer_summary = summary.get("account_layer_summary", {})
+        if not isinstance(account_layer_summary, dict):
+            account_layer_summary = {}
+
         raw_income = summary.get("total_income")
         if raw_income is None:
             raw_income = profile.get("totalIncome", 0)
@@ -11878,6 +12426,9 @@ class InvestigationReportBuilder:
             f"剔除理财本金回流、账户内部划转等非真实项目后，真实收入{real_income / 10000:.2f}万元，真实支出{real_expense / 10000:.2f}万元，",
             f"{gap_text}。",
         ]
+        account_scope_note = str(account_layer_summary.get("note") or "").strip()
+        if account_scope_note:
+            narrative_parts.append(account_scope_note)
 
         if salary_total > 0:
             narrative_parts.append(
@@ -11975,6 +12526,15 @@ class InvestigationReportBuilder:
             expense_income_ratio=expense_income_ratio,
         )
         review_severity = review["risk_level"]
+        financial_gap_explanation = _build_person_financial_gap_explanation(
+            {
+                "total_income": raw_income,
+                "total_expense": raw_expense,
+                "real_income": real_income,
+                "real_expense": real_expense,
+                "offset_detail": offset_detail,
+            }
+        )
 
         return {
             "total_inflow": raw_income,
@@ -11999,9 +12559,12 @@ class InvestigationReportBuilder:
             "income_sufficient": income_sufficient,
             "balance_narrative": "资金净结余" if net_balance >= 0 else "资金净流出",
             "narrative": "".join(narrative_parts),
+            "account_layer_summary": account_layer_summary,
+            "account_scope_note": account_scope_note,
             "review_severity": review_severity,
             "need_further_verification": review_severity in {"medium", "high"},
             "offset_rule_rows": offset_rule_rows,
+            "financial_gap_explanation": financial_gap_explanation,
         }
 
     def _build_real_income_composition_rows(self, profile: Dict) -> Dict:
@@ -12511,7 +13074,14 @@ class InvestigationReportBuilder:
             personal_fund_feature_analysis.get("overall_feature", "") or ""
         ).strip()
         pf_red_flags = personal_fund_feature_analysis.get("red_flags", [])
-        if pf_risk_level or pf_feature:
+        pf_risk_rank = risk_level_rank(pf_risk_level)
+        match_risk_rank = risk_level_rank(match_risk_level)
+        pf_conflicts_with_match = (
+            (pf_risk_level or pf_feature)
+            and pf_risk_rank < match_risk_rank
+            and self._is_optimistic_personal_feature_text(pf_feature)
+        )
+        if (pf_risk_level or pf_feature) and not pf_conflicts_with_match:
             pf_note = (
                 f"个人资金特征分析：判定{pf_risk_level or '未知'}，"
                 f"证据评分{pf_score:.1f}分，主要特征为“{pf_feature or '资金行为无明显异常'}”。"
@@ -12963,9 +13533,7 @@ class InvestigationReportBuilder:
                 continue
 
         if aml_count == 0:
-            narrative = (
-                "未检出该人员反洗钱预警记录（按 analysis_cache.suspicions 与画像缓存核对）。"
-            )
+            narrative = "未检出该人员反洗钱预警记录（按疑点缓存与画像缓存核对）。"
         elif aml_total > 0:
             narrative = (
                 f"检出反洗钱相关预警{aml_count}条，涉及金额{aml_total / 10000:.2f}万元，"
@@ -13419,7 +13987,8 @@ class InvestigationReportBuilder:
 
         narrative = (
             f"五维度综合评分{total_score:.0f}分（满分100分，分值越高风险越高），"
-            f"整体风险等级：{'高' if risk_level == 'high' else ('中' if risk_level == 'medium' else '低')}"
+            f"五维评分等级：{'高' if risk_level == 'high' else ('中' if risk_level == 'medium' else '低')}。"
+            "该等级仅反映五维评分模型，不等同于上方统一风险概览。"
         )
 
         def _dim_dict(dim: Any) -> Dict[str, Any]:
@@ -13586,6 +14155,109 @@ class InvestigationReportBuilder:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _format_report_data_flow(value: Any) -> str:
+        """将内部数据流策略标识转换为正式报告可读表述。"""
+        text = str(value or "").strip()
+        normalized = text.lower().replace("_", "-")
+        labels = {
+            "external-data-first": "优先使用外部补充数据，并与分析缓存交叉核验",
+            "cache-first": "优先复用本地分析缓存",
+        }
+        return labels.get(normalized, text)
+
+    @staticmethod
+    def _format_report_external_source_name(value: Any) -> str:
+        """将外部数据源键名转换为正式报告可读名称。"""
+        text = str(value or "").strip()
+        normalized = text.lower()
+        labels = {
+            "property": "房产",
+            "vehicle": "车辆",
+            "wealth_product": "理财产品",
+            "securities": "证券",
+            "insurance": "保险",
+            "hotel": "酒店入住",
+            "hotel_cohabitation": "酒店同住",
+            "railway": "铁路出行",
+            "flight": "航班出行",
+            "coaddress": "同住址",
+            "coviolation": "同车违章",
+            "wallet": "电子钱包",
+            "immigration": "出入境",
+        }
+        return labels.get(normalized, text)
+
+    @staticmethod
+    def _format_report_entity_type(value: Any) -> str:
+        """将对象类型统一转换为中文标签。"""
+        text = str(value or "").strip()
+        if not text:
+            return ""
+
+        normalized = text.lower()
+        labels = {
+            "person": "个人",
+            "company": "公司",
+            "enterprise": "公司",
+            "family": "家庭",
+            "household": "家庭",
+            "unknown": "未分类",
+            "other": "其他",
+        }
+        return labels.get(normalized, text)
+
+    def _format_report_external_source_list(self, values: Any) -> str:
+        """格式化外部数据源列表。"""
+        if not isinstance(values, list):
+            return ""
+        items = [
+            self._format_report_external_source_name(item)
+            for item in values
+            if str(item or "").strip()
+        ]
+        return "、".join(items)
+
+    @staticmethod
+    def _format_report_risk_label(value: Any) -> str:
+        """将风险等级统一转换为中文标签。"""
+        return risk_level_label(value)
+
+    @staticmethod
+    def _format_trace_reference_parts(
+        source_file: str = "",
+        row: Optional[int] = None,
+        tx_id: Any = None,
+    ) -> str:
+        """按已知字段拼接证据定位信息，避免暴露未提供占位。"""
+        parts: List[str] = []
+        source_text = str(source_file or "").strip()
+        if source_text and source_text != "未提供":
+            parts.append(source_text)
+        if row is not None:
+            parts.append(f"第{row}行")
+
+        tx_text = str(tx_id or "").strip()
+        if tx_text and tx_text.lower() not in {"nan", "none", "null"}:
+            parts.append(f"交易标识 {tx_text}")
+        return "，".join(parts)
+
+    def _format_named_trace_reference(
+        self,
+        label: str,
+        source_file: str = "",
+        row: Optional[int] = None,
+        tx_id: Any = None,
+        fallback: str = "原始流水记录",
+    ) -> str:
+        """格式化带标签的证据引用。"""
+        details = self._format_trace_reference_parts(
+            source_file=source_file,
+            row=row,
+            tx_id=tx_id,
+        )
+        return f"{label}[{details or fallback}]"
+
     def _build_cache_fingerprint(self) -> str:
         """
         构建缓存指纹（用于报告溯源）。
@@ -13624,11 +14296,11 @@ class InvestigationReportBuilder:
     def _get_frontend_bucket_label(bucket: str) -> str:
         """复用前端证据分布桶名称，避免报告与前端口径不一致。"""
         labels = {
-            "fund_cycles": "资金闭环",
+            "fund_cycles": "循环路径",
             "pass_through": "过账通道",
             "hub_connections": "资金枢纽",
             "high_risk_transactions": "高风险交易",
-            "communities": "团伙关系",
+            "communities": "关联群组",
             "periodic_income": "周期性收入",
             "sudden_changes": "资金突变",
             "delayed_transfers": "固定延迟转账",
@@ -13685,8 +14357,7 @@ class InvestigationReportBuilder:
     def _format_frontend_person_flow_trace_line(self, name: str) -> str:
         """格式化前端个人资金流量面板的溯源路径。"""
         return (
-            f'口径来源: analysis_cache/profiles.json -> ["{name}"].'
-            "totalIncome / totalExpense / transactionCount"
+            f"{name}的收入、支出和交易笔数口径来自资金画像汇总结果。"
         )
 
     def _format_frontend_bucket_trace_line(
@@ -13696,34 +14367,44 @@ class InvestigationReportBuilder:
         items: List[Any],
     ) -> str:
         """为前端证据分布桶生成简短溯源说明。"""
-        base_path = (
-            'analysis_cache/derived_data.json -> aggregation.evidencePacks'
-            f'["{entity_name}"]'
-        )
+        bucket_label = self._get_frontend_bucket_label(bucket)
+        base_path = f"{entity_name}的聚合证据汇总（{bucket_label}）"
         if not isinstance(items, list) or not items:
-            return f"来源: {base_path}.evidence.{bucket}"
+            return f"来源: {base_path}"
 
         sample = items[0]
         if not isinstance(sample, dict):
-            return f"来源: {base_path}.evidence.{bucket}[0]"
+            return f"来源: {base_path}"
 
         if bucket == "related_party":
             return (
-                f"来源: {base_path}.evidence.{bucket}；"
+                f"来源: {base_path}；"
                 f"{self._format_direct_transfer_trace_line(sample)}"
             )
 
         if bucket == "sudden_changes":
-            source_file = self._normalize_trace_source_name(sample.get("source_file"))
-            row = self._normalize_trace_row(sample.get("source_row_index"))
-            row_text = f"第{row}行" if row is not None else "行号未提供"
-            return f"来源: {base_path}.evidence.{bucket}；样例来源: [{source_file}, {row_text}]"
+            source_file = self._normalize_trace_source_name(
+                self._pick_first_non_empty(sample, "source_file", "sourceFile")
+            )
+            row = self._normalize_trace_row(
+                self._pick_first_non_empty(
+                    sample,
+                    "source_row_index",
+                    "sourceRowIndex",
+                    "row_index",
+                    "rowIndex",
+                )
+            )
+            trace_text = self._format_trace_reference_parts(source_file, row=row)
+            if trace_text:
+                return f"来源: {base_path}；样例来源: {trace_text}"
+            return f"来源: {base_path}；样例来源: 原始流水记录"
 
         if bucket == "pass_through":
             node = str(sample.get("node", "") or "未知节点").strip()
             ratio = self._safe_float_value(sample.get("ratio"), 0.0) * 100
             return (
-                f"来源: {base_path}.evidence.{bucket}；"
+                f"来源: {base_path}；"
                 f"样例节点: {node}，进出比 {ratio:.1f}%"
             )
 
@@ -13733,7 +14414,7 @@ class InvestigationReportBuilder:
             out_degree = int(self._safe_float_value(sample.get("out_degree"), 0.0))
             total_degree = int(self._safe_float_value(sample.get("total_degree"), 0.0))
             return (
-                f"来源: {base_path}.evidence.{bucket}；"
+                f"来源: {base_path}；"
                 f"样例节点: {node}，入度/出度/总连接数 = {in_degree}/{out_degree}/{total_degree}"
             )
 
@@ -13743,7 +14424,7 @@ class InvestigationReportBuilder:
             amount = self._safe_float_value(sample.get("amount"), 0.0)
             reason = str(sample.get("reasons", "") or "未提供").strip()
             return (
-                f"来源: {base_path}.evidence.{bucket}；"
+                f"来源: {base_path}；"
                 f"样例交易: {date} | {counterparty} | {amount:,.2f}元 | 原因: {reason}"
             )
 
@@ -13755,7 +14436,7 @@ class InvestigationReportBuilder:
                 member_text = ""
             total_amount = self._safe_float_value(sample.get("total_amount"), 0.0)
             return (
-                f"来源: {base_path}.evidence.{bucket}；"
+                f"来源: {base_path}；"
                 f"样例成员: {member_text or '未提供'} | 聚合金额 {total_amount / 10000:,.2f}万元"
             )
 
@@ -13769,12 +14450,12 @@ class InvestigationReportBuilder:
             relay_count = int(self._safe_float_value(sample.get("relay_count"), 0.0))
             loop_count = int(self._safe_float_value(sample.get("loop_count"), 0.0))
             return (
-                f"来源: {base_path}.evidence.{bucket}；"
-                f"样例成员: {member_text or '未提供'} | 直接往来/中转/闭环 = "
+                f"来源: {base_path}；"
+                f"样例成员: {member_text or '未提供'} | 直接往来/中转/循环路径 = "
                 f"{direct_count}/{relay_count}/{loop_count}"
             )
 
-        return f"来源: {base_path}.evidence.{bucket}[0]"
+        return f"来源: {base_path}"
 
     def _load_analysis_log_lines(self) -> List[str]:
         """读取分析执行日志镜像，供报告复盘使用。"""
@@ -13798,6 +14479,72 @@ class InvestigationReportBuilder:
                 return line.strip()
         return ""
 
+    @staticmethod
+    def _format_log_excerpt_for_report(stage: str, excerpt: str) -> str:
+        """将原始日志转换为正式报告可读的复盘摘要。"""
+        raw_excerpt = str(excerpt or "").strip()
+        if not raw_excerpt:
+            return ""
+
+        cleaned_excerpt = re.sub(
+            r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[[A-Z]+\] [^-]+ -\s*",
+            "",
+            raw_excerpt,
+        ).strip()
+        if not cleaned_excerpt:
+            return ""
+
+        if stage == "关联方分析":
+            match = re.search(
+                r"关联方分析完成:\s*直接往来(\d+)笔,\s*第三方中转(\d+)条链,\s*资金闭环(\d+)个,\s*外围节点(\d+)个",
+                cleaned_excerpt,
+            )
+            if match:
+                direct_count, relay_count, loop_count, peripheral_count = (
+                    int(match.group(1)),
+                    int(match.group(2)),
+                    int(match.group(3)),
+                    int(match.group(4)),
+                )
+                summary_parts = [f"关联方分析已完成，识别直接往来{direct_count}笔"]
+                non_zero_parts: List[str] = []
+                zero_parts: List[str] = []
+                metric_pairs = [
+                    ("第三方中转", relay_count, "条链", "第三方中转"),
+                    ("资金闭环", loop_count, "个", "资金回流链条"),
+                    ("外围节点", peripheral_count, "个", "外围扩展节点"),
+                ]
+                for label, count, unit, negative_label in metric_pairs:
+                    if count > 0:
+                        non_zero_parts.append(f"{label}{count}{unit}")
+                    else:
+                        zero_parts.append(negative_label)
+                if non_zero_parts:
+                    summary_parts.append("；".join(non_zero_parts))
+                sentence = "，".join(summary_parts)
+                if zero_parts:
+                    sentence += f"，未发现可支撑的{'、'.join(zero_parts)}证据。"
+                else:
+                    sentence += "。"
+                return sentence
+
+        if stage == "线索聚合":
+            match = re.search(
+                r"(.+?)\s*统一风险评分:\s*([0-9.]+)\s*\(([^,]+),\s*confidence=([0-9.]+)\)",
+                cleaned_excerpt,
+            )
+            if match:
+                entity_name = match.group(1).strip()
+                score = match.group(2).strip()
+                risk_label = risk_level_label(match.group(3).strip())
+                confidence = match.group(4).strip()
+                return (
+                    f"{entity_name}统一风险评分{score}分，"
+                    f"风险等级{risk_label}，置信度{confidence}。"
+                )
+
+        return cleaned_excerpt
+
     def _build_analysis_log_landing_review(self) -> List[Dict[str, str]]:
         """汇总分析日志关键信息的落地情况。"""
         log_lines = self._load_analysis_log_lines()
@@ -13808,38 +14555,38 @@ class InvestigationReportBuilder:
             {
                 "stage": "数据清洗",
                 "patterns": ["data_cleaner", "清洗合并完成"],
-                "landing": "已落地 output/cleaned_data/；主报告通过资金概况和溯源说明复用结果，但未逐条展开清洗日志。",
-                "artifacts": "output/cleaned_data/；核查结果分析报告.txt 的资金概况/溯源说明",
+                "landing": "已落地至标准化银行流水结果；主报告通过资金概况和溯源说明复用结果，但未逐条展开清洗日志。",
+                "artifacts": "标准化银行流水结果；正式主报告中的资金概况与溯源说明",
             },
             {
                 "stage": "资金画像",
                 "patterns": ["financial_profiler", "资金画像生成完成"],
-                "landing": "已落地 analysis_cache/profiles.json，并在主报告“家庭资产与资金画像”章节展开。",
-                "artifacts": "output/analysis_cache/profiles.json；核查结果分析报告.txt 第二部分",
+                "landing": "已落地至资金画像结果，并在主报告“家庭资产与资金画像”章节展开。",
+                "artifacts": "资金画像结果；正式主报告第二部分",
             },
             {
                 "stage": "资金穿透",
                 "patterns": ["fund_penetration", "过账通道"],
-                "landing": "已形成多层落地。过账通道、关系簇已进入专项报告；资金枢纽等前端证据桶已补充进入主 TXT，但尚未形成独立专项章节。",
-                "artifacts": "output/analysis_cache/derived_data.json::penetration/aggregation；专项报告/资金穿透分析报告.txt；核查结果分析报告.txt【前端关键视图落地】；资金核查底稿.xlsx",
+                "landing": "已形成多层落地。过账通道、关系簇已进入专项报告；资金枢纽等前端证据桶已补充进入主报告，但尚未形成独立专项章节。",
+                "artifacts": "资金穿透结果、专项穿透报告、正式主报告前端关键视图落地章节、资金核查底稿",
             },
             {
                 "stage": "关联方分析",
                 "patterns": ["related_party_analyzer", "关联方分析完成"],
-                "landing": "已落地 relatedParty 结果；主报告保留全局直接往来摘要，专项报告保留关系簇与代表路径。",
-                "artifacts": "output/analysis_cache/derived_data.json::relatedParty；专项报告/资金穿透分析报告.txt",
+                "landing": "已落地至关联方分析结果；主报告保留全局直接往来摘要，专项报告保留关系簇与代表路径。",
+                "artifacts": "关联方分析结果；专项穿透报告",
             },
             {
                 "stage": "时序分析",
                 "patterns": ["time_series_analyzer", "资金突变"],
-                "landing": "已落地 timeSeries 结果，并在专项时序报告中按事件展开。",
-                "artifacts": "output/analysis_cache/derived_data.json::timeSeries；专项报告/时序分析报告.txt",
+                "landing": "已落地至时序分析结果，并在专项时序报告中按事件展开。",
+                "artifacts": "时序分析结果；专项时序报告",
             },
             {
                 "stage": "线索聚合",
                 "patterns": ["clue_aggregator", "统一风险评分"],
-                "landing": "已落地。主报告已写入聚合排序摘要、前端证据分布逐桶计数和问题清单，完整明细仍以 aggregation 证据包为准。",
-                "artifacts": "output/analysis_cache/derived_data.json::aggregation；核查结果分析报告.txt；前端风险解释面板",
+                "landing": "已落地。主报告已写入聚合排序摘要、前端证据分布逐桶计数和问题清单，完整明细仍以聚合证据汇总结果为准。",
+                "artifacts": "聚合排序结果；正式主报告；前端风险解释面板",
             },
         ]
 
@@ -13851,7 +14598,7 @@ class InvestigationReportBuilder:
             reviews.append(
                 {
                     "stage": stage["stage"],
-                    "excerpt": excerpt,
+                    "excerpt": self._format_log_excerpt_for_report(stage["stage"], excerpt),
                     "landing": stage["landing"],
                     "artifacts": stage["artifacts"],
                 }
@@ -13921,11 +14668,10 @@ class InvestigationReportBuilder:
                 self._pick_first_non_empty(refs, "deposit_row")
             )
 
-        wd_row_text = f"第{wd_row}行" if wd_row is not None else "行号未提供"
-        dp_row_text = f"第{dp_row}行" if dp_row is not None else "行号未提供"
         return (
-            f"证据来源: 取现[{wd_source}, {wd_row_text}]，"
-            f"存现[{dp_source}, {dp_row_text}]"
+            "证据来源: "
+            f"{self._format_named_trace_reference('取现', wd_source, row=wd_row)}，"
+            f"{self._format_named_trace_reference('存现', dp_source, row=dp_row)}"
         )
 
     def _format_direct_transfer_trace_line(self, item: Dict[str, Any]) -> str:
@@ -13959,9 +14705,12 @@ class InvestigationReportBuilder:
         if tx_id is None:
             tx_id = self._pick_first_non_empty(refs, "transaction_id", "transactionId")
 
-        row_text = f"第{source_row}行" if source_row is not None else "行号未提供"
-        tx_text = str(tx_id) if tx_id else "未提供"
-        return f"证据来源: [{source_file}, {row_text}, 交易ID:{tx_text}]"
+        trace_text = self._format_trace_reference_parts(
+            source_file=source_file,
+            row=source_row,
+            tx_id=tx_id,
+        )
+        return f"证据来源: {trace_text or '原始流水记录'}"
 
     def generate_complete_txt_report(
         self, output_path: str, report: Optional[Dict] = None
@@ -13985,7 +14734,8 @@ class InvestigationReportBuilder:
         logger = logging.getLogger(__name__)
 
         # 优先复用正式报告对象，避免 txt 与 HTML 再走两套章节组装逻辑
-        report_data = report if isinstance(report, dict) else None
+        using_provided_report = isinstance(report, dict)
+        report_data = report if using_provided_report else None
         if not report_data:
             report_data = self.build_report_v5(
                 config=self._primary_config
@@ -14024,16 +14774,27 @@ class InvestigationReportBuilder:
             if isinstance(semantic_package, dict)
             else {}
         )
+        semantic_main_report_view = (
+            semantic_package.get("main_report_view", {})
+            if isinstance(semantic_package.get("main_report_view", {}), dict)
+            else {}
+        )
         semantic_company_issue_overview = (
             semantic_appendix_views.get("company_issue_overview", {})
             if isinstance(semantic_appendix_views, dict)
             else {}
         )
         semantic_company_issue_items = (
-            semantic_company_issue_overview.get("items", [])
-            if isinstance(semantic_company_issue_overview, dict)
+            semantic_main_report_view.get("company_issue_items", [])
+            if isinstance(semantic_main_report_view.get("company_issue_items", []), list)
             else []
         )
+        if not semantic_company_issue_items:
+            semantic_company_issue_items = (
+                semantic_company_issue_overview.get("items", [])
+                if isinstance(semantic_company_issue_overview, dict)
+                else []
+            )
         semantic_appendix_index = (
             semantic_appendix_views.get("appendix_index", {})
             if isinstance(semantic_appendix_views, dict)
@@ -14054,13 +14815,30 @@ class InvestigationReportBuilder:
         semantic_conclusion = self._build_semantic_conclusion_view(
             semantic_package,
             report_conclusion,
-            prefer_legacy_if_present=report is not None,
+            prefer_legacy_if_present=using_provided_report,
         )
         semantic_next_steps = self._build_semantic_next_steps(
             semantic_package,
             report_next_steps,
-            prefer_legacy_if_present=report is not None,
+            prefer_legacy_if_present=using_provided_report,
         )
+        semantic_person_dossier_lookup = {}
+        if isinstance(semantic_package, dict):
+            for dossier in semantic_package.get("person_dossiers", []) or []:
+                if not isinstance(dossier, dict):
+                    continue
+                entity_name = str(
+                    dossier.get("entity_name") or dossier.get("name") or ""
+                ).strip()
+                if entity_name:
+                    semantic_person_dossier_lookup[entity_name] = dossier
+        person_section_lookup = {}
+        for section in person_sections:
+            if not isinstance(section, dict):
+                continue
+            name = str(section.get("name") or "").strip()
+            if name:
+                person_section_lookup[name] = section
 
         # 从真实数据源提取统计信息
         person_count = int(
@@ -14181,11 +14959,10 @@ class InvestigationReportBuilder:
             or metadata.get("runId")
         )
         cache_fingerprint = self._build_cache_fingerprint()
-        cache_dir = os.path.join(self.output_dir, "analysis_cache")
 
         lines.append("")
         lines.append("【溯源元信息】")
-        lines.append(f"  • 缓存目录: {cache_dir}")
+        lines.append("  • 分析快照: 已生成本次报告对应的数据缓存指纹")
         if cache_version:
             lines.append(f"  • 缓存版本: {cache_version}")
         if cache_generated_at:
@@ -14193,7 +14970,9 @@ class InvestigationReportBuilder:
         if cache_manager_version:
             lines.append(f"  • 缓存管理器版本: {cache_manager_version}")
         if data_flow:
-            lines.append(f"  • 数据流策略: {data_flow}")
+            lines.append(
+                f"  • 数据流口径: {self._format_report_data_flow(data_flow)}"
+            )
         if analysis_run_id:
             lines.append(f"  • 分析运行ID: {analysis_run_id}")
         lines.append(f"  • 缓存指纹: {cache_fingerprint}")
@@ -14235,11 +15014,13 @@ class InvestigationReportBuilder:
         missing_sources = semantic_coverage.get("missing_sources", [])
         if available_sources:
             lines.append(
-                "  • 已接入外部来源: " + "、".join(str(item) for item in available_sources[:10])
+                "  • 已接入外部来源: "
+                + self._format_report_external_source_list(available_sources[:10])
             )
         if missing_sources:
             lines.append(
-                "  • 仍缺外部来源: " + "、".join(str(item) for item in missing_sources[:10])
+                "  • 仍缺外部来源: "
+                + self._format_report_external_source_list(missing_sources[:10])
             )
         lines.append("")
 
@@ -14290,7 +15071,7 @@ class InvestigationReportBuilder:
                 reason_text = "；".join(top_reasons[:2]) if top_reasons else "暂无补充原因"
                 lines.append(
                     f"  {idx}. {entity_name} | 优先级{item.get('priority_score', 0)} | "
-                    f"风险{item.get('risk_level', '') or '未标注'} | 依据: {reason_text}"
+                    f"{str(item.get('risk_label') or '').strip() or self._format_report_risk_label(item.get('risk_level'))} | 依据: {reason_text}"
                 )
         lines.append("")
 
@@ -14307,7 +15088,9 @@ class InvestigationReportBuilder:
         if len(hidden_assets) > 0:
             lines.append(f"  • 发现 {len(hidden_assets)} 处隐形资产")
         if aml_positive > 0:
-            lines.append(f"  • 发现 {aml_positive} 条实质AML预警（可疑/大额/支付交易触发）")
+            lines.append(
+                f"  • 发现 {aml_positive} 条实质反洗钱预警（可疑/大额/支付交易触发）"
+            )
         if len(credit_alerts) > 0:
             lines.append(f"  • 发现 {len(credit_alerts)} 条征信预警")
         if aggregation_highlights:
@@ -14315,7 +15098,10 @@ class InvestigationReportBuilder:
                 f"{item.get('entity', '未知对象')}({item.get('risk_score', 0):.1f}分)"
                 for item in aggregation_highlights[:3]
             )
-            lines.append(f"  • 聚合排序识别重点对象: {top_entities}")
+            lines.append(
+                f"  • 聚合排序识别重点对象: {top_entities}"
+                "（以下为聚合风险评分，不同于正式问题优先级）"
+            )
 
         # 从 derived_data 提取借贷和收入分析结果
         derived_data = self.derived_data
@@ -14396,7 +15182,7 @@ class InvestigationReportBuilder:
                     )
             if aggregation_highlights:
                 lines.append(
-                    "  • 聚合风险看板: 以下证据分布与前端高风险解释面板同口径，来源于 aggregation 证据包"
+                    "  • 聚合风险看板: 以下证据分布与前端高风险解释面板同口径，来源于聚合证据汇总结果"
                 )
                 for highlight in aggregation_highlights[:3]:
                     entity_name = str(highlight.get("entity", "") or "").strip()
@@ -14424,8 +15210,7 @@ class InvestigationReportBuilder:
                     )
                     lines.append(
                         "      ↳ 口径来源: "
-                        'analysis_cache/derived_data.json -> aggregation.evidencePacks'
-                        f'["{entity_name}"].aggregation_explainability.evidence_bucket_counts'
+                        f"{entity_name}的聚合证据汇总结果（按证据类别统计）"
                     )
                     evidence = pack.get("evidence", {})
                     if not isinstance(evidence, dict):
@@ -14488,6 +15273,53 @@ class InvestigationReportBuilder:
                         name = str(row or "").strip()
                         if name:
                             pending_members.append(name)
+
+                if not member_sections and members:
+                    synthesized_member_sections = []
+                    for member in members:
+                        member_name = str(member or "").strip()
+                        if not member_name:
+                            continue
+                        existing_person_section = person_section_lookup.get(member_name)
+                        if existing_person_section:
+                            synthesized_member_sections.append(existing_person_section)
+                            continue
+                        profile = self.profiles.get(member_name, {})
+                        if not isinstance(profile, dict) or not profile:
+                            continue
+                        income_match_analysis = self._build_income_match_analysis_v4(
+                            member_name, profile
+                        )
+                        semantic_dossier = semantic_person_dossier_lookup.get(
+                            member_name, {}
+                        )
+                        if isinstance(semantic_dossier, dict):
+                            financial_gap_explanation = semantic_dossier.get(
+                                "financial_gap_explanation"
+                            )
+                            if (
+                                isinstance(financial_gap_explanation, dict)
+                                and financial_gap_explanation
+                                and not income_match_analysis.get(
+                                    "financial_gap_explanation"
+                                )
+                            ):
+                                income_match_analysis[
+                                    "financial_gap_explanation"
+                                ] = financial_gap_explanation
+                        synthesized_member_sections.append(
+                            {
+                                "name": member_name,
+                                "asset_income_section": {},
+                                "data_analysis_section": {
+                                    "income_match_analysis": income_match_analysis,
+                                    "counterparty_analysis": {},
+                                },
+                                "unified_analysis": {},
+                            }
+                        )
+                    if synthesized_member_sections:
+                        member_sections = synthesized_member_sections
 
                 # 计算家庭年度工资
 
@@ -14590,6 +15422,19 @@ class InvestigationReportBuilder:
                     income_match_analysis = data_analysis_section.get(
                         "income_match_analysis", {}
                     ) or {}
+                    if not income_match_analysis.get("financial_gap_explanation"):
+                        semantic_dossier = semantic_person_dossier_lookup.get(member, {})
+                        if isinstance(semantic_dossier, dict):
+                            financial_gap_explanation = semantic_dossier.get(
+                                "financial_gap_explanation"
+                            )
+                            if (
+                                isinstance(financial_gap_explanation, dict)
+                                and financial_gap_explanation
+                            ):
+                                income_match_analysis["financial_gap_explanation"] = (
+                                    financial_gap_explanation
+                                )
                     counterparty_analysis = data_analysis_section.get(
                         "counterparty_analysis", {}
                     ) or {}
@@ -14628,6 +15473,19 @@ class InvestigationReportBuilder:
                     lines.append(
                         f"    💰 资金概况（原始流入{raw_inflow / 10000:,.2f}万元 / 原始流出{raw_outflow / 10000:,.2f}万元 / 真实收入{inflow / 10000:,.2f}万元 / 真实支出{outflow / 10000:,.2f}万元 / {tx_count}笔）"
                     )
+                    financial_gap_explanation = income_match_analysis.get(
+                        "financial_gap_explanation", {}
+                    ) or {}
+                    financial_gap_summary = str(
+                        financial_gap_explanation.get("summary") or ""
+                    ).strip()
+                    if financial_gap_summary:
+                        lines.append(f"    📌 收支口径说明：{financial_gap_summary}")
+                    account_scope_note = str(
+                        income_match_analysis.get("account_scope_note") or ""
+                    ).strip()
+                    if account_scope_note:
+                        lines.append(f"    📌 账户分层提示：{account_scope_note}")
                     lines.append("    📌 真实收入剔除依据")
                     offset_rule_rows = income_match_analysis.get(
                         "offset_rule_rows", []
@@ -15029,10 +15887,10 @@ class InvestigationReportBuilder:
 
         lines.append("【溯源说明】")
         lines.append(
-            "  • 本报告统计与金额来源于清洗后数据链路（output/cleaned_data -> output/analysis_cache），报告阶段不回到原始data重算"
+            "  • 本报告统计与金额来源于清洗后的标准化数据链路，报告阶段不回到原始流水重算"
         )
         lines.append(
-            "  • 线索条目优先输出证据来源文件、行号、交易ID；缺失字段将标记为“未提供”"
+            "  • 线索条目优先输出证据来源文件、行号及交易标识；如定位字段缺失，仅保留已确认的记录层级信息"
         )
         lines.append("")
 
@@ -15181,6 +16039,24 @@ class InvestigationReportBuilder:
                         lines.append(f"  • {label}: {value}")
                 lines.append("")
 
+            formal_sections = appendix.get("formal_sections", []) or []
+            if formal_sections:
+                for section in formal_sections[:6]:
+                    if not isinstance(section, dict):
+                        continue
+                    section_title = str(section.get("title") or "").strip()
+                    paragraphs = [
+                        str(paragraph).strip()
+                        for paragraph in (section.get("paragraphs", []) or [])
+                        if str(paragraph).strip()
+                    ]
+                    if not section_title or not paragraphs:
+                        continue
+                    lines.append(f"【{section_title}】")
+                    for paragraph in paragraphs[:4]:
+                        lines.append(f"  {paragraph}")
+                    lines.append("")
+
             appendix_key = str(appendix.get("appendix_key") or "").strip()
             if appendix_key == "appendix_a_assets_income":
                 family_financial_rollup = appendix.get("family_financial_rollup", []) or []
@@ -15248,7 +16124,7 @@ class InvestigationReportBuilder:
                             continue
                         family_name = str(item.get("family_name") or "").strip()
                         lines.append(
-                            f"  {idx}. {entity_name} | {item.get('risk_label', '')} | 问题{item.get('issue_count', 0)}项 | 最高优先级{item.get('top_priority', 0)}"
+                            f"  {idx}. {entity_name} | {item.get('risk_label', '')} | 异常收入/借贷问题{item.get('issue_count', 0)}项 | 最高优先级{item.get('top_priority', 0)}"
                             + (f" | 家庭:{family_name}" if family_name else "")
                         )
                         categories = [
@@ -15381,7 +16257,7 @@ class InvestigationReportBuilder:
                             if str(ref).strip()
                         ]
                         base = (
-                            f"  {idx}. {entity_name} | {item.get('entity_type', 'unknown')} | "
+                            f"  {idx}. {entity_name} | {self._format_report_entity_type(item.get('entity_type', 'unknown'))} | "
                             f"优先级{item.get('priority_score', 0)} | {item.get('risk_label', '') or item.get('risk_level', '')}"
                         )
                         if family_name:
@@ -15428,7 +16304,17 @@ class InvestigationReportBuilder:
                             if str(reason).strip()
                         ]
                         if counter_indicators:
-                            lines.append("     ↳ 反证/限制: " + "；".join(counter_indicators[:2]))
+                            cleaned_counter_indicators = [
+                                re.sub(r"[。；，、\s]+$", "", reason)
+                                for reason in counter_indicators[:2]
+                                if re.sub(r"[。；，、\s]+$", "", reason)
+                            ]
+                            if cleaned_counter_indicators:
+                                lines.append(
+                                    "     ↳ 反证/限制: "
+                                    + "；".join(cleaned_counter_indicators)
+                                    + "。"
+                                )
                     lines.append("")
 
                 company_hotspots = appendix.get("company_hotspots", []) or []
@@ -15479,7 +16365,7 @@ class InvestigationReportBuilder:
                 excerpt = str(item.get("excerpt", "") or "").strip()
                 artifacts = str(item.get("artifacts", "") or "").strip()
                 if excerpt:
-                    lines.append(f"    ↳ 日志摘录: {excerpt}")
+                    lines.append(f"    ↳ 复盘摘要: {excerpt}")
                 if artifacts:
                     lines.append(f"    ↳ 落地产物: {artifacts}")
             lines.append("")
@@ -15526,9 +16412,16 @@ class InvestigationReportBuilder:
         lines.append("=" * 70)
 
         # 写入文件
+        rendered_text = humanize_report_text("\n".join(lines))
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
+            f.write(rendered_text)
+
+        try:
+            # 先生成一次目录清单，供 QA 判断“无 HTML 时的主入口是否已回退到 TXT”。
+            self.generate_report_index_file(os.path.dirname(output_path))
+        except Exception as exc:
+            logger.warning("[初查报告] 报告目录清单预生成失败: %s", exc)
 
         try:
             artifact_paths = self.save_report_package_artifacts(
@@ -15676,12 +16569,37 @@ class InvestigationReportBuilder:
                 preferred_html = sorted(
                     html_files, key=lambda x: x["size"], reverse=True
                 )[0]["name"]
-        lines.append(
-            f"  1. 优先查看'{preferred_html or 'HTML综合报告'}'获取完整分析"
-        )
+        preferred_txt = None
+        if txt_files:
+            preferred_txt_candidates = [
+                f
+                for f in txt_files
+                if f["name"] == "核查结果分析报告.txt"
+            ] or [
+                f
+                for f in txt_files
+                if f["name"] != "报告目录清单.txt"
+                and not str(f["name"]).startswith("专项报告/")
+            ] or [
+                f for f in txt_files if f["name"] != "报告目录清单.txt"
+            ]
+            if preferred_txt_candidates:
+                preferred_txt = sorted(
+                    preferred_txt_candidates,
+                    key=lambda x: (x["size"] or 0),
+                    reverse=True,
+                )[0]["name"]
+        if preferred_html:
+            lines.append(f"  1. 优先查看'{preferred_html}'获取完整分析")
+        elif preferred_txt:
+            lines.append(
+                f"  1. 当前未生成HTML报告，优先查看'{preferred_txt}'获取正式结论"
+            )
+        else:
+            lines.append("  1. 当前未生成HTML报告，请优先查看正式TXT报告获取分析结论")
         lines.append("  2. 需要深入某个方面时，查看对应的专项报告txt")
         lines.append("  3. 需要数据底稿时，打开'资金核查底稿.xlsx'")
-        lines.append("  4. 所有分析基于 output/cleaned_data/ 中的标准化银行流水")
+        lines.append("  4. 所有分析基于标准化后的银行流水数据")
         lines.append("")
         lines.append("=" * 70)
 

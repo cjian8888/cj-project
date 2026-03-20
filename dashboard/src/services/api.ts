@@ -4,17 +4,77 @@
 
 import type { ReportPackage } from '../types';
 
+function isLoopbackHost(hostname: string): boolean {
+    return hostname === 'localhost' || hostname === '127.0.0.1';
+}
+
+function normalizeLoopbackUrl(rawUrl: string): string {
+    if (typeof window === 'undefined') {
+        return rawUrl;
+    }
+
+    try {
+        const parsed = new URL(rawUrl);
+        const currentHostname = window.location.hostname;
+        if (isLoopbackHost(parsed.hostname) && isLoopbackHost(currentHostname)) {
+            parsed.hostname = currentHostname;
+            return parsed.toString().replace(/\/$/, '');
+        }
+    } catch {
+        return rawUrl;
+    }
+
+    return rawUrl;
+}
+
+function getDefaultApiBaseUrl(): string {
+    if (typeof window === 'undefined') {
+        return 'http://localhost:8000';
+    }
+
+    const { protocol, hostname, port } = window.location;
+    if (port === '8000') {
+        return '';
+    }
+    return `${protocol}//${hostname}:8000`;
+}
+
+function resolveApiBaseUrl(): string {
+    const envValue = String(import.meta.env.VITE_API_URL || '').trim();
+    if (typeof window !== 'undefined' && window.location.port === '8000') {
+        return '';
+    }
+    if (!envValue) {
+        return getDefaultApiBaseUrl();
+    }
+    return normalizeLoopbackUrl(envValue);
+}
+
 function getDefaultWsUrl(): string {
     if (typeof window === 'undefined') {
         return 'ws://localhost:8000/ws';
     }
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${protocol}//${window.location.host}/ws`;
+    if (window.location.port === '8000') {
+        return `${protocol}//${window.location.host}/ws`;
+    }
+    return `${protocol}//${window.location.hostname}:8000/ws`;
 }
 
-export const API_BASE_URL = import.meta.env.VITE_API_URL || '';
-const WS_URL = import.meta.env.VITE_WS_URL || getDefaultWsUrl();
+function resolveWsUrl(): string {
+    const envValue = String(import.meta.env.VITE_WS_URL || '').trim();
+    if (typeof window !== 'undefined' && window.location.port === '8000') {
+        return getDefaultWsUrl();
+    }
+    if (!envValue) {
+        return getDefaultWsUrl();
+    }
+    return normalizeLoopbackUrl(envValue);
+}
+
+export const API_BASE_URL = resolveApiBaseUrl();
+const WS_URL = resolveWsUrl();
 
 // ==================== Types ====================
 

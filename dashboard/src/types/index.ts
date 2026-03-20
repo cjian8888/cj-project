@@ -9,6 +9,7 @@ export interface LogEntry {
 }
 
 export type AnalysisStatus = 'idle' | 'running' | 'completed' | 'failed';
+export type BackendConnectionState = 'unknown' | 'online' | 'offline';
 
 // ==================== Configuration Types ====================
 
@@ -47,6 +48,7 @@ export interface AnalysisState {
     currentPhase: string;
     lastRunTime: Date | null;
     status: AnalysisStatus;
+    backendConnection: BackendConnectionState;
     isLoading?: boolean; // 数据加载状态
 }
 
@@ -473,7 +475,9 @@ export interface ReportIssue {
 export interface ReportQualityCheck {
     check_id?: string;
     status?: string;
+    title?: string;
     message?: string;
+    details?: Record<string, unknown>;
 }
 
 export interface ReportMainView {
@@ -481,6 +485,8 @@ export interface ReportMainView {
     summary_narrative?: string;
     issue_count?: number;
     high_risk_issue_count?: number;
+    company_issue_count?: number;
+    high_risk_company_count?: number;
     top_priority_entities?: ReportPriorityBoardItem[];
     issues?: ReportIssue[];
     aggregation_summary?: Record<string, unknown>;
@@ -500,6 +506,15 @@ export interface ReportPackage {
             total?: number;
         };
         checks?: ReportQualityCheck[];
+        meta?: {
+            qa_guard_version?: string;
+            generated_at?: string;
+        };
+    };
+    artifact_meta?: {
+        package_generated_at?: string;
+        source_report_generated_at?: string;
+        qa_guard_version?: string;
     };
     appendix_views?: Record<string, unknown>;
     family_dossiers?: Array<Record<string, unknown>>;

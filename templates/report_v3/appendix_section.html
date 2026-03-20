@@ -15,6 +15,19 @@
 </div>
 {% endif %}
 
+{% if appendix_data.formal_sections %}
+<div style="background: #fcfdff; border: 1px solid #d8e4ef; padding: 18px 20px; margin: 20px 0 24px; border-radius: 6px;">
+    {% for section in appendix_data.formal_sections %}
+    <div {% if not loop.last %}style="margin-bottom: 18px;"{% endif %}>
+        <h3 style="margin: 0 0 10px; color: #1f4e79;">{{ section.title }}</h3>
+        {% for paragraph in section.paragraphs %}
+        <p style="margin: 8px 0; text-indent: 2em; line-height: 1.9;">{{ paragraph }}</p>
+        {% endfor %}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
 {% if appendix_data.appendix_key == 'appendix_a_assets_income' %}
 {% if appendix_data.family_financial_rollup %}
 <h3>家庭收支与待补成员</h3>
@@ -71,7 +84,7 @@
     <li>
         {{ item.entity_name }}
         {% if item.risk_label %}（{{ item.risk_label }}）{% endif %}
-        ，问题数量：{{ item.issue_count }}
+        ，异常收入/借贷问题：{{ item.issue_count }}
         ，最高优先级：{{ item.top_priority }}
         {% if item.family_name %}，家庭：{{ item.family_name }}{% endif %}
         {% if item.categories %}
@@ -168,7 +181,7 @@
     <li>
         {{ item.entity_name }}
         {% if item.risk_label %}（{{ item.risk_label }}）{% endif %}
-        {% if item.entity_type %}，对象类型：{{ item.entity_type }}{% endif %}
+        {% if item.entity_type %}，对象类型：{{ item.entity_type | format_entity_type }}{% endif %}
         {% if item.priority_score is not none %}，优先级：{{ item.priority_score }}{% endif %}
         {% if item.family_name %}，家庭：{{ item.family_name }}{% endif %}
         {% if item.top_reasons %}

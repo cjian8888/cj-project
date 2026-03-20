@@ -96,6 +96,10 @@ def _extract_data_range(metadata: Dict[str, Any]) -> Dict[str, Optional[str]]:
 
 def _build_entity_summary(name: str, profile: Dict[str, Any], entity_type: str) -> Dict[str, Any]:
     summary = _as_dict(profile.get("summary"))
+    account_layer_summary = _as_dict(
+        profile.get("account_layer_summary") or summary.get("account_layer_summary")
+    )
+    layers = _as_dict(account_layer_summary.get("layers"))
     return {
         "entity_name": name,
         "entity_type": entity_type,
@@ -110,6 +114,31 @@ def _build_entity_summary(name: str, profile: Dict[str, Any], entity_type: str) 
         ),
         "real_income": _as_float(summary.get("real_income")),
         "real_expense": _as_float(summary.get("real_expense")),
+        "offset_detail": _as_dict(summary.get("offset_detail")),
+        "account_layer_summary": {
+            "has_corporate_account_activity": bool(
+                account_layer_summary.get("has_corporate_account_activity", False)
+            ),
+            "has_mixed_personal_corporate_activity": bool(
+                account_layer_summary.get(
+                    "has_mixed_personal_corporate_activity", False
+                )
+            ),
+            "dominant_layer": str(account_layer_summary.get("dominant_layer") or "").strip(),
+            "note": str(account_layer_summary.get("note") or "").strip(),
+            "personal_layer_income": _as_float(
+                _as_dict(layers.get("personal")).get("total_income")
+            ),
+            "personal_layer_expense": _as_float(
+                _as_dict(layers.get("personal")).get("total_expense")
+            ),
+            "corporate_layer_income": _as_float(
+                _as_dict(layers.get("corporate")).get("total_income")
+            ),
+            "corporate_layer_expense": _as_float(
+                _as_dict(layers.get("corporate")).get("total_expense")
+            ),
+        },
     }
 
 

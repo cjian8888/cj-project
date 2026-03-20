@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 """Assemble the unified semantic report package and appendix views."""
 
+import re
 from typing import Any, Dict, Iterable, List, Optional
 
+from report_text_formatter import humanize_report_text
 from unified_risk_model import build_risk_schema, normalize_risk_level, risk_level_label
 
 
@@ -28,12 +30,122 @@ def _unique_texts(values: Iterable[Any]) -> List[str]:
     ordered: List[str] = []
     seen = set()
     for value in values:
-        text = str(value or "").strip()
+        text = humanize_report_text(value)
         if not text or text in seen:
             continue
         ordered.append(text)
         seen.add(text)
     return ordered
+
+
+def _normalize_text_list(values: Iterable[Any]) -> List[str]:
+    return _unique_texts(humanize_report_text(value) for value in values)
+
+
+def _normalize_issue(issue: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(issue)
+    for key in ("headline", "narrative", "status", "theme", "category"):
+        if key in normalized:
+            normalized[key] = humanize_report_text(normalized.get(key))
+    for key in ("why_flagged", "counter_indicators", "evidence_refs", "next_actions"):
+        if key in normalized:
+            normalized[key] = _normalize_text_list(_as_list(normalized.get(key)))
+    return normalized
+
+
+def _normalize_priority_board_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(item)
+    if "top_reasons" in normalized:
+        normalized["top_reasons"] = _normalize_text_list(
+            _as_list(normalized.get("top_reasons"))
+        )
+    return normalized
+
+
+def _strip_terminal_punctuation(text: Any) -> str:
+    return re.sub(r"[。；，、\s]+$", "", str(text or "").strip())
+
+
+def _ensure_sentence(text: Any) -> str:
+    cleaned = _strip_terminal_punctuation(text)
+    if not cleaned:
+        return ""
+    if cleaned[-1] in "。！？":
+        return cleaned
+    return cleaned + "。"
+
+
+def _join_semantic_sentences(parts: Iterable[Any]) -> str:
+    sentences = []
+    for part in parts:
+        sentence = _ensure_sentence(part)
+        if sentence:
+            sentences.append(sentence)
+    return " ".join(sentences)
+
+
+def _format_semantic_followup(
+    counter_indicators: Iterable[Any], next_actions: Iterable[Any]
+) -> str:
+    counter_texts = _unique_texts(
+        _strip_terminal_punctuation(text) for text in counter_indicators
+    )
+    action_texts = _unique_texts(
+        _strip_terminal_punctuation(text) for text in next_actions
+    )
+    return _join_semantic_sentences(
+        [
+            (
+                f"反证/限制包括{'；'.join(counter_texts)}"
+                if counter_texts
+                else ""
+            ),
+            f"建议继续{'；'.join(action_texts)}" if action_texts else "",
+        ]
+    )
+
+
+def _build_company_brief_summary(
+    entity_name: str,
+    role_tags: Iterable[Any],
+    risk_overview: Dict[str, Any],
+    related_persons: Iterable[Any],
+    related_companies: Iterable[Any],
+    key_issue_cards: Iterable[Any],
+) -> str:
+    clean_entity_name = str(entity_name or "").strip() or "相关公司"
+    clean_role_tags = _unique_texts(role_tags)[:4]
+    clean_related_persons = _unique_texts(related_persons)
+    clean_related_companies = _unique_texts(related_companies)
+    representative_issue_count = len(
+        [item for item in key_issue_cards if isinstance(item, dict) or str(item).strip()]
+    )
+    total_issue_count = int(_as_float(risk_overview.get("issue_count")))
+    risk_level = normalize_risk_level(risk_overview.get("risk_level"), default="low")
+    risk_label = str(risk_overview.get("risk_label") or "").strip() or risk_level_label(
+        risk_level
+    )
+    priority_score = round(_as_float(risk_overview.get("priority_score")), 1)
+
+    parts: List[str] = []
+    if clean_role_tags:
+        parts.append(f"角色标签为{'、'.join(clean_role_tags)}")
+    parts.append(f"统一风险为{risk_label}，优先级{priority_score:.1f}分")
+    if clean_related_persons:
+        parts.append(f"关联核心人员{len(clean_related_persons)}名")
+    if clean_related_companies:
+        parts.append(f"关联公司{len(clean_related_companies)}家")
+    if total_issue_count > 0:
+        parts.append(f"全量问题{total_issue_count}项")
+    if representative_issue_count > 0 and representative_issue_count != total_issue_count:
+        parts.append(f"代表问题{representative_issue_count}项")
+    elif representative_issue_count > 0 and total_issue_count <= 0:
+        parts.append(f"代表问题{representative_issue_count}项")
+    return (
+        f"{clean_entity_name}{'；'.join(parts)}。"
+        if parts
+        else f"{clean_entity_name}已纳入统一语义层公司清单。"
+    )
 
 
 def _issue_sort_key(item: Dict[str, Any]) -> Any:
@@ -183,6 +295,9 @@ def _build_company_issue_overview(
             continue
         risk_overview = _as_dict(dossier.get("risk_overview"))
         risk_level = normalize_risk_level(risk_overview.get("risk_level"), default="low")
+        role_tags = _unique_texts(_as_list(dossier.get("role_tags")))[:8]
+        related_persons = _unique_texts(_as_list(dossier.get("related_persons")))[:10]
+        related_companies = _unique_texts(_as_list(dossier.get("related_companies")))[:10]
         if risk_level in {"critical", "high"}:
             high_risk_company_count += 1
 
@@ -201,6 +316,14 @@ def _build_company_issue_overview(
         key_issue_cards = _as_list(dossier.get("key_issue_cards"))[:5]
         if not key_issue_cards and linked_issues:
             key_issue_cards = [_issue_brief(issue) for issue in linked_issues[:5]]
+        brief_summary = _build_company_brief_summary(
+            entity_name,
+            role_tags,
+            risk_overview,
+            related_persons,
+            related_companies,
+            key_issue_cards,
+        )
 
         items.append(
             {
@@ -209,11 +332,11 @@ def _build_company_issue_overview(
                 "risk_label": str(risk_overview.get("risk_label") or risk_level_label(risk_level)),
                 "priority_score": round(_as_float(risk_overview.get("priority_score")), 1),
                 "confidence": round(_as_float(risk_overview.get("confidence")), 2),
-                "role_tags": _unique_texts(_as_list(dossier.get("role_tags")))[:8],
-                "summary": str(dossier.get("summary") or "").strip(),
+                "role_tags": role_tags,
+                "summary": brief_summary,
                 "issue_refs": _unique_texts(_as_list(dossier.get("issue_refs"))),
-                "related_persons": _unique_texts(_as_list(dossier.get("related_persons")))[:10],
-                "related_companies": _unique_texts(_as_list(dossier.get("related_companies")))[:10],
+                "related_persons": related_persons,
+                "related_companies": related_companies,
                 "key_issue_cards": key_issue_cards,
                 "next_actions": next_actions,
             }
@@ -325,6 +448,8 @@ def _build_main_report_view(
         "summary_narrative": summary_narrative,
         "issue_count": issue_count,
         "high_risk_issue_count": high_risk_issue_count,
+        "company_issue_count": companies_with_issues,
+        "high_risk_company_count": high_risk_company_count,
         "top_priority_entities": top_priority_entities,
         "issues": issue_cards,
         "company_issue_summary": {
@@ -454,7 +579,14 @@ def _build_appendix_a_assets_income(
 def _build_appendix_b_income_loan(
     issue_payload: Dict[str, Any], dossier_payload: Dict[str, Any]
 ) -> Dict[str, Any]:
-    categories = {"直接往来", "征信预警", "AML预警", "隐形资产", "综合问题"}
+    categories = {
+        "直接往来",
+        "征信预警",
+        "AML预警",
+        "反洗钱预警",
+        "隐形资产",
+        "综合问题",
+    }
     issues = [
         issue
         for issue in sorted(_as_list(issue_payload.get("issues")), key=_issue_sort_key)
@@ -463,12 +595,15 @@ def _build_appendix_b_income_loan(
     items: List[Dict[str, Any]] = []
     for issue in issues[:20]:
         scope = _as_dict(issue.get("scope"))
+        category = str(issue.get("category") or "").strip()
+        if category == "AML预警":
+            category = "反洗钱预警"
         items.append(
             {
                 "issue_id": str(issue.get("issue_id") or "").strip(),
                 "entity_name": str(scope.get("entity") or scope.get("company") or "").strip(),
                 "family_name": str(scope.get("family") or "").strip(),
-                "category": str(issue.get("category") or "").strip(),
+                "category": category,
                 "headline": str(issue.get("headline") or issue.get("narrative") or "").strip(),
                 "risk_level": normalize_risk_level(issue.get("risk_level"), default="low"),
                 "risk_label": risk_level_label(issue.get("risk_level")),
@@ -496,20 +631,24 @@ def _build_appendix_b_income_loan(
         "focus_entity_count": len(focus_entities),
         "direct_transfer_count": len([item for item in items if item["category"] == "直接往来"]),
         "credit_alert_count": len([item for item in items if item["category"] == "征信预警"]),
-        "aml_alert_count": len([item for item in items if item["category"] == "AML预警"]),
+        "aml_alert_count": len([item for item in items if item["category"] == "反洗钱预警"]),
         "person_issue_ref_count": person_issue_refs,
     }
+    formal_chapter = _build_appendix_b_formal_chapter(
+        summary,
+        items,
+        focus_entities[:10],
+    )
 
     return {
         "title": "附录B 异常收入与借贷",
         "summary": summary,
         "items": items,
         "focus_entities": focus_entities[:10],
-        "formal_chapter": _build_appendix_b_formal_chapter(
-            summary,
-            items,
-            focus_entities[:10],
-        ),
+        "focus_entity_cards": _as_list(formal_chapter.get("focus_entity_cards")),
+        "issue_cards": _as_list(formal_chapter.get("issue_cards")),
+        "recommended_actions": _as_list(formal_chapter.get("recommended_actions")),
+        "formal_chapter": formal_chapter,
     }
 
 
@@ -629,10 +768,89 @@ def _build_appendix_a_formal_chapter(
         "结合真实收入、主要资产和大额支出凭证做匹配性复核。"
     ]
 
+    formal_sections: List[Dict[str, Any]] = []
+    if family_financial_rollup:
+        focus_family = family_financial_rollup[0]
+        pending_members = _unique_texts(_as_list(focus_family.get("pending_members")))[:4]
+        formal_sections.append(
+            {
+                "title": "一、家庭收支匹配概览",
+                "paragraphs": _unique_texts(
+                    [
+                        (
+                            f"统一语义层覆盖{int(_as_float(summary.get('persons_count')))}名人员、"
+                            f"{int(_as_float(summary.get('families_count')))}个家庭，当前重点家庭为"
+                            f"{str(focus_family.get('family_name') or '').strip() or '待核实家庭'}。"
+                            f" 该家庭共{int(_as_float(focus_family.get('member_count')))}人，"
+                            f"真实收入{_as_float(focus_family.get('total_income')):,.2f}元，"
+                            f"真实支出{_as_float(focus_family.get('total_expense')):,.2f}元，"
+                            f"收支差额{_as_float(focus_family.get('income_gap')):,.2f}元。"
+                        ),
+                        (
+                            f"当前待补数据家庭{int(_as_float(summary.get('pending_family_count')))}个。"
+                            + (
+                                f" 就{str(focus_family.get('family_name') or '').strip()}而言，"
+                                f"仍需补充{'、'.join(pending_members)}的银行流水和资产资料。"
+                                if pending_members
+                                else ""
+                            )
+                        ),
+                    ]
+                ),
+            }
+        )
+    if person_gap_items:
+        focus_person = person_gap_items[0]
+        person_headlines = _unique_texts(
+            _strip_terminal_punctuation(item)
+            for item in _as_list(focus_person.get("key_issue_headlines"))
+        )[:3]
+        person_issue_refs = _unique_texts(_as_list(focus_person.get("issue_refs")))[:5]
+        ratio = focus_person.get("expense_income_ratio")
+        ratio_text = f"{float(ratio):.3f}" if isinstance(ratio, (int, float)) else "—"
+        formal_sections.append(
+            {
+                "title": "二、个人收支与补证重点",
+                "paragraphs": _unique_texts(
+                    [
+                        (
+                            f"{str(focus_person.get('entity_name') or '').strip() or '重点对象'}当前真实收入"
+                            f"{_as_float(focus_person.get('real_income')):,.2f}元，真实支出"
+                            f"{_as_float(focus_person.get('real_expense')):,.2f}元，收支差额"
+                            f"{_as_float(focus_person.get('income_gap')):,.2f}元，支出/收入比为{ratio_text}。"
+                            + (
+                                f" 该对象归属于{str(focus_person.get('family_name') or '').strip()}。"
+                                if str(focus_person.get("family_name") or "").strip()
+                                else ""
+                            )
+                        ),
+                        (
+                            (
+                                f"关联问题主要包括{'；'.join(person_headlines)}。"
+                                if person_headlines
+                                else ""
+                            )
+                            + (
+                                f" 当前对应问题卡为{'、'.join(person_issue_refs)}。"
+                                if person_issue_refs
+                                else ""
+                            )
+                            + (
+                                f" 建议优先{_strip_terminal_punctuation(recommended_actions[0])}。"
+                                if recommended_actions
+                                else ""
+                            )
+                        ),
+                    ]
+                ),
+            }
+        )
+
     return {
         "title": "附录A 资产与收入匹配",
         "lead": lead,
         "overview_metrics": overview_metrics,
+        "formal_sections": formal_sections,
         "family_financial_rollup": family_financial_rollup,
         "person_gap_items": person_gap_items,
         "recommended_actions": recommended_actions,
@@ -645,7 +863,7 @@ def _build_appendix_b_formal_chapter(
     focus_entities: List[str],
 ) -> Dict[str, Any]:
     lead = (
-        "本附录围绕异常收入、借贷、征信与 AML 相关问题卡进行归集，"
+        "本附录围绕异常收入、借贷、征信与反洗钱相关问题卡进行归集，"
         "用于支持对资金来源、借贷背景和持续性风险的人工复核。"
     )
     overview_metrics = [
@@ -666,7 +884,7 @@ def _build_appendix_b_formal_chapter(
             "value": int(_as_float(summary.get("credit_alert_count"))),
         },
         {
-            "label": "AML预警",
+            "label": "反洗钱预警",
             "value": int(_as_float(summary.get("aml_alert_count"))),
         },
     ]
@@ -752,10 +970,86 @@ def _build_appendix_b_formal_chapter(
         for action in _as_list(item.get("next_actions"))
     )[:8] or ["补查借贷凭证、收入来源说明及还款流水。"]
 
+    formal_sections: List[Dict[str, Any]] = []
+    if focus_entity_cards:
+        focus_entity = focus_entity_cards[0]
+        categories = _unique_texts(_as_list(focus_entity.get("categories")))[:4]
+        headlines = _unique_texts(_as_list(focus_entity.get("headlines")))[:3]
+        formal_sections.append(
+            {
+                "title": "一、重点对象与问题分布",
+                "paragraphs": _unique_texts(
+                    [
+                        (
+                            f"异常收入与借贷方向共归集{int(_as_float(summary.get('issue_count')))}项问题卡，"
+                            f"重点对象{int(_as_float(summary.get('focus_entity_count')))}个，当前以"
+                            f"{str(focus_entity.get('entity_name') or '').strip() or '重点对象'}"
+                            f"（{str(focus_entity.get('risk_label') or '').strip()}，问题"
+                            f"{int(_as_float(focus_entity.get('issue_count')))}项，最高优先级"
+                            f"{_as_float(focus_entity.get('top_priority')):.1f}）为核心核查对象。"
+                        ),
+                        (
+                            (
+                                f"问题类型主要集中于{'、'.join(categories)}。"
+                                if categories
+                                else ""
+                            )
+                            + (
+                                f" 代表问题包括{'；'.join(headlines)}。"
+                                if headlines
+                                else ""
+                            )
+                        ),
+                    ]
+                ),
+            }
+        )
+    if issue_cards:
+        top_issue = issue_cards[0]
+        evidence_refs = _unique_texts(_as_list(top_issue.get("evidence_refs")))[:4]
+        why_flagged = _unique_texts(_as_list(top_issue.get("why_flagged")))[:3]
+        formal_sections.append(
+            {
+                "title": "二、证据与复核方向",
+                "paragraphs": _unique_texts(
+                    [
+                        (
+                            f"重点问题卡“{str(top_issue.get('headline') or '').strip() or '待核实问题'}”"
+                            f"涉及对象{str(top_issue.get('entity_name') or '').strip() or '待核实对象'}"
+                            + (
+                                f"，所属家庭为{str(top_issue.get('family_name') or '').strip()}"
+                                if str(top_issue.get("family_name") or "").strip()
+                                else ""
+                            )
+                            + "。"
+                        ),
+                        (
+                            (
+                                f"现有触发依据包括{'；'.join(why_flagged)}。"
+                                if why_flagged
+                                else ""
+                            )
+                            + (
+                                f" 证据索引已落在{'、'.join(evidence_refs)}。"
+                                if evidence_refs
+                                else ""
+                            )
+                            + (
+                                f" 建议继续{_strip_terminal_punctuation(recommended_actions[0])}。"
+                                if recommended_actions
+                                else ""
+                            )
+                        ),
+                    ]
+                ),
+            }
+        )
+
     return {
         "title": "附录B 异常收入与借贷",
         "lead": lead,
         "overview_metrics": overview_metrics,
+        "formal_sections": formal_sections,
         "focus_entity_cards": focus_entity_cards,
         "issue_cards": issue_cards,
         "recommended_actions": recommended_actions,
@@ -810,7 +1104,7 @@ def _build_appendix_c_formal_chapter(
         entity_name = str(item.get("entity_name") or "").strip()
         company_name = str(item.get("company_name") or "").strip()
         family_name = str(item.get("family_name") or "").strip()
-        scope_parts = [part for part in [entity_name, company_name] if part]
+        scope_parts = _unique_texts([entity_name, company_name])
         if family_name:
             scope_parts.append(f"家庭:{family_name}")
         representative_issues.append(
@@ -868,10 +1162,208 @@ def _build_appendix_c_formal_chapter(
         "结合代表性路径、交易回单与对手方背景材料开展穿透复核。"
     ]
 
+    formal_sections: List[Dict[str, Any]] = []
+    if priority_entities:
+        top_entities = [
+            f"{str(item.get('entity_name') or '').strip()}（{str(item.get('risk_label') or '').strip()}，优先级{_as_float(item.get('priority_score')):.1f}）"
+            for item in priority_entities[:3]
+            if str(item.get("entity_name") or "").strip()
+        ]
+        family_names = _unique_texts(
+            str(item.get("family_name") or "").strip()
+            for item in priority_entities
+            if str(item.get("family_name") or "").strip()
+        )[:3]
+        focus_reasons = _unique_texts(
+            reason
+            for item in priority_entities[:4]
+            for reason in _as_list(item.get("top_reasons"))
+        )[:4]
+        focus_issue_refs = _unique_texts(
+            ref
+            for item in priority_entities[:4]
+            for ref in _as_list(item.get("issue_refs"))
+        )[:6]
+        formal_sections.append(
+            {
+                "title": "一、重点对象分层研判",
+                "paragraphs": _unique_texts(
+                    [
+                        (
+                            f"统一语义层共识别{len(priority_entities)}个网络重点对象，当前以"
+                            f"{'、'.join(top_entities) or '已归集对象'}为主要穿透核查对象。"
+                            + (
+                                f" 其中涉及家庭归属的对象主要集中在{'、'.join(family_names)}。"
+                                if family_names
+                                else ""
+                            )
+                        ),
+                        (
+                            "从触发原因看，重点对象主要集中在"
+                            + (
+                                "、".join(focus_reasons)
+                                if focus_reasons
+                                else "直接往来、关系穿透等场景"
+                            )
+                            + "等场景。"
+                            + (
+                                f" 已关联问题卡{'、'.join(focus_issue_refs)}。"
+                                if focus_issue_refs
+                                else ""
+                            )
+                        ),
+                    ]
+                ),
+            }
+        )
+
+    if representative_issues:
+        categories = _unique_texts(
+            str(item.get("category") or "").strip()
+            for item in representative_issues
+            if str(item.get("category") or "").strip()
+        )[:4]
+        evidence_refs = _unique_texts(
+            ref
+            for item in representative_issues[:4]
+            for ref in _as_list(item.get("evidence_refs"))
+        )[:5]
+        counter_indicators = _unique_texts(
+            reason
+            for item in representative_issues[:4]
+            for reason in _as_list(item.get("counter_indicators"))
+        )[:3]
+        next_action_samples = _unique_texts(
+            action
+            for item in representative_issues[:4]
+            for action in _as_list(item.get("next_actions"))
+        )[:3]
+        top_issue = representative_issues[0]
+        top_issue_headline = str(top_issue.get("headline") or "").strip()
+        top_issue_scope = str(top_issue.get("scope_line") or "").strip()
+        additional_headlines = _unique_texts(
+            str(item.get("headline") or "").strip()
+            for item in representative_issues[1:3]
+            if str(item.get("headline") or "").strip()
+        )[:2]
+        formal_sections.append(
+            {
+                "title": "二、代表性关系与穿透链条",
+                "paragraphs": _unique_texts(
+                    [
+                        (
+                            f"本次共归集{len(representative_issues)}项代表性穿透问题，主要表现为"
+                            + ("、".join(categories) if categories else "资金链路异常")
+                            + "。"
+                            + (
+                                f" 其中“{top_issue_headline}”为当前优先级较高的核查链条，范围覆盖{top_issue_scope}。"
+                                if top_issue_headline
+                                else ""
+                            )
+                        ),
+                        _join_semantic_sentences(
+                            [
+                                (
+                                    f"现有样本路径还包括{'；'.join(additional_headlines)}"
+                                    if additional_headlines
+                                    else ""
+                                ),
+                                (
+                                    f"现有证据索引主要落在{'、'.join(evidence_refs)}"
+                                    if evidence_refs
+                                    else ""
+                                ),
+                                _format_semantic_followup(
+                                    counter_indicators, next_action_samples
+                                ),
+                            ]
+                        ),
+                    ]
+                ),
+            }
+        )
+
+    if company_hotspots:
+        hotspot_names = _unique_texts(
+            str(item.get("entity_name") or "").strip()
+            for item in company_hotspots
+            if str(item.get("entity_name") or "").strip()
+        )[:3]
+        role_tags = _unique_texts(
+            tag
+            for item in company_hotspots[:4]
+            for tag in _as_list(item.get("role_tags"))
+        )[:6]
+        related_persons = _unique_texts(
+            name
+            for item in company_hotspots[:4]
+            for name in _as_list(item.get("related_persons"))
+        )[:6]
+        hotspot_summaries = _unique_texts(
+            str(item.get("summary") or "").strip()
+            for item in company_hotspots[:2]
+            if str(item.get("summary") or "").strip()
+        )[:2]
+        hotspot_headlines = _unique_texts(
+            headline
+            for item in company_hotspots[:3]
+            for headline in _as_list(item.get("key_issue_headlines"))
+        )[:3]
+        hotspot_actions = _unique_texts(
+            action
+            for item in company_hotspots[:3]
+            for action in _as_list(item.get("next_actions"))
+        )[:3]
+        formal_sections.append(
+            {
+                "title": "三、公司热点与核查方向",
+                "paragraphs": _unique_texts(
+                    [
+                        (
+                            f"涉案公司热点共{len(company_hotspots)}个，以"
+                            + ("、".join(hotspot_names) if hotspot_names else "已归集公司节点")
+                            + "为主要节点。"
+                            + (
+                                f" 角色标签集中于{'、'.join(role_tags)}。"
+                                if role_tags
+                                else ""
+                            )
+                            + (
+                                f" 关联人员包括{'、'.join(related_persons)}。"
+                                if related_persons
+                                else ""
+                            )
+                        ),
+                        _join_semantic_sentences(
+                            [
+                                "；".join(
+                                    _strip_terminal_punctuation(text)
+                                    for text in hotspot_summaries
+                                )
+                                if hotspot_summaries
+                                else "",
+                                (
+                                    f"重点关注{'；'.join(hotspot_headlines)}"
+                                    if hotspot_headlines
+                                    else ""
+                                ),
+                                (
+                                    f"建议优先{'；'.join(hotspot_actions)}"
+                                    if hotspot_actions
+                                    else ""
+                                ),
+                            ]
+                        ),
+                    ]
+                ),
+            }
+        )
+
     return {
         "title": "附录C 关系网络与资金穿透",
         "lead": lead,
         "overview_metrics": overview_metrics,
+        "formal_sections": formal_sections,
         "priority_entities": priority_entities,
         "representative_issues": representative_issues,
         "company_hotspots": company_hotspots,
@@ -1014,10 +1506,56 @@ def _build_appendix_d_formal_chapter(
         + [f"围绕{item['entity_name']}的行为异常标记补调交易明细与业务背景材料。"
            for item in behavior_cards if str(item.get("entity_name") or "").strip()]
     )[:8] or ["围绕异常时序与行为标记补查原始交易明细和业务背景。"]
+    formal_sections: List[Dict[str, Any]] = []
+    if timeline_cards or behavior_cards:
+        focus_timeline = timeline_cards[0] if timeline_cards else {}
+        focus_behavior = behavior_cards[0] if behavior_cards else {}
+        formal_sections.append(
+            {
+                "title": "一、时序与行为状态说明",
+                "paragraphs": _unique_texts(
+                    [
+                        (
+                            f"当前统一语义层共归集{len(timeline_cards)}项时序问题、"
+                            f"{len(behavior_cards)}个行为异常对象。"
+                            + (
+                                f" 其中“{str(focus_timeline.get('headline') or '').strip()}”为优先级较高的时序样本。"
+                                if str(focus_timeline.get("headline") or "").strip()
+                                else ""
+                            )
+                        ),
+                        (
+                            (
+                                f"行为异常对象以{str(focus_behavior.get('entity_name') or '').strip()}为代表，"
+                                f"当前标签包括{'、'.join(_unique_texts(_as_list(focus_behavior.get('behavioral_flags')))[:4])}。"
+                                if str(focus_behavior.get("entity_name") or "").strip()
+                                else ""
+                            )
+                            + (
+                                f" 建议优先{_strip_terminal_punctuation(recommended_actions[0])}。"
+                                if recommended_actions
+                                else ""
+                            )
+                        ),
+                    ]
+                ),
+            }
+        )
+    else:
+        formal_sections.append(
+            {
+                "title": "一、时序与行为状态说明",
+                "paragraphs": [
+                    "当前未归集到可单列的现金碰撞、时序伴随或行为异常对象，说明现有统一语义层尚未形成可直接写入正式附录的异常节奏链路。",
+                    "建议在后续补充完整流水、时间窗与行为标签后继续复核异常节奏及账户控制关系。",
+                ],
+            }
+        )
     return {
         "title": "附录D 时序与行为模式",
         "lead": lead,
         "overview_metrics": overview_metrics,
+        "formal_sections": formal_sections,
         "timeline_cards": timeline_cards,
         "behavior_cards": behavior_cards,
         "recommended_actions": recommended_actions,
@@ -1055,10 +1593,53 @@ def _build_appendix_e_formal_chapter(
     recommended_actions = _unique_texts(
         action for item in wallet_cards for action in _as_list(item.get("next_actions"))
     )[:8] or ["补调微信、支付宝、财付通相关明细及辅助凭证。"]
+    focus_card = wallet_cards[0] if wallet_cards else {}
+    formal_sections: List[Dict[str, Any]] = [
+        {
+            "title": "一、电子钱包补证覆盖情况",
+            "paragraphs": _unique_texts(
+                [
+                    (
+                        f"电子钱包数据当前处于{str(focus_card.get('status') or ('已接入' if summary.get('wallet_available') else '待补调')).strip()}状态，"
+                        f"覆盖{int(_as_float(summary.get('subject_count')))}个主体，形成摘要交易"
+                        f"{int(_as_float(summary.get('transaction_count')))}笔，关联问题"
+                        f"{int(_as_float(summary.get('issue_count')))}项。"
+                    ),
+                    (
+                        "电子钱包链路用于补强银行主链之外的支付证据，"
+                        "当前应重点核对实名绑定、订单轨迹与资金回流关系。"
+                    ),
+                ]
+            ),
+        },
+        {
+            "title": "二、补证动作与链路缺口",
+            "paragraphs": _unique_texts(
+                [
+                    (
+                        "当前主要补证动作包括"
+                        + "；".join(
+                            _strip_terminal_punctuation(action)
+                            for action in recommended_actions[:3]
+                            if _strip_terminal_punctuation(action)
+                        )
+                        + "。"
+                        if recommended_actions
+                        else "当前尚未形成明确补证动作。"
+                    ),
+                    (
+                        "目前尚需将电子钱包摘要交易与银行流水、聊天记录及实名设备信息交叉校验，"
+                        "以识别是否存在链路转移或证据缺口。"
+                    ),
+                ]
+            ),
+        },
+    ]
     return {
         "title": "附录E 电子钱包补证",
         "lead": lead,
         "overview_metrics": overview_metrics,
+        "formal_sections": formal_sections,
         "wallet_cards": wallet_cards,
         "recommended_actions": recommended_actions,
     }
@@ -1266,14 +1847,14 @@ def build_report_package_view(
 
     issues = sorted(
         (
-            issue
+            _normalize_issue(issue)
             for issue in _as_list(issue_payload.get("issues"))
             if isinstance(issue, dict)
         ),
         key=_issue_sort_key,
     )
     priority_board = [
-        item
+        _normalize_priority_board_item(item)
         for item in _as_list(issue_payload.get("priority_board"))
         if isinstance(item, dict)
     ]

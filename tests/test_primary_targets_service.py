@@ -87,6 +87,22 @@ def test_get_or_create_config_writes_auto_snapshot(tmp_path):
     assert Path(service.auto_config_path).exists()
 
 
+def test_generate_default_config_accepts_empty_analysis_cache_payload(tmp_path):
+    data_dir = tmp_path / "data"
+    output_dir = tmp_path / "output"
+    cache_dir = output_dir / "analysis_cache"
+    data_dir.mkdir()
+    cache_dir.mkdir(parents=True)
+
+    service = PrimaryTargetsService(data_dir=str(data_dir), output_dir=str(output_dir))
+    config, msg = service.generate_default_config()
+
+    assert msg == "success"
+    assert config is not None
+    assert config.analysis_units == []
+    assert config.include_companies == []
+
+
 def test_generate_default_config_normalizes_relation_labels(tmp_path):
     data_dir = tmp_path / "data"
     output_dir = tmp_path / "output"

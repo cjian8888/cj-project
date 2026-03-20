@@ -83,6 +83,14 @@ tax_analysis, travel_analysis
         </ul>
     </div>
     {% endif %}
+
+    {% set gap_summary = unit.data_analysis_section.income_match_analysis.financial_gap_explanation.summary if unit.data_analysis_section and unit.data_analysis_section.income_match_analysis and unit.data_analysis_section.income_match_analysis.financial_gap_explanation and unit.data_analysis_section.income_match_analysis.financial_gap_explanation.summary else '' %}
+    {% if gap_summary %}
+    <div style="margin: 15px 0; padding: 15px; background: #eef6ff; border-left: 4px solid #3b6ea8;">
+        <h4 style="margin: 0 0 10px 0;">收支口径说明</h4>
+        <p style="margin: 0; line-height: 1.8;">{{ gap_summary }}</p>
+    </div>
+    {% endif %}
     
     {# 3. 收入透视 #}
     <h4 style="margin: 15px 0 10px 0;">收入透视</h4>
@@ -392,6 +400,9 @@ tax_analysis, travel_analysis
         {% if income_match.salary_ratio and income_match.salary_ratio < 50 %} 资金流入中仅{{
             income_match.salary_ratio|round(1) }}%为正常工资收入，其正常工资收入金额不足以支撑月度消费。 {% endif %} 
     </p>
+    {% if income_match.financial_gap_explanation and income_match.financial_gap_explanation.summary %}
+    <p><strong>收支口径说明：</strong>{{ income_match.financial_gap_explanation.summary }}</p>
+    {% endif %}
     {% if income_match.offset_rule_rows and income_match.offset_rule_rows|length > 0 %}
     <p><strong>真实收入剔除依据：</strong></p>
     <table>
@@ -688,7 +699,7 @@ tax_analysis, travel_analysis
             
             {# 【2026-02-13 新增】大额资金往来对手方Top 10统计 #}
             {% if transfer.inflow and transfer.inflow.top10_counterparties and transfer.inflow.top10_counterparties|length > 0 %}
-            <p><strong>主要资金来源对手方Top 10：</strong></p>
+            <p><strong>主要资金来源对手方前10：</strong></p>
             <table>
                 <tr>
                     <th class="seq-col">序号</th>
@@ -708,7 +719,7 @@ tax_analysis, travel_analysis
             {% endif %}
             
             {% if transfer.outflow and transfer.outflow.top10_counterparties and transfer.outflow.top10_counterparties|length > 0 %}
-            <p><strong>主要资金去向对手方Top 10：</strong></p>
+            <p><strong>主要资金去向对手方前10：</strong></p>
             <table>
                 <tr>
                     <th class="seq-col">序号</th>
@@ -1041,8 +1052,8 @@ tax_analysis, travel_analysis
             {% if five_dim and five_dim.total_score %}
             <h3 class="item-title">{{ ns.idx }}、五维度风险评分</h3>
             <p>
-                {{ five_dim.narrative or (unit.name ~ '五维度综合评分' ~ five_dim.total_score ~ '分（满分100分），整体风险等级：' ~ 
-                ('低' if five_dim.risk_level == 'low' else ('中' if five_dim.risk_level == 'medium' else '高')) ) }}
+                {{ five_dim.narrative or (unit.name ~ '五维度综合评分' ~ five_dim.total_score ~ '分（满分100分），五维评分等级：' ~
+                ('低' if five_dim.risk_level == 'low' else ('中' if five_dim.risk_level == 'medium' else '高')) ~ '。该等级仅反映五维评分模型，不等同于上方统一风险概览。') }}
             </p>
             <table>
                 <tr>

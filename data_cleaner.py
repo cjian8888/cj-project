@@ -450,7 +450,10 @@ def validate_data_quality(
     if "date" not in df.columns or df["date"].isna().all():
         logger.error("缺少日期字段")
         quality_report["warnings"].append("缺少日期字段")
-        return df, quality_report
+        quality_report["invalid_rows"] = df.index.tolist()
+        quality_report["valid_rows"] = 0
+        quality_report["removed_rows"] = len(df)
+        return df.iloc[0:0].copy(), quality_report
 
     # 标记日期缺失的行
     invalid_date = df["date"].isna()
@@ -772,21 +775,21 @@ def standardize_bank_fields(
 
     # 7.2 账户类别识别 (个人/对公/联名)
     def classify_account_category(
-        account_num: str, counterparty: str, description: str
+        account_num: str, account_type: str, description: str
     ) -> str:
         """
         识别账户类别
 
         Args:
             account_num: 账号
-            counterparty: 对手方
+            account_type: 已识别账户类型
             description: 交易摘要
 
         Returns:
             账户类别: 个人账户/对公账户/联名账户
         """
         desc_str = str(description).upper()
-        cp_str = str(counterparty).upper()
+        account_type_str = str(account_type).strip()
         account_str = str(account_num).replace(" ", "").replace("-", "")
 
         # 联名账户特征
@@ -797,10 +800,19 @@ def standardize_bank_fields(
         if is_company_entity:
             return "对公账户"
 
-        # 对公账户特征
-        if any(kw in desc_str for kw in ["对公", "公司", "企业", "单位"]):
+        # 账户类型已明确识别为对公结算账户，直接按对公口径
+        if account_type_str == "对公结算账户":
             return "对公账户"
-        if any(kw in cp_str for kw in ["公司", "企业", "有限", "股份", "集团"]):
+
+        # 仅接受能够直接描述“本方账户属性”的显式信号，不能再用对手方名称反推本方账户类别
+        explicit_corporate_markers = [
+            "对公账户",
+            "对公账号",
+            "单位结算账户",
+            "公司结算账户",
+            "单位账户",
+        ]
+        if any(kw in desc_str for kw in explicit_corporate_markers):
             return "对公账户"
 
         # 对公账号常见长度（各银行口径不一）
@@ -872,7 +884,7 @@ def standardize_bank_fields(
     # 应用账户类别识别
     normalized["account_category"] = normalized.apply(
         lambda row: classify_account_category(
-            row["account_number"], row["counterparty"], row["description"]
+            row["account_number"], row["account_type"], row["description"]
         ),
         axis=1,
     )
@@ -1043,6 +1055,21 @@ def clean_and_merge_files(
 
     start_time = datetime.now()
 
+    def _build_final_stats(
+        total_valid_rows: int, total_duplicates: int, final_rows: int
+    ) -> Dict:
+        total_time = (datetime.now() - start_time).total_seconds()
+        return {
+            "entity": entity_name,
+            "file_count": len(file_list),
+            "total_original": sum(s["original_rows"] for s in file_stats),
+            "total_valid": total_valid_rows,
+            "total_duplicates": total_duplicates,
+            "final_rows": final_rows,
+            "total_time": f"{total_time:.2f}s",
+            "file_stats": file_stats,
+        }
+
     for filepath in file_list:
         file_start = datetime.now()
         filename = os.path.basename(
@@ -1071,7 +1098,8 @@ def clean_and_merge_files(
             df_valid["数据来源"] = filename
             df_valid["银行来源"] = bank_name
 
-            all_dfs.append(df_valid)
+            if not df_valid.empty:
+                all_dfs.append(df_valid)
 
             file_time = (datetime.now() - file_start).total_seconds()
 
@@ -1102,7 +1130,12 @@ def clean_and_merge_files(
     # 合并所有数据
     if not all_dfs:
         logger.error(f"{entity_name} 没有有效数据")
-        return pd.DataFrame(), {}
+        final_stats = _build_final_stats(total_valid_rows=0, total_duplicates=0, final_rows=0)
+        logger.info(
+            f"{entity_name} 清洗合并完成: {len(file_list)}个文件, "
+            f"{final_stats['total_original']}行 → {final_stats['final_rows']}行"
+        )
+        return pd.DataFrame(), final_stats
 
     df_merged = pd.concat(all_dfs, ignore_index=True)
 
@@ -1144,18 +1177,11 @@ def clean_and_merge_files(
         except Exception as e:
             logger.warning(f"  累计统计字段计算失败: {e}")
 
-    total_time = (datetime.now() - start_time).total_seconds()
-
-    final_stats = {
-        "entity": entity_name,
-        "file_count": len(file_list),
-        "total_original": sum(s["original_rows"] for s in file_stats),
-        "total_valid": len(df_merged),
-        "total_duplicates": dedup_stats["duplicates"],
-        "final_rows": len(df_final),
-        "total_time": f"{total_time:.2f}s",
-        "file_stats": file_stats,
-    }
+    final_stats = _build_final_stats(
+        total_valid_rows=len(df_merged),
+        total_duplicates=dedup_stats["duplicates"],
+        final_rows=len(df_final),
+    )
 
     logger.info(
         f"{entity_name} 清洗合并完成: {len(file_list)}个文件, "

@@ -132,6 +132,31 @@ class TestTimeAnomalyDetector:
         assert len(result) >= 1
         assert any(item["entity_name"] == "引擎测试实体" for item in result)
 
+    def test_detect_supports_cleaned_data_input_with_chinese_columns(self):
+        """测试检测器兼容 data_cleaner 输出的中文列结构。"""
+        detector = TimeAnomalyDetector()
+        data = {
+            "cleaned_data": {
+                "中文列实体": pd.DataFrame(
+                    [
+                        {
+                            "交易时间": "2024-02-10 23:30:00",
+                            "收入(元)": 120000.0,
+                            "支出(元)": 0.0,
+                            "交易对手": "A",
+                            "交易摘要": "春节夜间交易",
+                            "本方账号": "6222",
+                            "所属银行": "测试银行",
+                        }
+                    ]
+                )
+            }
+        }
+
+        result = detector.detect(data, {"min_amount": 50000})
+
+        assert len(result) >= 1
+        assert any(item["entity_name"] == "中文列实体" for item in result)
     def test_detect_returns_valid_suspicion_data(self):
         """测试返回的数据可以通过 Suspicion 模型验证"""
         detector = TimeAnomalyDetector()

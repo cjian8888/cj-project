@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { Download, Users, Settings, FileText, ChevronDown, ChevronUp, ArrowLeft, ArrowRight, CheckCircle } from 'lucide-react';
 import { PrimaryTargetsConfig } from './PrimaryTargetsConfig';
 import { API_BASE_URL } from '../services/api';
@@ -58,6 +58,7 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
     // 步骤控制
     const [currentStep, setCurrentStep] = useState<BuilderStep>('config');
     const [primaryTargetsConfig, setPrimaryTargetsConfig] = useState<PrimaryTargetsConfigType | null>(null);
+    const subjectsBootstrappedRef = useRef(false);
     
     // 嫌疑人选择
     const [subjects, setSubjects] = useState<Subject[]>([]);
@@ -106,6 +107,10 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
 
     // 加载可选嫌疑人列表
     useEffect(() => {
+        if (subjectsBootstrappedRef.current) {
+            return;
+        }
+        subjectsBootstrappedRef.current = true;
         const fetchSubjects = async () => {
             setLoadingSubjects(true);
             try {
@@ -124,7 +129,7 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
                 setLoadingSubjects(false);
             }
         };
-        fetchSubjects();
+        void fetchSubjects();
     }, []);
 
     const toggleSubject = (name: string) => {
@@ -390,8 +395,10 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
 
                             {/* 案件名称 */}
                             <div className="mb-3.5">
-                                <label className="block text-sm font-medium theme-text-muted mb-1.5">案件名称</label>
+                                <label htmlFor="report-builder-case-name" className="block text-sm font-medium theme-text-muted mb-1.5">案件名称</label>
                                 <input
+                                    id="report-builder-case-name"
+                                    name="caseName"
                                     type="text"
                                     value={caseName}
                                     onChange={(e) => setCaseName(e.target.value)}
@@ -402,8 +409,10 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
 
                             {/* 文号 */}
                             <div className="mb-3.5">
-                                <label className="block text-sm font-medium theme-text-muted mb-1.5">文号（可选）</label>
+                                <label htmlFor="report-builder-doc-number" className="block text-sm font-medium theme-text-muted mb-1.5">文号（可选）</label>
                                 <input
+                                    id="report-builder-doc-number"
+                                    name="docNumber"
                                     type="text"
                                     value={docNumber}
                                     onChange={(e) => setDocNumber(e.target.value)}
@@ -414,13 +423,13 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
 
                             {/* 核查对象选择 */}
                             <div className="mb-3.5">
-                                <label className="block text-sm font-medium theme-text-muted mb-1.5">
+                                <div className="block text-sm font-medium theme-text-muted mb-1.5">
                                     <Users size={14} className="inline mr-1 align-middle" />
                                     核查对象
                                     <span className="text-xs font-normal theme-text-dim ml-1.5">
                                         （已选 {selectedSubjects.length}/{subjects.length}）
                                     </span>
-                                </label>
+                                </div>
                                 {loadingSubjects ? (
                                     <div className="p-4 text-center theme-text-dim">加载中...</div>
                                 ) : (
@@ -441,6 +450,8 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
                                                 >
                                                     <input
                                                         type="checkbox"
+                                                        name={`report-builder-subject-${subject.type}`}
+                                                        aria-label={`选择核查对象 ${subject.name}`}
                                                         checked={selectedSubjects.includes(subject.name)}
                                                         onChange={() => { }}
                                                         className="mt-0.5 cursor-pointer accent-blue-500"
@@ -476,10 +487,12 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
                                 {showThresholds && (
                                     <div className="p-3 border theme-border rounded-md theme-bg-base">
                                         <div className="flex justify-between items-center mb-2 text-xs">
-                                            <label className="theme-text-muted">大额转账标准</label>
+                                            <label htmlFor="report-builder-large-transfer" className="theme-text-muted">大额转账标准</label>
                                             <div className="flex items-center gap-1">
                                                 <span className="theme-text-dim">¥</span>
                                                 <input
+                                                    id="report-builder-large-transfer"
+                                                    name="largeTransfer"
                                                     type="number"
                                                     value={thresholds.largeTransfer}
                                                     onChange={(e) => setThresholds(prev => ({
@@ -491,10 +504,12 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
                                             </div>
                                         </div>
                                         <div className="flex justify-between items-center text-xs">
-                                            <label className="theme-text-muted">大额现金标准</label>
+                                            <label htmlFor="report-builder-large-cash" className="theme-text-muted">大额现金标准</label>
                                             <div className="flex items-center gap-1">
                                                 <span className="theme-text-dim">¥</span>
                                                 <input
+                                                    id="report-builder-large-cash"
+                                                    name="largeCash"
                                                     type="number"
                                                     value={thresholds.largeCash}
                                                     onChange={(e) => setThresholds(prev => ({
@@ -511,7 +526,7 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
 
                             {/* 模块选择 */}
                             <div className="mb-3.5">
-                                <label className="block text-sm font-medium theme-text-muted mb-1.5">选择报告模块</label>
+                                <div className="block text-sm font-medium theme-text-muted mb-1.5">选择报告模块</div>
                                 <div className="flex flex-col gap-1.5">
                                     {sections.map(section => (
                                         <div
@@ -524,6 +539,8 @@ export function ReportBuilder({ className }: ReportBuilderProps) {
                                         >
                                             <input
                                                 type="checkbox"
+                                                name={`report-builder-section-${section.id}`}
+                                                aria-label={`选择报告模块 ${section.name}`}
                                                 checked={section.checked}
                                                 onChange={() => { }}
                                                 className="mt-0.5 cursor-pointer accent-blue-500"

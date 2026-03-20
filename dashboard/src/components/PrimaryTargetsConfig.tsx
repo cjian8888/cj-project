@@ -13,7 +13,7 @@
  * - 主归集人：默认为户主，用户可调整
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
     Users, Building2, Plus, Trash2, Save, RefreshCw,
     ChevronDown, ChevronUp, Check, AlertTriangle, Info
@@ -83,10 +83,15 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
     const [isNew, setIsNew] = useState(false);
     const [expandedUnits, setExpandedUnits] = useState<Set<number>>(new Set([0]));
     const [showCompanies, setShowCompanies] = useState(true);
+    const bootstrappedLoadRef = useRef(false);
 
     // 加载配置和实体列表
     useEffect(() => {
-        loadData();
+        if (bootstrappedLoadRef.current) {
+            return;
+        }
+        bootstrappedLoadRef.current = true;
+        void loadData();
     }, []);
 
     // 配置变化时通知父组件
@@ -495,7 +500,7 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
                                     <div className="p-3 border-t border-white/10">
                                         {/* 成员列表 */}
                                         <div className="mb-3">
-                                            <label className="text-xs theme-text-dim mb-1 block">成员列表</label>
+                                            <div className="text-xs theme-text-dim mb-1 block">成员列表</div>
                                             <div className="space-y-1">
                                                 {unit.member_details?.map((member) => (
                                                     <div
@@ -517,7 +522,13 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
                                                             {member.name}
                                                             {!member.has_data && <span className="text-xs text-red-400 ml-1">(无数据)</span>}
                                                         </span>
+                                                        <label htmlFor={`primary-targets-relation-${unitIndex}-${member.name}`} className="sr-only">
+                                                            {member.name}关系
+                                                        </label>
                                                         <select
+                                                            id={`primary-targets-relation-${unitIndex}-${member.name}`}
+                                                            name={`primary-targets-relation-${unitIndex}-${member.name}`}
+                                                            aria-label={`${member.name}关系`}
                                                             value={member.relation}
                                                             onChange={(e) => updateMemberRelation(unitIndex, member.name, e.target.value)}
                                                             className="px-1.5 py-0.5 text-xs bg-gray-700 border border-gray-600 rounded"
@@ -529,6 +540,8 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
                                                         </select>
                                                         <button
                                                             onClick={() => removeMemberFromUnit(unitIndex, member.name)}
+                                                            aria-label={`从分析单元移除成员 ${member.name}`}
+                                                            title={`移除成员 ${member.name}`}
                                                             className="p-0.5 hover:bg-red-500/20 rounded text-red-400"
                                                         >
                                                             <Trash2 size={12} />
@@ -546,7 +559,7 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
                                         {/* 添加成员 */}
                                         {availablePersons.length > 0 && (
                                             <div>
-                                                <label className="text-xs theme-text-dim mb-1 block">添加成员</label>
+                                                <div className="text-xs theme-text-dim mb-1 block">添加成员</div>
                                                 <div className="flex flex-wrap gap-1">
                                                     {availablePersons.slice(0, 10).map(person => (
                                                         <button
@@ -626,8 +639,10 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
             {/* 案件信息 */}
             <div className="space-y-3">
                 <div>
-                    <label className="block text-xs font-medium theme-text-muted mb-1">核查对象所在单位</label>
+                    <label htmlFor="primary-targets-employer" className="block text-xs font-medium theme-text-muted mb-1">核查对象所在单位</label>
                     <input
+                        id="primary-targets-employer"
+                        name="employer"
                         type="text"
                         value={config?.employer || ''}
                         onChange={(e) => setConfig(config ? { ...config, employer: e.target.value } : null)}
@@ -636,8 +651,10 @@ export function PrimaryTargetsConfig({ onConfigChange, className }: PrimaryTarge
                     />
                 </div>
                 <div>
-                    <label className="block text-xs font-medium theme-text-muted mb-1">案件来源</label>
+                    <label htmlFor="primary-targets-case-source" className="block text-xs font-medium theme-text-muted mb-1">案件来源</label>
                     <input
+                        id="primary-targets-case-source"
+                        name="case_source"
                         type="text"
                         value={config?.case_source || ''}
                         onChange={(e) => setConfig(config ? { ...config, case_source: e.target.value } : null)}

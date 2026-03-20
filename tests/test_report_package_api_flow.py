@@ -178,6 +178,51 @@ def test_save_html_report_refreshes_report_package_artifacts():
         shutil.rmtree(output_dir, ignore_errors=True)
 
 
+def test_generate_and_save_html_report_persists_semantic_summary_block(monkeypatch):
+    output_dir = _make_workspace_tmp_dir()
+    previous_config = dict(api_server._current_config)
+    try:
+        _seed_minimal_cache(output_dir)
+
+        api_server._current_config.clear()
+        api_server._current_config["outputDirectory"] = str(output_dir)
+
+        config = PrimaryTargetsConfig(
+            analysis_units=[AnalysisUnit(anchor="张三", members=["张三", "李四"])]
+        )
+        monkeypatch.setattr(
+            "report_config.primary_targets_service.PrimaryTargetsService.get_or_create_config",
+            lambda self: (config, "ok", False),
+        )
+
+        response = asyncio.run(api_server.generate_investigation_report_html())
+
+        assert response["success"] is True
+        html = response["html"]
+        assert "正式报告综合研判" in html
+        assert "统一语义层重点对象" in html
+        assert "张三（高风险）" in html
+        assert html.index("数据来源及完整性声明") < html.index("正式报告综合研判")
+        assert html.index("正式报告综合研判") < html.index("统一语义层重点对象")
+
+        save_response = asyncio.run(
+            api_server.save_html_report({"html": html, "filename": "初查报告"})
+        )
+
+        assert save_response["success"] is True
+
+        report_path = output_dir / "analysis_results" / "初查报告.html"
+        saved_html = report_path.read_text(encoding="utf-8")
+
+        assert report_path.exists()
+        assert "正式报告综合研判" in saved_html
+        assert "张三（高风险）" in saved_html
+    finally:
+        api_server._current_config.clear()
+        api_server._current_config.update(previous_config)
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+
 def test_generate_report_v5_persists_report_package_before_save(monkeypatch):
     output_dir = _make_workspace_tmp_dir()
     previous_config = dict(api_server._current_config)
@@ -218,7 +263,7 @@ def test_generate_report_v5_persists_report_package_before_save(monkeypatch):
             report_package["appendix_views"]["appendix_e_wallet_supplement"]["title"]
             == "附录E 电子钱包补证"
         )
-        assert "REPORT PACKAGE QA SUMMARY" in summary_text
+        assert "报告一致性检查摘要" in summary_text
     finally:
         api_server._current_config.clear()
         api_server._current_config.update(previous_config)

@@ -1153,13 +1153,7 @@ def calculate_income_structure(df: pd.DataFrame, entity_name: str = None) -> Dic
     # 统计总流入和同名转账
     total_inflow = df["income"].sum()
     total_expense = df["expense"].sum()
-
-    # 识别同名转账（本人转入）
-    self_transfer_mask = (df["counterparty"] == entity_name) & (df["income"] > 0)
-    self_transfer_income = df[self_transfer_mask]["income"].sum()
-
-    # 计算外部净收入（排除本人互转）
-    external_income = total_inflow - self_transfer_income
+    self_transfer_income = 0.0
 
     # 识别工资性收入（增强版）
     salary_income = 0.0
@@ -1170,16 +1164,21 @@ def calculate_income_structure(df: pd.DataFrame, entity_name: str = None) -> Dic
     income_df = df[df["income"] > 0].copy()
 
     if not income_df.empty:
+        my_accounts = set()
+        if _detect_account_column(df):
+            my_accounts, _ = _get_my_accounts(df)
+
         # 为每笔收入标记是否为工资
         income_df["is_salary"] = False
         income_df["salary_reason"] = ""  # 判定依据
-        income_df["is_self_transfer"] = False  # 是否为本人互转
+        income_df["is_self_transfer"] = income_df.apply(
+            lambda row: _identify_self_transfer(row, entity_name, my_accounts), axis=1
+        )  # 是否为本人互转
         income_df["is_reimbursement"] = False  # 是否为报销/退款
 
-        if entity_name:
-            income_df.loc[
-                income_df["counterparty"] == entity_name, "is_self_transfer"
-            ] = True
+        self_transfer_income = income_df.loc[
+            income_df["is_self_transfer"], "income"
+        ].sum()
 
         # 预处理：识别报销/差旅/退款（负面清单）
         income_df = _identify_reimbursements(income_df)
@@ -1229,6 +1228,9 @@ def calculate_income_structure(df: pd.DataFrame, entity_name: str = None) -> Dic
             & ~income_df["is_reimbursement"].fillna(False)
         )
         non_salary_income = income_df.loc[non_salary_mask, "income"].sum()
+
+    # 计算外部净收入（排除本人互转）
+    external_income = total_inflow - self_transfer_income
 
     # 按年度/月度统计
     yearly_stats, monthly_stats = _calculate_yearly_monthly_stats(df)
@@ -1525,6 +1527,160 @@ def _log_account_extraction_summary(account_list: List[Dict]) -> None:
         f"其中真实银行卡{len(real_bank_cards)}张，其他账户{len(other_accounts)}个，"
         f"总余额{total_balance / 10000:.2f}万元"
     )
+
+
+def _resolve_account_layer(account_category: str, account_type: str) -> str:
+    """将账户类别/账户类型归并为稳定的账户层标签。"""
+    category = str(account_category or "").strip()
+    account_type = str(account_type or "").strip()
+
+    if category == "对公账户" or account_type == "对公结算账户":
+        return "corporate"
+    if category == "联名账户":
+        return "joint"
+    if category == "个人账户":
+        return "personal"
+    if account_type in {"借记卡", "信用卡"}:
+        return "personal"
+    return "other"
+
+
+def _build_account_layer_summary(df: pd.DataFrame) -> Dict:
+    """按个人/对公/联名等账户层拆分原始流水规模，避免画像叙述混写。"""
+    default_bucket = {
+        "label": "",
+        "transaction_count": 0,
+        "account_count": 0,
+        "total_income": 0.0,
+        "total_expense": 0.0,
+        "income_ratio": 0.0,
+        "expense_ratio": 0.0,
+    }
+    default_result = {
+        "total_transaction_count": 0,
+        "total_account_count": 0,
+        "total_income": 0.0,
+        "total_expense": 0.0,
+        "has_corporate_account_activity": False,
+        "has_mixed_personal_corporate_activity": False,
+        "dominant_layer": "personal",
+        "note": "",
+        "layers": {
+            "personal": dict(default_bucket, label="个人账户层"),
+            "corporate": dict(default_bucket, label="对公账户层"),
+            "joint": dict(default_bucket, label="联名账户层"),
+            "other": dict(default_bucket, label="其他账户层"),
+        },
+    }
+    if df is None or df.empty:
+        return default_result
+
+    work_df = df.copy()
+    for column in ("account_category", "account_type"):
+        if column not in work_df.columns:
+            work_df[column] = ""
+    for column in ("income", "expense"):
+        if column not in work_df.columns:
+            work_df[column] = 0.0
+
+    account_col = _find_first_matching_column(
+        work_df,
+        ["account_number", "account_id", "account", "本方账号", "账号"],
+    )
+    if account_col:
+        work_df["account_str"] = work_df[account_col].apply(_normalize_account_identifier)
+    else:
+        work_df["account_str"] = ""
+
+    work_df["account_layer"] = work_df.apply(
+        lambda row: _resolve_account_layer(
+            row.get("account_category"),
+            row.get("account_type"),
+        ),
+        axis=1,
+    )
+
+    total_income = float(work_df["income"].sum()) if "income" in work_df.columns else 0.0
+    total_expense = (
+        float(work_df["expense"].sum()) if "expense" in work_df.columns else 0.0
+    )
+    total_accounts = int((work_df["account_str"] != "").sum())
+    if "account_str" in work_df.columns:
+        total_accounts = int(work_df.loc[work_df["account_str"] != "", "account_str"].nunique())
+
+    layer_specs = {
+        "personal": "个人账户层",
+        "corporate": "对公账户层",
+        "joint": "联名账户层",
+        "other": "其他账户层",
+    }
+    layer_result = {}
+    for layer_key, label in layer_specs.items():
+        bucket_df = work_df[work_df["account_layer"] == layer_key]
+        bucket_accounts = 0
+        if not bucket_df.empty and "account_str" in bucket_df.columns:
+            bucket_accounts = int(
+                bucket_df.loc[bucket_df["account_str"] != "", "account_str"].nunique()
+            )
+        bucket_income = float(bucket_df["income"].sum()) if not bucket_df.empty else 0.0
+        bucket_expense = (
+            float(bucket_df["expense"].sum()) if not bucket_df.empty else 0.0
+        )
+        layer_result[layer_key] = {
+            "label": label,
+            "transaction_count": int(len(bucket_df)),
+            "account_count": bucket_accounts,
+            "total_income": bucket_income,
+            "total_expense": bucket_expense,
+            "income_ratio": round(bucket_income / total_income, 4) if total_income > 0 else 0.0,
+            "expense_ratio": round(bucket_expense / total_expense, 4)
+            if total_expense > 0
+            else 0.0,
+        }
+
+    has_corporate = layer_result["corporate"]["transaction_count"] > 0
+    has_personal = layer_result["personal"]["transaction_count"] > 0
+    has_mixed = has_corporate and has_personal
+    dominant_layer = max(
+        layer_result.items(),
+        key=lambda item: (
+            item[1]["total_income"] + item[1]["total_expense"],
+            item[1]["transaction_count"],
+        ),
+    )[0]
+
+    note = ""
+    if has_corporate:
+        corporate = layer_result["corporate"]
+        personal = layer_result["personal"]
+        if has_mixed:
+            note = (
+                "该主体名下同时存在个人账户与对公账户流水；"
+                f"个人账户层原始流入{personal['total_income'] / 10000:.2f}万元、"
+                f"流出{personal['total_expense'] / 10000:.2f}万元（{personal['transaction_count']}笔），"
+                f"对公账户层原始流入{corporate['total_income'] / 10000:.2f}万元、"
+                f"流出{corporate['total_expense'] / 10000:.2f}万元（{corporate['transaction_count']}笔）。"
+                "当前真实收入/支出仍按全账户汇总口径展示，审阅时应与个人可支配资金分层理解。"
+            )
+        else:
+            note = (
+                "该主体当前主要表现为对公账户层流水；"
+                f"对公账户层原始流入{corporate['total_income'] / 10000:.2f}万元、"
+                f"流出{corporate['total_expense'] / 10000:.2f}万元（{corporate['transaction_count']}笔）。"
+                "当前真实收入/支出仍按全账户汇总口径展示，审阅时应重点区分经营性往来与个人可支配资金。"
+            )
+
+    return {
+        "total_transaction_count": int(len(work_df)),
+        "total_account_count": total_accounts,
+        "total_income": total_income,
+        "total_expense": total_expense,
+        "has_corporate_account_activity": has_corporate,
+        "has_mixed_personal_corporate_activity": has_mixed,
+        "dominant_layer": dominant_layer,
+        "note": note,
+        "layers": layer_result,
+    }
 
 
 def extract_bank_accounts(df: pd.DataFrame, entity_name: str = None) -> List[Dict]:
@@ -2212,6 +2368,60 @@ def _extract_bank_product_account_signals(
     }
 
 
+_UNKNOWN_COUNTERPARTY_VALUES = {
+    "",
+    "-",
+    "--",
+    "nan",
+    "none",
+    "null",
+    "未知",
+    "无",
+    "不详",
+    "暂无法获知",
+}
+
+_INTERNAL_TRANSFER_DESCRIPTION_KEYWORDS = [
+    "卡转存",
+    "销户转存",
+    "转存开户",
+    "活转开户",
+    "定转活",
+    "活转定",
+    "自动转存",
+    "本息转活",
+    "定期开户",
+]
+
+
+def _normalize_text_token(value: Any) -> str:
+    """统一标准化文本值，避免 NaN/None 影响规则判断。"""
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def _is_unknown_counterparty(value: Any) -> bool:
+    """识别银行回单中常见的“空/未知对手方”表示。"""
+    counterparty = _normalize_text_token(value)
+    if not counterparty:
+        return True
+    return counterparty.lower() in _UNKNOWN_COUNTERPARTY_VALUES or (
+        counterparty in _UNKNOWN_COUNTERPARTY_VALUES
+    )
+
+
+def _has_internal_transfer_description(value: Any) -> bool:
+    """识别银行内部搬移/定活互转类摘要。"""
+    description = _normalize_text_token(value)
+    return bool(
+        description
+        and utils.contains_keywords(
+            description, _INTERNAL_TRANSFER_DESCRIPTION_KEYWORDS
+        )
+    )
+
+
 def _identify_self_transfer(row: pd.Series, entity_name: str, my_accounts: set) -> bool:
     """
     深度识别自我转账 (同名 or 账号在名下列表中)
@@ -2224,10 +2434,8 @@ def _identify_self_transfer(row: pd.Series, entity_name: str, my_accounts: set) 
     Returns:
         是否为自我转账
     """
-    import re
-
-    counterparty = str(row.get("counterparty", "")).strip()
-    description = str(row.get("description", ""))
+    counterparty = _normalize_text_token(row.get("counterparty", ""))
+    description = _normalize_text_token(row.get("description", ""))
     is_self_transfer = False
 
     # A. 精确同名匹配（完整姓名）
@@ -2253,6 +2461,14 @@ def _identify_self_transfer(row: pd.Series, entity_name: str, my_accounts: set) 
     # C. 模糊特征 "本人", "户主"
     if not is_self_transfer and utils.contains_keywords(
         counterparty + description, ["本人", "户主", "卡卡转账", "自行转账"]
+    ):
+        is_self_transfer = True
+
+    # D. 银行内部搬移类摘要（通常无对手方，不应落入真实收入/支出）
+    if (
+        not is_self_transfer
+        and _is_unknown_counterparty(counterparty)
+        and _has_internal_transfer_description(description)
     ):
         is_self_transfer = True
 
@@ -3281,7 +3497,10 @@ def _attach_salary_reference_to_income_classification(
         "工资性收入",
         "已知发薪单位",
         "用户定义发薪单位",
+        "摘要含强工资关键词",
         "人力资源公司",
+        "高频稳定收入",
+        "工资识别结果",
     )
     salary_like_reasons = {}
     salary_like_total = 0.0
@@ -3341,6 +3560,11 @@ def recalculate_income_metrics(
         entity_name=entity_name,
         wealth_result=wealth_management,
         family_members=family_members,
+        salary_details=(
+            income_structure.get("salary_details", [])
+            if isinstance(income_structure, dict)
+            else []
+        ),
     )
     excluded_signature_counter = income_classification.pop("_excluded_signature_counter", Counter())
     salary_alignment_meta = _align_salary_outputs_with_exclusions(
@@ -3573,6 +3797,8 @@ def generate_profile_report(df: pd.DataFrame, entity_name: str, family_members: 
 
     # 【2026-02-12新增】将剔除详情加入summary，供报告使用
     summary["offset_detail"] = offset_detail
+    account_layer_summary = _build_account_layer_summary(df)
+    summary["account_layer_summary"] = account_layer_summary
 
     # 计算银行账户列表（用于 bank_accounts 字段）
     bank_accounts = []
@@ -3596,6 +3822,7 @@ def generate_profile_report(df: pd.DataFrame, entity_name: str, family_members: 
         "income_classification": income_classification,  # Phase 4 新增字段
         "summary": summary,
         "bank_accounts": bank_accounts,
+        "account_layer_summary": account_layer_summary,
     }
 
     logger.info(f"{entity_name} 资金画像生成完成")
@@ -4059,6 +4286,62 @@ def _build_income_tx_counter(
     return counter
 
 
+def _build_income_tx_reason_map(
+    transactions: List[Dict],
+    *,
+    amount_keys: List[str],
+    reason_keys: List[str],
+    date_keys: List[str] = None,
+    counterparty_keys: List[str] = None,
+    description_keys: List[str] = None,
+) -> Dict[tuple, str]:
+    """根据交易列表构建签名到原因的映射，供分类链路复用。"""
+    reason_map: Dict[tuple, str] = {}
+    if not isinstance(transactions, list):
+        return reason_map
+
+    date_keys = date_keys or ["日期", "date"]
+    counterparty_keys = counterparty_keys or ["对手方", "counterparty"]
+    description_keys = description_keys or ["摘要", "description"]
+
+    for tx in transactions:
+        if not isinstance(tx, dict):
+            continue
+
+        amount = None
+        for key in amount_keys:
+            value = tx.get(key)
+            if value not in (None, ""):
+                amount = value
+                break
+        if amount is None:
+            continue
+
+        reason_text = ""
+        for key in reason_keys:
+            value = tx.get(key)
+            if value not in (None, ""):
+                reason_text = str(value).strip()
+                break
+
+        signature = _make_income_tx_signature(
+            next((tx.get(key) for key in date_keys if tx.get(key) is not None), None),
+            amount,
+            next(
+                (tx.get(key) for key in counterparty_keys if tx.get(key) is not None),
+                "",
+            ),
+            next(
+                (tx.get(key) for key in description_keys if tx.get(key) is not None),
+                "",
+            ),
+        )
+        if signature not in reason_map:
+            reason_map[signature] = reason_text
+
+    return reason_map
+
+
 def _filter_salary_detail_records(
     details: List[Dict],
     excluded_signature_counter: Counter,
@@ -4278,6 +4561,7 @@ def classify_income_sources(
     entity_name: str = None,
     wealth_result: Dict = None,
     family_members: List[str] = None,
+    salary_details: List[Dict] = None,
 ) -> Dict:
     """
     对收入来源进行分类（增强版 - 2026-01-25）【向量化优化】
@@ -4501,6 +4785,15 @@ def classify_income_sources(
         wealth_result.get("refund_transactions", []) if wealth_result else [],
         amount_keys=["income", "收入", "金额", "amount"],
         date_keys=["date", "日期"],
+    )
+    salary_counter = _build_income_tx_counter(
+        salary_details or [],
+        amount_keys=["金额", "amount", "income", "收入"],
+    )
+    salary_reason_map = _build_income_tx_reason_map(
+        salary_details or [],
+        amount_keys=["金额", "amount", "income", "收入"],
+        reason_keys=["判定依据", "reason", "salary_reason"],
     )
 
     loan_issue_keywords = ["放款", "贷款发放", "个贷发放"]
@@ -4931,6 +5224,16 @@ def classify_income_sources(
 
     excluded_df = df[df["excluded_reason"] != ""].copy()
     df = df[df["excluded_reason"] == ""].copy()
+    if salary_counter:
+        df["matched_salary_detail"] = df["tx_signature"].apply(
+            lambda sig: _consume_counter_match(salary_counter, sig)
+        )
+        df["matched_salary_reason"] = (
+            df["tx_signature"].map(salary_reason_map).fillna("").astype(str)
+        )
+    else:
+        df["matched_salary_detail"] = False
+        df["matched_salary_reason"] = ""
     total_income = df["amount"].sum()
     business_reimbursement_df = excluded_df[
         excluded_df["excluded_reason"] == "单位报销/业务往来款（已剔除）"
@@ -5122,6 +5425,14 @@ def classify_income_sources(
 
     # 向量化:合法收入分类
     legitimate_conditions = [
+        (
+            df["matched_salary_detail"],
+            df["matched_salary_reason"].where(
+                df["matched_salary_reason"] != "", "工资识别结果"
+            ),
+            "salary_detail_match",
+            "high",
+        ),
         (df["has_salary_kw"], "工资性收入", "salary", "high"),
         (df["has_pension_kw"], "养老金/职业年金", "pension", "high"),
         (df["has_invest_kw"], "投资收益", "investment_income", "medium"),
@@ -5238,7 +5549,10 @@ def classify_income_sources(
     for mask, reason, bucket, confidence in legitimate_conditions:
         update_mask = mask & (df["category"] == "unknown")
         df.loc[update_mask, "category"] = "legitimate"
-        df.loc[update_mask, "reason"] = reason
+        if isinstance(reason, pd.Series):
+            df.loc[update_mask, "reason"] = reason.loc[update_mask]
+        else:
+            df.loc[update_mask, "reason"] = reason
         df.loc[update_mask, "rule_bucket"] = bucket
         df.loc[update_mask, "confidence"] = confidence
 

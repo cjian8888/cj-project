@@ -21,15 +21,19 @@ import clue_aggregator
 from api_server import (
     InvestigationReportRequest,
     _apply_report_generation_overrides,
+    _build_all_family_summaries,
+    _enhance_suspicions_with_analysis,
     _get_effective_family_units_for_analysis,
     _populate_transport_external_data,
     _refresh_profile_real_metrics,
+    _refresh_profiles_and_build_family_summaries,
     _save_external_report_caches,
     get_graph_data,
     serialize_for_json,
     serialize_analysis_results,
 )
 from cache_manager import CacheManager
+from report_quality_guard import REPORT_QA_GUARD_VERSION
 from report_config.primary_targets_schema import (
     AnalysisUnit,
     AnalysisUnitMember,
@@ -104,6 +108,95 @@ def test_get_effective_family_units_for_analysis_prefers_saved_primary_config(tm
     assert effective_units[0]["householder"] == "张三"
     assert effective_units[0]["members"] == ["张三", "李四"]
     assert effective_units[0]["member_details"][1]["relation"] == "配偶"
+
+
+def test_refresh_profiles_and_build_family_summaries_uses_refreshed_profiles(monkeypatch):
+    profiles = {
+        "张三": {"summary": {"real_income": 100.0, "real_expense": 40.0}},
+        "李四": {"summary": {"real_income": 20.0, "real_expense": 10.0}},
+    }
+    family_units = [
+        {
+            "anchor": "张三",
+            "householder": "张三",
+            "members": ["张三", "李四"],
+            "extended_relatives": [],
+        }
+    ]
+
+    def fake_refresh(_profiles, _cleaned_data, _family_units, _analyzer, _logger):
+        _profiles["张三"]["summary"]["real_income"] = 1000.0
+        _profiles["李四"]["summary"]["real_income"] = 200.0
+        return 2
+
+    monkeypatch.setattr(api_server, "_refresh_profiles_with_family_units", fake_refresh)
+    monkeypatch.setattr(
+        api_server,
+        "_collect_family_assets_for_summary",
+        lambda _members, _profiles: {"properties": [], "vehicles": []},
+    )
+    monkeypatch.setattr(
+        api_server.family_finance,
+        "calculate_family_summary",
+        lambda current_profiles, members, properties=None, vehicles=None: {
+            "total_income": sum(
+                current_profiles[name]["summary"]["real_income"]
+                for name in members
+                if name in current_profiles
+            ),
+            "total_expense": sum(
+                current_profiles[name]["summary"]["real_expense"]
+                for name in members
+                if name in current_profiles
+            ),
+        },
+    )
+
+    updated_count, summaries = _refresh_profiles_and_build_family_summaries(
+        profiles=profiles,
+        cleaned_data={"张三": pd.DataFrame(), "李四": pd.DataFrame()},
+        family_units_list=family_units,
+        income_expense_match_analyzer=object(),
+        logger=logging.getLogger(__name__),
+    )
+
+    assert updated_count == 2
+    assert summaries["张三"]["total_income"] == 1200.0
+    assert summaries["张三"]["householder"] == "张三"
+
+
+def test_build_all_family_summaries_uses_current_profile_values(monkeypatch):
+    profiles = {
+        "张三": {
+            "summary": {"real_income": 500.0, "real_expense": 200.0},
+            "properties": [],
+            "vehicles": [],
+        }
+    }
+    family_units = [{"anchor": "张三", "householder": "张三", "members": ["张三"]}]
+
+    monkeypatch.setattr(
+        api_server,
+        "_collect_family_assets_for_summary",
+        lambda _members, _profiles: {"properties": [], "vehicles": []},
+    )
+    monkeypatch.setattr(
+        api_server.family_finance,
+        "calculate_family_summary",
+        lambda current_profiles, members, properties=None, vehicles=None: {
+            "total_income": current_profiles["张三"]["summary"]["real_income"],
+            "total_expense": current_profiles["张三"]["summary"]["real_expense"],
+        },
+    )
+
+    summaries = _build_all_family_summaries(
+        profiles=profiles,
+        family_units_list=family_units,
+        logger=logging.getLogger(__name__),
+    )
+
+    assert summaries["张三"]["total_income"] == 500.0
+    assert summaries["张三"]["total_expense"] == 200.0
 
 
 def test_save_external_report_caches_overwrites_stale_empty_data(tmp_path):
@@ -293,6 +386,24 @@ def test_serialize_analysis_results_flattens_related_party_details_with_type_tag
     ]
     assert related_party["direct_flows"][0]["counterparty"] == "李四"
     assert related_party["discovered_nodes"][0]["name"] == "外围账户B"
+
+
+def test_enhance_suspicions_keeps_existing_time_series_alerts_when_analysis_alerts_missing():
+    suspicions = {"timeSeriesAlerts": [{"id": "plugin-alert"}]}
+    analysis_results = {"timeSeries": {"periodic_income": []}}
+
+    enhanced = _enhance_suspicions_with_analysis(suspicions, analysis_results)
+
+    assert enhanced["timeSeriesAlerts"] == [{"id": "plugin-alert"}]
+
+
+def test_enhance_suspicions_prefers_non_empty_analysis_time_series_alerts():
+    suspicions = {"timeSeriesAlerts": [{"id": "plugin-alert"}]}
+    analysis_results = {"timeSeries": {"alerts": [{"id": "analysis-alert"}]}}
+
+    enhanced = _enhance_suspicions_with_analysis(suspicions, analysis_results)
+
+    assert enhanced["timeSeriesAlerts"] == [{"id": "analysis-alert"}]
 
 
 def test_get_graph_data_exposes_phase1_related_party_outputs_and_prefers_penetration_cycles():
@@ -914,6 +1025,288 @@ def test_get_results_refreshes_report_package_when_semantic_artifact_missing(
     assert payload["data"]["reportPackage"]["priority_board"][0]["entity_name"] == "李四"
 
 
+def test_load_report_package_for_manifest_refreshes_stale_qa_guard_version(
+    tmp_path, monkeypatch
+):
+    output_dir = tmp_path / "output"
+    results_dir = output_dir / "analysis_results"
+    qa_dir = results_dir / "qa"
+    qa_dir.mkdir(parents=True)
+    (results_dir / "核查结果分析报告.txt").write_text("main", encoding="utf-8")
+
+    stale_package = {
+        "meta": {"generated_at": "2026-03-17T22:52:01"},
+        "qa_checks": {
+            "summary": {"pass": 1, "warn": 0, "fail": 0, "total": 1},
+            "checks": [],
+            "meta": {
+                "qa_guard_version": "2026-03-17.0",
+                "generated_at": "2026-03-17T22:52:01",
+            },
+        },
+        "artifact_meta": {
+            "package_generated_at": "2026-03-17T22:52:01",
+            "source_report_generated_at": "2026-03-17T22:52:01",
+            "qa_guard_version": "2026-03-17.0",
+        },
+    }
+    (qa_dir / "report_package.json").write_text(
+        json.dumps(stale_package, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (qa_dir / "report_consistency_check.json").write_text(
+        json.dumps(stale_package["qa_checks"], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (qa_dir / "report_consistency_check.txt").write_text("stale", encoding="utf-8")
+
+    refresh_calls = []
+
+    def fake_refresh(active_output_dir):
+        refresh_calls.append(active_output_dir)
+        refreshed_package = {
+            "meta": {"generated_at": "2026-03-17T22:52:01"},
+            "qa_checks": {
+                "summary": {"pass": 2, "warn": 0, "fail": 0, "total": 2},
+                "checks": [],
+                "meta": {
+                    "qa_guard_version": REPORT_QA_GUARD_VERSION,
+                    "generated_at": "2026-03-18T22:10:00",
+                },
+            },
+            "artifact_meta": {
+                "package_generated_at": "2026-03-18T22:10:00",
+                "source_report_generated_at": "2026-03-17T22:52:01",
+                "qa_guard_version": REPORT_QA_GUARD_VERSION,
+            },
+        }
+        (qa_dir / "report_package.json").write_text(
+            json.dumps(refreshed_package, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (qa_dir / "report_consistency_check.json").write_text(
+            json.dumps(refreshed_package["qa_checks"], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (qa_dir / "report_consistency_check.txt").write_text(
+            "fresh",
+            encoding="utf-8",
+        )
+        return {"report_package_path": str(qa_dir / "report_package.json")}
+
+    monkeypatch.setattr(
+        api_server,
+        "_refresh_report_semantic_artifacts",
+        fake_refresh,
+    )
+
+    payload = api_server._load_report_package_for_manifest(str(results_dir))
+
+    assert refresh_calls == [str(output_dir)]
+    assert payload["qa_checks"]["meta"]["qa_guard_version"] == REPORT_QA_GUARD_VERSION
+    assert payload["artifact_meta"]["qa_guard_version"] == REPORT_QA_GUARD_VERSION
+
+
+def test_load_report_package_for_manifest_refreshes_when_report_logic_is_newer(
+    tmp_path, monkeypatch
+):
+    output_dir = tmp_path / "output"
+    results_dir = output_dir / "analysis_results"
+    qa_dir = results_dir / "qa"
+    qa_dir.mkdir(parents=True)
+    (results_dir / "核查结果分析报告.txt").write_text("main", encoding="utf-8")
+
+    package_generated_at = "2026-03-18T10:00:00"
+    package = {
+        "meta": {"generated_at": package_generated_at},
+        "qa_checks": {
+            "summary": {"pass": 1, "warn": 0, "fail": 0, "total": 1},
+            "checks": [],
+            "meta": {
+                "qa_guard_version": REPORT_QA_GUARD_VERSION,
+                "generated_at": package_generated_at,
+            },
+        },
+        "artifact_meta": {
+            "package_generated_at": package_generated_at,
+            "source_report_generated_at": package_generated_at,
+            "qa_guard_version": REPORT_QA_GUARD_VERSION,
+        },
+    }
+    (qa_dir / "report_package.json").write_text(
+        json.dumps(package, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (qa_dir / "report_consistency_check.json").write_text(
+        json.dumps(package["qa_checks"], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (qa_dir / "report_consistency_check.txt").write_text("fresh", encoding="utf-8")
+
+    refresh_calls = []
+
+    def fake_refresh(active_output_dir):
+        refresh_calls.append(active_output_dir)
+        refreshed_package = {
+            **package,
+            "artifact_meta": {
+                **package["artifact_meta"],
+                "package_generated_at": "2026-03-19T08:40:00",
+            },
+        }
+        (qa_dir / "report_package.json").write_text(
+            json.dumps(refreshed_package, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return {"report_package_path": str(qa_dir / "report_package.json")}
+
+    monkeypatch.setattr(
+        api_server,
+        "_get_latest_semantic_source_timestamp",
+        lambda _results_dir: None,
+    )
+    monkeypatch.setattr(
+        api_server,
+        "_get_latest_report_logic_timestamp",
+        lambda: datetime.fromisoformat("2026-03-19T08:30:00"),
+    )
+    monkeypatch.setattr(
+        api_server,
+        "_refresh_report_semantic_artifacts",
+        fake_refresh,
+    )
+
+    payload = api_server._load_report_package_for_manifest(str(results_dir))
+
+    assert refresh_calls == [str(output_dir)]
+    assert payload["artifact_meta"]["package_generated_at"] == "2026-03-19T08:40:00"
+
+
+def test_load_report_package_for_manifest_refreshes_when_dossier_explanations_missing(
+    tmp_path, monkeypatch
+):
+    output_dir = tmp_path / "output"
+    results_dir = output_dir / "analysis_results"
+    qa_dir = results_dir / "qa"
+    qa_dir.mkdir(parents=True)
+    (results_dir / "核查结果分析报告.txt").write_text("main", encoding="utf-8")
+
+    package_generated_at = "2026-03-19T09:00:00"
+    stale_package = {
+        "meta": {"generated_at": package_generated_at},
+        "person_dossiers": [{"entity_name": "张三", "financial_gap_explanation": None}],
+        "family_dossiers": [{"family_name": "张三家庭"}],
+        "company_dossiers": [
+            {
+                "entity_name": "测试科技有限公司",
+                "company_business_explanation": None,
+            }
+        ],
+        "qa_checks": {
+            "summary": {"pass": 1, "warn": 0, "fail": 0, "total": 1},
+            "checks": [],
+            "meta": {
+                "qa_guard_version": REPORT_QA_GUARD_VERSION,
+                "generated_at": package_generated_at,
+            },
+        },
+        "artifact_meta": {
+            "package_generated_at": package_generated_at,
+            "source_report_generated_at": package_generated_at,
+            "qa_guard_version": REPORT_QA_GUARD_VERSION,
+        },
+    }
+    (qa_dir / "report_package.json").write_text(
+        json.dumps(stale_package, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (qa_dir / "report_consistency_check.json").write_text(
+        json.dumps(stale_package["qa_checks"], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (qa_dir / "report_consistency_check.txt").write_text("stale", encoding="utf-8")
+
+    refresh_calls = []
+
+    def fake_refresh(active_output_dir):
+        refresh_calls.append(active_output_dir)
+        refreshed_package = {
+            **stale_package,
+            "person_dossiers": [
+                {
+                    "entity_name": "张三",
+                    "financial_gap_explanation": {
+                        "summary": "原始口径与真实口径差异已解释。",
+                        "income_gap": 0,
+                        "expense_gap": 0,
+                        "income_offset_rows": [],
+                        "expense_offset_rows": [],
+                    },
+                }
+            ],
+            "family_dossiers": [
+                {
+                    "family_name": "张三家庭",
+                    "family_financial_explanation": {
+                        "summary": "当前已识别成员1名，成员流水覆盖完整。",
+                        "member_count": 1,
+                        "pending_member_count": 0,
+                        "pending_members": [],
+                        "focus_clues": [],
+                    },
+                }
+            ],
+            "company_dossiers": [
+                {
+                    "entity_name": "测试科技有限公司",
+                    "company_business_explanation": {
+                        "summary": "累计流入10.00万、流出8.00万，共2笔交易。",
+                        "behavioral_flags": [],
+                        "focus_issue_headlines": [],
+                    },
+                }
+            ],
+        }
+        (qa_dir / "report_package.json").write_text(
+            json.dumps(refreshed_package, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (qa_dir / "report_consistency_check.json").write_text(
+            json.dumps(refreshed_package["qa_checks"], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (qa_dir / "report_consistency_check.txt").write_text(
+            "fresh",
+            encoding="utf-8",
+        )
+        return {"report_package_path": str(qa_dir / "report_package.json")}
+
+    monkeypatch.setattr(
+        api_server,
+        "_get_latest_semantic_source_timestamp",
+        lambda _results_dir: None,
+    )
+    monkeypatch.setattr(
+        api_server,
+        "_get_latest_report_logic_timestamp",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        api_server,
+        "_refresh_report_semantic_artifacts",
+        fake_refresh,
+    )
+
+    payload = api_server._load_report_package_for_manifest(str(results_dir))
+
+    assert refresh_calls == [str(output_dir)]
+    assert payload["family_dossiers"][0]["family_financial_explanation"]["member_count"] == 1
+    assert (
+        payload["company_dossiers"][0]["company_business_explanation"]["summary"]
+        == "累计流入10.00万、流出8.00万，共2笔交易。"
+    )
+
+
 def test_preview_report_file_supports_head_requests_for_html(tmp_path):
     output_dir = tmp_path / "output"
     results_dir = output_dir / "analysis_results"
@@ -1115,6 +1508,22 @@ def test_get_report_manifest_exposes_semantic_navigation_metadata(tmp_path):
         assert (
             groups["qa_artifacts"]["semanticHeadline"]
             == "QA 检查存在 1 项阻断问题，当前仍需收口。"
+        )
+        assert (
+            payload["semanticOverview"]["qa"]["highlights"][0]["title"]
+            == "高风险问题证据可追溯"
+        )
+        assert (
+            payload["semanticOverview"]["qa"]["highlights"][0]["summary"]
+            == "仍有高风险问题缺少可回溯证据索引，暂不宜直接用于正式定性。"
+        )
+        assert (
+            payload["semanticOverview"]["qa"]["highlights"][1]["title"]
+            == "公司卷宗摘要信息完整"
+        )
+        assert (
+            payload["semanticOverview"]["qa"]["highlights"][1]["summary"]
+            == "公司卷宗已生成，但仍有摘要或风险概览待补齐。"
         )
         assert (
             groups["dossiers"]["semanticHighlights"][0]["title"] == "桥接节点"

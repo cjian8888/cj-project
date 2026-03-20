@@ -118,6 +118,89 @@ def test_income_match_analysis_separates_raw_and_real_metrics():
     assert result["offset_rule_rows"][1]["name"] == "单位报销/业务往来款"
 
 
+def test_income_match_analysis_materializes_financial_gap_explanation():
+    profile = {
+        "summary": {
+            "total_income": 500_000,
+            "total_expense": 480_000,
+            "real_income": 400_000,
+            "real_expense": 460_000,
+            "offset_detail": {
+                "self_transfer": 100_000,
+                "self_transfer_expense": 20_000,
+                "offset_meta": {
+                    "self_transfer": {
+                        "income_amount": 100_000,
+                        "expense_amount": 20_000,
+                        "confidence": "high",
+                    }
+                },
+            },
+        },
+        "yearly_salary": {
+            "summary": {
+                "total": 120_000,
+            }
+        },
+    }
+
+    builder = _make_builder(profile)
+    result = builder._build_income_match_analysis_v4("张三", profile)
+    explanation = result["financial_gap_explanation"]
+
+    assert explanation["income_gap"] == 100_000
+    assert explanation["expense_gap"] == 20_000
+    assert "原始口径收支基本平衡" in explanation["summary"]
+    assert "真实口径收支净流出6.00万元" in explanation["summary"]
+    assert "流入侧较真实收入多出10.00万元" in explanation["summary"]
+    assert "流出侧仅剔除2.00万元" in explanation["summary"]
+
+
+def test_income_match_analysis_surfaces_account_layer_scope_note():
+    profile = {
+        "summary": {
+            "total_income": 1_100_000,
+            "total_expense": 720_000,
+            "real_income": 900_000,
+            "real_expense": 680_000,
+        },
+        "yearly_salary": {
+            "summary": {
+                "total": 200_000,
+            }
+        },
+        "account_layer_summary": {
+            "has_corporate_account_activity": True,
+            "has_mixed_personal_corporate_activity": True,
+            "note": (
+                "该主体名下同时存在个人账户与对公账户流水；"
+                "个人账户层原始流入20.00万元、流出12.00万元（15笔），"
+                "对公账户层原始流入90.00万元、流出60.00万元（40笔）。"
+                "当前真实收入/支出仍按全账户汇总口径展示，审阅时应与个人可支配资金分层理解。"
+            ),
+            "layers": {
+                "personal": {
+                    "total_income": 200_000,
+                    "total_expense": 120_000,
+                    "transaction_count": 15,
+                },
+                "corporate": {
+                    "total_income": 900_000,
+                    "total_expense": 600_000,
+                    "transaction_count": 40,
+                },
+            },
+        },
+    }
+
+    builder = _make_builder(profile)
+    result = builder._build_income_match_analysis_v4("张三", profile)
+
+    assert "个人账户层原始流入20.00万元" in result["account_scope_note"]
+    assert "对公账户层原始流入90.00万元" in result["account_scope_note"]
+    assert "当前真实收入/支出仍按全账户汇总口径展示" in result["narrative"]
+
+
 def test_income_match_low_severity_does_not_trigger_report_escalation():
     profile = {
         "summary": {
@@ -136,6 +219,55 @@ def test_income_match_low_severity_does_not_trigger_report_escalation():
 
     assert result["review_severity"] == "low"
     assert result["need_further_verification"] is False
+
+
+def test_unified_income_expense_analysis_uses_real_metrics_not_raw_balanced_flow():
+    profile = {
+        "totalIncome": 5_000_000,
+        "totalExpense": 4_990_000,
+        "summary": {
+            "total_income": 5_000_000,
+            "total_expense": 4_990_000,
+            "real_income": 1_000_000,
+            "real_expense": 2_500_000,
+        },
+        "yearly_salary": {
+            "summary": {
+                "total": 400_000,
+            }
+        },
+    }
+
+    builder = _make_builder(profile)
+    result = builder._analyze_income_expense_match_unified("张三", profile)
+
+    assert result.score == 25
+    assert result.verdict == "收支明显不匹配"
+    assert "真实收入100.00万元" in result.details
+    assert "工资覆盖率16.0%" in result.details
+
+
+def test_unified_high_risk_warnings_use_real_metrics_not_raw_metrics():
+    profile = {
+        "totalIncome": 5_000_000,
+        "totalExpense": 4_990_000,
+        "summary": {
+            "total_income": 5_000_000,
+            "total_expense": 4_990_000,
+            "real_income": 1_000_000,
+            "real_expense": 2_500_000,
+        },
+        "yearly_salary": {
+            "summary": {
+                "total": 400_000,
+            }
+        },
+    }
+
+    builder = _make_builder(profile)
+    warnings = builder._extract_high_risk_warnings_unified("张三", profile)
+
+    assert "真实支出明显高于真实收入，需核实缺口资金来源" in warnings
 
 
 def test_conclusion_and_next_steps_skip_low_severity_income_match_items():
@@ -473,6 +605,45 @@ def test_build_salary_income_uses_actual_salary_year_span():
     assert result["end_year"] == "2025"
     assert "张三2024年至2025年共取得工资收入30.00万元" in result["narrative"]
     assert "2026年" not in result["narrative"]
+
+
+def test_build_salary_income_prefers_official_yearly_total_over_classified_cap():
+    profile = {
+        "yearly_salary": {
+            "yearly": {
+                "2022": {"total": 92_881.76},
+                "2023": {"total": 104_524.0},
+                "2024": {"total": 134_700.0},
+                "2025": {"total": 120_000.0},
+                "2026": {"total": 62_000.0},
+            },
+            "summary": {
+                "total": 514_105.76,
+                "avg_monthly": 10_710.536666666667,
+            },
+        },
+        "income_classification": {
+            "legitimate_income": 123.74,
+            "salary_classified_income": 123.74,
+        },
+    }
+    builder = InvestigationReportBuilder(
+        {
+            "profiles": {"王永安": profile},
+            "derived_data": {},
+            "suspicions": {},
+            "graph_data": {},
+            "metadata": {"date_range": {"start": "2022-01-01", "end": "2026-12-31"}},
+        },
+        output_dir="output",
+    )
+
+    result = builder._build_salary_income_v4("王永安", profile)
+
+    assert result["total_wan"] == 51.41
+    assert result["avg_yearly_wan"] == 10.28
+    assert "王永安2022年至2026年共取得工资收入51.41万元" in result["narrative"]
+    assert "其中2022年9.29万元，2023年10.45万元，2024年13.47万元，2025年12.00万元，2026年6.20万元" in result["narrative"]
 
 
 def test_build_report_v4_prefers_injected_primary_config_over_disk_fallback():
@@ -1219,6 +1390,152 @@ def test_render_html_report_v3_formats_dates_and_property_area_cleanly():
     assert "2024-01-06 13:14:15" in html
 
 
+def test_render_html_report_v3_surfaces_financial_gap_explanation():
+    profile = {
+        "entityName": "张三",
+        "summary": {
+            "total_income": 500000,
+            "total_expense": 480000,
+            "real_income": 400000,
+            "real_expense": 460000,
+            "offset_detail": {
+                "self_transfer": 100000,
+                "self_transfer_expense": 20000,
+                "offset_meta": {
+                    "self_transfer": {
+                        "income_amount": 100000,
+                        "expense_amount": 20000,
+                        "confidence": "high",
+                    }
+                },
+            },
+        },
+        "yearly_salary": {
+            "summary": {"total": 120000},
+            "yearly": {},
+            "details": [],
+        },
+        "properties": [],
+        "bank_accounts_official": [],
+        "bank_accounts": [],
+        "vehicles": [],
+        "transactions": [],
+        "coaddress_persons": [],
+        "coviolation_vehicles": [],
+    }
+
+    builder = _make_builder(profile)
+    section = builder.build_v4_person_section("张三")
+    report = {
+        "meta": {
+            "doc_number": "测试字号",
+            "generation_options": {"sections": ["assets", "risks"]},
+            "title_subject": "张三",
+        },
+        "preface": {},
+        "family_sections": [],
+        "person_sections": [section],
+        "company_sections": [],
+    }
+
+    html = builder.render_html_report_v3(report)
+
+    assert "收支口径说明" in html
+    assert "原始口径收支基本平衡，净结余2.00万元" in html
+    assert "流入侧较真实收入多出10.00万元" in html
+
+
+def test_resolve_person_overview_risk_level_aggregates_to_highest_signal():
+    builder = _make_builder(
+        {
+            "summary": {},
+            "income_expense_match_analysis": {"risk_level": "高风险"},
+            "personal_fund_feature_analysis": {"risk_level": "关注级"},
+        }
+    )
+
+    risk_level = builder._resolve_person_overview_risk_level(
+        "张三",
+        {
+            "income_match_analysis": {"review_severity": "medium"},
+            "personal_fund_feature_analysis": {},
+            "five_dimension_score": {"risk_level": "low"},
+        }
+    )
+
+    assert risk_level == "high"
+
+
+def test_build_five_dimension_score_v4_uses_dimension_specific_label():
+    profile = {
+        "summary": {
+            "real_income": 100000,
+            "real_expense": 180000,
+        },
+        "yearly_salary": {"summary": {"total": 10000}},
+        "bank_accounts": [],
+        "bank_accounts_official": [],
+        "properties": [],
+        "vehicles": [],
+        "transactions": [],
+    }
+
+    builder = _make_builder(profile)
+    result = builder._build_five_dimension_score_v4("张三", profile)
+
+    assert "五维评分等级：" in result["narrative"]
+    assert "整体风险等级：" not in result["narrative"]
+
+
+def test_optimistic_personal_feature_text_does_not_misclassify_negative_mismatch():
+    builder = _make_builder({"summary": {}})
+
+    assert (
+        builder._is_optimistic_personal_feature_text("消费水平与收入匹配，无异常消费")
+        is True
+    )
+    assert (
+        builder._is_optimistic_personal_feature_text(
+            "收支严重不匹配、资金流向复杂，关注级"
+        )
+        is False
+    )
+
+
+def test_counterparty_analysis_keeps_negative_personal_feature_note_when_match_is_higher_risk():
+    profile = {
+        "summary": {
+            "total_income": 200000,
+            "total_expense": 260000,
+            "real_income": 180000,
+            "real_expense": 240000,
+        },
+        "income_expense_match_analysis": {
+            "risk_level": "高风险",
+            "metrics": {
+                "coverage_ratio": 12.0,
+                "effective_expense": 24.0,
+                "gap": 18.0,
+            },
+        },
+        "personal_fund_feature_analysis": {
+            "risk_level": "关注级",
+            "evidence_score": 55.0,
+            "overall_feature": "收支严重不匹配、资金流向复杂，关注级",
+        },
+        "finance_risk_analysis": {},
+        "salary_enhanced_analysis": {},
+    }
+
+    builder = _make_builder(profile)
+    result = builder._build_counterparty_analysis_v4("张三", profile)
+
+    assert any(
+        "个人资金特征分析：判定关注级" in note
+        for note in result["supplementary_notes"]
+    )
+
+
 def test_related_party_analysis_includes_coaddress_and_coviolation_clues():
     profile = {
         "coaddress_persons": [
@@ -1317,6 +1634,14 @@ def test_generate_complete_txt_report_prefers_provided_report_object(tmp_path):
                         },
                         "data_analysis_section": {
                             "income_match_analysis": {
+                                "financial_gap_explanation": {
+                                    "summary": (
+                                        "原始口径收支基本平衡，净结余2.00万元；"
+                                        "真实口径收支净结余20.00万元；"
+                                        "流入侧较真实收入多出10.00万元，主要因本人账户互转10.00万被剔除；"
+                                        "流出侧仅剔除2.00万元，主要为本人账户互转2.00万。"
+                                    )
+                                },
                                 "offset_rule_rows": [
                                     {
                                         "name": "本人账户互转",
@@ -1377,6 +1702,8 @@ def test_generate_complete_txt_report_prefers_provided_report_object(tmp_path):
 
     assert "家庭成员数: 2 人" in text
     assert "待补数据成员: 李四" in text
+    assert "📌 收支口径说明：" in text
+    assert "流入侧较真实收入多出10.00万元" in text
     assert "测试发现（影响：需持续关注）" in text
     assert "这是正式报告综合研判" in text
     assert "测试建议（优先级高，期限7日内）" in text
@@ -1518,13 +1845,69 @@ def test_generate_complete_txt_report_includes_frontend_landing_and_log_review(t
     assert "【前端关键视图落地】" in text
     assert "个人资金流量: 共1人" in text
     assert "张三 | 流水总额150.00万元" in text
-    assert 'analysis_cache/profiles.json -> ["张三"].totalIncome / totalExpense / transactionCount' in text
+    assert "张三的收入、支出和交易笔数口径来自资金画像汇总结果。" in text
+    assert 'analysis_cache/profiles.json -> ["张三"].totalIncome / totalExpense / transactionCount' not in text
     assert "张三: 直接往来2；过账通道1" in text
     assert "【分析执行日志落地复盘】" in text
     assert "数据清洗" in text
     assert "张三 清洗合并完成" in text
     assert "线索聚合" in text
-    assert "derived_data.json::aggregation" in text
+    assert "张三统一风险评分88.0分，风险等级极高风险，置信度0.82。" in text
+
+
+def test_build_analysis_log_landing_review_sanitizes_related_party_zero_metrics(tmp_path):
+    analysis_results_dir = tmp_path / "analysis_results"
+    analysis_results_dir.mkdir(parents=True, exist_ok=True)
+    (analysis_results_dir / "分析执行日志.txt").write_text(
+        "\n".join(
+            [
+                "2026-03-17 21:02:22 [INFO] related_party_analyzer - 关联方分析完成: 直接往来2笔, 第三方中转0条链, 资金闭环0个, 外围节点0个",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    builder = InvestigationReportBuilder(
+        {
+            "profiles": {},
+            "derived_data": {},
+            "suspicions": {},
+            "graph_data": {},
+            "metadata": {},
+        },
+        output_dir=str(tmp_path),
+    )
+
+    reviews = builder._build_analysis_log_landing_review()
+    related_review = next(item for item in reviews if item.get("stage") == "关联方分析")
+
+    assert related_review["excerpt"] == "关联方分析已完成，识别直接往来2笔，未发现可支撑的第三方中转、资金回流链条、外围扩展节点证据。"
+
+
+def test_format_log_excerpt_for_report_sanitizes_aggregation_score_line():
+    excerpt = (
+        "2026-03-19 08:01:04 [INFO] clue_aggregator - "
+        "朱永平 统一风险评分: 46.5 (high, confidence=0.87)"
+    )
+
+    result = InvestigationReportBuilder._format_log_excerpt_for_report("线索聚合", excerpt)
+
+    assert result == "朱永平统一风险评分46.5分，风险等级高风险，置信度0.87。"
+
+
+def test_format_direct_transfer_trace_line_omits_missing_placeholders():
+    builder = _make_builder({"summary": {}})
+
+    trace = builder._format_direct_transfer_trace_line(
+        {
+            "source_file": "/tmp/张三流水.xlsx",
+            "source_row_index": 8,
+        }
+    )
+
+    assert trace == "证据来源: 张三流水.xlsx，第8行"
+    assert "未提供" not in trace
+    assert "交易ID" not in trace
 
 
 def test_income_expense_match_uses_non_salary_wording_not_unknown_income():

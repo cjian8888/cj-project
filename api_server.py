@@ -127,6 +127,8 @@ from investigation_report_builder import (
     InvestigationReportBuilder,
     load_investigation_report_builder,
 )
+from report_quality_guard import REPORT_QA_GUARD_VERSION
+from report_text_formatter import format_report_qa_check_display
 from report_config.primary_targets_service import PrimaryTargetsService
 from specialized_reports import SpecializedReportGenerator
 from suspicion_engine import SuspicionEngine
@@ -841,6 +843,68 @@ def _refresh_profiles_with_family_units(
             logger.warning(f"更新 {person_name} 真实收入失败: {exc}")
 
     return updated_count
+
+
+def _build_all_family_summaries(
+    profiles: Dict[str, Any],
+    family_units_list: List[Dict[str, Any]],
+    logger: logging.Logger,
+) -> Dict[str, Dict[str, Any]]:
+    """基于当前画像状态构建全部家庭财务汇总。"""
+    all_family_summaries: Dict[str, Dict[str, Any]] = {}
+
+    for unit in family_units_list:
+        householder = unit.get("householder", "") or unit.get("anchor", "")
+        members = unit.get("members", [])
+        if not members:
+            continue
+        if not _family_unit_has_profile_members(members, profiles):
+            logger.info(f"  · 跳过无画像家庭单元: {householder}")
+            continue
+        try:
+            family_assets = _collect_family_assets_for_summary(members, profiles)
+            unit_summary = family_finance.calculate_family_summary(
+                profiles,
+                members,
+                properties=family_assets["properties"],
+                vehicles=family_assets["vehicles"],
+            )
+            unit_summary["householder"] = householder
+            unit_summary["extended_relatives"] = unit.get("extended_relatives", [])
+            all_family_summaries[householder] = unit_summary
+        except Exception as e:
+            logger.warning(f"计算 {householder} 家庭汇总失败: {e}")
+
+    return all_family_summaries
+
+
+def _refresh_profiles_and_build_family_summaries(
+    profiles: Dict[str, Any],
+    cleaned_data: Dict[str, pd.DataFrame],
+    family_units_list: List[Dict[str, Any]],
+    income_expense_match_analyzer: IncomeExpenseMatchAnalyzer,
+    logger: logging.Logger,
+) -> tuple[int, Dict[str, Dict[str, Any]]]:
+    """先刷新个人真实收支，再用刷新后的画像重建家庭汇总。"""
+    updated_count = 0
+    if family_units_list:
+        logger.info("  ▶ 根据当前生效归集单元刷新真实收入...")
+        updated_count = _refresh_profiles_with_family_units(
+            profiles,
+            cleaned_data,
+            family_units_list,
+            income_expense_match_analyzer,
+            logger,
+        )
+        logger.info(f"  ✓ 已根据家庭关系更新 {updated_count} 人的真实收入")
+
+    logger.info("  ▶ 计算家庭财务汇总...")
+    all_family_summaries = _build_all_family_summaries(
+        profiles,
+        family_units_list,
+        logger,
+    )
+    return updated_count, all_family_summaries
 
 
 def _save_external_report_caches(
@@ -2398,8 +2462,13 @@ def serialize_analysis_results(results: Dict) -> Dict:
 def _enhance_suspicions_with_analysis(suspicions: Dict, analysis_results: Dict) -> Dict:
     """用分析结果增强疑点数据"""
     enhanced = suspicions.copy()
-    if analysis_results.get("timeSeries"):
-        enhanced["timeSeriesAlerts"] = analysis_results["timeSeries"].get("alerts", [])
+    time_series = analysis_results.get("timeSeries")
+    if isinstance(time_series, dict) and "alerts" in time_series:
+        alerts = time_series.get("alerts")
+        if alerts:
+            enhanced["timeSeriesAlerts"] = alerts
+        elif "timeSeriesAlerts" not in enhanced:
+            enhanced["timeSeriesAlerts"] = []
     return enhanced
 
 
@@ -3194,6 +3263,9 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                                 person_transactions=feature_tx_df,
                                 family_members=[],
                                 suspicions=None,
+                                income_expense_match_analysis=profile.get(
+                                    "income_expense_match_analysis", {}
+                                ),
                             )
                             profile["personal_fund_feature_analysis"] = (
                                 _summarize_personal_fund_feature_analysis(
@@ -3440,33 +3512,13 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             analysis_results["family_relations"] = family_tree
             analysis_results["family_units_v2"] = inferred_family_units
 
-            # 计算家庭财务汇总
-            logger.info("  ▶ 计算家庭财务汇总...")
-            all_family_summaries = {}
-            for unit in effective_family_units:
-                householder = unit.get("householder", "") or unit.get("anchor", "")
-                members = unit.get("members", [])
-                if members:
-                    if not _family_unit_has_profile_members(members, profiles):
-                        logger.info(f"  · 跳过无画像家庭单元: {householder}")
-                        continue
-                    try:
-                        family_assets = _collect_family_assets_for_summary(
-                            members, profiles
-                        )
-                        unit_summary = family_finance.calculate_family_summary(
-                            profiles,
-                            members,
-                            properties=family_assets["properties"],
-                            vehicles=family_assets["vehicles"],
-                        )
-                        unit_summary["householder"] = householder
-                        unit_summary["extended_relatives"] = unit.get(
-                            "extended_relatives", []
-                        )
-                        all_family_summaries[householder] = unit_summary
-                    except Exception as e:
-                        logger.warning(f"计算 {householder} 家庭汇总失败: {e}")
+            _, all_family_summaries = _refresh_profiles_and_build_family_summaries(
+                profiles,
+                cleaned_data,
+                effective_family_units,
+                income_expense_match_analyzer,
+                logger,
+            )
 
             if all_family_summaries:
                 first_householder = list(all_family_summaries.keys())[0]
@@ -3485,17 +3537,6 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                 )
                 analysis_results["family_summary"] = family_summary_result
                 logger.info(f"  ✓ 家庭汇总完成(fallback): {len(all_persons)} 人")
-
-            if effective_family_units:
-                logger.info("  ▶ 根据当前生效归集单元刷新真实收入...")
-                updated_count = _refresh_profiles_with_family_units(
-                    profiles,
-                    cleaned_data,
-                    effective_family_units,
-                    income_expense_match_analyzer,
-                    logger,
-                )
-                logger.info(f"  ✓ 已根据家庭关系更新 {updated_count} 人的真实收入")
 
         except Exception as e:
             logger.warning(f"  ✗ 家庭分析失败: {e}")
@@ -4819,6 +4860,125 @@ def _manifest_unique_texts(values: List[Any]) -> List[str]:
     return result
 
 
+def _manifest_parse_datetime(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
+
+def _get_latest_semantic_source_timestamp(results_dir: str) -> Optional[datetime]:
+    latest_timestamp: Optional[datetime] = None
+    for root, dirs, files in os.walk(results_dir):
+        dirs[:] = [item for item in dirs if item != "qa"]
+        for filename in files:
+            file_path = os.path.join(root, filename)
+            relative_path = os.path.relpath(file_path, results_dir).replace("\\", "/")
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in _REPORT_FILE_TYPES:
+                continue
+            group_meta = _classify_report_group(relative_path, ext)
+            if group_meta.get("key") in {"qa_artifacts", "technical_files"}:
+                continue
+            try:
+                modified_at = datetime.fromtimestamp(os.stat(file_path).st_mtime)
+            except OSError:
+                continue
+            if latest_timestamp is None or modified_at > latest_timestamp:
+                latest_timestamp = modified_at
+    return latest_timestamp
+
+
+_REPORT_SEMANTIC_LOGIC_FILES = (
+    "investigation_report_builder.py",
+    "report_view_builder.py",
+    "report_dossier_builder.py",
+    "report_issue_engine.py",
+    "report_quality_guard.py",
+)
+
+
+def _get_latest_report_logic_timestamp() -> Optional[datetime]:
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    latest_timestamp: Optional[datetime] = None
+    for relative_path in _REPORT_SEMANTIC_LOGIC_FILES:
+        file_path = os.path.join(base_dir, relative_path)
+        if not os.path.exists(file_path):
+            continue
+        try:
+            modified_at = datetime.fromtimestamp(os.stat(file_path).st_mtime)
+        except OSError:
+            continue
+        if latest_timestamp is None or modified_at > latest_timestamp:
+            latest_timestamp = modified_at
+    return latest_timestamp
+
+
+def _report_package_requires_refresh(results_dir: str, payload: Dict[str, Any]) -> bool:
+    if not payload:
+        return True
+
+    qa_checks = _manifest_as_dict(payload.get("qa_checks"))
+    qa_meta = _manifest_as_dict(qa_checks.get("meta"))
+    artifact_meta = _manifest_as_dict(payload.get("artifact_meta"))
+    stored_guard_version = str(
+        qa_meta.get("qa_guard_version") or artifact_meta.get("qa_guard_version") or ""
+    ).strip()
+    if stored_guard_version != REPORT_QA_GUARD_VERSION:
+        return True
+
+    dossier_explanation_fields = (
+        ("person_dossiers", "financial_gap_explanation"),
+        ("family_dossiers", "family_financial_explanation"),
+        ("company_dossiers", "company_business_explanation"),
+    )
+    for dossier_key, explanation_key in dossier_explanation_fields:
+        dossiers = _manifest_as_list(payload.get(dossier_key))
+        if not dossiers:
+            continue
+        for dossier in dossiers:
+            if not isinstance(dossier, dict):
+                return True
+            if not _manifest_as_dict(dossier.get(explanation_key)):
+                return True
+
+    package_generated_at = _manifest_parse_datetime(
+        artifact_meta.get("package_generated_at")
+    )
+    if package_generated_at is None:
+        return True
+
+    qa_dir = os.path.join(results_dir, "qa")
+    required_paths = [
+        os.path.join(qa_dir, "report_package.json"),
+        os.path.join(qa_dir, "report_consistency_check.json"),
+        os.path.join(qa_dir, "report_consistency_check.txt"),
+    ]
+    if not all(os.path.exists(path) for path in required_paths):
+        return True
+
+    latest_source_timestamp = _get_latest_semantic_source_timestamp(results_dir)
+    latest_logic_timestamp = _get_latest_report_logic_timestamp()
+    latest_refresh_baseline = latest_source_timestamp
+    if latest_logic_timestamp and (
+        latest_refresh_baseline is None or latest_logic_timestamp > latest_refresh_baseline
+    ):
+        latest_refresh_baseline = latest_logic_timestamp
+
+    if latest_refresh_baseline and latest_refresh_baseline > (
+        package_generated_at + timedelta(seconds=1)
+    ):
+        return True
+
+    return False
+
+
 def _load_report_package_for_manifest(results_dir: str) -> Dict[str, Any]:
     package_path = os.path.join(results_dir, "qa", "report_package.json")
     logger = logging.getLogger(__name__)
@@ -4835,14 +4995,18 @@ def _load_report_package_for_manifest(results_dir: str) -> Dict[str, Any]:
             return {}
 
     payload = _read_package()
-    if payload:
+    if payload and not _report_package_requires_refresh(results_dir, payload):
         return payload
+
+    if payload:
+        logger.info("[报告清单] report_package 版本或时间戳已过期，尝试刷新")
 
     output_dir = os.path.dirname(os.path.abspath(results_dir))
     semantic_paths = _refresh_report_semantic_artifacts(output_dir)
     if semantic_paths:
-        logger.info("[报告清单] report_package 缺失，已尝试基于缓存刷新")
-    return _read_package()
+        logger.info("[报告清单] report_package 已按当前缓存与QA规则刷新")
+    refreshed_payload = _read_package()
+    return refreshed_payload or payload
 
 
 def _build_manifest_main_report_overview(report_package: Dict[str, Any]) -> Dict[str, Any]:
@@ -4941,6 +5105,10 @@ def _build_manifest_appendix_overview(report_package: Dict[str, Any]) -> Dict[st
     }
 
 
+def _format_manifest_qa_check_highlight(item: Dict[str, Any]) -> Dict[str, str]:
+    return format_report_qa_check_display(item)
+
+
 def _build_manifest_qa_overview(report_package: Dict[str, Any]) -> Dict[str, Any]:
     qa_checks = _manifest_as_dict(report_package.get("qa_checks"))
     summary = _manifest_as_dict(qa_checks.get("summary"))
@@ -4970,12 +5138,7 @@ def _build_manifest_qa_overview(report_package: Dict[str, Any]) -> Dict[str, Any
         status = str(item.get("status") or "").strip().lower()
         if status not in focus_statuses:
             continue
-        highlights.append(
-            {
-                "title": str(item.get("check_id") or "").strip(),
-                "summary": str(item.get("message") or "").strip(),
-            }
-        )
+        highlights.append(_format_manifest_qa_check_highlight(item))
         if len(highlights) >= 4:
             break
 
@@ -4988,6 +5151,28 @@ def _build_manifest_qa_overview(report_package: Dict[str, Any]) -> Dict[str, Any
         badges.append(f"提示 {warn_count} 项")
     if pass_count:
         badges.append(f"通过 {pass_count} 项")
+
+    artifact_meta = _manifest_as_dict(report_package.get("artifact_meta"))
+    source_report_generated_at = str(
+        artifact_meta.get("source_report_generated_at")
+        or _manifest_as_dict(report_package.get("meta")).get("generated_at")
+        or ""
+    ).strip()
+    if source_report_generated_at:
+        badges.append(
+            f"报告批次 {source_report_generated_at[:16].replace('T', ' ')}"
+        )
+
+    package_generated_at = _manifest_parse_datetime(
+        artifact_meta.get("package_generated_at")
+    )
+    source_report_generated_ts = _manifest_parse_datetime(source_report_generated_at)
+    if (
+        package_generated_at
+        and source_report_generated_ts
+        and package_generated_at > source_report_generated_ts + timedelta(minutes=1)
+    ):
+        badges.append(f"QA重校 {package_generated_at.strftime('%Y-%m-%d %H:%M')}")
 
     return {
         "headline": headline,

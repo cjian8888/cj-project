@@ -181,7 +181,8 @@ class PersonalFundFeatureAnalyzer:
                  person_profile: Dict[str, Any],
                  person_transactions: pd.DataFrame,
                  family_members: Optional[List[str]] = None,
-                 suspicions: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                 suspicions: Optional[Dict[str, Any]] = None,
+                 income_expense_match_analysis: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         执行完整的个人资金特征分析
 
@@ -198,10 +199,15 @@ class PersonalFundFeatureAnalyzer:
         person_transactions = self._normalize_transactions(person_transactions)
 
         # 执行各维度分析
+        authoritative_income_expense = (
+            self._build_authoritative_income_expense_dimension(
+                income_expense_match_analysis
+            )
+        )
+
         dimensions = {
-            "income_expense_match": self._analyze_income_expense_match(
-                person_profile, person_transactions
-            ),
+            "income_expense_match": authoritative_income_expense
+            or self._analyze_income_expense_match(person_profile, person_transactions),
             "borrowing_behavior": self._analyze_borrowing_behavior(
                 person_profile, person_transactions, family_members
             ),
@@ -331,6 +337,73 @@ class PersonalFundFeatureAnalyzer:
                 "extra_ratio": extra_ratio,
                 "extra_income_types": extra_income_types
             }
+        }
+
+    def _build_authoritative_income_expense_dimension(
+        self, income_expense_match_analysis: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """优先复用新版真实收支分析，避免与旧消费口径冲突。"""
+        if not isinstance(income_expense_match_analysis, dict):
+            return None
+
+        metrics = income_expense_match_analysis.get("metrics", {})
+        if not isinstance(metrics, dict):
+            metrics = {}
+
+        wage_income = float(
+            metrics.get("real_salary", metrics.get("wage_income", 0)) or 0
+        )
+        total_expense = float(
+            metrics.get("effective_expense", metrics.get("total_expense", 0)) or 0
+        )
+        total_income = float(metrics.get("total_income", 0) or 0)
+        extra_income = float(
+            metrics.get("extra_income", max(0.0, total_income - wage_income)) or 0
+        )
+        coverage_ratio = float(
+            metrics.get(
+                "coverage_ratio",
+                (wage_income / total_expense * 100) if total_expense > 0 else 100.0,
+            )
+            or 0
+        )
+        gap = float(metrics.get("gap", total_expense - wage_income) or 0)
+        extra_ratio = float(
+            metrics.get(
+                "extra_ratio",
+                (extra_income / total_income * 100) if total_income > 0 else 0.0,
+            )
+            or 0
+        )
+        extra_income_types = metrics.get("extra_income_types", [])
+        if not isinstance(extra_income_types, list):
+            extra_income_types = []
+
+        evidence = income_expense_match_analysis.get("evidence", [])
+        if not isinstance(evidence, list):
+            evidence = []
+
+        description = str(income_expense_match_analysis.get("description", "") or "")
+        score = round(
+            min(20.0, max(0.0, float(income_expense_match_analysis.get("score", 0) or 0))),
+            1,
+        )
+
+        return {
+            "score": score,
+            "description": description,
+            "evidence": evidence,
+            "metrics": {
+                "wage_income": wage_income,
+                "total_income": total_income,
+                "total_expense": total_expense,
+                "extra_income": extra_income,
+                "gap": gap,
+                "coverage_ratio": coverage_ratio,
+                "extra_ratio": extra_ratio,
+                "extra_income_types": extra_income_types,
+                "analysis_basis": "income_expense_match_analysis",
+            },
         }
 
     def _analyze_borrowing_behavior(self,
@@ -937,23 +1010,31 @@ class PersonalFundFeatureAnalyzer:
         income_exp = dimensions["income_expense_match"]
         if income_exp["score"] >= 10:
             metrics = income_exp["metrics"]
-            income_types = "、".join(metrics["extra_income_types"]) if metrics["extra_income_types"] else "无"
-            template = self.description_templates["income_expense_mismatch"][0]
-            descriptions.append(template.format(
-                wage_income=metrics["wage_income"],
-                total_expense=metrics["total_expense"],
-                gap=metrics["gap"],
-                coverage_ratio=metrics["coverage_ratio"]
-            ))
-
-            if metrics["extra_income"] > 0:
-                template = self.description_templates["extra_income_high"][0]
+            if metrics.get("analysis_basis") == "income_expense_match_analysis":
+                if income_exp.get("description"):
+                    descriptions.append(str(income_exp["description"]).strip())
+            else:
+                income_types = (
+                    "、".join(metrics["extra_income_types"])
+                    if metrics["extra_income_types"]
+                    else "无"
+                )
+                template = self.description_templates["income_expense_mismatch"][0]
                 descriptions.append(template.format(
-                    income_types=income_types,
-                    extra_income=metrics["extra_income"],
-                    extra_ratio=metrics["extra_ratio"],
-                    consumption_feature="日常开销"
+                    wage_income=metrics["wage_income"],
+                    total_expense=metrics["total_expense"],
+                    gap=metrics["gap"],
+                    coverage_ratio=metrics["coverage_ratio"]
                 ))
+
+                if metrics["extra_income"] > 0:
+                    template = self.description_templates["extra_income_high"][0]
+                    descriptions.append(template.format(
+                        income_types=income_types,
+                        extra_income=metrics["extra_income"],
+                        extra_ratio=metrics["extra_ratio"],
+                        consumption_feature="日常开销"
+                    ))
 
         # 借贷行为描述
         borrowing = dimensions["borrowing_behavior"]
@@ -1003,13 +1084,30 @@ class PersonalFundFeatureAnalyzer:
                                    dimensions: Dict[str, Dict[str, Any]]) -> List[str]:
         """生成风险排除说明"""
         exclusions = []
+        income_expense = dimensions["income_expense_match"]
+        income_metrics = income_expense.get("metrics", {})
+        income_expense_concerning = float(income_expense.get("score", 0) or 0) >= 10.0
+
+        if not income_expense_concerning and isinstance(income_metrics, dict):
+            coverage_ratio = float(income_metrics.get("coverage_ratio", 100) or 0)
+            gap = float(income_metrics.get("gap", 0) or 0)
+            low_threshold_pct = self.thresholds.income_coverage_ratio_low * 100
+            income_expense_concerning = (
+                coverage_ratio < low_threshold_pct and gap > 0
+            )
 
         # 收支正常
-        if dimensions["income_expense_match"]["score"] < 5:
+        if (
+            float(income_expense.get("score", 0) or 0) <= 5.0
+            and not income_expense_concerning
+        ):
             exclusions.append("工资收入覆盖正常，收支结构合理")
 
         # 消费正常
-        if dimensions["consumption_pattern"]["score"] < 5:
+        if (
+            float(dimensions["consumption_pattern"].get("score", 0) or 0) < 5.0
+            and not income_expense_concerning
+        ):
             exclusions.append("消费水平与收入匹配，无异常消费")
 
         # 借贷正常

@@ -19,7 +19,7 @@
 {% if priority_board %}
 <p><strong>优先核查对象：</strong>
     {% for item in priority_board[:3] %}
-    {{ item.entity_name }}{% if item.risk_level %}（{{ item.risk_level }}）{% endif %}{% if not loop.last %}、{% endif %}
+    {{ item.entity_name }}{% if item.risk_level %}（{{ item.risk_level | format_risk_label }}）{% endif %}{% if not loop.last %}、{% endif %}
     {% endfor %}
 </p>
 {% endif %}

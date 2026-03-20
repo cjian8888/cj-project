@@ -10,6 +10,7 @@ from datetime import datetime
 import sys
 import os
 import tempfile
+import warnings
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -120,7 +121,26 @@ class TestValidateDataQuality:
             'expense': [0, 0]
         })
         result, report = validate_data_quality(df)
+        assert result.empty
         assert '缺少日期字段' in report['warnings']
+        assert report['valid_rows'] == 0
+        assert report['removed_rows'] == 2
+
+    def test_validate_all_missing_dates_returns_empty_dataframe(self):
+        """测试日期全空时整批记录被剔除"""
+        df = pd.DataFrame({
+            'date': [pd.NaT, pd.NaT],
+            'income': [0, 0],
+            'expense': [0, 0],
+            'description': ['回执', '回执']
+        })
+        result, report = validate_data_quality(df)
+
+        assert result.empty
+        assert '缺少日期字段' in report['warnings']
+        assert report['invalid_rows'] == [0, 1]
+        assert report['valid_rows'] == 0
+        assert report['removed_rows'] == 2
     
     def test_validate_missing_dates(self):
         """测试缺失日期值"""
@@ -276,6 +296,36 @@ class TestStandardizeBankFields:
         assert result.iloc[0]['account_type'] == '对公结算账户'
         assert bool(result.iloc[0]['is_real_bank_card']) is True
 
+    def test_standardize_personal_card_not_flipped_by_company_counterparty(self):
+        """个人银行卡不能因为对手方是公司就被误判为对公账户"""
+        df = pd.DataFrame({
+            '交易时间': ['2024-01-01'],
+            '交易金额': [1000],
+            '借贷标志': ['贷'],
+            '本方账号': ['6222600220004293728'],
+            '交易对方名称': ['支付宝（中国）网络技术有限公司'],
+            '交易摘要': ['网上支付退款']
+        })
+        result = standardize_bank_fields(df, bank_name='交通银行', entity_name='于巧云')
+        assert result.iloc[0]['account_type'] == '借记卡'
+        assert result.iloc[0]['account_category'] == '个人账户'
+        assert bool(result.iloc[0]['is_real_bank_card']) is True
+
+    def test_standardize_short_numeric_account_still_identified_as_corporate(self):
+        """个人主体下的短位纯数字账号仍应识别为对公账户"""
+        df = pd.DataFrame({
+            '交易时间': ['2024-01-01'],
+            '交易金额': [88000],
+            '借贷标志': ['贷'],
+            '本方账号': ['496271366239'],
+            '交易对方名称': ['北京智晟睿科技有限公司'],
+            '交易摘要': ['IBPS1021000999962024010530562210']
+        })
+        result = standardize_bank_fields(df, bank_name='中国银行', entity_name='王永安')
+        assert result.iloc[0]['account_type'] == '对公结算账户'
+        assert result.iloc[0]['account_category'] == '对公账户'
+        assert bool(result.iloc[0]['is_real_bank_card']) is True
+
     def test_standardize_parses_wan_unit_values(self):
         """金额字段中的万/万元应统一换算为元"""
         df = pd.DataFrame({
@@ -414,6 +464,60 @@ class TestCleanAndMergeFiles:
                         'total_time', 'file_stats']
         for key in expected_keys:
             assert key in stats
+
+    def test_clean_merge_drops_file_when_all_dates_missing(self, tmp_path):
+        """测试整份日期全空文件不会混入最终清洗结果"""
+        test_file = tmp_path / "invalid_dates.xlsx"
+        pd.DataFrame({
+            '交易时间': [None, None],
+            '本方账号': ['6222000000000001', '6222000000000002'],
+            '交易金额': [None, None],
+            '借贷标志': [None, None],
+            '交易摘要': ['超出查询年限', '超出查询年限'],
+        }).to_excel(test_file, index=False)
+
+        result, stats = clean_and_merge_files([str(test_file)], '张伟')
+
+        assert result.empty
+        assert stats['total_original'] == 2
+        assert stats['total_valid'] == 0
+        assert stats['final_rows'] == 0
+        assert stats['file_stats'][0]['valid_rows'] == 0
+
+    def test_clean_merge_skips_empty_frames_without_concat_futurewarning(self, tmp_path):
+        """测试空清洗结果不会参与 concat 并触发 FutureWarning"""
+        invalid_file = tmp_path / "invalid_dates.xlsx"
+        valid_file = tmp_path / "valid.xlsx"
+
+        pd.DataFrame({
+            '交易时间': [None, None],
+            '本方账号': ['6222000000000001', '6222000000000002'],
+            '交易金额': [None, None],
+            '借贷标志': [None, None],
+            '交易摘要': ['超出查询年限', '超出查询年限'],
+        }).to_excel(invalid_file, index=False)
+
+        pd.DataFrame({
+            '交易时间': ['2024-01-01'],
+            '交易金额': [1000],
+            '借贷标志': ['贷'],
+            '交易摘要': ['工资'],
+        }).to_excel(valid_file, index=False)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            result, stats = clean_and_merge_files(
+                [str(invalid_file), str(valid_file)], '张伟'
+            )
+
+        future_warnings = [
+            warning for warning in caught if issubclass(warning.category, FutureWarning)
+        ]
+        assert not future_warnings
+        assert len(result) == 1
+        assert stats['total_original'] == 3
+        assert stats['total_valid'] == 1
+        assert stats['final_rows'] == 1
 
 
 class TestSaveFormattedExcel:

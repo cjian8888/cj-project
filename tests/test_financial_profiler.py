@@ -92,7 +92,21 @@ class TestCalculateIncomeStructure:
         result = calculate_income_structure(df, '张伟')
         assert result['self_transfer_income'] == 5000
         assert result['external_income'] == 10000
-    
+
+    def test_calculate_income_internal_transfer_summary_without_counterparty(self):
+        """测试空对手方+内部转存摘要会被识别为本人互转"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02']),
+            'income': [12000, 430000],
+            'expense': [0, 0],
+            'counterparty': ['某某公司', None],
+            'description': ['工资', '转存开户']
+        })
+        result = calculate_income_structure(df, '张伟')
+        assert result['self_transfer_income'] == 430000
+        assert result['external_income'] == 12000
+        assert result['non_salary_income'] == 0
+
     def test_calculate_income_salary_detection(self):
         """测试工资识别"""
         df = pd.DataFrame({
@@ -219,7 +233,21 @@ class TestAnalyzeWealthManagement:
         result = analyze_wealth_management(df, '张伟')
         assert result['self_transfer_income'] > 0
         assert result['self_transfer_expense'] > 0
-    
+
+    def test_analyze_wealth_internal_transfer_summary_without_counterparty(self):
+        """测试空对手方+内部转存摘要会被识别为自我转账"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03']),
+            'income': [430000, 0, 20000],
+            'expense': [0, 250000, 0],
+            'counterparty': [None, None, '某某公司'],
+            'description': ['转存开户', '销户转存', '工资']
+        })
+        result = analyze_wealth_management(df, '张伟')
+        assert result['self_transfer_income'] == 430000
+        assert result['self_transfer_expense'] == 250000
+        assert result['self_transfer_count'] == 2
+
     def test_analyze_wealth_loan_detection(self):
         """测试贷款识别"""
         df = pd.DataFrame({
@@ -438,6 +466,30 @@ class TestGenerateProfileReport:
         assert 'third_party_ratio' in summary
         assert 'business_reimbursement' in summary['offset_detail']
 
+    def test_generate_profile_builds_account_layer_summary(self):
+        """测试个人主体画像会输出个人/对公账户分层摘要"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03', '2024-01-04']),
+            'income': [10000, 0, 200000, 0],
+            'expense': [0, 2000, 0, 50000],
+            'counterparty': ['某公司', '超市', '北京智晟睿科技有限公司', '成都花园水城城乡建设投资有限责任公司'],
+            'description': ['工资', '购物', 'IBPS1021000999962024010530562210', 'IBPS1041000000042023041910264624'],
+            'account_number': ['6222000011112222', '6222000011112222', '496271366239', '496271366239'],
+            'account_type': ['借记卡', '借记卡', '对公结算账户', '对公结算账户'],
+            'account_category': ['个人账户', '个人账户', '对公账户', '对公账户'],
+        })
+        result = generate_profile_report(df, '张伟')
+        account_layer_summary = result['account_layer_summary']
+
+        assert account_layer_summary['has_corporate_account_activity'] is True
+        assert account_layer_summary['has_mixed_personal_corporate_activity'] is True
+        assert round(account_layer_summary['layers']['personal']['total_income'], 2) == 10000
+        assert round(account_layer_summary['layers']['personal']['total_expense'], 2) == 2000
+        assert round(account_layer_summary['layers']['corporate']['total_income'], 2) == 200000
+        assert round(account_layer_summary['layers']['corporate']['total_expense'], 2) == 50000
+        assert '当前真实收入/支出仍按全账户汇总口径展示' in account_layer_summary['note']
+        assert result['summary']['account_layer_summary']['has_corporate_account_activity'] is True
+
     def test_generate_profile_income_classification_matches_real_income_basis(self):
         """测试收入分类合计与真实收入主口径一致"""
         df = pd.DataFrame({
@@ -557,7 +609,10 @@ class TestGenerateProfileReport:
 
         assert income_classification['salary_reference_income'] == result['yearly_salary']['summary']['total']
         assert income_classification['salary_classified_income'] > 0
-        assert '工资性收入' in income_classification['salary_like_reasons']
+        assert any(
+            reason in income_classification['salary_like_reasons']
+            for reason in ['工资性收入', '摘要含强工资关键词', '已知发薪单位']
+        )
         assert 'salary_reference_basis' in income_classification
 
     def test_generate_profile_aligns_salary_reference_with_excluded_income(self):
@@ -583,6 +638,30 @@ class TestGenerateProfileReport:
         assert round(income_classification['salary_reference_income'], 2) == 10000
         assert round(income_classification['salary_reference_gross_income'], 2) == 15000
         assert income_classification['salary_reference_basis'] == 'yearly_salary_summary_total_excluded_aligned'
+
+    def test_generate_profile_uses_salary_details_to_classify_payroll_code_income(self):
+        """测试工资识别结果会同步传导到收入分类，不再把同单位工资码入账落为未知收入"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-21', '2024-02-22']),
+            'income': [16820.54, 16980.0],
+            'expense': [0, 0],
+            'counterparty': ['上海比亚迪有限公司', '上海比亚迪有限公司'],
+            'description': [
+                'OBSS035228599833000000000000工资',
+                'IBPS3085840000132024022271526391',
+            ],
+        })
+
+        result = generate_profile_report(df, '吴嘉欣')
+        income_classification = result['income_classification']
+
+        assert round(result['income_structure']['salary_income'], 2) == 33800.54
+        assert round(income_classification['legitimate_income'], 2) == 33800.54
+        assert round(income_classification['unknown_income'], 2) == 0.0
+        assert any(
+            detail.get('reason') == '已知发薪单位'
+            for detail in income_classification['legitimate_details']
+        )
 
     def test_generate_profile_supports_wan_unit_columns_and_invalid_dates(self):
         """万元列头和脏日期不应导致画像流程崩溃"""

@@ -51,6 +51,7 @@ const defaultAnalysis: AnalysisState = {
     currentPhase: '',
     lastRunTime: null,
     status: 'idle',
+    backendConnection: 'unknown',
     isLoading: false, // 数据加载状态
 };
 
@@ -356,6 +357,7 @@ export function AppProvider({ children }: AppProviderProps) {
                 ? prev.lastRunTime
                 : (options.lastRunTime ?? prev.lastRunTime),
             status: 'completed',
+            backendConnection: 'online',
             isLoading: false,
         }));
     }, [buildSafeDataState]);
@@ -382,6 +384,43 @@ export function AppProvider({ children }: AppProviderProps) {
         }
         return false;
     }, []);
+
+    const finalizeCompletedAnalysis = useCallback(async (
+        options: { currentPhase: string; preserveLastRunTime?: boolean; endTime?: string | null }
+    ) => {
+        try {
+            const result = await api.getResults();
+            if (!result.data) {
+                throw new Error('分析结果为空');
+            }
+
+            const backendData = result.data as any;
+            applyCompletedData(backendData, {
+                currentPhase: options.currentPhase,
+                preserveLastRunTime: options.preserveLastRunTime,
+                lastRunTime: options.endTime ? new Date(options.endTime) : null,
+            });
+            const restoredLogs = await restoreHistoricalLogs();
+            if (!restoredLogs) {
+                const now = new Date();
+                const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+                addLog({ time: timeStr, level: 'INFO', msg: '✓ 分析完成，数据已加载' });
+            }
+        } catch (error) {
+            console.error('获取分析结果失败:', error);
+            const errorMsg = error instanceof Error ? error.message : '未知错误';
+            const now = new Date();
+            const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+            addLog({ time: timeStr, level: 'ERROR', msg: `获取结果失败: ${errorMsg}` });
+            setAnalysis(prev => ({
+                ...prev,
+                isRunning: false,
+                status: 'failed',
+                backendConnection: 'offline',
+                currentPhase: `获取结果失败: ${errorMsg}`,
+            }));
+        }
+    }, [addLog, applyCompletedData, restoreHistoricalLogs]);
 
     const initializeFromBackend = useCallback(async () => {
         const now = new Date();
@@ -419,6 +458,7 @@ export function AppProvider({ children }: AppProviderProps) {
                     currentPhase: phaseText,
                     lastRunTime: status.startTime ? new Date(status.startTime) : null,
                     status: 'running',
+                    backendConnection: 'online',
                     isLoading: false,
                 });
                 ws.connect();
@@ -430,6 +470,7 @@ export function AppProvider({ children }: AppProviderProps) {
                 ...prev,
                 status: status.status as AnalysisState['status'],
                 currentPhase: phaseText || '等待开始分析',
+                backendConnection: 'online',
                 isLoading: false,
             }));
             ws.connect();
@@ -437,7 +478,7 @@ export function AppProvider({ children }: AppProviderProps) {
         } catch (error) {
             const errorMsg = error instanceof Error ? error.message : '未知错误';
             console.error('初始化失败:', error);
-            setAnalysis(prev => ({ ...prev, isLoading: false }));
+            setAnalysis(prev => ({ ...prev, isLoading: false, backendConnection: 'offline' }));
             addLog({ time: new Date().toLocaleTimeString(), level: 'WARN', msg: `后端连接失败: ${errorMsg}，请确保后端服务已启动` });
         }
     }, [addLog, applyCompletedData, restoreHistoricalLogs]);
@@ -511,6 +552,7 @@ export function AppProvider({ children }: AppProviderProps) {
                 currentPhase: '初始化分析引擎...',
                 lastRunTime: now,
                 status: 'running',
+                backendConnection: 'online',
                 isLoading: false,
             });
             completeHandledRef.current = false;
@@ -528,6 +570,7 @@ export function AppProvider({ children }: AppProviderProps) {
                 isRunning: false,
                 status: 'failed',
                 currentPhase: `启动失败: ${errorMsg}`,
+                backendConnection: 'offline',
                 isLoading: false,
             }));
         }
@@ -548,6 +591,7 @@ export function AppProvider({ children }: AppProviderProps) {
                     progress: status.progress,
                     currentPhase: phaseText,
                     status: status.status as AnalysisState['status'],
+                    backendConnection: 'online',
                 }));
             } else if (message.type === 'complete') {
                 if (completeHandledRef.current) {
@@ -560,39 +604,15 @@ export function AppProvider({ children }: AppProviderProps) {
                     isRunning: false,
                     progress: 100,
                     status: 'completed',
+                    backendConnection: 'online',
                     currentPhase: '分析完成，正在加载数据...',
                 }));
 
                 // 添加短暂延迟确保后端数据保存完成，然后获取结果
                 setTimeout(() => {
-                    api.getResults().then(async result => {
-                        if (result.data) {
-                            const backendData = result.data as any;
-                            applyCompletedData(backendData, {
-                                currentPhase: '分析完成',
-                                preserveLastRunTime: true,
-                            });
-                            const restoredLogs = await restoreHistoricalLogs();
-                            if (!restoredLogs) {
-                                const now = new Date();
-                                const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-                                addLog({ time: timeStr, level: 'INFO', msg: '✓ 分析完成，数据已加载' });
-                            }
-                        }
-                    }).catch(error => {
-                        console.error('获取分析结果失败:', error);
-                        const errorMsg = error instanceof Error ? error.message : '未知错误';
-                        const now = new Date();
-                        const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-                        addLog({ time: timeStr, level: 'ERROR', msg: `获取结果失败: ${errorMsg}` });
-
-                        // 更新状态为失败
-                        setAnalysis(prev => ({
-                            ...prev,
-                            isRunning: false,
-                            status: 'failed',
-                            currentPhase: `获取结果失败: ${errorMsg}`
-                        }));
+                    void finalizeCompletedAnalysis({
+                        currentPhase: '分析完成',
+                        preserveLastRunTime: true,
                     });
                 }, 500); // 500ms 延迟确保后端数据保存完成
             }
@@ -602,7 +622,67 @@ export function AppProvider({ children }: AppProviderProps) {
             unsubscribe();
             ws.disconnect();
         };
-    }, [addLog, applyCompletedData, restoreHistoricalLogs]);
+    }, [addLog, finalizeCompletedAnalysis]);
+
+    useEffect(() => {
+        if (!analysis.isRunning) {
+            return;
+        }
+
+        let cancelled = false;
+
+        const pollStatus = async () => {
+            try {
+                const status = await api.getStatus();
+                if (cancelled) {
+                    return;
+                }
+
+                const phaseText = (status as any).currentPhase ?? (status as any).phase ?? '';
+                setAnalysis(prev => ({
+                    ...prev,
+                    isRunning: status.status === 'running',
+                    progress: status.status === 'completed' ? 100 : status.progress,
+                    currentPhase: phaseText || prev.currentPhase,
+                    status: status.status as AnalysisState['status'],
+                    backendConnection: 'online',
+                }));
+
+                if (status.status === 'completed' && !completeHandledRef.current) {
+                    completeHandledRef.current = true;
+                    setAnalysis(prev => ({
+                        ...prev,
+                        isRunning: false,
+                        progress: 100,
+                        status: 'completed',
+                        backendConnection: 'online',
+                        currentPhase: '分析完成，正在加载数据...',
+                    }));
+                    await finalizeCompletedAnalysis({
+                        currentPhase: '分析完成',
+                        preserveLastRunTime: true,
+                        endTime: status.endTime,
+                    });
+                }
+            } catch (error) {
+                if (cancelled) {
+                    return;
+                }
+                console.warn('轮询分析状态失败:', error);
+                setAnalysis(prev => ({ ...prev, backendConnection: 'offline' }));
+            }
+        };
+
+        void pollStatus();
+        const timer = window.setInterval(() => {
+            void pollStatus();
+        }, 3000);
+
+        return () => {
+            cancelled = true;
+            window.clearInterval(timer);
+        };
+    }, [analysis.isRunning, finalizeCompletedAnalysis]);
 
     const stopAnalysis = useCallback(async () => {
         const now = new Date();
@@ -622,9 +702,11 @@ export function AppProvider({ children }: AppProviderProps) {
                 ...prev,
                 isRunning: isStopping,
                 status: (isStopping ? 'running' : 'idle') as AnalysisState['status'],
+                backendConnection: 'online',
                 currentPhase: isStopping ? '正在停止分析...' : '已就绪，可重新开始',
             }));
         } catch (error) {
+            setAnalysis(prev => ({ ...prev, backendConnection: 'offline' }));
             addLog({ time: timeStr, level: 'WARN', msg: '■ 停止请求失败，后端可能已停止或不可达' });
         }
     }, [addLog]);
@@ -665,6 +747,7 @@ export function AppProvider({ children }: AppProviderProps) {
                     currentPhase: '缓存已清除，等待开始分析',
                     lastRunTime: null,
                     status: 'idle',
+                    backendConnection: 'online',
                     isLoading: false,
                 });
                 
@@ -695,6 +778,9 @@ export function AppProvider({ children }: AppProviderProps) {
      */
     useEffect(() => {
         let disposed = false;
+        const bootstrapTimer = window.setTimeout(() => {
+            void bootstrap();
+        }, 0);
 
         const bootstrap = async () => {
             try {
@@ -756,10 +842,9 @@ export function AppProvider({ children }: AppProviderProps) {
             }
         };
 
-        void bootstrap();
-
         return () => {
             disposed = true;
+            window.clearTimeout(bootstrapTimer);
         };
     }, [addLog, initializeFromBackend]); // 只在组件挂载时执行一次
 

@@ -12,6 +12,9 @@
 {% set wallet_available = report.meta.wallet_data_available if report.meta else false %}
 {% set semantic = report.report_package if report.report_package else {} %}
 {% set coverage = semantic.coverage if semantic and semantic.coverage else {} %}
+{% set main_report_view = semantic.main_report_view if semantic and semantic.main_report_view else {} %}
+{% set semantic_conclusion = report.get('_semantic_conclusion', {}) %}
+{% set semantic_summary = main_report_view.summary_narrative if main_report_view and main_report_view.summary_narrative else (semantic_conclusion.get('summary_narrative', '') if semantic_conclusion else '') %}
 {% set priority_board = semantic.priority_board if semantic and semantic.priority_board else [] %}
 {% set appendix_views = semantic.appendix_views if semantic and semantic.appendix_views else {} %}
 {% set appendix_index = appendix_views['appendix_index'] if appendix_views and appendix_views['appendix_index'] else {} %}
@@ -51,7 +54,7 @@
         <li>已补充第三方支付明细摘要: 支付宝{{ wallet_summary.alipayTransactionCount or 0 }}笔、财付通{{ wallet_summary.tenpayTransactionCount or 0 }}笔、微信登录轨迹{{ wallet_summary.loginEventCount or 0 }}条</li>
         {% endif %}
         {% if coverage.available_external_sources %}
-        <li>统一语义层已接入来源: {{ coverage.available_external_sources | join('、') }}</li>
+        <li>统一语义层已接入来源: {{ coverage.available_external_sources | format_external_source_list }}</li>
         {% endif %}
     </ul>
     
@@ -65,10 +68,17 @@
         {% endif %}
         <li><strong style="color: #ffc107;">配偶资产</strong>: 建议调取配偶银行流水及资产信息</li>
         {% if coverage.missing_sources %}
-        <li><strong style="color: #ffc107;">仍缺数据源</strong>: {{ coverage.missing_sources | join('、') }}</li>
+        <li><strong style="color: #ffc107;">仍缺数据源</strong>: {{ coverage.missing_sources | format_external_source_list }}</li>
         {% endif %}
     </ul>
 </div>
+
+{% if semantic_summary %}
+<div style="background: #eef4ff; border-left: 4px solid #1d39c4; padding: 15px; margin: 20px 0; border-radius: 4px;">
+    <h3 style="margin-top: 0; color: #1d39c4;">正式报告综合研判</h3>
+    <p style="margin: 0; line-height: 1.8;">{{ semantic_summary }}</p>
+</div>
+{% endif %}
 
 {% if priority_board %}
 <div style="background: #fff7e6; border-left: 4px solid #d48806; padding: 15px; margin: 20px 0; border-radius: 4px;">
@@ -76,7 +86,7 @@
     <ol style="margin: 0; padding-left: 20px; line-height: 1.8;">
         {% for item in priority_board[:5] %}
         <li>
-            {{ item.entity_name }}{% if item.risk_level %}（{{ item.risk_level }}）{% endif %}
+            {{ item.entity_name }}{% if item.risk_level %}（{{ item.risk_level | format_risk_label }}）{% endif %}
             {% if item.top_reasons %}：{{ item.top_reasons | join('；') }}{% endif %}
         </li>
         {% endfor %}

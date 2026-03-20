@@ -147,25 +147,25 @@ function KPICard({
                 </div>
             </div>
 
-            {/* Value */}
-            <div className="relative z-10">
-                <div className="flex items-baseline gap-2">
-                    <h3 className={`text-2xl lg:text-3xl font-bold theme-text tracking-tight ${isStatus ? '' : ''}`}>
-                        {value}
-                    </h3>
-                    {isStatus && (
-                        <span className="relative flex h-2.5 w-2.5">
-                            <span className={`
+                {/* Value */}
+                <div className="relative z-10">
+                    <div className="flex items-baseline gap-2">
+                        <div className={`text-2xl lg:text-3xl font-bold theme-text tracking-tight ${isStatus ? '' : ''}`}>
+                            {value}
+                        </div>
+                        {isStatus && (
+                            <span className="relative flex h-2.5 w-2.5">
+                                <span className={`
                 animate-ping absolute inline-flex h-full w-full rounded-full opacity-75
                 ${trend === 'up' ? 'bg-green-400' : 'theme-bg-muted'}
               `} />
-                            <span className={`
+                                <span className={`
                 relative inline-flex rounded-full h-2.5 w-2.5
                 ${trend === 'up' ? 'bg-green-500' : 'theme-bg-subtle'}
               `} />
-                        </span>
-                    )}
-                </div>
+                            </span>
+                        )}
+                    </div>
                 <p className="text-sm theme-text-muted mt-1">{label}</p>
                 <p className="text-xs theme-text-dim mt-0.5">{subLabel}</p>
             </div>
