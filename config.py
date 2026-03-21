@@ -437,7 +437,7 @@ BANK_FIELD_MAPPING: Dict[str, List[str]] = {
     'transaction_amount': ['交易金额', '发生额', '金额'],
     'debit_credit_flag': ['借贷标志', '借贷', '收支标志'],
     'balance': ['交易余额', '余额', '账户余额', '当前余额'],
-    'counterparty_name': ['交易对方名称', '对方账户名称', '对手方', '交易对方'],
+    'counterparty_name': ['交易对手', '交易对方名称', '对方账户名称', '对手方', '交易对方', '对方名称'],
     'counterparty_account': ['交易对方账号', '对方账号', '对方账户'],
     'summary': ['交易摘要', '摘要', '用途', '附言'],
     'cash_flag': ['现金标志', '现金'],

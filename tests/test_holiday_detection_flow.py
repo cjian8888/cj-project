@@ -15,7 +15,8 @@ import config
 from holiday_service import HolidayService
 from api_server import serialize_suspicions
 from risk_scoring import RISK_SCORE_WEIGHTS, score_transaction
-from suspicion_detector import run_all_detections
+from suspicion_detector import run_all_detections, detect_holiday_transactions
+from detectors.time_anomaly_detector import TimeAnomalyDetector
 
 
 def test_run_all_detections_covers_before_during_after_holiday_window():
@@ -54,6 +55,98 @@ def test_run_all_detections_covers_before_during_after_holiday_window():
     assert len(records) == 3
     assert {item["holiday_period"] for item in records} == {"before", "during", "after"}
     assert {item["holiday_name"] for item in records} == {"春节"}
+
+
+def test_time_anomaly_holiday_aggregation_matches_legacy_holiday_semantics(monkeypatch):
+    holiday_window = {
+        date(2024, 2, 7): ("春节", "before"),
+        date(2024, 2, 10): ("春节", "during"),
+        date(2024, 2, 20): ("春节", "after"),
+    }
+
+    monkeypatch.setattr(
+        "suspicion_detector.build_holiday_window",
+        lambda start, end, days_before=3, days_after=2: holiday_window,
+    )
+    monkeypatch.setattr(
+        "detectors.time_anomaly_detector.build_holiday_window",
+        lambda start, end, days_before=3, days_after=2: holiday_window,
+    )
+
+    cleaned_data = {
+        "张三": pd.DataFrame(
+            [
+                {
+                    "date": "2024-02-07 09:00:00",
+                    "income": 60000.0,
+                    "expense": 0.0,
+                    "counterparty": "甲方",
+                    "description": "节前收入",
+                    "source_row_index": 11,
+                    "transaction_id": "P-BEFORE",
+                },
+                {
+                    "date": "2024-02-10 11:30:00",
+                    "income": 0.0,
+                    "expense": 80000.0,
+                    "counterparty": "乙方",
+                    "description": "节中支出",
+                    "source_row_index": 12,
+                    "transaction_id": "P-DURING",
+                },
+                {
+                    "date": "2024-02-20 09:15:00",
+                    "income": 0.0,
+                    "expense": 90000.0,
+                    "counterparty": "丙方",
+                    "description": "节后支出",
+                    "source_row_index": 13,
+                    "transaction_id": "P-AFTER",
+                },
+            ]
+        ),
+        "李四": pd.DataFrame(
+            [
+                {
+                    "date": "2024-02-08 08:00:00",
+                    "income": 90000.0,
+                    "expense": 0.0,
+                    "counterparty": "丁方",
+                    "description": "普通交易",
+                    "source_row_index": 21,
+                    "transaction_id": "L-NORMAL",
+                }
+            ]
+        ),
+    }
+
+    legacy = detect_holiday_transactions(cleaned_data)
+    engine = TimeAnomalyDetector().detect(
+        {"cleaned_data": cleaned_data},
+        {"weekend_detection_enabled": False, "min_amount": 50000, "holiday_threshold": 50000},
+    )
+
+    holiday_results = {
+        item["entity_name"]: item
+        for item in engine
+        if "节假日敏感窗口" in item.get("description", "")
+    }
+
+    assert set(holiday_results) == {"张三"}
+    assert "李四" not in legacy
+
+    legacy_records = legacy["张三"]
+    legacy_amount = sum(item["amount"] for item in legacy_records)
+    legacy_periods = {item["holiday_period"] for item in legacy_records}
+    legacy_names = {item["holiday_name"] for item in legacy_records}
+
+    engine_record = holiday_results["张三"]
+    assert engine_record["amount"] == legacy_amount
+    assert len(engine_record["related_transactions"]) == len(legacy_records)
+    assert legacy_names == {"春节"}
+    assert legacy_periods == {"before", "during", "after"}
+    assert "节日: 春节" in engine_record["evidence"]
+    assert "时段: 节前、节中、节后" in engine_record["evidence"]
 
 
 def test_serialize_suspicions_converts_holiday_transaction_fields():

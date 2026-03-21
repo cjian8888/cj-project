@@ -665,7 +665,7 @@ def run_all_detections(
     # 检测核心人员与涉案公司之间的直接资金往来
     for person in all_persons:
         for company in all_companies:
-            if person in cleaned_data and company in cleaned_data:
+            if person in cleaned_data:
                 # 个人账户视角
                 df_person = cleaned_data[person]
                 counterparty_col = (
@@ -713,6 +713,7 @@ def run_all_detections(
                             seen_direct_transfers[dedupe_key] = record
                             direct_transfer_roles[dedupe_key] = "person"
 
+            if company in cleaned_data:
                 # 公司账户视角
                 df_company = cleaned_data[company]
                 company_counterparty_col = (

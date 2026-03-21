@@ -17,8 +17,37 @@
 """
 
 import os
+import re
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+
+
+def _is_windows_style_path(value: str) -> bool:
+    return bool(re.match(r"^[A-Za-z]:[\\/]", str(value or "")))
+
+
+def _runtime_path(value: str) -> Path:
+    """
+    规范化运行时注入的路径字符串。
+
+    说明：
+    - 实际打包运行时，Windows 会给出类似 `D:\\bundle\\fpas.exe`
+    - 在 Unix 测试环境中直接交给 Path 解析会把整个字符串当文件名，导致 `.parent == '.'`
+    """
+    text = str(value or "")
+    if _is_windows_style_path(text):
+        return Path(str(PureWindowsPath(text)))
+    return Path(text)
+
+
+def _join_runtime_path(base: Path, *parts: str) -> Path:
+    base_text = str(base)
+    if _is_windows_style_path(base_text):
+        return Path(str(PureWindowsPath(base_text, *parts)))
+    current = base
+    for part in parts:
+        current = current / part
+    return current
 
 
 def get_app_root() -> Path:
@@ -33,7 +62,10 @@ def get_app_root() -> Path:
     """
     if getattr(sys, "frozen", False):
         # PyInstaller 打包后，sys.executable 是 exe 路径
-        return Path(sys.executable).parent.resolve()
+        executable = str(getattr(sys, "executable", "") or "")
+        if _is_windows_style_path(executable):
+            return Path(str(PureWindowsPath(executable).parent))
+        return Path(executable).parent
     else:
         # 开发环境，返回 paths.py 所在目录
         return Path(__file__).parent.resolve()
@@ -49,7 +81,7 @@ def get_resource_root() -> Path:
     if getattr(sys, "frozen", False):
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
-            return Path(meipass).resolve()
+            return _runtime_path(meipass)
     return get_app_root()
 
 
@@ -60,7 +92,7 @@ def get_data_dir() -> Path:
     Returns:
         Path: data 目录路径
     """
-    return get_app_root() / "data"
+    return _join_runtime_path(get_app_root(), "data")
 
 
 def get_output_dir() -> Path:
@@ -70,7 +102,7 @@ def get_output_dir() -> Path:
     Returns:
         Path: output 目录路径
     """
-    return get_app_root() / "output"
+    return _join_runtime_path(get_app_root(), "output")
 
 
 def get_config_dir() -> Path:
@@ -80,7 +112,7 @@ def get_config_dir() -> Path:
     Returns:
         Path: config 目录路径
     """
-    return get_resource_root() / "config"
+    return _join_runtime_path(get_resource_root(), "config")
 
 
 def get_cache_path() -> Path:
@@ -100,7 +132,7 @@ def get_templates_dir() -> Path:
     Returns:
         Path: templates 目录路径
     """
-    return get_resource_root() / "templates"
+    return _join_runtime_path(get_resource_root(), "templates")
 
 
 def get_knowledge_dir() -> Path:
@@ -110,7 +142,7 @@ def get_knowledge_dir() -> Path:
     Returns:
         Path: knowledge 目录路径
     """
-    return get_resource_root() / "knowledge"
+    return _join_runtime_path(get_resource_root(), "knowledge")
 
 
 def get_dashboard_dist_dir() -> Path:
@@ -120,7 +152,7 @@ def get_dashboard_dist_dir() -> Path:
     Returns:
         Path: dashboard/dist 目录路径
     """
-    return get_resource_root() / "dashboard" / "dist"
+    return _join_runtime_path(get_resource_root(), "dashboard", "dist")
 
 
 def resolve_path(path_str: str, base_dir: Path = None) -> Path:

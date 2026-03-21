@@ -343,6 +343,7 @@ class CacheManager:
             "dataFlow": "external_data_first",
             # 【修复】添加身份证号到人名的映射
             "id_to_name_map": id_to_name_map or {},
+            "runtimeLogPaths": results.get("runtimeLogPaths", {}),
         }
         self.save_metadata(metadata)
 
@@ -369,6 +370,11 @@ class CacheManager:
             self.logger.warning("[缓存加载] profiles 加载失败")
             return None
             
+        wallet_data = self.load_cache("walletData")
+        external_p0 = self.load_cache("external_p0")
+        external_p1 = self.load_cache("external_p1")
+        external_p2 = self.load_cache("external_p2")
+
         results = {
             "profiles": profiles,
             "_profiles_raw": None,  # 不再使用
@@ -393,10 +399,17 @@ class CacheManager:
             "flightData": self.load_cache("flightData"),
             "coaddressData": self.load_cache("coaddressData"),
             "coviolationData": self.load_cache("coviolationData"),
-            "walletData": self.load_cache("walletData"),
-            "external_p0": self.load_cache("external_p0"),
-            "external_p1": self.load_cache("external_p1"),
-            "external_p2": self.load_cache("external_p2"),
+            "walletData": wallet_data,
+            "external_p0": external_p0,
+            "external_p1": external_p1,
+            "external_p2": external_p2,
+            "externalData": {
+                "p0": external_p0 or {},
+                "p1": external_p1 or {},
+                "p2": external_p2 or {},
+                "wallet": wallet_data or {},
+            },
+            "runtimeLogPaths": metadata.get("runtimeLogPaths", {}),
         }
         # 检查必需缓存（profiles_full 不再是必需的）
         required_caches = ["profiles", "suspicions", "analysisResults", "graphData"]

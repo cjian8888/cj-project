@@ -218,7 +218,7 @@ class FixedFrequencyDetector(BaseDetector):
             interval_type = pattern["interval_type"]
             tx_type = pattern["tx_type"]
 
-            if tx_type == "收入":
+            if tx_type in {"收入", "income"}:
                 description = (
                     f"发现规律性收入模式：与{counterparty}存在{interval_type}固定金额"
                     f"收入 {occurrences} 次，每次金额约 {amount:,.2f} 元"

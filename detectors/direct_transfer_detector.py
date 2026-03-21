@@ -182,93 +182,92 @@ class DirectTransferDetector(BaseDetector):
         # 检测核心人员与涉案公司之间的直接资金往来
         for person in all_persons:
             for company in all_companies:
-                if person not in cleaned_data or company not in cleaned_data:
-                    continue
-
                 # 个人账户视角
-                df_person = cleaned_data[person]
-                for _, row in self._iter_matches(df_person, company):
-                    record = self._build_result(
-                        person,
-                        company,
-                        row,
-                        "person",
-                        income_high_risk_min,
-                        suspicion_medium_high_amount,
-                    )
-                    if not record:
-                        continue
-                    dedupe_key = build_direct_transfer_dedupe_key(
-                        person,
-                        company,
-                        record["direction"],
-                        record["amount"],
-                        self._safe_text(record.get("date")),
-                        record["description"],
-                        record.get("bank", ""),
-                    )
-                    existing = results_by_key.get(dedupe_key)
-                    if existing is None:
-                        results_by_key[dedupe_key] = record
-                        record_roles[dedupe_key] = "person"
-                        ordered_keys.append(dedupe_key)
-                        continue
+                if person in cleaned_data:
+                    df_person = cleaned_data[person]
+                    for _, row in self._iter_matches(df_person, company):
+                        record = self._build_result(
+                            person,
+                            company,
+                            row,
+                            "person",
+                            income_high_risk_min,
+                            suspicion_medium_high_amount,
+                        )
+                        if not record:
+                            continue
+                        dedupe_key = build_direct_transfer_dedupe_key(
+                            person,
+                            company,
+                            record["direction"],
+                            record["amount"],
+                            self._safe_text(record.get("date")),
+                            record["description"],
+                            record.get("bank", ""),
+                        )
+                        existing = results_by_key.get(dedupe_key)
+                        if existing is None:
+                            results_by_key[dedupe_key] = record
+                            record_roles[dedupe_key] = "person"
+                            ordered_keys.append(dedupe_key)
+                            continue
 
-                    if score_direct_transfer_record(
-                        record,
-                        person=person,
-                        company=company,
-                        account_role="person",
-                    ) > score_direct_transfer_record(
-                        existing,
-                        person=person,
-                        company=company,
-                        account_role=record_roles.get(dedupe_key, ""),
-                    ):
-                        results_by_key[dedupe_key] = record
-                        record_roles[dedupe_key] = "person"
+                        if score_direct_transfer_record(
+                            record,
+                            person=person,
+                            company=company,
+                            account_role="person",
+                        ) > score_direct_transfer_record(
+                            existing,
+                            person=person,
+                            company=company,
+                            account_role=record_roles.get(dedupe_key, ""),
+                        ):
+                            results_by_key[dedupe_key] = record
+                            record_roles[dedupe_key] = "person"
 
                 # 公司账户视角
-                df_company = cleaned_data[company]
-                for _, row in self._iter_matches(df_company, person):
-                    record = self._build_result(
-                        person,
-                        company,
-                        row,
-                        "company",
-                        income_high_risk_min,
-                        suspicion_medium_high_amount,
-                    )
-                    if not record:
-                        continue
-                    dedupe_key = build_direct_transfer_dedupe_key(
-                        person,
-                        company,
-                        record["direction"],
-                        record["amount"],
-                        self._safe_text(record.get("date")),
-                        record["description"],
-                        record.get("bank", ""),
-                    )
-                    existing = results_by_key.get(dedupe_key)
-                    if existing is None:
-                        results_by_key[dedupe_key] = record
-                        record_roles[dedupe_key] = "company"
-                        ordered_keys.append(dedupe_key)
-                        continue
+                if company in cleaned_data:
+                    df_company = cleaned_data[company]
+                    for _, row in self._iter_matches(df_company, person):
+                        record = self._build_result(
+                            person,
+                            company,
+                            row,
+                            "company",
+                            income_high_risk_min,
+                            suspicion_medium_high_amount,
+                        )
+                        if not record:
+                            continue
+                        dedupe_key = build_direct_transfer_dedupe_key(
+                            person,
+                            company,
+                            record["direction"],
+                            record["amount"],
+                            self._safe_text(record.get("date")),
+                            record["description"],
+                            record.get("bank", ""),
+                        )
+                        existing = results_by_key.get(dedupe_key)
+                        if existing is None:
+                            results_by_key[dedupe_key] = record
+                            record_roles[dedupe_key] = "company"
+                            ordered_keys.append(dedupe_key)
+                            continue
 
-                    if score_direct_transfer_record(
-                        record,
-                        person=person,
-                        company=company,
-                        account_role="company",
-                    ) > score_direct_transfer_record(
-                        existing,
-                        person=person,
-                        company=company,
-                        account_role=record_roles.get(dedupe_key, ""),
-                    ):
-                        results_by_key[dedupe_key] = record
-                        record_roles[dedupe_key] = "company"
+                        if score_direct_transfer_record(
+                            record,
+                            person=person,
+                            company=company,
+                            account_role="company",
+                        ) > score_direct_transfer_record(
+                            existing,
+                            person=person,
+                            company=company,
+                            account_role=record_roles.get(dedupe_key, ""),
+                        ):
+                            results_by_key[dedupe_key] = record
+                            record_roles[dedupe_key] = "company"
 
         return [results_by_key[key] for key in ordered_keys]

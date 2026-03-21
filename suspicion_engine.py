@@ -10,7 +10,10 @@ from glob import glob
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Type
 
+import pandas as pd
+
 from detectors.base_detector import BaseDetector
+import utils
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -25,7 +28,14 @@ class SuspicionEngine:
     Attributes:
         detectors: 已注册的检测器实例字典，key为检测器name，value为实例
     """
-    
+    _TRANSACTION_ONLY_DETECTORS = {
+        "round_amount",
+        "fixed_amount",
+        "fixed_frequency",
+        "frequency_anomaly",
+        "suspicious_pattern",
+    }
+
     def __init__(self, detectors_dir: Optional[str] = None):
         """初始化引擎并自动注册检测器。"""
         self.detectors: Dict[str, BaseDetector] = {}
@@ -114,6 +124,131 @@ class SuspicionEngine:
 
         return True, ""
 
+    @staticmethod
+    def _pick_column(frame_or_row: Any, *candidates: str) -> str:
+        available = (
+            frame_or_row.columns
+            if hasattr(frame_or_row, "columns")
+            else getattr(frame_or_row, "index", [])
+        )
+        for column in candidates:
+            if column in available:
+                return column
+        return ""
+
+    @staticmethod
+    def _safe_text(value: Any) -> str:
+        try:
+            if pd.isna(value):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        if value is None:
+            return ""
+        text = str(value).strip()
+        return "" if text.lower() in {"nan", "none", "null"} else text
+
+    def _extract_signed_amount_and_type(self, row: Any) -> tuple[float, str]:
+        income_col = self._pick_column(row, "income", "收入(元)")
+        expense_col = self._pick_column(row, "expense", "支出(元)")
+        amount_col = self._pick_column(row, "amount", "交易金额")
+
+        income = utils.format_amount(row.get(income_col, 0)) if income_col else 0.0
+        expense = utils.format_amount(row.get(expense_col, 0)) if expense_col else 0.0
+
+        if income > 0 and income >= expense:
+            return income, "收入"
+        if expense > 0:
+            return -expense, "支出"
+
+        amount = utils.format_amount(row.get(amount_col, 0)) if amount_col else 0.0
+        if amount > 0:
+            return amount, "收入"
+        if amount < 0:
+            return amount, "支出"
+        return 0.0, ""
+
+    def _build_transactions_from_dataframe(self, df: Any) -> List[Dict[str, Any]]:
+        if df is None or not hasattr(df, "iterrows") or getattr(df, "empty", True):
+            return []
+
+        date_col = self._pick_column(df, "date", "交易时间", "交易日期", "日期")
+        if not date_col:
+            return []
+
+        counterparty_col = self._pick_column(df, "counterparty", "交易对手", "对手方")
+        description_col = self._pick_column(df, "description", "交易摘要", "摘要")
+        account_col = self._pick_column(df, "account", "account_number", "本方账号", "账号")
+        bank_col = self._pick_column(df, "bank", "银行来源", "所属银行")
+        tx_id_col = self._pick_column(df, "transaction_id", "流水号")
+        source_col = self._pick_column(df, "source_file", "数据来源")
+        channel_col = self._pick_column(df, "transaction_channel", "交易渠道")
+
+        transactions: List[Dict[str, Any]] = []
+        for _, row in df.iterrows():
+            tx_date = row.get(date_col)
+            try:
+                if pd.isna(tx_date):
+                    continue
+            except (TypeError, ValueError):
+                pass
+
+            amount, tx_type = self._extract_signed_amount_and_type(row)
+            if amount == 0 or not tx_type:
+                continue
+
+            transactions.append(
+                {
+                    "tx_date": tx_date,
+                    "amount": amount,
+                    "tx_type": tx_type,
+                    "counterparty": self._safe_text(
+                        row.get(counterparty_col, "") if counterparty_col else ""
+                    ),
+                    "description": self._safe_text(
+                        row.get(description_col, "") if description_col else ""
+                    ),
+                    "account": self._safe_text(
+                        row.get(account_col, "") if account_col else ""
+                    ),
+                    "bank": self._safe_text(row.get(bank_col, "") if bank_col else ""),
+                    "transaction_id": self._safe_text(
+                        row.get(tx_id_col, "") if tx_id_col else ""
+                    ),
+                    "transaction_channel": self._safe_text(
+                        row.get(channel_col, "") if channel_col else ""
+                    ),
+                    "source_file": self._safe_text(
+                        row.get(source_col, "") if source_col else ""
+                    ),
+                }
+            )
+
+        return transactions
+
+    def _build_detector_inputs(
+        self, detector_name: str, data: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        if detector_name not in self._TRANSACTION_ONLY_DETECTORS:
+            return [data]
+
+        cleaned_data = data.get("cleaned_data", {})
+        if not isinstance(cleaned_data, dict) or not cleaned_data:
+            return [data]
+
+        detector_inputs: List[Dict[str, Any]] = []
+        for entity_name, df in cleaned_data.items():
+            transactions = self._build_transactions_from_dataframe(df)
+            if not transactions:
+                continue
+            detector_inputs.append(
+                {
+                    "transactions": transactions,
+                    "entity_name": entity_name,
+                }
+            )
+        return detector_inputs or [data]
+
     def run_all(self, data: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
         """运行所有启用的检测器。
 
@@ -141,7 +276,11 @@ class SuspicionEngine:
 
         for name, detector in enabled_detectors:
             try:
-                suspicions = detector.detect(data, config)
+                suspicions: List[Dict[str, Any]] = []
+                for detector_input in self._build_detector_inputs(name, data):
+                    partial = detector.detect(detector_input, config)
+                    if partial:
+                        suspicions.extend(partial)
                 if suspicions:
                     results[name] = suspicions
                     logger.debug(f"检测器 '{name}' 发现 {len(suspicions)} 个疑点")
@@ -177,7 +316,11 @@ class SuspicionEngine:
             return []
 
         try:
-            result = detector.detect(data, config)
+            result: List[Dict[str, Any]] = []
+            for detector_input in self._build_detector_inputs(name, data):
+                partial = detector.detect(detector_input, config)
+                if partial:
+                    result.extend(partial)
             logger.debug(f"检测器 '{name}' 执行完成，发现 {len(result) if result else 0} 个疑点")
             return result if result else []
         except Exception as e:

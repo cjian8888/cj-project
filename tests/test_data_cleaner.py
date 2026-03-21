@@ -103,6 +103,56 @@ class TestDeduplicateTransactions:
         assert len(result) == 2
         assert stats['duplicates'] == 0
 
+    def test_deduplicate_same_prefix_but_different_balance_not_removed(self):
+        """同金额同前缀摘要但余额不同时不应误删"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01 10:00:00', '2024-01-01 10:00:01']),
+            'income': [5000, 5000],
+            'expense': [0, 0],
+            'counterparty': ['代发平台', '代发平台'],
+            'description': ['batch-pay-0001-A', 'batch-pay-0001-B'],
+            'balance': [120000, 115000],
+            'account_number': ['6222000011112222', '6222000011112222'],
+            'transaction_channel': ['网银', '网银'],
+            'source_file': ['工资批次.xlsx', '工资批次.xlsx'],
+        })
+        result, stats = deduplicate_transactions(df)
+        assert len(result) == 2
+        assert stats['duplicates'] == 0
+
+    def test_deduplicate_same_amount_same_summary_but_different_account_not_removed(self):
+        """同金额同摘要但账号不同不应误删"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01 10:00:00', '2024-01-01 10:00:01']),
+            'income': [2000, 2000],
+            'expense': [0, 0],
+            'counterparty': ['某公司', '某公司'],
+            'description': ['工资发放', '工资发放'],
+            'account_number': ['6222000011112222', '6222000011113333'],
+            'transaction_channel': ['手机银行', '手机银行'],
+            'source_file': ['工资批次.xlsx', '工资批次.xlsx'],
+        })
+        result, stats = deduplicate_transactions(df)
+        assert len(result) == 2
+        assert stats['duplicates'] == 0
+
+    def test_deduplicate_uses_strong_signals_when_counterparty_missing(self):
+        """对手方缺失时可借助强特征确认重复"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01 10:00:00', '2024-01-01 10:00:01']),
+            'income': [3000, 3000],
+            'expense': [0, 0],
+            'counterparty': ['', ''],
+            'description': ['批量代发', '批量代发'],
+            'balance': [98000, 98000],
+            'account_number': ['6222000011112222', '6222000011112222'],
+            'transaction_channel': ['网银', '网银'],
+            'source_file': ['工资批次.xlsx', '工资批次.xlsx'],
+        })
+        result, stats = deduplicate_transactions(df)
+        assert len(result) == 1
+        assert stats['duplicates'] == 1
+
 
 class TestValidateDataQuality:
     """测试数据质量验证函数"""
@@ -175,6 +225,48 @@ class TestValidateDataQuality:
         })
         result, report = validate_data_quality(df)
         assert '缺少摘要' in str(report['warnings'])
+
+    def test_validate_abnormal_empty_description_alert(self):
+        """摘要大面积缺失时应给出更强审计提示"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03', '2024-01-04']),
+            'income': [1000, 2000, 3000, 4000],
+            'expense': [0, 0, 0, 0],
+            'description': ['', '', '', '工资']
+        })
+        result, report = validate_data_quality(df)
+        assert '异常空摘要' in str(report['warnings'])
+        assert report['audit_alerts']['empty_description']['count'] == 3
+
+    def test_validate_abnormal_zero_balance_alert(self):
+        """大量零余额时应提示核查余额缺失或过桥清空"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03', '2024-01-04']),
+            'income': [1000, 2000, 3000, 4000],
+            'expense': [0, 0, 0, 0],
+            'balance': [0, 0, 0, 100],
+            'description': ['工资', '奖金', '补贴', '报销']
+        })
+        result, report = validate_data_quality(df)
+        assert '异常零余额' in str(report['warnings'])
+        assert report['audit_alerts']['zero_balance']['count'] == 3
+
+    def test_validate_repeated_date_segment_alert(self):
+        """同一时间戳批量重复时应输出日期段异常提示"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime([
+                '2024-01-01 10:00:00',
+                '2024-01-01 10:00:00',
+                '2024-01-01 10:00:00',
+                '2024-01-02 09:00:00',
+            ]),
+            'income': [1000, 1000, 1000, 2000],
+            'expense': [0, 0, 0, 0],
+            'description': ['工资', '工资', '工资', '奖金']
+        })
+        result, report = validate_data_quality(df)
+        assert '异常重复日期段' in str(report['warnings'])
+        assert report['audit_alerts']['repeated_date_segments']['segments'] == 1
     
     def test_validate_report_structure(self):
         """测试报告结构"""
@@ -226,6 +318,18 @@ class TestStandardizeBankFields:
             '交易金额': [1000],
             '借贷标志': ['贷'],
             '交易对方名称': ['某某公司']
+        })
+        result = standardize_bank_fields(df)
+        assert 'counterparty' in result.columns
+        assert result.iloc[0]['counterparty'] == '某某公司'
+
+    def test_standardize_with_common_counterparty_header(self):
+        """测试常见交易对手列名也能标准化"""
+        df = pd.DataFrame({
+            '交易时间': ['2024-01-01'],
+            '交易金额': [1000],
+            '借贷标志': ['贷'],
+            '交易对手': ['某某公司']
         })
         result = standardize_bank_fields(df)
         assert 'counterparty' in result.columns
@@ -349,6 +453,37 @@ class TestStandardizeBankFields:
         assert result.iloc[0]['income'] == 12000.0
         assert pd.notna(result.iloc[0]['date'])
         assert pd.isna(result.iloc[1]['date'])
+
+    def test_standardize_handles_categorical_account_and_transaction_id(self):
+        """Categorical 文本列不应因 fillna 写入新类别而崩溃"""
+        df = pd.DataFrame({
+            '交易时间': ['2024-01-01', '2024-01-02'],
+            '交易金额': [1000, 2000],
+            '借贷标志': ['贷', '借'],
+            '本方账号': pd.Categorical(['6222000011112222', None]),
+            '交易流水号': pd.Categorical(['TX001', None]),
+            '交易摘要': ['工资', '还款'],
+        })
+        result = standardize_bank_fields(df)
+        assert result.iloc[0]['account_number'] == '6222000011112222'
+        assert result.iloc[1]['account_number'] == ''
+        assert result.iloc[0]['transaction_id'] == 'TX001'
+        assert result.iloc[1]['transaction_id'] == ''
+
+    def test_standardize_handles_categorical_description_and_counterparty(self):
+        """description / counterparty 为 Categorical 时也应稳定清洗"""
+        df = pd.DataFrame({
+            '交易时间': ['2024-01-01', '2024-01-02'],
+            '交易金额': [1000, 2000],
+            '借贷标志': ['贷', '借'],
+            '交易摘要': pd.Categorical([' 工资入账 ', None]),
+            '交易对手': pd.Categorical([' 某某公司 ', None]),
+        })
+        result = standardize_bank_fields(df)
+        assert result.iloc[0]['description'] == '工资入账'
+        assert result.iloc[1]['description'] == ''
+        assert result.iloc[0]['counterparty'] == '某某公司'
+        assert result.iloc[1]['counterparty'] == ''
 
 
 class TestGenerateCleaningReport:

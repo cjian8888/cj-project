@@ -17,6 +17,7 @@ from detectors.frequency_anomaly_detector import FrequencyAnomalyDetector
 from real_salary_income_analyzer import RealSalaryIncomeAnalyzer
 from specialized_reports import SpecializedReportGenerator
 from suspicion_detector import run_all_detections
+from suspicion_engine import SuspicionEngine
 
 
 def _make_generator(tmp_path):
@@ -240,6 +241,39 @@ def test_direct_transfer_detector_deduplicates_mirrored_bank_memos():
     assert results[0]["evidence_refs"]["source_row_index"] == 11
 
 
+def test_direct_transfer_detector_supports_person_only_ledgers():
+    detector = DirectTransferDetector()
+    cleaned_data = {
+        "张三": pd.DataFrame(
+            {
+                "counterparty": ["某公司"],
+                "income": [0.0],
+                "expense": [80000.0],
+                "balance": [120000.0],
+                "date": ["2024-01-03 09:00:00"],
+                "description": ["往来款支付"],
+                "source_row_index": [21],
+                "transaction_id": ["P-ONLY-1"],
+            }
+        )
+    }
+
+    results = detector.detect(
+        {
+            "cleaned_data": cleaned_data,
+            "all_persons": ["张三"],
+            "all_companies": ["某公司"],
+        },
+        {"income_high_risk_min": 50000, "suspicion_medium_high_amount": 20000},
+    )
+
+    assert len(results) == 1
+    assert results[0]["person"] == "张三"
+    assert results[0]["company"] == "某公司"
+    assert results[0]["direction"] == "payment"
+    assert results[0]["amount"] == 80000.0
+
+
 def test_run_all_detections_direct_transfer_fallback_keeps_non_zero_amounts():
     cleaned_data = {
         "张三": pd.DataFrame(
@@ -274,6 +308,417 @@ def test_run_all_detections_direct_transfer_fallback_keeps_non_zero_amounts():
     assert len(direct_transfers) == 2
     assert {item["amount"] for item in direct_transfers} == {5000.0, 100000.0}
     assert {item["direction"] for item in direct_transfers} == {"receive", "payment"}
+
+
+def test_run_all_detections_direct_transfer_supports_person_only_ledgers():
+    cleaned_data = {
+        "张三": pd.DataFrame(
+            {
+                "counterparty": ["某公司"],
+                "income": [0.0],
+                "expense": [80000.0],
+                "balance": [120000.0],
+                "date": ["2024-01-03 09:00:00"],
+                "description": ["往来款支付"],
+                "source_row_index": [21],
+                "transaction_id": ["P-ONLY-1"],
+            }
+        )
+    }
+
+    results = run_all_detections(cleaned_data, ["张三"], ["某公司"])
+
+    assert len(results["direct_transfers"]) == 1
+    assert results["direct_transfers"][0]["direction"] == "payment"
+    assert results["direct_transfers"][0]["amount"] == 80000.0
+
+
+def test_cash_collision_detector_matches_legacy_for_chinese_cleaned_columns():
+    cleaned_data = {
+        "张三": pd.DataFrame(
+            [
+                {
+                    "date": "2024-02-09 09:00:00",
+                    "收入(元)": 0.0,
+                    "支出(元)": 50000.0,
+                    "现金": "是",
+                    "交易摘要": "ATM取现",
+                    "交易对手": "ATM",
+                    "银行来源": "工行",
+                    "source_row_index": 11,
+                }
+            ]
+        ),
+        "李四": pd.DataFrame(
+            [
+                {
+                    "date": "2024-02-09 10:00:00",
+                    "收入(元)": 50000.0,
+                    "支出(元)": 0.0,
+                    "现金": "是",
+                    "交易摘要": "ATM存现",
+                    "交易对手": "ATM",
+                    "银行来源": "农行",
+                    "source_row_index": 21,
+                }
+            ]
+        ),
+    }
+
+    legacy = run_all_detections(cleaned_data, ["张三", "李四"], [])
+    engine_results = SuspicionEngine().run_by_name(
+        "cash_collision",
+        {"cleaned_data": cleaned_data, "all_persons": ["张三", "李四"]},
+        {"cash_time_window_hours": 48, "amount_tolerance_ratio": 0.05},
+    )
+
+    assert len(legacy["cash_collisions"]) == 1
+    assert len(engine_results) == 1
+
+    expected = legacy["cash_collisions"][0]
+    actual = engine_results[0]
+    for field in (
+        "withdrawal_entity",
+        "deposit_entity",
+        "withdrawal_amount",
+        "deposit_amount",
+        "time_diff_hours",
+        "amount_diff_ratio",
+        "risk_level",
+        "risk_reason",
+    ):
+        assert actual[field] == expected[field]
+
+
+def test_cash_collision_detector_supports_categorical_cash_flags_and_wan_columns():
+    cleaned_data = {
+        "张三": pd.DataFrame(
+            {
+                "交易时间": ["2024-02-09 09:00:00"],
+                "收入(万元)": pd.Categorical(["0"]),
+                "支出(万元)": pd.Categorical(["5"]),
+                "现金": pd.Categorical(["是"]),
+                "交易摘要": pd.Categorical(["ATM取现"]),
+                "交易对手": ["ATM"],
+                "source_row_index": [31],
+            }
+        ),
+        "李四": pd.DataFrame(
+            {
+                "交易时间": ["2024-02-09 09:30:00"],
+                "收入(万元)": pd.Categorical(["5"]),
+                "支出(万元)": pd.Categorical(["0"]),
+                "现金": pd.Categorical(["是"]),
+                "交易摘要": pd.Categorical(["ATM存现"]),
+                "交易对手": ["ATM"],
+                "source_row_index": [41],
+            }
+        ),
+    }
+
+    results = SuspicionEngine().run_by_name(
+        "cash_collision",
+        {"cleaned_data": cleaned_data},
+        {"cash_time_window_hours": 48, "amount_tolerance_ratio": 0.05},
+    )
+
+    assert len(results) == 1
+    assert results[0]["withdrawal_amount"] == 50000.0
+    assert results[0]["deposit_amount"] == 50000.0
+    assert results[0]["withdrawal_row"] == 31
+    assert results[0]["deposit_row"] == 41
+
+
+def test_suspicion_engine_adapts_cleaned_data_for_transaction_only_detectors():
+    cleaned_data = {
+        "张三": pd.DataFrame(
+            [
+                {
+                    "date": "2024-01-01 09:00:00",
+                    "income": 60000.0,
+                    "expense": 0.0,
+                    "counterparty": "来源A",
+                    "description": "收入A",
+                    "bank": "测试银行",
+                },
+                {
+                    "date": "2024-01-01 09:10:00",
+                    "income": 60000.0,
+                    "expense": 0.0,
+                    "counterparty": "来源B",
+                    "description": "收入B",
+                    "bank": "测试银行",
+                },
+                {
+                    "date": "2024-01-01 09:20:00",
+                    "income": 60000.0,
+                    "expense": 0.0,
+                    "counterparty": "来源C",
+                    "description": "收入C",
+                    "bank": "测试银行",
+                },
+                {
+                    "date": "2024-01-01 09:30:00",
+                    "income": 60000.0,
+                    "expense": 0.0,
+                    "counterparty": "来源D",
+                    "description": "收入D",
+                    "bank": "测试银行",
+                },
+                {
+                    "date": "2024-01-01 09:40:00",
+                    "income": 60000.0,
+                    "expense": 0.0,
+                    "counterparty": "来源E",
+                    "description": "收入E",
+                    "bank": "测试银行",
+                },
+                {
+                    "date": "2024-01-02 10:00:00",
+                    "income": 0.0,
+                    "expense": 180000.0,
+                    "counterparty": "集中去向",
+                    "description": "集中转出",
+                    "bank": "测试银行",
+                },
+                {
+                    "date": "2024-01-05 11:00:00",
+                    "income": 0.0,
+                    "expense": 50000.0,
+                    "counterparty": "固定对手方",
+                    "description": "固定支出1",
+                    "bank": "测试银行",
+                },
+                {
+                    "date": "2024-02-05 11:00:00",
+                    "income": 0.0,
+                    "expense": 50000.0,
+                    "counterparty": "固定对手方",
+                    "description": "固定支出2",
+                    "bank": "测试银行",
+                },
+                {
+                    "date": "2024-03-05 11:00:00",
+                    "income": 0.0,
+                    "expense": 50000.0,
+                    "counterparty": "固定对手方",
+                    "description": "固定支出3",
+                    "bank": "测试银行",
+                },
+            ]
+        )
+    }
+
+    results = SuspicionEngine().run_all(
+        {"cleaned_data": cleaned_data},
+        {
+            "daily_threshold": 5,
+            "hourly_threshold": 5,
+            "window_tx_threshold": 5,
+            "min_amount": 10000,
+            "min_occurrences": 3,
+            "window_days": 7,
+            "min_inflow_sources": 3,
+            "min_outflow_targets": 3,
+        },
+    )
+
+    for detector_name in (
+        "round_amount",
+        "fixed_amount",
+        "fixed_frequency",
+        "frequency_anomaly",
+        "suspicious_pattern",
+    ):
+        assert detector_name in results
+        assert len(results[detector_name]) >= 1
+        assert all(item.get("entity_name") == "张三" for item in results[detector_name])
+
+
+def test_suspicion_engine_transaction_only_detectors_handle_categorical_columns_without_optional_fields():
+    cleaned_data = {
+        "张三": pd.DataFrame(
+            {
+                "date": [
+                    "2024-01-01 09:00:00",
+                    "2024-01-01 09:10:00",
+                    "2024-01-01 09:20:00",
+                    "2024-01-01 09:30:00",
+                    "2024-01-01 09:40:00",
+                    "2024-01-02 10:00:00",
+                    "2024-01-05 11:00:00",
+                    "2024-02-05 11:00:00",
+                    "2024-03-05 11:00:00",
+                ],
+                "income": [
+                    60000.0,
+                    60000.0,
+                    60000.0,
+                    60000.0,
+                    60000.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                ],
+                "expense": [
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    180000.0,
+                    50000.0,
+                    50000.0,
+                    50000.0,
+                ],
+                "counterparty": pd.Categorical(
+                    [
+                        "来源A",
+                        "来源B",
+                        "来源C",
+                        "来源D",
+                        "来源E",
+                        "集中去向",
+                        "固定对手方",
+                        "固定对手方",
+                        "固定对手方",
+                    ]
+                ),
+                "description": pd.Categorical(
+                    [
+                        "收入A",
+                        "收入B",
+                        "收入C",
+                        "收入D",
+                        "收入E",
+                        "集中转出",
+                        "固定支出1",
+                        "固定支出2",
+                        "固定支出3",
+                    ]
+                ),
+            }
+        )
+    }
+
+    results = SuspicionEngine().run_all(
+        {"cleaned_data": cleaned_data},
+        {
+            "daily_threshold": 5,
+            "hourly_threshold": 5,
+            "window_tx_threshold": 5,
+            "min_amount": 10000,
+            "min_occurrences": 3,
+            "window_days": 7,
+            "min_inflow_sources": 3,
+            "min_outflow_targets": 3,
+        },
+    )
+
+    for detector_name in (
+        "round_amount",
+        "fixed_amount",
+        "fixed_frequency",
+        "frequency_anomaly",
+        "suspicious_pattern",
+    ):
+        assert detector_name in results
+        assert len(results[detector_name]) >= 1
+        assert all(item.get("entity_name") == "张三" for item in results[detector_name])
+
+
+def test_suspicion_engine_maps_account_number_and_income_tx_type_for_cleaned_data():
+    cleaned_data = {
+        "张三": pd.DataFrame(
+            [
+                {
+                    "date": "2024-01-01 09:00:00",
+                    "income": 50000.0,
+                    "expense": 0.0,
+                    "counterparty": "某单位",
+                    "description": "工资发放",
+                    "account_number": "6222000011112222",
+                    "bank": "测试银行",
+                },
+                {
+                    "date": "2024-02-01 09:00:00",
+                    "income": 50000.0,
+                    "expense": 0.0,
+                    "counterparty": "某单位",
+                    "description": "工资发放",
+                    "account_number": "6222000011112222",
+                    "bank": "测试银行",
+                },
+                {
+                    "date": "2024-03-01 09:00:00",
+                    "income": 50000.0,
+                    "expense": 0.0,
+                    "counterparty": "某单位",
+                    "description": "工资发放",
+                    "account_number": "6222000011112222",
+                    "bank": "测试银行",
+                },
+            ]
+        )
+    }
+
+    engine = SuspicionEngine()
+    detector_inputs = engine._build_detector_inputs("fixed_frequency", {"cleaned_data": cleaned_data})
+
+    assert detector_inputs[0]["transactions"][0]["account"] == "6222000011112222"
+    assert detector_inputs[0]["transactions"][0]["tx_type"] == "收入"
+
+    results = engine.run_by_name(
+        "fixed_frequency",
+        {"cleaned_data": cleaned_data},
+        {"min_occurrences": 3, "amount_tolerance": 0, "day_tolerance": 3},
+    )
+
+    assert len(results) >= 1
+    assert "规律性收入模式" in results[0]["description"]
+
+
+def test_suspicion_engine_suspicious_pattern_respects_account_number_boundaries():
+    cleaned_data = {
+        "张三": pd.DataFrame(
+            [
+                {
+                    "date": "2024-01-01 09:00:00",
+                    "income": 100000.0,
+                    "expense": 0.0,
+                    "counterparty": "来源A",
+                    "description": "大额转入",
+                    "account_number": "ACC-IN",
+                    "bank": "测试银行",
+                },
+                {
+                    "date": "2024-01-01 12:00:00",
+                    "income": 0.0,
+                    "expense": 90000.0,
+                    "counterparty": "去向B",
+                    "description": "大额转出",
+                    "account_number": "ACC-OUT",
+                    "bank": "测试银行",
+                },
+            ]
+        )
+    }
+
+    results = SuspicionEngine().run_by_name(
+        "suspicious_pattern",
+        {"cleaned_data": cleaned_data},
+        {
+            "window_days": 7,
+            "min_inflow_sources": 3,
+            "min_outflow_targets": 3,
+            "min_amount": 50000,
+            "fast_in_out_hours": 24,
+            "fast_in_out_ratio": 0.8,
+        },
+    )
+
+    assert results == []
 
 
 def test_database_manager_normalizes_dirty_amounts_before_persist(tmp_path):

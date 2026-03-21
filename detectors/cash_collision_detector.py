@@ -30,6 +30,47 @@ class CashCollisionDetector(BaseDetector):
     def risk_level(self) -> str:
         return "高"
 
+    @staticmethod
+    def _pick_column(
+        container: Any, *candidates: str, is_amount_field: bool = False
+    ) -> str:
+        columns = getattr(container, "columns", None)
+        if columns is not None:
+            return (
+                utils.find_first_matching_column(
+                    container,
+                    list(candidates),
+                    is_amount_field=is_amount_field,
+                )
+                or ""
+            )
+
+        available = getattr(container, "index", [])
+        for column in candidates:
+            if column in available:
+                return column
+        return ""
+
+    @staticmethod
+    def _safe_text(value: Any) -> str:
+        try:
+            if pd.isna(value):
+                return ""
+        except (TypeError, ValueError):
+            pass
+
+        if value is None:
+            return ""
+
+        text = str(value).strip()
+        return "" if text.lower() in {"nan", "none", "null"} else text
+
+    def _normalize_cash_flag(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        text = self._safe_text(value).lower()
+        return text in {"true", "1", "yes", "y", "是"}
+
     def detect(
         self, data: Dict[str, Any], config: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
@@ -110,13 +151,15 @@ class CashCollisionDetector(BaseDetector):
         3. 降级：关键词匹配
         """
         if "is_cash" in df.columns:
-            return df[df["is_cash"] == True].copy()
+            return df[df["is_cash"].apply(self._normalize_cash_flag)].copy()
         elif "现金" in df.columns:
-            return df[df["现金"] == "是"].copy()
+            cash_flag = utils.normalize_text_series(df["现金"]).str.strip()
+            return df[cash_flag.isin({"是", "true", "True", "1"})].copy()
         else:
             # 降级：关键词匹配
             def is_cash_by_keyword(row):
-                desc = str(row.get("description", "")).lower()
+                desc_col = self._pick_column(row, "description", "交易摘要")
+                desc = self._safe_text(row.get(desc_col, "") if desc_col else "").lower()
                 cash_keywords = ["atm", "现金", "取现", "存款", "withdrawal", "deposit"]
                 for kw in cash_keywords:
                     if kw in desc:
@@ -127,17 +170,46 @@ class CashCollisionDetector(BaseDetector):
 
     def _split_cash_transactions(self, cash_df: pd.DataFrame) -> tuple:
         """将现金交易拆分为取现和存现。"""
-        # 如果有income/expense列
-        if "income" in cash_df.columns and "expense" in cash_df.columns:
-            withdrawals = cash_df[cash_df["expense"] > 0].copy()
-            deposits = cash_df[cash_df["income"] > 0].copy()
-            withdrawals["amount"] = withdrawals["expense"]
-            deposits["amount"] = deposits["income"]
+        normalized = cash_df.copy()
+        income_col = self._pick_column(
+            normalized, "income", "收入(元)", is_amount_field=True
+        )
+        expense_col = self._pick_column(
+            normalized, "expense", "支出(元)", is_amount_field=True
+        )
+        amount_col = self._pick_column(
+            normalized, "amount", "交易金额", is_amount_field=True
+        )
+
+        if income_col:
+            normalized["_cash_income"] = utils.normalize_amount_series(
+                normalized[income_col].astype("object"), income_col
+            )
         else:
-            # 只有单列amount的情况（负数为支出）
-            withdrawals = cash_df[cash_df["amount"] < 0].copy()
-            deposits = cash_df[cash_df["amount"] > 0].copy()
-            withdrawals["amount"] = withdrawals["amount"].abs()
+            normalized["_cash_income"] = 0.0
+
+        if expense_col:
+            normalized["_cash_expense"] = utils.normalize_amount_series(
+                normalized[expense_col].astype("object"), expense_col
+            )
+        else:
+            normalized["_cash_expense"] = 0.0
+
+        if income_col or expense_col:
+            withdrawals = normalized[normalized["_cash_expense"] > 0].copy()
+            deposits = normalized[normalized["_cash_income"] > 0].copy()
+            withdrawals["amount"] = withdrawals["_cash_expense"]
+            deposits["amount"] = deposits["_cash_income"]
+        elif amount_col:
+            normalized["_cash_amount"] = utils.normalize_amount_series(
+                normalized[amount_col].astype("object"), amount_col
+            )
+            withdrawals = normalized[normalized["_cash_amount"] < 0].copy()
+            deposits = normalized[normalized["_cash_amount"] > 0].copy()
+            withdrawals["amount"] = withdrawals["_cash_amount"].abs()
+            deposits["amount"] = deposits["_cash_amount"]
+        else:
+            return normalized.iloc[0:0].copy(), normalized.iloc[0:0].copy()
 
         return withdrawals, deposits
 
@@ -145,24 +217,29 @@ class CashCollisionDetector(BaseDetector):
         """提取记录用于跨实体检测。"""
         records = []
         for _, row in df.iterrows():
-            parsed_date = utils.parse_date(row.get("date"))
+            date_col = self._pick_column(row, "date", "交易时间", "交易日期", "日期")
+            parsed_date = utils.parse_date(row.get(date_col) if date_col else None)
             if pd.isna(parsed_date):
                 continue
-            bank_val = row.get("银行来源", row.get("bank", ""))
-            source_val = row.get("数据来源", row.get("source_file", ""))
+            bank_col = self._pick_column(row, "银行来源", "bank", "所属银行")
+            source_col = self._pick_column(row, "数据来源", "source_file")
+            desc_col = self._pick_column(row, "description", "交易摘要")
+            source_row_col = self._pick_column(row, "source_row_index")
+            bank_val = row.get(bank_col, "") if bank_col else ""
+            source_val = row.get(source_col, "") if source_col else ""
             records.append(
                 {
                     "entity": entity_name,
                     "date": parsed_date,
-                    "amount": row["amount"],
-                    "bank": str(bank_val)
-                    if bank_val and str(bank_val) != "nan"
-                    else "",
-                    "source_file": str(source_val)
-                    if source_val and str(source_val) != "nan"
-                    else "",
-                    "description": row.get("description", ""),
-                    "source_row_index": row.get("source_row_index", None),
+                    "amount": utils.format_amount(row.get("amount", 0)),
+                    "bank": self._safe_text(bank_val),
+                    "source_file": self._safe_text(source_val),
+                    "description": self._safe_text(
+                        row.get(desc_col, "") if desc_col else ""
+                    ),
+                    "source_row_index": row.get(source_row_col, None)
+                    if source_row_col
+                    else None,
                 }
             )
         return records

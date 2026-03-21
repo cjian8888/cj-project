@@ -16432,6 +16432,11 @@ class InvestigationReportBuilder:
                 "[初查报告] report_package 与 QA 产物已生成: %s",
                 artifact_paths,
             )
+            try:
+                # 语义产物落盘后再刷新一次目录清单，避免首轮索引缺少 QA 文件。
+                self.generate_report_index_file(os.path.dirname(output_path))
+            except Exception as exc:
+                logger.warning("[初查报告] 报告目录清单二次刷新失败: %s", exc)
         except Exception as exc:
             logger.warning("[初查报告] report_package 生成失败: %s", exc)
 
@@ -16477,33 +16482,34 @@ class InvestigationReportBuilder:
                 f.write("\n".join(lines))
             return index_path
 
-        # 获取所有文件
+        # 获取所有文件（递归纳入 analysis_results 下的正式产物）
         index_path = os.path.join(reports_dir, "报告目录清单.txt")
         files = []
-        for filename in os.listdir(reports_dir):
-            filepath = os.path.join(reports_dir, filename)
-            if os.path.isfile(filepath):
+        supported_exts = {
+            ".txt",
+            ".html",
+            ".htm",
+            ".xlsx",
+            ".xls",
+            ".md",
+            ".pdf",
+            ".json",
+            ".docx",
+        }
+        for root, _, filenames in os.walk(reports_dir):
+            for filename in filenames:
+                ext = os.path.splitext(filename)[1].lower()
+                if ext not in supported_exts:
+                    continue
+                filepath = os.path.join(root, filename)
+                relative_name = os.path.relpath(filepath, reports_dir).replace("\\", "/")
                 files.append(
                     {
-                        "name": filename,
+                        "name": relative_name,
                         "path": filepath,
                         "size": os.path.getsize(filepath) / 1024,  # KB
                     }
                 )
-
-        # 检查专项报告目录
-        sub_report_dir = os.path.join(reports_dir, "专项报告")
-        if os.path.exists(sub_report_dir):
-            for filename in os.listdir(sub_report_dir):
-                filepath = os.path.join(sub_report_dir, filename)
-                if os.path.isfile(filepath):
-                    files.append(
-                        {
-                            "name": f"专项报告/{filename}",
-                            "path": filepath,
-                            "size": os.path.getsize(filepath) / 1024,  # KB
-                        }
-                    )
 
         if not any(f["name"] == "报告目录清单.txt" for f in files):
             files.append(
@@ -16515,15 +16521,40 @@ class InvestigationReportBuilder:
             )
 
         # 按类别分组
-        html_files = [f for f in files if f["name"].endswith(".html")]
-        excel_files = [f for f in files if f["name"].endswith(".xlsx")]
+        html_files = [
+            f for f in files if f["name"].endswith(".html") or f["name"].endswith(".htm")
+        ]
+        excel_files = [
+            f for f in files if f["name"].endswith(".xlsx") or f["name"].endswith(".xls")
+        ]
         txt_files = [f for f in files if f["name"].endswith(".txt")]
+        json_files = [f for f in files if f["name"].endswith(".json")]
+        other_files = [
+            f
+            for f in files
+            if not (
+                f["name"].endswith(".html")
+                or f["name"].endswith(".htm")
+                or f["name"].endswith(".xlsx")
+                or f["name"].endswith(".xls")
+                or f["name"].endswith(".txt")
+                or f["name"].endswith(".json")
+            )
+        ]
+        files.sort(key=lambda item: item["name"])
+        html_files.sort(key=lambda item: item["name"])
+        excel_files.sort(key=lambda item: item["name"])
+        txt_files.sort(key=lambda item: item["name"])
+        json_files.sort(key=lambda item: item["name"])
+        other_files.sort(key=lambda item: item["name"])
 
         # 统计
         lines.append(f"【报告文件统计】")
         lines.append(f"  HTML报告: {len(html_files)} 个")
         lines.append(f"  Excel底稿: {len(excel_files)} 个")
         lines.append(f"  txt报告: {len(txt_files)} 个")
+        lines.append(f"  JSON/QA产物: {len(json_files)} 个")
+        lines.append(f"  其他报告: {len(other_files)} 个")
         lines.append(f"  总计: {len(files)} 个文件")
         lines.append("")
         lines.append("-" * 70)
@@ -16546,11 +16577,23 @@ class InvestigationReportBuilder:
                     lines.append(f"  • {f['name']} ({f['size']:.1f} KB) - 深度分析报告")
             lines.append("")
 
+        if json_files:
+            lines.append("【JSON/QA产物】")
+            for f in json_files:
+                lines.append(f"  • {f['name']} ({f['size']:.1f} KB) - 语义包或一致性产物")
+            lines.append("")
+
         # Excel底稿
         if excel_files:
             lines.append("【Excel数据底稿】")
             for f in excel_files:
                 lines.append(f"  • {f['name']} ({f['size']:.1f} KB) - 完整数据底稿")
+            lines.append("")
+
+        if other_files:
+            lines.append("【其他报告文件】")
+            for f in other_files:
+                lines.append(f"  • {f['name']} ({f['size']:.1f} KB) - 补充报告文件")
             lines.append("")
 
         lines.append("-" * 70)

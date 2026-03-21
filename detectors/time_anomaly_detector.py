@@ -478,8 +478,10 @@ class TimeAnomalyDetector(BaseDetector):
         holiday_names = sorted(
             {tx.get("holiday_name", "节假日") for tx in transactions if tx.get("holiday_name")}
         )
+        period_order = {"before": 0, "during": 1, "after": 2}
         holiday_periods = sorted(
-            {tx.get("holiday_period", "during") for tx in transactions if tx.get("holiday_period")}
+            {tx.get("holiday_period", "during") for tx in transactions if tx.get("holiday_period")},
+            key=lambda item: period_order.get(item, 99),
         )
         period_labels = {
             "before": "节前",

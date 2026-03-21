@@ -55,6 +55,7 @@ from utils.suspicion_text import (
     normalize_direct_transfer_description_text,
     score_direct_transfer_record,
 )
+from utils.safe_types import extract_id_from_filename
 
 # 【修复】Python 3.14 导入路径修复：utils 导入后项目目录可能从 sys.path 消失
 project_dir = str(APP_ROOT)
@@ -369,6 +370,42 @@ def _finalize_analysis_runtime_log_capture(status: str):
         _active_analysis_log_paths.clear()
 
 
+def _clear_analysis_log_path_state():
+    """清空运行态日志路径，避免目录切换或清缓存后继续读取旧日志。"""
+    with _analysis_log_lock:
+        _active_analysis_log_paths.clear()
+        _last_analysis_log_paths.clear()
+
+
+def _sync_analysis_log_paths_with_output(
+    output_dir: str, runtime_log_paths: Optional[Dict[str, Any]] = None
+):
+    """让日志历史路径与当前输出目录对齐。"""
+    normalized_output_dir = os.path.realpath(os.path.abspath(output_dir))
+    candidates: Dict[str, str] = {}
+
+    if isinstance(runtime_log_paths, dict):
+        for key, raw_path in runtime_log_paths.items():
+            path = str(raw_path or "").strip()
+            if not path:
+                continue
+            resolved = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+            if os.path.exists(resolved) and _is_path_within(normalized_output_dir, resolved):
+                candidates[str(key)] = resolved
+
+    results_mirror = os.path.join(normalized_output_dir, "analysis_results", "分析执行日志.txt")
+    latest_log = os.path.join(normalized_output_dir, "analysis_logs", "analysis_run_latest.log")
+    if os.path.exists(results_mirror):
+        candidates["resultsMirror"] = results_mirror
+    if os.path.exists(latest_log):
+        candidates.setdefault("latest", latest_log)
+
+    with _analysis_log_lock:
+        _active_analysis_log_paths.clear()
+        _last_analysis_log_paths.clear()
+        _last_analysis_log_paths.update(candidates)
+
+
 def _get_last_analysis_log_paths() -> Dict[str, str]:
     with _analysis_log_lock:
         return dict(_last_analysis_log_paths)
@@ -632,6 +669,7 @@ def _sync_analysis_state_with_active_output(force_reload: bool = False) -> bool:
         return False
 
     if not results_data:
+        _clear_analysis_log_path_state()
         return False
 
     if isinstance(results_data, dict) and isinstance(results_data.get("suspicions"), dict):
@@ -639,6 +677,12 @@ def _sync_analysis_state_with_active_output(force_reload: bool = False) -> bool:
         results_data["suspicions"] = _normalize_serialized_suspicions_payload(
             results_data["suspicions"]
         )
+        _sync_analysis_log_paths_with_output(
+            target_output_dir,
+            results_data.get("runtimeLogPaths", {}),
+        )
+    else:
+        _sync_analysis_log_paths_with_output(target_output_dir, {})
 
     analysis_state.results = results_data
     if not analysis_state.end_time:
@@ -1550,27 +1594,19 @@ def _prepare_person_transactions_for_advanced_analyzers(
             (normalized["income"] <= 0) & (normalized["expense"] > 0), "direction"
         ] = "expense"
 
-    if counterparty_col:
-        normalized["counterparty"] = tx_df[counterparty_col].fillna("").astype(str)
-    else:
-        normalized["counterparty"] = ""
+    def _normalize_text_series(column_name: Optional[str]) -> pd.Series:
+        if not column_name:
+            return pd.Series("", index=tx_df.index, dtype="string")
+        # 清洗后的文本列可能被压缩为 Categorical；先转成 string 再填空值，避免 fillna
+        # 在分类类型上写入新类别时报错。
+        return tx_df[column_name].astype("string").fillna("")
 
-    if description_col:
-        normalized["description"] = tx_df[description_col].fillna("").astype(str)
-    else:
-        normalized["description"] = ""
-
-    if account_col:
-        normalized["account_number"] = tx_df[account_col].fillna("").astype(str)
-    else:
-        normalized["account_number"] = ""
+    normalized["counterparty"] = _normalize_text_series(counterparty_col)
+    normalized["description"] = _normalize_text_series(description_col)
+    normalized["account_number"] = _normalize_text_series(account_col)
     normalized["account"] = normalized["account_number"]
 
-    category_series = (
-        tx_df[category_col].fillna("").astype(str)
-        if category_col
-        else pd.Series("", index=tx_df.index)
-    )
+    category_series = _normalize_text_series(category_col)
 
     def _map_transaction_type(
         raw_category: str, direction: str, description: str
@@ -1898,6 +1934,309 @@ def _normalize_serialized_suspicions_payload(suspicions: Dict[str, Any]) -> Dict
     return normalized_suspicions
 
 
+_PERSON_ID_VALUE_PATTERN = re.compile(r"^[1-9]\d{16}[\dXx]$")
+_ID_TO_NAME_ID_FIELDS = (
+    "entity_id",
+    "owner_id",
+    "id_number",
+    "passenger_id",
+    "person_id",
+    "subjectId",
+    "subject_id",
+    "注册身份证号",
+)
+_ID_TO_NAME_NAME_FIELDS = (
+    "entity_name",
+    "owner_name",
+    "name",
+    "passenger_name_cn",
+    "subjectName",
+    "subject_name",
+    "注册姓名",
+)
+_FILE_ID_COLUMNS = (
+    "身份证号",
+    "证件号码",
+    "自然人证件号码",
+    "权利人证件号码",
+    "旅客证件号",
+    "注册身份证号",
+)
+_FILE_NAME_COLUMNS = (
+    "姓名",
+    "自然人姓名",
+    "自然人对象名称",
+    "权利人名称",
+    "机动车所有人",
+    "旅客中文姓名",
+    "注册姓名",
+)
+
+
+def _normalize_person_id_value(value: Any) -> Optional[str]:
+    text = str(value or "").strip().upper()
+    if not text or text.lower() in {"nan", "none", "null"}:
+        return None
+    if _PERSON_ID_VALUE_PATTERN.fullmatch(text):
+        return text
+    extracted = extract_id_from_filename(text)
+    if extracted and _PERSON_ID_VALUE_PATTERN.fullmatch(extracted):
+        return extracted
+    return None
+
+
+def _normalize_person_name_value(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return "" if text.lower() in {"nan", "none", "null"} else text
+
+
+def _register_id_name_candidate(
+    id_to_name_map: Dict[str, str],
+    confidence_scores: Dict[str, int],
+    person_id: Any,
+    person_name: Any,
+    confidence: int,
+    known_person_names: Optional[set[str]] = None,
+) -> None:
+    normalized_id = _normalize_person_id_value(person_id)
+    normalized_name = _normalize_person_name_value(person_name)
+    if not normalized_id or not normalized_name:
+        return
+    if known_person_names and normalized_name not in known_person_names:
+        return
+
+    if confidence >= confidence_scores.get(normalized_id, 0):
+        id_to_name_map[normalized_id] = normalized_name
+        confidence_scores[normalized_id] = confidence
+
+
+def _infer_person_name_from_filename(
+    file_name: str, known_person_names: Optional[set[str]]
+) -> tuple[str, int]:
+    stem = Path(file_name).stem
+    if known_person_names:
+        matched_names = sorted(
+            {name for name in known_person_names if name and name in stem},
+            key=len,
+            reverse=True,
+        )
+        if len(matched_names) == 1:
+            return matched_names[0], 2
+
+    for part in re.split(r"[_\-\s]+", stem):
+        candidate = part.strip("()[]【】（）")
+        if not candidate or _normalize_person_id_value(candidate):
+            continue
+        if re.fullmatch(r"[\u4e00-\u9fa5·]{2,8}", candidate):
+            return candidate, 1
+
+    return "", 0
+
+
+def _extract_id_name_pairs_from_dataframe(
+    df: pd.DataFrame, known_person_names: Optional[set[str]]
+) -> List[tuple[str, str]]:
+    if df is None or df.empty:
+        return []
+
+    id_columns = [column for column in _FILE_ID_COLUMNS if column in df.columns]
+    name_columns = [column for column in _FILE_NAME_COLUMNS if column in df.columns]
+    if not id_columns or not name_columns:
+        return []
+
+    pairs: List[tuple[str, str]] = []
+    for _, row in df.head(200).iterrows():
+        normalized_id = None
+        for id_column in id_columns:
+            normalized_id = _normalize_person_id_value(row.get(id_column))
+            if normalized_id:
+                break
+        if not normalized_id:
+            continue
+
+        normalized_name = ""
+        for name_column in name_columns:
+            candidate_name = _normalize_person_name_value(row.get(name_column))
+            if not candidate_name:
+                continue
+            if not known_person_names or candidate_name in known_person_names:
+                normalized_name = candidate_name
+                break
+
+        if normalized_name:
+            pairs.append((normalized_id, normalized_name))
+
+    return pairs
+
+
+def _read_id_name_pairs_from_file(
+    file_path: str, known_person_names: Optional[set[str]]
+) -> List[tuple[str, str]]:
+    suffix = Path(file_path).suffix.lower()
+    pairs: List[tuple[str, str]] = []
+
+    try:
+        if suffix == ".csv":
+            for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk"):
+                try:
+                    df = pd.read_csv(file_path, dtype=str, nrows=200, encoding=encoding)
+                    return _extract_id_name_pairs_from_dataframe(df, known_person_names)
+                except UnicodeDecodeError:
+                    continue
+            return []
+
+        if suffix in {".xlsx", ".xls"}:
+            xls = pd.ExcelFile(file_path)
+            for sheet_name in xls.sheet_names:
+                df = pd.read_excel(xls, sheet_name=sheet_name, dtype=str, nrows=200)
+                pairs.extend(_extract_id_name_pairs_from_dataframe(df, known_person_names))
+                if pairs:
+                    break
+    except Exception as exc:
+        logging.getLogger(__name__).debug(f"读取身份证映射候选文件失败: {file_path}, {exc}")
+
+    return pairs
+
+
+def _collect_id_name_pairs_from_external_data(
+    payload: Any, known_person_names: Optional[set[str]]
+) -> List[tuple[str, str]]:
+    pairs: List[tuple[str, str]] = []
+
+    def _visit(node: Any) -> None:
+        if isinstance(node, dict):
+            for id_field in _ID_TO_NAME_ID_FIELDS:
+                normalized_id = _normalize_person_id_value(node.get(id_field))
+                if not normalized_id:
+                    continue
+                for name_field in _ID_TO_NAME_NAME_FIELDS:
+                    normalized_name = _normalize_person_name_value(node.get(name_field))
+                    if not normalized_name:
+                        continue
+                    if known_person_names and normalized_name not in known_person_names:
+                        continue
+                    pairs.append((normalized_id, normalized_name))
+                    break
+
+            for value in node.values():
+                _visit(value)
+        elif isinstance(node, list):
+            for item in node:
+                _visit(item)
+
+    _visit(payload)
+    return pairs
+
+
+def _build_id_to_name_map(
+    data_dir: str, external_data: Optional[Dict[str, Any]], known_person_names: List[str]
+) -> Dict[str, str]:
+    id_to_name_map: Dict[str, str] = {}
+    confidence_scores: Dict[str, int] = {}
+    known_person_name_set = {name for name in known_person_names if name}
+    data_root = Path(data_dir)
+
+    if data_root.exists():
+        for file_path in sorted(data_root.rglob("*")):
+            if (
+                not file_path.is_file()
+                or file_path.suffix.lower() not in {".xlsx", ".xls", ".csv"}
+            ):
+                continue
+
+            normalized_id = extract_id_from_filename(file_path.name)
+            inferred_name, confidence = _infer_person_name_from_filename(
+                file_path.name, known_person_name_set
+            )
+            if normalized_id and inferred_name:
+                _register_id_name_candidate(
+                    id_to_name_map,
+                    confidence_scores,
+                    normalized_id,
+                    inferred_name,
+                    confidence,
+                    known_person_name_set,
+                )
+
+            for person_id, person_name in _read_id_name_pairs_from_file(
+                str(file_path), known_person_name_set
+            ):
+                _register_id_name_candidate(
+                    id_to_name_map,
+                    confidence_scores,
+                    person_id,
+                    person_name,
+                    3,
+                    known_person_name_set,
+                )
+
+    for person_id, person_name in _collect_id_name_pairs_from_external_data(
+        external_data or {}, known_person_name_set
+    ):
+        _register_id_name_candidate(
+            id_to_name_map,
+            confidence_scores,
+            person_id,
+            person_name,
+            3,
+            known_person_name_set,
+        )
+
+    return id_to_name_map
+
+
+def _group_suspicions_by_entity(records: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        entity_name = str(record.get("entity_name") or record.get("entity") or "").strip()
+        if not entity_name:
+            entity_name = "未知实体"
+        grouped.setdefault(entity_name, []).append(record)
+    return grouped
+
+
+def _merge_plugin_suspicions(
+    suspicions: Dict[str, Any], plugin_results: Dict[str, List[Dict[str, Any]]]
+) -> Dict[str, Any]:
+    merged = dict(suspicions or {})
+
+    if plugin_results.get("direct_transfer"):
+        merged["direct_transfers"] = plugin_results["direct_transfer"]
+    if plugin_results.get("cash_collision"):
+        merged["cash_collisions"] = plugin_results["cash_collision"]
+    if plugin_results.get("time_anomaly"):
+        merged["timeSeriesAlerts"] = plugin_results["time_anomaly"]
+    if plugin_results.get("fixed_frequency"):
+        merged["fixed_frequency"] = _group_suspicions_by_entity(
+            plugin_results["fixed_frequency"]
+        )
+
+    amount_pattern_records: List[Dict[str, Any]] = []
+    for detector_name in ("round_amount", "fixed_amount"):
+        detector_records = plugin_results.get(detector_name) or []
+        if detector_records:
+            merged[detector_name] = detector_records
+            amount_pattern_records.extend(detector_records)
+    if amount_pattern_records:
+        merged["amount_patterns"] = _group_suspicions_by_entity(amount_pattern_records)
+
+    for detector_name in ("frequency_anomaly", "suspicious_pattern"):
+        detector_records = plugin_results.get(detector_name) or []
+        if detector_records:
+            merged[detector_name] = detector_records
+
+    return merged
+
+
 def serialize_suspicions(suspicions: Dict) -> Dict:
     """
     序列化疑点数据
@@ -2031,6 +2370,46 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
             "evidenceSummary": record.get("evidence_summary", ""),
         }
 
+    def convert_standard_suspicion(record: Dict) -> Dict:
+        """转换标准 Suspicion 模型记录为统一 camelCase 输出。"""
+        if not isinstance(record, dict):
+            return record
+
+        normalized = dict(record)
+        alias_mapping = {
+            "suspicionId": ("suspicionId", "suspicion_id"),
+            "suspicionType": ("suspicionType", "suspicion_type"),
+            "relatedTransactions": ("relatedTransactions", "related_transactions"),
+            "detectionDate": ("detectionDate", "detection_date"),
+            "entityName": ("entityName", "entity_name"),
+        }
+
+        for target_key, aliases in alias_mapping.items():
+            found = False
+            value = None
+            for alias in aliases:
+                if alias in normalized:
+                    value = normalized.pop(alias)
+                    found = True
+                    break
+            if not found:
+                continue
+            normalized[target_key] = (
+                _format_date(value) if target_key == "detectionDate" else value
+            )
+
+        return normalized
+
+    def convert_grouped_standard_suspicions(
+        grouped_records: Dict[str, List[Dict[str, Any]]]
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        if not isinstance(grouped_records, dict):
+            return grouped_records
+        return {
+            entity_name: [convert_standard_suspicion(record) for record in records]
+            for entity_name, records in grouped_records.items()
+        }
+
     def _format_date(date_val) -> str:
         """格式化日期为 ISO 字符串"""
         if date_val is None:
@@ -2050,6 +2429,10 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
         "cash_timing_patterns": "cashTimingPatterns",
         "holiday_transactions": "holidayTransactions",
         "amount_patterns": "amountPatterns",
+        "round_amount": "roundAmount",
+        "fixed_amount": "fixedAmount",
+        "frequency_anomaly": "frequencyAnomaly",
+        "suspicious_pattern": "suspiciousPattern",
         "aml_alerts": "amlAlerts",
         "credit_alerts": "creditAlerts",
         "hidden_assets_with_context": "hiddenAssetsWithContext",
@@ -2073,6 +2456,16 @@ def serialize_suspicions(suspicions: Dict) -> Dict:
                 entity: [convert_holiday_transaction(r) for r in records]
                 for entity, records in value.items()
             }
+        elif key in (
+            "round_amount",
+            "fixed_amount",
+            "frequency_anomaly",
+            "suspicious_pattern",
+            "timeSeriesAlerts",
+        ) and isinstance(value, list):
+            result[new_key] = [convert_standard_suspicion(r) for r in value]
+        elif key in ("fixed_frequency", "amount_patterns") and isinstance(value, dict):
+            result[new_key] = convert_grouped_standard_suspicions(value)
         elif key == "wallet_alerts" and isinstance(value, list):
             result[new_key] = [convert_wallet_alert(r) for r in value]
         else:
@@ -2491,7 +2884,8 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
     """
     logger = logging.getLogger(__name__)
 
-    analysis_state.clear_stop_request()
+    if analysis_state.status != "running":
+        analysis_state.clear_stop_request()
     analysis_state.start_time = datetime.now()
     analysis_state.end_time = None
     analysis_state.results = None
@@ -2501,6 +2895,9 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
     log_capture_started = False
 
     try:
+        if analysis_state.is_stop_requested():
+            raise AnalysisStoppedError("分析启动前已收到停止请求")
+
         data_dir = analysis_config.inputDirectory
         output_dir = analysis_config.outputDirectory or str(OUTPUT_DIR)
 
@@ -2933,20 +3330,12 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                 thresholds=_FallbackFinanceThresholds()
             )
 
-        # 🔄 构建身份证号到人名的映射（递归扫描 data_dir 下所有文件名）
-        import glob
-        import re
-
-        id_pattern = re.compile(r"^([^_]+)_([0-9]{17}[0-9Xx])_")
-        for file_path in glob.glob(os.path.join(data_dir, "**", "*.xlsx"), recursive=True):
-            basename = os.path.basename(file_path)
-            match = id_pattern.match(basename)
-            if not match:
-                continue
-            name = match.group(1).strip()
-            id_part = match.group(2).upper()
-            if name and id_part not in id_to_name_map:
-                id_to_name_map[id_part] = name
+        # 🔄 构建身份证号到人名的映射（兼容 CSV / 非标准文件名 / 外部数据主体信息）
+        id_to_name_map = _build_id_to_name_map(
+            data_dir,
+            external_data,
+            all_persons,
+        )
 
         logger.info(f"身份证号映射表构建完成: {len(id_to_name_map)} 个人员")
         try:
@@ -3616,13 +4005,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                 ],
             }
             plugin_results = engine.run_all(detector_input, detector_config)
-            # 字段对齐：插件键名 -> 系统标准键名
-            if plugin_results.get("direct_transfer"):
-                suspicions["direct_transfers"] = plugin_results["direct_transfer"]
-            if plugin_results.get("cash_collision"):
-                suspicions["cash_collisions"] = plugin_results["cash_collision"]
-            if plugin_results.get("time_anomaly"):
-                suspicions["timeSeriesAlerts"] = plugin_results["time_anomaly"]
+            suspicions = _merge_plugin_suspicions(suspicions, plugin_results)
         except Exception as e:
             logger.warning(f"SuspicionEngine 增强失败，保留旧检测器结果: {e}")
 
@@ -4192,6 +4575,7 @@ async def sync_active_paths(request: ActivePathsRequest):
 
     if output_changed and not cache_restored:
         analysis_state.reset("等待开始分析")
+        _clear_analysis_log_path_state()
 
     return {
         "success": True,
@@ -4209,7 +4593,18 @@ async def start_analysis(config: AnalysisConfig, background_tasks: BackgroundTas
     if analysis_state.status == "running":
         raise HTTPException(status_code=400, detail="分析任务正在运行")
 
+    _set_active_paths(config.inputDirectory, config.outputDirectory)
+    _clear_analysis_log_path_state()
     analysis_state.clear_stop_request()
+    analysis_state.start_time = None
+    analysis_state.end_time = None
+    analysis_state.results = None
+    analysis_state.update(
+        status="running",
+        progress=0,
+        phase="等待任务启动...",
+        error=None,
+    )
     background_tasks.add_task(run_analysis_refactored, config)
     return {"message": "分析任务已启动 (重构版)", "version": "3.2.0"}
 
@@ -4271,44 +4666,24 @@ async def get_results():
 @app.get("/api/reports/legacy")
 async def get_reports():
     """获取报告列表（递归扫描所有子目录）"""
-    reports = []
+    logger = logging.getLogger(__name__)
     reports_dir = _get_active_results_dir()
+    if not os.path.exists(reports_dir):
+        return {"reports": []}
 
-    def scan_directory(directory, prefix=""):
-        """递归扫描目录"""
-        if not os.path.exists(directory):
-            return
-
-        for item in os.listdir(directory):
-            item_path = os.path.join(directory, item)
-            relative_path = os.path.relpath(item_path, reports_dir)
-
-            if os.path.isfile(item_path):
-                if item.endswith((".html", ".docx", ".txt", ".pdf")):
-                    stat_info = os.stat(item_path)
-                    # 在子目录中的文件，添加子目录前缀
-                    display_name = item if prefix == "" else f"{prefix}/{item}"
-                    reports.append(
-                        {
-                            "name": display_name,  # 前端期望 "name"
-                            "path": item_path,
-                            "size": stat_info.st_size,
-                            "modified": datetime.fromtimestamp(
-                                stat_info.st_mtime
-                            ).isoformat(),  # 前端期望 "modified"
-                        }
-                    )
-            elif os.path.isdir(item_path):
-                # 递归扫描子目录
-                scan_directory(
-                    item_path, prefix=item if prefix == "" else f"{prefix}/{item}"
-                )
-
-    scan_directory(reports_dir)
-
-    # 按修改时间排序，最新的在前面
+    _refresh_semantic_artifacts_for_runtime_read(reports_dir, logger, "报告列表旧接口")
+    legacy_extensions = {".html", ".docx", ".txt", ".pdf"}
+    reports = [
+        {
+            "name": item["name"],
+            "path": item["path"],
+            "size": item["size"],
+            "modified": item["modified"],
+        }
+        for item in _collect_report_files(reports_dir)
+        if str(item.get("extension") or "").lower() in legacy_extensions
+    ]
     reports.sort(key=lambda x: x["modified"], reverse=True)
-
     return {"reports": reports}
 
 
@@ -4440,14 +4815,18 @@ async def invalidate_cache(cache_name: Optional[str] = None):
     Args:
         cache_name: 缓存名称（如 'profiles'），None 表示失效所有缓存
     """
+    global _cache_manager
     cache_dir = _get_active_cache_dir()
     try:
         cache_mgr = CacheManager(cache_dir)
         if cache_name:
             cache_mgr.invalidate(cache_name)
+            _cache_manager = None
+            analysis_state.reset("缓存已失效，请重新开始分析")
             return {"success": True, "message": f"已失效缓存: {cache_name}"}
         else:
             cache_mgr.clear_all()
+            _cache_manager = None
             # 缓存失效后同步清空内存态，避免旧结果继续返回
             analysis_state.reset("缓存已失效，请重新开始分析")
             return {"success": True, "message": "已清除所有缓存"}
@@ -4458,6 +4837,7 @@ async def invalidate_cache(cache_name: Optional[str] = None):
 @app.post("/api/cache/clear")
 async def clear_cache():
     """彻底清空缓存（内存 + 当前输出目录）。"""
+    global _cache_manager
     if analysis_state.status == "running":
         return {"success": False, "error": "分析正在运行，无法清空缓存"}
 
@@ -4465,13 +4845,17 @@ async def clear_cache():
     cache_dir = _get_active_cache_dir()
     results_dir = _get_active_results_dir()
     cleaned_data_dir = os.path.join(output_dir, "cleaned_data")
+    analysis_logs_dir = os.path.join(output_dir, "analysis_logs")
 
     try:
         with _cache_lock:
             _clear_directory_contents(cache_dir)
             _clear_directory_contents(results_dir)
             _clear_directory_contents(cleaned_data_dir)
+            _clear_directory_contents(analysis_logs_dir)
 
+        _cache_manager = None
+        _clear_analysis_log_path_state()
         analysis_state.reset("缓存已清空，等待开始分析")
         return {
             "success": True,
@@ -5511,6 +5895,30 @@ def _build_report_manifest(results_dir: str) -> Dict[str, Any]:
     }
 
 
+def _should_refresh_semantic_artifacts_for_path(relative_path: str) -> bool:
+    normalized = str(relative_path or "").replace("\\", "/").strip("/")
+    if not normalized:
+        return False
+
+    basename = os.path.basename(normalized)
+    parent = os.path.dirname(normalized).replace("\\", "/").strip("/")
+    if basename not in {
+        "report_package.json",
+        "report_consistency_check.json",
+        "report_consistency_check.txt",
+    }:
+        return False
+
+    return parent in {"", "qa"}
+
+
+def _refresh_semantic_artifacts_for_runtime_read(results_dir: str, logger, scene: str) -> None:
+    try:
+        _load_report_package_for_manifest(results_dir)
+    except Exception as exc:
+        logger.warning("[%s] 预刷新语义产物失败: %s", scene, exc)
+
+
 @app.get("/api/reports")
 async def get_report_files():
     """
@@ -5525,6 +5933,7 @@ async def get_report_files():
         return {"success": True, "reports": [], "message": "报告目录不存在"}
 
     try:
+        _refresh_semantic_artifacts_for_runtime_read(results_dir, logger, "报告列表")
         reports = _collect_report_files(results_dir)
         logger.info(f"[报告列表] 找到 {len(reports)} 个报告文件")
         return {"success": True, "reports": reports}
@@ -5632,6 +6041,9 @@ async def preview_report_file(filename: str, request: Request):
             content={"success": False, "error": "非法文件路径"},
         )
 
+    if _should_refresh_semantic_artifacts_for_path(normalized_path):
+        _refresh_semantic_artifacts_for_runtime_read(results_dir, logger, "报告预览")
+
     if not os.path.exists(filepath):
         logger.warning(f"[报告预览] 文件不存在: {filepath}")
         return JSONResponse(
@@ -5719,6 +6131,11 @@ async def download_report_file(filename: str):
         return JSONResponse(
             status_code=400,
             content={"success": False, "error": "非法文件路径"},
+        )
+
+    if _should_refresh_semantic_artifacts_for_path(normalized_path):
+        _refresh_semantic_artifacts_for_runtime_read(
+            results_dir, logging.getLogger(__name__), "报告下载"
         )
 
     if not os.path.exists(filepath):
@@ -6533,27 +6950,24 @@ async def get_audit_navigation():
 
     # 构建报告文件列表
     report_files = []
-    primary_report_patterns = ["核查底稿", "审计报告", "report"]
+    audit_navigation_extensions = {".xlsx", ".html", ".docx", ".txt", ".pdf"}
     if os.path.exists(analysis_results_dir):
-        for filename in os.listdir(analysis_results_dir):
-            if filename.endswith((".xlsx", ".html", ".docx", ".txt", ".pdf")):
-                filepath = os.path.join(analysis_results_dir, filename)
-                stat_info = os.stat(filepath)
-                is_primary = any(p in filename.lower() for p in primary_report_patterns)
-                report_files.append(
-                    {
-                        "name": filename,
-                        "size": stat_info.st_size,
-                        "sizeFormatted": f"{stat_info.st_size / 1024:.1f}KB"
-                        if stat_info.st_size < 1024 * 1024
-                        else f"{stat_info.st_size / 1024 / 1024:.1f}MB",
-                        "modified": datetime.fromtimestamp(
-                            stat_info.st_mtime
-                        ).isoformat(),
-                        "isPrimary": is_primary,
-                    }
-                )
-        # 主要报告排在前面
+        _refresh_semantic_artifacts_for_runtime_read(
+            analysis_results_dir, logging.getLogger(__name__), "审计导航"
+        )
+        report_files = [
+            {
+                "name": item["name"],
+                "size": item["size"],
+                "sizeFormatted": f"{item['size'] / 1024:.1f}KB"
+                if item["size"] < 1024 * 1024
+                else f"{item['size'] / 1024 / 1024:.1f}MB",
+                "modified": item["modified"],
+                "isPrimary": str(item.get("groupKey") or "") == "primary_reports",
+            }
+            for item in _collect_report_files(analysis_results_dir)
+            if str(item.get("extension") or "").lower() in audit_navigation_extensions
+        ]
         report_files.sort(key=lambda x: (not x["isPrimary"], x["name"]))
 
     return serialize_for_json(

@@ -10,7 +10,7 @@ import os
 import re
 import pandas as pd
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import config
 import utils
 
@@ -79,6 +79,16 @@ def _normalize_amount_series(series: pd.Series, column_name: str) -> pd.Series:
     return series.apply(
         lambda value: utils.format_amount(value, unit_hint_multiplier=multiplier)
     )
+
+
+def _normalize_optional_text_series(series: pd.Series) -> pd.Series:
+    """统一处理可能为 Categorical 的文本列。"""
+    return series.astype("string").fillna("").str.strip()
+
+
+def _clean_optional_text_series(series: pd.Series) -> pd.Series:
+    """统一处理可选文本列并复用现有文本清洗逻辑。"""
+    return _normalize_optional_text_series(series).apply(utils.clean_text)
 
 
 def _read_transaction_file(filepath: str) -> pd.DataFrame:
@@ -174,6 +184,104 @@ def _build_dedup_direction_amount_keys(df: pd.DataFrame) -> Tuple[pd.Series, pd.
     return direction_key, amount_key.round(2)
 
 
+def _normalize_dedup_text(value: Any) -> str:
+    """标准化启发式去重中的文本字段。"""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value).replace("nan", "").strip()
+
+
+def _normalize_dedup_channel(value: Any) -> str:
+    channel = _normalize_dedup_text(value)
+    return "" if channel in {"其他", "未知"} else channel
+
+
+def _normalize_dedup_balance(value: Any) -> Optional[float]:
+    try:
+        balance = utils.format_amount(value)
+    except Exception:
+        return None
+    # `balance` 缺失时通常会被标准化为 0；这里不把 0 当作强特征，避免误删。
+    if balance <= 0:
+        return None
+    return round(balance, 2)
+
+
+def _collect_dedup_match_signals(
+    current_row: pd.Series, next_row: pd.Series
+) -> Tuple[bool, int, List[str], int, List[str]]:
+    """收集启发式去重的弱/强匹配信号。"""
+    weak_matches = 0
+    weak_reasons: List[str] = []
+    strong_matches = 0
+    strong_reasons: List[str] = []
+
+    current_counterparty = _normalize_dedup_text(current_row.get("_counterparty_clean", ""))
+    next_counterparty = _normalize_dedup_text(next_row.get("_counterparty_clean", ""))
+    if current_counterparty and next_counterparty:
+        if current_counterparty != next_counterparty:
+            return False, weak_matches, weak_reasons, strong_matches, strong_reasons
+        weak_matches += 1
+        weak_reasons.append("对手方")
+
+    current_desc = _normalize_dedup_text(current_row.get("_description_clean", ""))
+    next_desc = _normalize_dedup_text(next_row.get("_description_clean", ""))
+    current_desc_prefix = _normalize_dedup_text(current_row.get("_description_prefix", ""))
+    next_desc_prefix = _normalize_dedup_text(next_row.get("_description_prefix", ""))
+    if current_desc and next_desc:
+        if current_desc == next_desc:
+            weak_matches += 1
+            weak_reasons.append("摘要")
+        elif current_desc_prefix and next_desc_prefix and current_desc_prefix == next_desc_prefix:
+            strong_matches += 1
+            strong_reasons.append("摘要前缀")
+        else:
+            return False, weak_matches, weak_reasons, strong_matches, strong_reasons
+
+    text_feature_pairs = [
+        ("账号", current_row.get("account_number", ""), next_row.get("account_number", "")),
+        (
+            "交易渠道",
+            _normalize_dedup_channel(current_row.get("transaction_channel", "")),
+            _normalize_dedup_channel(next_row.get("transaction_channel", "")),
+        ),
+    ]
+    for feature_name, current_value, next_value in text_feature_pairs:
+        normalized_current = _normalize_dedup_text(current_value)
+        normalized_next = _normalize_dedup_text(next_value)
+        if not normalized_current or not normalized_next:
+            continue
+        if normalized_current != normalized_next:
+            return False, weak_matches, weak_reasons, strong_matches, strong_reasons
+        strong_matches += 1
+        strong_reasons.append(feature_name)
+
+    current_balance = _normalize_dedup_balance(current_row.get("balance"))
+    next_balance = _normalize_dedup_balance(next_row.get("balance"))
+    if current_balance is not None and next_balance is not None:
+        if current_balance != next_balance:
+            return False, weak_matches, weak_reasons, strong_matches, strong_reasons
+        strong_matches += 1
+        strong_reasons.append("余额")
+
+    current_source = _normalize_dedup_text(
+        current_row.get("数据来源", current_row.get("source_file", ""))
+    )
+    next_source = _normalize_dedup_text(
+        next_row.get("数据来源", next_row.get("source_file", ""))
+    )
+    if current_source and next_source and current_source == next_source:
+        strong_matches += 1
+        strong_reasons.append("来源文件")
+
+    return True, weak_matches, weak_reasons, strong_matches, strong_reasons
+
+
 def deduplicate_transactions(
     df: pd.DataFrame, output_dir: str = None
 ) -> Tuple[pd.DataFrame, Dict]:
@@ -230,7 +338,7 @@ def deduplicate_transactions(
 
     if has_valid_tx_id:
         # 流水号可用：完全相同的流水号才视为重复
-        tx_id_col = df["transaction_id"].astype(str).str.strip()
+        tx_id_col = _normalize_optional_text_series(df["transaction_id"])
         # 排除空值和占位符
         valid_tx_ids = ~tx_id_col.isin(["", "nan", "None", "N/A", "-"])
 
@@ -268,10 +376,9 @@ def deduplicate_transactions(
     dedup_details = []
 
     # 创建辅助列用于匹配
-    df["_counterparty_clean"] = df["counterparty"].astype(str).replace("nan", "").str.strip()
-    df["_description_clean"] = (
-        df["description"].astype(str).replace("nan", "").str.strip().str[:10]
-    )
+    df["_counterparty_clean"] = _normalize_optional_text_series(df["counterparty"])
+    df["_description_clean"] = _normalize_optional_text_series(df["description"])
+    df["_description_prefix"] = df["_description_clean"].str[:10]
 
     # 按金额分组进行向量化去重（金额相同的记录才可能是重复）
     tolerance = config.DEDUP_TIME_TOLERANCE_SECONDS
@@ -301,29 +408,25 @@ def deduplicate_transactions(
                 if not duplicates_mask[next_idx]:
                     next_row = df.loc[next_idx]
 
-                    # 对手方匹配检查
-                    counterparty_match = True
-                    if (
-                        current_row["_counterparty_clean"]
-                        and next_row["_counterparty_clean"]
-                    ):
-                        counterparty_match = (
-                            current_row["_counterparty_clean"]
-                            == next_row["_counterparty_clean"]
-                        )
+                    (
+                        candidate_match,
+                        weak_matches,
+                        weak_reasons,
+                        strong_matches,
+                        strong_reasons,
+                    ) = _collect_dedup_match_signals(current_row, next_row)
 
-                    # 摘要匹配检查
-                    desc_match = True
-                    if (
-                        current_row["_description_clean"]
-                        and next_row["_description_clean"]
-                    ):
-                        desc_match = (
-                            current_row["_description_clean"]
-                            == next_row["_description_clean"]
-                        )
+                    # 兼容旧规则的同时引入强特征兜底：
+                    # 1) 对手方+摘要都匹配：保持原有自动去重能力
+                    # 2) 只有一个弱特征时：至少再有一个强特征一致
+                    # 3) 弱特征都缺失时：至少两个强特征一致
+                    should_dedup = candidate_match and (
+                        weak_matches >= 2
+                        or (weak_matches == 1 and strong_matches >= 1)
+                        or (weak_matches == 0 and strong_matches >= 2)
+                    )
 
-                    if counterparty_match and desc_match:
+                    if should_dedup:
                         # 大额交易保护逻辑
                         current_amount = current_row["_amount_rounded"]
                         if current_amount >= config.ASSET_LARGE_AMOUNT_THRESHOLD:
@@ -363,14 +466,19 @@ def deduplicate_transactions(
                                 "对手方": str(next_row.get("counterparty", "")),
                                 "摘要": str(next_row.get("description", ""))[:30],
                                 "与行": int(current_idx),
-                                "去重原因": "时间+金额+对手方+摘要相同",
+                                "去重原因": "时间+金额相近，且匹配特征: "
+                                + "、".join(weak_reasons + strong_reasons),
                             }
                         )
 
                 j += 1
 
     # 清理辅助列
-    df = df.drop(["_counterparty_clean", "_description_clean"], axis=1, errors="ignore")
+    df = df.drop(
+        ["_counterparty_clean", "_description_clean", "_description_prefix"],
+        axis=1,
+        errors="ignore",
+    )
 
     # 移除重复记录
     df_dedup = df[~duplicates_mask].copy()
@@ -439,7 +547,12 @@ def validate_data_quality(
     """
     logger.info("开始数据质量验证...")
 
-    quality_report = {"total_rows": len(df), "invalid_rows": [], "warnings": []}
+    quality_report = {
+        "total_rows": len(df),
+        "invalid_rows": [],
+        "warnings": [],
+        "audit_alerts": {},
+    }
 
     if df.empty:
         return df, quality_report
@@ -489,9 +602,56 @@ def validate_data_quality(
         )
 
     # 3. 检查数据完整性
-    empty_description = df["description"].isna() | (df["description"] == "")
-    if empty_description.any():
-        quality_report["warnings"].append(f"{empty_description.sum()}条记录缺少摘要")
+    description_series = (
+        _normalize_optional_text_series(df["description"])
+        if "description" in df.columns
+        else pd.Series("", index=df.index, dtype="string")
+    )
+    empty_description = description_series == ""
+    empty_description_count = int(empty_description.sum())
+    if empty_description_count:
+        empty_description_ratio = empty_description_count / len(df)
+        quality_report["warnings"].append(
+            f"{empty_description_count}条记录缺少摘要(占比{empty_description_ratio:.1%})"
+        )
+        if empty_description_count >= 3 or empty_description_ratio >= 0.2:
+            quality_report["warnings"].append(
+                f"异常空摘要：发现{empty_description_count}条摘要缺失，建议核查源文件摘要列映射或银行回单完整性"
+            )
+        quality_report["audit_alerts"]["empty_description"] = {
+            "count": empty_description_count,
+            "ratio": round(empty_description_ratio, 4),
+        }
+
+    # 4. 异常零余额提示（仅在余额列存在时启用，避免把缺字段默认值误报为异常）
+    if "balance" in df.columns:
+        balance_series = pd.to_numeric(df["balance"], errors="coerce")
+        zero_balance = balance_series.fillna(0.0) == 0
+        zero_balance_count = int(zero_balance.sum())
+        if zero_balance_count:
+            zero_balance_ratio = zero_balance_count / len(df)
+            if zero_balance_count >= 3 or zero_balance_ratio >= 0.3:
+                quality_report["warnings"].append(
+                    f"异常零余额：发现{zero_balance_count}条余额为零记录(占比{zero_balance_ratio:.1%})，需核查是否为余额缺失或过桥资金清空"
+                )
+            quality_report["audit_alerts"]["zero_balance"] = {
+                "count": zero_balance_count,
+                "ratio": round(zero_balance_ratio, 4),
+            }
+
+    # 5. 异常重复日期段提示（同一时间戳重复 >= 3 次）
+    repeated_date_counts = df.loc[valid_mask, "date"].value_counts()
+    repeated_date_segments = repeated_date_counts[repeated_date_counts >= 3]
+    if not repeated_date_segments.empty:
+        repeated_segment_count = int(len(repeated_date_segments))
+        max_repeat_count = int(repeated_date_segments.max())
+        quality_report["warnings"].append(
+            f"异常重复日期段：发现{repeated_segment_count}个同一时间戳重复段，最大重复{max_repeat_count}条，需核查批量导入或模板流水"
+        )
+        quality_report["audit_alerts"]["repeated_date_segments"] = {
+            "segments": repeated_segment_count,
+            "max_repeat_count": max_repeat_count,
+        }
 
     # 移除无效行
     df_valid = df[valid_mask].copy()
@@ -567,7 +727,7 @@ def standardize_bank_fields(
     desc_col = _find_first_matching_column(df, config.BANK_FIELD_MAPPING.get("summary", []))
 
     if desc_col:
-        normalized["description"] = df[desc_col].apply(utils.clean_text)
+        normalized["description"] = _clean_optional_text_series(df[desc_col])
     else:
         normalized["description"] = ""
 
@@ -589,7 +749,7 @@ def standardize_bank_fields(
 
         # 向量化处理金额和借贷标志
         amounts = _normalize_amount_series(df[amount_col], amount_col).abs()
-        flags = df[debit_credit_col].astype(str).str.strip().str.upper()
+        flags = _normalize_optional_text_series(df[debit_credit_col]).str.upper()
 
         # 定义收入/支出标志
         credit_flags = ["贷", "C", "CREDIT", "贷方", "进", "收"]
@@ -602,9 +762,9 @@ def standardize_bank_fields(
         debit_mask = flags.isin(debit_flags)
         # 布尔索引：根据摘要推断收入
         desc_lower = (
-            df[desc_col].astype(str).str.lower()
+            _normalize_optional_text_series(df[desc_col]).str.lower()
             if desc_col and desc_col in df.columns
-            else pd.Series("", index=df.index)
+            else pd.Series("", index=df.index, dtype="string")
         )
         inferred_income_mask = (
             ~credit_mask
@@ -663,7 +823,7 @@ def standardize_bank_fields(
     )
 
     if counterparty_col:
-        normalized["counterparty"] = df[counterparty_col].apply(utils.clean_text)
+        normalized["counterparty"] = _clean_optional_text_series(df[counterparty_col])
     else:
         normalized["counterparty"] = ""
 
@@ -713,7 +873,7 @@ def standardize_bank_fields(
     )
 
     if account_col:
-        normalized["account_number"] = df[account_col].fillna("").astype(str).str.strip()
+        normalized["account_number"] = _normalize_optional_text_series(df[account_col])
     else:
         normalized["account_number"] = ""
 
@@ -912,7 +1072,7 @@ def standardize_bank_fields(
     )
 
     if tx_id_col:
-        normalized["transaction_id"] = df[tx_id_col].fillna("").astype(str).str.strip()
+        normalized["transaction_id"] = _normalize_optional_text_series(df[tx_id_col])
     else:
         normalized["transaction_id"] = ""
 
