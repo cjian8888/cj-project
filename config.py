@@ -436,6 +436,7 @@ BANK_FIELD_MAPPING: Dict[str, List[str]] = {
     'transaction_time': ['交易时间', '发生时间', '记账时间', '交易日期'],
     'transaction_amount': ['交易金额', '发生额', '金额'],
     'debit_credit_flag': ['借贷标志', '借贷', '收支标志'],
+    'transaction_status': ['交易状态', '交易结果', '业务状态', '处理结果', '状态', '交易是否成功', '查询反馈结果原因'],
     'balance': ['交易余额', '余额', '账户余额', '当前余额'],
     'counterparty_name': ['交易对手', '交易对方名称', '对方账户名称', '对手方', '交易对方', '对方名称'],
     'counterparty_account': ['交易对方账号', '对方账号', '对方账户'],
@@ -466,6 +467,7 @@ COLUMN_MAPPING: Dict[str, str] = {
     'is_cash': '现金',
     '数据来源': '来源文件',
     'transaction_id': '流水号',
+    'transaction_status': '交易状态',
     # Phase 0.1 刑侦级指标字段 (2026-01-18 新增)
     'is_balance_zeroed': '余额清空',
     'transaction_channel': '交易渠道',
@@ -478,7 +480,7 @@ COLUMN_ORDER: List[str] = [
     'counterparty', 'description', 'category',
     '银行来源', 'account_number', 'is_cash',
     'is_balance_zeroed', 'transaction_channel', 'sensitive_keywords',  # Phase 0.1 新增
-    '数据来源'
+    'transaction_status', '数据来源'
 ]
 
 # 读取 Excel 时的列名变体（用于兼容不同格式）

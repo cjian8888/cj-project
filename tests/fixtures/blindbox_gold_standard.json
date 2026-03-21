@@ -1,0 +1,84 @@
+{
+  "coverage": {
+    "bank_transaction_count": 28160,
+    "persons_count": 11,
+    "companies_count": 3,
+    "wallet_subject_count": 10,
+    "alipay_trade_count": 25154,
+    "tenpay_trade_count": 4600,
+    "wx_login_count": 8292,
+    "direct_transfer_count": 229
+  },
+  "entity_samples": [
+    {
+      "entity_name": "陈斌",
+      "entity_type": "person",
+      "transaction_count": 4057,
+      "total_income": "1192534.71",
+      "total_expense": "1146395.13"
+    },
+    {
+      "entity_name": "赵峰",
+      "entity_type": "person",
+      "transaction_count": 1419,
+      "total_income": "3986526.23",
+      "total_expense": "4086276.65"
+    },
+    {
+      "entity_name": "金琳",
+      "entity_type": "person",
+      "transaction_count": 6296,
+      "total_income": "9537556.55",
+      "total_expense": "9854935.08"
+    },
+    {
+      "entity_name": "贵州锐晶科技有限公司",
+      "entity_type": "company",
+      "transaction_count": 965,
+      "total_income": "35218519.51",
+      "total_expense": "18503512.52"
+    },
+    {
+      "entity_name": "北京鑫兴航科技有限公司",
+      "entity_type": "company",
+      "transaction_count": 172,
+      "total_income": "4162552.75",
+      "total_expense": "3936109.83"
+    }
+  ],
+  "key_transactions": [
+    {
+      "entity_name": "赵峰",
+      "direction": "expense",
+      "amount": "500000.00",
+      "transaction_time": "2025-02-09 15:27:30",
+      "counterparty_name": "北京鑫兴航科技有限公司",
+      "source_file": "赵峰_321182197708011010_国监查【2026】第004303号_中国建设银行交易流水.xlsx",
+      "excel_row_num": 11,
+      "transaction_id": "1020013L31739086049635167"
+    },
+    {
+      "entity_name": "北京鑫兴航科技有限公司",
+      "direction": "income",
+      "amount": "500000.00",
+      "transaction_time": "2025-02-09 15:27:43",
+      "counterparty_name": "赵峰",
+      "source_file": "北京鑫兴航科技有限公司_91110111MABX4F7F7U_国监查【2025】第030696号_中国工商银行交易流水.xlsx",
+      "excel_row_num": 103,
+      "transaction_id": "25040000001"
+    },
+    {
+      "entity_name": "赵峰",
+      "direction": "income",
+      "amount": "500000.00",
+      "transaction_time": "2025-02-09 14:04:01",
+      "counterparty_name": "朱永平",
+      "source_file": "赵峰_321182197708011010_国监查【2026】第004303号_中国建设银行交易流水.xlsx",
+      "excel_row_num": 12,
+      "transaction_id": "102001l4i1739081041915567"
+    }
+  ],
+  "key_issue_headlines": [
+    "赵峰与北京鑫兴航科技有限公司发生500,000元直接往来"
+  ]
+}

@@ -489,6 +489,7 @@ class InvestigationReportBuilder:
 
         # 核查底稿Excel缓存（延迟加载）
         self._workbook_cache = {}
+        self._cleaned_trace_candidates_cache: Dict[str, List[Dict[str, Any]]] = {}
         self._effective_family_units_cache: Optional[List[Dict[str, Any]]] = None
         self.profiles = analysis_cache.get("profiles", {})
         # 缓存核心人员列表
@@ -644,6 +645,170 @@ class InvestigationReportBuilder:
                 return candidate
         return None
 
+    def _load_cleaned_trace_candidates(self, entity_name: str) -> List[Dict[str, Any]]:
+        """从 cleaned_data 中加载可回填到结论卡的代表性溯源记录。"""
+        entity = str(entity_name or "").strip()
+        if not entity:
+            return []
+        if entity in self._cleaned_trace_candidates_cache:
+            return self._cleaned_trace_candidates_cache[entity]
+
+        import pandas as pd
+
+        candidates: List[Dict[str, Any]] = []
+        candidate_paths = [
+            os.path.join(self.output_dir, "cleaned_data", "个人", f"{entity}_合并流水.xlsx"),
+            os.path.join(self.output_dir, "cleaned_data", "公司", f"{entity}_合并流水.xlsx"),
+        ]
+        for path in candidate_paths:
+            if not os.path.isfile(path):
+                continue
+            try:
+                df = pd.read_excel(path, dtype=object)
+            except Exception as exc:
+                logger.warning("[report_package] 读取 cleaned_data 失败 %s: %s", path, exc)
+                continue
+            if df.empty:
+                continue
+
+            for row in df.to_dict(orient="records"):
+                source_file = str(row.get("来源文件") or "").strip()
+                source_row = self._normalize_trace_row(row.get("source_row_index"))
+                if not source_file or source_row is None:
+                    continue
+
+                income = self._safe_float_value(row.get("收入(元)"), 0.0)
+                expense = self._safe_float_value(row.get("支出(元)"), 0.0)
+                amount = max(abs(income), abs(expense))
+                tx_id = str(row.get("流水号") or "").strip()
+                if tx_id.lower() in {"nan", "none", "null"}:
+                    tx_id = ""
+
+                candidates.append(
+                    {
+                        "source_file": source_file,
+                        "source_row": source_row,
+                        "transaction_id": tx_id,
+                        "amount": amount,
+                        "income": income,
+                        "expense": expense,
+                        "category": str(row.get("交易分类") or "").strip(),
+                        "summary": str(row.get("交易摘要") or "").strip(),
+                    }
+                )
+            break
+
+        self._cleaned_trace_candidates_cache[entity] = candidates
+        return candidates
+
+    def _pick_issue_fallback_evidence_refs(
+        self,
+        entity_name: str,
+        category: str = "",
+    ) -> List[str]:
+        """为无 traceable evidence_refs 的结论卡挑选 cleaned_data 代表性证据。"""
+        candidates = self._load_cleaned_trace_candidates(entity_name)
+        if not candidates:
+            return []
+
+        preferred = candidates
+        normalized_category = str(category or "").strip()
+        if normalized_category == "收支不匹配":
+            income_candidates = [item for item in candidates if item.get("income", 0.0) > 0]
+            non_salary_candidates = [
+                item
+                for item in income_candidates
+                if "工资" not in str(item.get("category") or "")
+                and "工资" not in str(item.get("summary") or "")
+            ]
+            preferred = non_salary_candidates or income_candidates or candidates
+
+        with_tx_id = [item for item in preferred if str(item.get("transaction_id") or "").strip()]
+        ranked = sorted(
+            with_tx_id or preferred,
+            key=lambda item: (
+                -self._safe_float_value(item.get("amount"), 0.0),
+                int(item.get("source_row") or 0),
+                str(item.get("source_file") or ""),
+            ),
+        )
+        if not ranked:
+            return []
+
+        chosen = ranked[0]
+        refs = [
+            f"{chosen['source_file']}（解析记录第{int(chosen['source_row'])}行）"
+        ]
+        tx_id = str(chosen.get("transaction_id") or "").strip()
+        if tx_id:
+            refs.append(f"交易标识 {tx_id}")
+        return refs
+
+    def _enrich_report_package_issue_evidence_refs(
+        self,
+        report_package: Dict[str, Any],
+    ) -> None:
+        """为语义层中缺少 evidence_refs 的结论卡补 cleaned_data 溯源。"""
+        if not isinstance(report_package, dict):
+            return
+
+        issues = report_package.get("issues")
+        if not isinstance(issues, list):
+            return
+
+        evidence_index = report_package.setdefault("evidence_index", {})
+        if not isinstance(evidence_index, dict):
+            evidence_index = {}
+            report_package["evidence_index"] = evidence_index
+
+        updated_refs: Dict[str, List[str]] = {}
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            if issue.get("evidence_refs"):
+                continue
+            source_modules = issue.get("source_modules") or []
+            if "report_conclusion" not in source_modules:
+                continue
+
+            scope = issue.get("scope") or {}
+            entity_name = str(scope.get("entity") or scope.get("company") or "").strip()
+            if not entity_name:
+                continue
+
+            refs = self._pick_issue_fallback_evidence_refs(
+                entity_name,
+                category=str(issue.get("category") or ""),
+            )
+            if not refs:
+                continue
+
+            issue["evidence_refs"] = refs
+            issue_id = str(issue.get("issue_id") or "").strip()
+            if issue_id:
+                updated_refs[issue_id] = refs
+                for ref in refs:
+                    bucket = evidence_index.setdefault(ref, {"issue_ids": [], "ref": ref})
+                    issue_ids = bucket.setdefault("issue_ids", [])
+                    if issue_id not in issue_ids:
+                        issue_ids.append(issue_id)
+
+        main_report_view = report_package.get("main_report_view")
+        if isinstance(main_report_view, dict):
+            for issue in main_report_view.get("issues", []) or []:
+                if not isinstance(issue, dict):
+                    continue
+                issue_id = str(issue.get("issue_id") or "").strip()
+                refs = updated_refs.get(issue_id)
+                if refs and not issue.get("evidence_refs"):
+                    issue["evidence_refs"] = refs
+
+        if updated_refs:
+            logger.info(
+                "[report_package] 已为 %s 条综合研判问题补充 cleaned_data 溯源",
+                len(updated_refs),
+            )
+
     def build_report_package(
         self,
         report: Optional[Dict[str, Any]] = None,
@@ -680,6 +845,7 @@ class InvestigationReportBuilder:
             dossier_payload,
             qa_checks={},
         )
+        self._enrich_report_package_issue_evidence_refs(report_package)
         report_package["qa_checks"] = run_report_quality_checks(
             analysis_cache,
             report_package,
@@ -707,6 +873,34 @@ class InvestigationReportBuilder:
         }
         return report_package
 
+    def _merge_report_package_without_report_context(
+        self,
+        existing_package: Optional[Dict[str, Any]],
+        refreshed_package: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """在缺少原始 report 对象时，保留已有正式语义层，避免刷新后降级。"""
+        existing = existing_package if isinstance(existing_package, dict) else {}
+        refreshed = refreshed_package if isinstance(refreshed_package, dict) else {}
+        if not existing:
+            return refreshed
+        if not refreshed:
+            return existing
+
+        merged = dict(existing)
+        for key in (
+            "meta",
+            "coverage",
+            "person_dossiers",
+            "company_dossiers",
+            "family_dossiers",
+            "qa_checks",
+            "risk_schema",
+            "artifact_meta",
+        ):
+            if key in refreshed:
+                merged[key] = refreshed[key]
+        return merged
+
     def save_report_package_artifacts(
         self,
         report: Optional[Dict[str, Any]] = None,
@@ -720,11 +914,23 @@ class InvestigationReportBuilder:
             effective_formal_report_path or formal_report_path
         )
         os.makedirs(report_dirs["qa_dir"], exist_ok=True)
+        report_package_path = os.path.join(report_dirs["qa_dir"], "report_package.json")
+        existing_report_package = None
+        if not isinstance(report, dict) and os.path.exists(report_package_path):
+            try:
+                with open(report_package_path, "r", encoding="utf-8") as handle:
+                    existing_report_package = json.load(handle)
+            except (OSError, ValueError, TypeError):
+                existing_report_package = None
         report_package = self.build_report_package(
             report=report,
             formal_report_path=effective_formal_report_path or formal_report_path,
         )
-        report_package_path = os.path.join(report_dirs["qa_dir"], "report_package.json")
+        if not isinstance(report, dict):
+            report_package = self._merge_report_package_without_report_context(
+                existing_report_package,
+                report_package,
+            )
         consistency_path = os.path.join(
             report_dirs["qa_dir"], "report_consistency_check.json"
         )
@@ -14334,6 +14540,10 @@ class InvestigationReportBuilder:
                 profile.get("totalExpense"),
                 self._safe_float_value(summary.get("total_expense"), 0.0),
             )
+            real_income = self._safe_float_value(
+                profile.get("realIncome"),
+                self._safe_float_value(summary.get("real_income"), 0.0),
+            )
             transaction_count = int(
                 self._safe_float_value(
                     profile.get("transactionCount"),
@@ -14346,6 +14556,7 @@ class InvestigationReportBuilder:
                     "name": name,
                     "income": income,
                     "expense": expense,
+                    "real_income": real_income,
                     "total_flow": income + expense,
                     "transaction_count": transaction_count,
                 }
@@ -14357,7 +14568,7 @@ class InvestigationReportBuilder:
     def _format_frontend_person_flow_trace_line(self, name: str) -> str:
         """格式化前端个人资金流量面板的溯源路径。"""
         return (
-            f"{name}的收入、支出和交易笔数口径来自资金画像汇总结果。"
+            f"{name}的总流入、总流出和交易笔数口径来自资金画像汇总结果；真实收入为剔除互转、理财本金回流等后的口径。"
         )
 
     def _format_frontend_bucket_trace_line(
@@ -15174,7 +15385,13 @@ class InvestigationReportBuilder:
                 for idx, row in enumerate(frontend_person_flows, 1):
                     lines.append(
                         f"    {idx}. {row['name']} | 流水总额{row['total_flow'] / 10000:,.2f}万元 | "
-                        f"收入{row['income'] / 10000:,.2f}万元 | 支出{row['expense'] / 10000:,.2f}万元 | "
+                        f"总流入{row['income'] / 10000:,.2f}万元 | 总流出{row['expense'] / 10000:,.2f}万元"
+                        + (
+                            f" | 真实收入{row['real_income'] / 10000:,.2f}万元"
+                            if row.get("real_income", 0) > 0
+                            else ""
+                        )
+                        + " | "
                         f"{row['transaction_count']}笔"
                     )
                     lines.append(

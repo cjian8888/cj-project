@@ -146,6 +146,7 @@ def _build_family_entries(
     report: Dict[str, Any], derived_data: Dict[str, Any]
 ) -> List[Dict[str, Any]]:
     families: List[Dict[str, Any]] = []
+    all_family_summaries = _as_dict(derived_data.get("all_family_summaries"))
     family_sections = _as_list(report.get("family_sections"))
     if family_sections:
         for item in family_sections:
@@ -198,6 +199,7 @@ def _build_family_entries(
         if not isinstance(item, dict):
             continue
         anchor = str(item.get("anchor") or "").strip()
+        family_summary = _as_dict(all_family_summaries.get(anchor))
         members = [
             str(member).strip()
             for member in _as_list(item.get("members"))
@@ -218,8 +220,30 @@ def _build_family_entries(
                 "members": members,
                 "member_count": len(members),
                 "pending_members": pending_members,
-                "total_income": _as_float(item.get("real_income", 0)),
-                "total_expense": _as_float(item.get("real_expense", 0)),
+                "total_income": _as_float(
+                    _pick(
+                        item,
+                        "real_income",
+                        default=_pick(
+                            family_summary,
+                            "real_income",
+                            "total_income",
+                            default=0,
+                        ),
+                    )
+                ),
+                "total_expense": _as_float(
+                    _pick(
+                        item,
+                        "real_expense",
+                        default=_pick(
+                            family_summary,
+                            "real_expense",
+                            "total_expense",
+                            default=0,
+                        ),
+                    )
+                ),
             }
         )
     return families

@@ -1411,6 +1411,12 @@ def serialize_profiles(profiles: Dict) -> Dict:
                 or income_structure.get("total_income", 0),
                 "totalExpense": summary.get("total_expense", 0)
                 or income_structure.get("total_expense", 0),
+                "realIncome": summary.get("real_income")
+                if summary.get("real_income") is not None
+                else profile_dict.get("real_income", 0),
+                "realExpense": summary.get("real_expense")
+                if summary.get("real_expense") is not None
+                else profile_dict.get("real_expense", 0),
                 "transactionCount": summary.get("transaction_count", 0),
                 # 审计关键字段 - 前端展示用
                 "cashTotal": cash_total,
@@ -4243,6 +4249,16 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
 
         # 8.4 生成 Excel 核查底稿
         try:
+            report_package_for_excel = None
+            report_package_path = os.path.join(
+                output_dirs["analysis_results"], "qa", "report_package.json"
+            )
+            if os.path.exists(report_package_path):
+                try:
+                    with open(report_package_path, "r", encoding="utf-8") as handle:
+                        report_package_for_excel = json.load(handle)
+                except (OSError, ValueError, TypeError) as exc:
+                    logger.warning(f"  ✗ 读取 report_package 供 Excel 对齐失败: {exc}")
             excel_path = report_generator.generate_excel_workbook(
                 profiles=profiles,
                 suspicions=suspicions,
@@ -4256,6 +4272,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                 income_results=analysis_results.get("income", {}),
                 time_series_results=analysis_results.get("timeSeries", {}),
                 derived_data=derived_data if "derived_data" in dir() else {},
+                report_package=report_package_for_excel,
             )
             logger.info(f"  ✓ Excel核查底稿已生成: {excel_path}")
             broadcast_log("INFO", "  ✓ Excel核查底稿生成成功")

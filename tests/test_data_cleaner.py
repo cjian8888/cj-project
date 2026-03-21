@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from data_cleaner import (
     deduplicate_transactions, validate_data_quality,
     standardize_bank_fields, generate_cleaning_report,
-    clean_and_merge_files, save_formatted_excel
+    clean_and_merge_files, save_formatted_excel,
+    _read_transaction_file,
 )
 
 
@@ -50,7 +51,7 @@ class TestDeduplicateTransactions:
     def test_deduplicate_with_duplicates(self):
         """测试有重复数据"""
         df = pd.DataFrame({
-            'date': pd.to_datetime(['2024-01-01 10:00:00', '2024-01-01 10:00:01']),
+            'date': pd.to_datetime(['2024-01-01 10:00:00', '2024-01-01 10:00:00']),
             'income': [1000, 1000],
             'expense': [0, 0],
             'counterparty': ['公司', '公司'],
@@ -59,6 +60,131 @@ class TestDeduplicateTransactions:
         result, stats = deduplicate_transactions(df)
         assert len(result) == 1
         assert stats['duplicates'] == 1
+
+    def test_deduplicate_prefers_transaction_id_even_when_coverage_is_low(self):
+        """只要单行有有效流水号，就应优先按流水号精确去重"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime([
+                '2024-01-01 10:00:00',
+                '2024-01-01 10:05:00',
+                '2024-01-01 10:10:00',
+            ]),
+            'income': [1000, 1000, 500],
+            'expense': [0, 0, 0],
+            'counterparty': ['甲公司', '甲公司', '乙公司'],
+            'description': ['工资', '工资', '补贴'],
+            'transaction_id': ['TX-001', 'TX-001', ''],
+        })
+        result, stats = deduplicate_transactions(df)
+        assert len(result) == 2
+        assert stats['duplicates'] == 1
+
+    def test_deduplicate_transaction_id_prefers_principal_row_over_fee_row(self):
+        """同一流水号存在主交易和手续费时，应保留主交易而不是随机留手续费"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2025-02-09 15:27:30', '2025-02-09 15:27:30']),
+            'income': [0, 0],
+            'expense': [500000, 9],
+            'counterparty': ['北京鑫兴航科技有限公司', ''],
+            'description': ['对公转账', '账户转账手续费'],
+            'transaction_id': ['1020013L31739086049635167', '1020013L31739086049635167'],
+            '数据来源': ['中国建设银行交易流水.xlsx', '中国建设银行交易流水.xlsx'],
+            'source_row_index': [11, 12],
+        })
+        result, stats = deduplicate_transactions(df)
+        assert len(result) == 1
+        assert stats['duplicates'] == 1
+        assert float(result.iloc[0]['expense']) == 500000
+        assert result.iloc[0]['counterparty'] == '北京鑫兴航科技有限公司'
+
+    def test_deduplicate_placeholder_transaction_id_uses_raw_non_empty_txid_semantics(self):
+        """建行等银行的 '-' 占位流水号也应按非空流水号口径精确去重"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime([
+                '2025-03-21 00:07:54',
+                '2025-06-21 00:31:15',
+            ]),
+            'income': [0.17, 0.18],
+            'expense': [0, 0],
+            'counterparty': ['', ''],
+            'description': ['利息存入', '利息存入'],
+            'transaction_id': ['-', '-'],
+            '数据来源': ['中国建设银行交易流水.xlsx', '中国建设银行交易流水.xlsx'],
+        })
+        result, stats = deduplicate_transactions(df)
+        assert len(result) == 1
+        assert stats['duplicates'] == 1
+
+    def test_deduplicate_exact_blank_natural_key_template_rows(self):
+        """无流水号且对手方/摘要全空的模板重复行应按精确自然键去重"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime([
+                '2024-06-29 00:00:00',
+                '2024-06-29 00:00:00',
+                '2024-06-29 00:00:00',
+            ]),
+            'income': [8.71, 8.71, 8.71],
+            'expense': [0, 0, 0],
+            'counterparty': ['', '', ''],
+            'description': ['', '', ''],
+            'account_number': ['6221482883736688'] * 3,
+            'transaction_id': ['', '', ''],
+            '数据来源': ['上海银行交易流水.xlsx'] * 3,
+        })
+        result, stats = deduplicate_transactions(df)
+        assert len(result) == 1
+        assert stats['duplicates'] == 2
+
+    def test_deduplicate_zero_amount_exact_natural_key_rows(self):
+        """无流水号的零金额信息行，只要自然键完全一致也应压重"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime([
+                '2023-06-21 00:00:00',
+                '2023-06-21 00:00:00',
+            ]),
+            'income': [0, 0],
+            'expense': [0, 0],
+            'counterparty': ['', ''],
+            'description': ['个人活期结息', '个人活期结息'],
+            'account_number': ['335801100399267', '335801100399267'],
+            'transaction_id': ['', ''],
+            '数据来源': ['中国农业银行交易流水.xlsx'] * 2,
+        })
+        result, stats = deduplicate_transactions(df)
+        assert len(result) == 1
+        assert stats['duplicates'] == 1
+
+    def test_deduplicate_same_amount_same_summary_one_second_apart_is_not_removed_without_balance_anchor(self):
+        """同账号同金额同摘要但仅相差 1 秒的连续转账，不应再被粗暴去重"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01 10:00:00', '2024-01-01 10:00:01']),
+            'income': [0, 0],
+            'expense': [5000, 5000],
+            'counterparty': ['贵州锐晶科技有限公司', '贵州锐晶科技有限公司'],
+            'description': ['对公转账', '对公转账'],
+            'account_number': ['6222000011112222', '6222000011112222'],
+            'transaction_channel': ['网银', '网银'],
+        })
+        result, stats = deduplicate_transactions(df)
+        assert len(result) == 2
+        assert stats['duplicates'] == 0
+
+    def test_deduplicate_different_transaction_ids_are_never_heuristically_merged(self):
+        """不同非空流水号的交易，即使特征高度相似也不能再被启发式误删"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-05-22 11:22:14', '2024-05-22 11:22:15']),
+            'income': [0, 0],
+            'expense': [3.57, 3.57],
+            'counterparty': ['', ''],
+            'description': ['支付宝-上海盒马网络科技有限公司', '支付宝-上海盒马网络科技有限公司'],
+            'account_number': ['2470649_156', '2470649_156'],
+            'balance': [329.30, 329.30],
+            'transaction_channel': ['第三方支付', '第三方支付'],
+            'transaction_id': ['TX001', 'TX002'],
+        })
+        result, stats = deduplicate_transactions(df)
+        assert len(result) == 2
+        assert stats['duplicates'] == 0
     
     def test_deduplicate_large_amount_protection(self):
         """测试大额交易保护"""
@@ -191,6 +317,26 @@ class TestValidateDataQuality:
         assert report['invalid_rows'] == [0, 1]
         assert report['valid_rows'] == 0
         assert report['removed_rows'] == 2
+
+    def test_validate_keeps_account_only_placeholder_rows_without_dates(self):
+        """无日期但仅包含账号查询反馈的记录，应保留在主流水笔数口径中"""
+        df = pd.DataFrame({
+            'date': [pd.NaT, pd.NaT],
+            'income': [0, 0],
+            'expense': [0, 0],
+            'description': ['', ''],
+            'counterparty': ['', ''],
+            'account_number': ['980200018624738', '97280150300025111'],
+            'transaction_id': ['', ''],
+        })
+        result, report = validate_data_quality(df)
+
+        assert len(result) == 2
+        assert '缺少日期字段' in report['warnings']
+        assert '无日期的信息型查询反馈记录' in str(report['warnings'])
+        assert report['valid_rows'] == 2
+        assert report['removed_rows'] == 0
+        assert report['audit_alerts']['missing_date_placeholders']['count'] == 2
     
     def test_validate_missing_dates(self):
         """测试缺失日期值"""
@@ -203,6 +349,20 @@ class TestValidateDataQuality:
         result, report = validate_data_quality(df)
         assert len(result) == 1
         assert '日期缺失' in str(report['warnings'])
+
+    def test_validate_invalid_transaction_status_rows_are_removed(self):
+        """失败/冲正/退汇等状态应从主流水剔除"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03']),
+            'income': [1000, 2000, 3000],
+            'expense': [0, 0, 0],
+            'description': ['工资', '冲正', '奖金'],
+            'transaction_status': ['交易成功', '冲正成功', '交易失败'],
+        })
+        result, report = validate_data_quality(df)
+        assert len(result) == 1
+        assert '无效交易状态记录' in str(report['warnings'])
+        assert report['audit_alerts']['invalid_transaction_status']['count'] == 2
     
     def test_validate_zero_amount(self):
         """测试零金额检测"""
@@ -310,6 +470,18 @@ class TestStandardizeBankFields:
         assert result.iloc[0]['expense'] == 0
         assert result.iloc[1]['income'] == 0
         assert result.iloc[1]['expense'] == 2000
+
+    def test_standardize_unknown_debit_credit_flag_does_not_default_to_expense(self):
+        """借贷标志缺失且无明确收入关键词时，不应被默认记成支出"""
+        df = pd.DataFrame({
+            '交易时间': ['2024-12-05 23:59:59'],
+            '交易金额': ['1053.42'],
+            '借贷标志': [None],
+            '交易摘要': ['利息'],
+        })
+        result = standardize_bank_fields(df)
+        assert float(result.iloc[0]['income']) == 0.0
+        assert float(result.iloc[0]['expense']) == 0.0
     
     def test_standardize_with_counterparty(self):
         """测试对手方标准化"""
@@ -346,6 +518,42 @@ class TestStandardizeBankFields:
         result = standardize_bank_fields(df)
         assert 'balance' in result.columns
         assert result.iloc[0]['balance'] == 5000
+
+    def test_standardize_with_transaction_status(self):
+        """测试交易状态列标准化"""
+        df = pd.DataFrame({
+            '交易时间': ['2024-01-01'],
+            '交易金额': [1000],
+            '借贷标志': ['贷'],
+            '交易状态': ['交易失败'],
+        })
+        result = standardize_bank_fields(df)
+        assert 'transaction_status' in result.columns
+        assert result.iloc[0]['transaction_status'] == '交易失败'
+
+    def test_standardize_accepts_transaction_success_status_column_name(self):
+        """真实银行文件中的“交易是否成功”也应映射到 transaction_status"""
+        df = pd.DataFrame({
+            '交易时间': ['2024-01-01'],
+            '交易金额': [1000],
+            '借贷标志': ['贷'],
+            '交易是否成功': ['交易失败'],
+        })
+        result = standardize_bank_fields(df)
+        assert result.iloc[0]['transaction_status'] == '交易失败'
+
+    def test_standardize_preserves_signed_amounts_with_debit_credit_flag(self):
+        """带借贷标志的负数金额应保留原始符号，不能被绝对值化"""
+        df = pd.DataFrame({
+            '交易时间': ['2025-06-29 15:41:00'],
+            '交易金额': ['-320000.00'],
+            '借贷标志': ['出'],
+            '交易摘要': ['往来款'],
+            '交易对方名称': ['武汉志航电子科技有限公司'],
+        })
+        result = standardize_bank_fields(df)
+        assert float(result.iloc[0]['income']) == 0.0
+        assert float(result.iloc[0]['expense']) == -320000.0
     
     def test_standardize_cash_detection(self):
         """测试现金交易检测"""
@@ -542,7 +750,21 @@ class TestGenerateCleaningReport:
 
 class TestCleanAndMergeFiles:
     """测试清洗合并文件函数"""
-    
+
+    def test_read_transaction_file_preserves_leading_zero_txid(self, tmp_path):
+        """读取 Excel 时应保留流水号前导零"""
+        test_file = tmp_path / "leading_zero.xlsx"
+        pd.DataFrame({
+            '交易时间': ['2024-01-01'],
+            '交易金额': ['100'],
+            '借贷标志': ['贷'],
+            '交易流水号': ['00000000125'],
+        }).to_excel(test_file, index=False)
+
+        result = _read_transaction_file(str(test_file))
+
+        assert str(result.iloc[0]['交易流水号']) == '00000000125'
+
     def test_clean_merge_empty_file_list(self):
         """测试空文件列表"""
         result, stats = clean_and_merge_files([], '张伟')

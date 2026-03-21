@@ -526,8 +526,107 @@ def _build_aggregation_overview(
     )
 
 
-def _generate_aggregation_summary_sheet(writer, derived_data: Optional[Dict]) -> None:
+def _build_semantic_priority_board_rows(
+    report_package: Optional[Dict[str, Any]],
+    limit: int = 5,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """将正式语义层 priority_board 转成 Excel 旧版聚合风险页。"""
+    package = report_package if isinstance(report_package, dict) else {}
+    board = package.get("priority_board")
+    if not isinstance(board, list) or not board:
+        return [], []
+
+    normalized_items: List[Dict[str, Any]] = []
+    for item in board:
+        if not isinstance(item, dict):
+            continue
+        entity_name = str(item.get("entity_name") or item.get("name") or "").strip()
+        if not entity_name:
+            continue
+        risk_label = str(item.get("risk_label") or "").strip()
+        if not risk_label:
+            risk_label = _RISK_LEVEL_MAP.get(
+                str(item.get("risk_level") or "").strip().lower(),
+                "低风险",
+            )
+        top_reasons = [
+            str(reason).strip()
+            for reason in (item.get("top_reasons") or [])
+            if str(reason).strip()
+        ]
+        issue_refs = [
+            str(issue_id).strip()
+            for issue_id in (item.get("issue_refs") or [])
+            if str(issue_id).strip()
+        ]
+        normalized_items.append(
+            {
+                "entity_name": entity_name,
+                "priority_score": round(float(item.get("priority_score", 0) or 0), 2),
+                "confidence": round(float(item.get("confidence", 0) or 0), 2),
+                "severity": round(float(item.get("severity", 0) or 0), 2),
+                "risk_label": risk_label,
+                "top_reasons": top_reasons,
+                "issue_refs": issue_refs,
+            }
+        )
+
+    if not normalized_items:
+        return [], []
+
+    summary_rows = [
+        {
+            "指标": "极高风险实体数",
+            "值": sum(1 for item in normalized_items if item["risk_label"] == "极高风险"),
+        },
+        {
+            "指标": "高风险实体数",
+            "值": sum(1 for item in normalized_items if item["risk_label"] == "高风险"),
+        },
+        {"指标": "高优先线索实体数", "值": len(normalized_items)},
+        {
+            "指标": "平均风险分",
+            "值": round(
+                sum(item["priority_score"] for item in normalized_items)
+                / len(normalized_items),
+                2,
+            ),
+        },
+    ]
+
+    detail_rows: List[Dict[str, Any]] = []
+    for item in normalized_items[:limit]:
+        reason_text = " | ".join(item["top_reasons"][:3])
+        detail_rows.append(
+            {
+                "对象名称": item["entity_name"],
+                "风险评分": item["priority_score"],
+                "风险置信度": item["confidence"],
+                "高优先线索数": len(item["issue_refs"]),
+                "最强证据分": item["severity"],
+                "综合摘要": reason_text or item["risk_label"],
+                "重点线索": reason_text or "未提供",
+            }
+        )
+
+    return summary_rows, detail_rows
+
+
+def _generate_aggregation_summary_sheet(
+    writer,
+    derived_data: Optional[Dict],
+    report_package: Optional[Dict[str, Any]] = None,
+) -> None:
     """生成聚合风险排序摘要页。"""
+    semantic_summary_rows, semantic_detail_rows = _build_semantic_priority_board_rows(
+        report_package
+    )
+    if semantic_summary_rows:
+        _write_excel_sheet(writer, "聚合风险排序", semantic_summary_rows)
+        if semantic_detail_rows:
+            _write_excel_sheet(writer, "聚合风险重点对象", semantic_detail_rows)
+        return
+
     overview = _build_aggregation_overview(derived_data=derived_data)
     highlights = overview.get("highlights", [])
     summary = overview.get("summary", {})
@@ -1845,7 +1944,8 @@ def generate_excel_workbook(profiles: Dict,
                             loan_results: Dict = None,
                             income_results: Dict = None,
                             time_series_results: Dict = None,
-                            derived_data: Dict = None) -> str:
+                            derived_data: Dict = None,
+                            report_package: Optional[Dict[str, Any]] = None) -> str:
     """
     生成Excel核查底稿
 
@@ -1878,7 +1978,11 @@ def generate_excel_workbook(profiles: Dict,
         _generate_summary_sheet(writer, profiles)
 
         # 1.5 聚合风险排序摘要
-        _generate_aggregation_summary_sheet(writer, derived_data)
+        _generate_aggregation_summary_sheet(
+            writer,
+            derived_data,
+            report_package=report_package,
+        )
 
 
         # 2. 直接转账关系表

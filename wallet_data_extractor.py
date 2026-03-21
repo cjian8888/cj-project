@@ -392,6 +392,21 @@ def _append_artifact_row(
     artifact_details[bucket].append(row)
 
 
+def _backfill_wechat_phone_mapping(
+    subject: Dict[str, Any],
+    subject_id: str,
+    phone_to_subject_ids: Dict[str, Set[str]],
+    *phones: Optional[str],
+) -> None:
+    for phone in phones:
+        normalized_phone = _normalize_phone(phone)
+        if not normalized_phone:
+            continue
+        subject["phones"].add(normalized_phone)
+        subject["platformPhones"]["wechat"].add(normalized_phone)
+        phone_to_subject_ids[normalized_phone].add(subject_id)
+
+
 def _new_subject(subject_id: str, subject_name: Optional[str], known_name_set: Set[str]) -> Dict[str, Any]:
     return {
         "subjectId": subject_id,
@@ -810,7 +825,13 @@ def _parse_wechat_registration_file(
     match_basis = None
     if candidate_subject_id:
         match_basis = "手机号"
-    else:
+    if not candidate_subject_id and current_bound_phone:
+        candidate_subject_id = _select_unique_match(
+            phone_to_subject_ids.get(current_bound_phone, set())
+        )
+        if candidate_subject_id:
+            match_basis = "绑定手机号"
+    if not candidate_subject_id:
         for alias_value in (alias, wxid):
             if not alias_value:
                 continue
@@ -828,6 +849,7 @@ def _parse_wechat_registration_file(
             "alias": alias or "",
             "nickname": nickname or "",
             "registeredAt": registered_at,
+            "currentBoundPhone": current_bound_phone or "",
             "latestLoginAt": unmatched_wechat_accounts.get(phone, {}).get("latestLoginAt"),
             "loginEventCount": unmatched_wechat_accounts.get(phone, {}).get("loginEventCount", 0),
         }
@@ -858,10 +880,17 @@ def _parse_wechat_registration_file(
     if alias:
         wechat["wechatAliases"].add(alias)
         subject["platformAliases"]["wechat"].add(alias)
+        alias_to_subject_ids[alias].add(candidate_subject_id)
     if wxid:
         subject["platformAliases"]["wechat"].add(wxid)
-    subject["phones"].add(phone)
-    subject["platformPhones"]["wechat"].add(phone)
+        alias_to_subject_ids[wxid].add(candidate_subject_id)
+    _backfill_wechat_phone_mapping(
+        subject,
+        candidate_subject_id,
+        phone_to_subject_ids,
+        phone,
+        current_bound_phone,
+    )
     subject["signals"].add("存在微信注册信息")
     if match_basis:
         subject["matchBasis"].add(f"微信{match_basis}映射")
@@ -923,10 +952,29 @@ def _parse_wechat_login_file(
     if not login_events:
         return
 
-    subject_id = _select_unique_match(phone_to_subject_ids.get(phone, set()))
+    candidate_ids: Set[str] = set(phone_to_subject_ids.get(phone, set()))
+    unmatched_account = unmatched_wechat_accounts.get(phone, {})
+    current_bound_phone = _normalize_phone(unmatched_account.get("currentBoundPhone"))
+    if current_bound_phone:
+        candidate_ids.update(phone_to_subject_ids.get(current_bound_phone, set()))
+    for alias_value in (
+        safe_str(unmatched_account.get("alias")),
+        safe_str(unmatched_account.get("wxid")),
+    ):
+        if alias_value:
+            candidate_ids.update(alias_to_subject_ids.get(alias_value, set()))
+
+    subject_id = _select_unique_match(candidate_ids)
     if subject_id and subject_id in raw_subjects:
         subject = raw_subjects[subject_id]
         wechat = subject["wechat"]
+        _backfill_wechat_phone_mapping(
+            subject,
+            subject_id,
+            phone_to_subject_ids,
+            phone,
+            current_bound_phone,
+        )
         wechat["loginEventCount"] += len(login_events)
         latest_login = max(event["loginTime"] for event in login_events)
         if not wechat["latestLoginAt"] or latest_login > wechat["latestLoginAt"]:
@@ -957,6 +1005,7 @@ def _parse_wechat_login_file(
             "alias": "",
             "nickname": "",
             "registeredAt": None,
+            "currentBoundPhone": None,
             "latestLoginAt": None,
             "loginEventCount": 0,
         },
@@ -1017,6 +1066,11 @@ def _build_wallet_data_payload(
         totals["tenpayAccountCount"] += summary["platforms"]["wechat"]["tenpayAccountCount"]
         totals["tenpayTransactionCount"] += summary["platforms"]["wechat"]["tenpayTransactionCount"]
         totals["loginEventCount"] += summary["platforms"]["wechat"]["loginEventCount"]
+
+    totals["loginEventCount"] += sum(
+        int(account.get("loginEventCount", 0) or 0)
+        for account in unmatched_wechat_accounts.values()
+    )
 
     subjects.sort(
         key=lambda item: (_subject_total_transactions(item), item.get("subjectName", "")),

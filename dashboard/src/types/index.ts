@@ -56,6 +56,8 @@ export interface Profile {
     entityName: string;
     totalIncome: number;
     totalExpense: number;
+    realIncome?: number;
+    realExpense?: number;
     transactionCount: number;
     // 新增审计关键字段（对应后端 serialize_profiles 扩展）
     cashTotal?: number;        // 现金交易总额（取现+存现）

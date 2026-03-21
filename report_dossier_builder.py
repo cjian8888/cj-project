@@ -970,6 +970,8 @@ def build_report_dossiers(
                 "transaction_count": int(company.get("transaction_count", 0) or 0),
                 "total_income": _as_float(company.get("total_income", 0)),
                 "total_expense": _as_float(company.get("total_expense", 0)),
+                "real_income": _as_float(company.get("real_income", 0)),
+                "real_expense": _as_float(company.get("real_expense", 0)),
                 "role_tags": role_tags,
                 "risk_overview": risk_overview,
                 "related_persons": related_persons[:10],

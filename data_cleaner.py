@@ -16,6 +16,20 @@ import utils
 
 logger = utils.setup_logger(__name__)
 
+INVALID_TRANSACTION_STATUS_KEYWORDS = (
+    "失败",
+    "冲正",
+    "冲销",
+    "退汇",
+    "撤销",
+    "撤回",
+    "作废",
+    "关闭",
+    "取消",
+    "拒绝",
+    "未完成",
+    "回退",
+)
 
 def _normalize_column_token(column_name: str) -> str:
     """标准化列名文本，便于做模糊匹配。"""
@@ -98,14 +112,14 @@ def _read_transaction_file(filepath: str) -> pd.DataFrame:
         last_error = None
         for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk"):
             try:
-                return pd.read_csv(filepath, encoding=encoding)
+                return pd.read_csv(filepath, encoding=encoding, dtype=str)
             except UnicodeDecodeError as exc:
                 last_error = exc
             except Exception as exc:
                 last_error = exc
         if last_error:
             raise last_error
-    return pd.read_excel(filepath)
+    return pd.read_excel(filepath, dtype=str)
 
 
 def _looks_like_company_entity(entity_name: str) -> bool:
@@ -212,6 +226,30 @@ def _normalize_dedup_balance(value: Any) -> Optional[float]:
     return round(balance, 2)
 
 
+def _normalize_transaction_status_series(series: pd.Series) -> pd.Series:
+    return (
+        _normalize_optional_text_series(series)
+        .str.replace(r"\s+", "", regex=True)
+        .str.replace("（", "(")
+        .str.replace("）", ")")
+        .str.upper()
+    )
+
+
+def _build_invalid_transaction_status_mask(df: pd.DataFrame) -> pd.Series:
+    if "transaction_status" not in df.columns:
+        return pd.Series(False, index=df.index)
+
+    normalized_status = _normalize_transaction_status_series(df["transaction_status"])
+    if normalized_status.empty:
+        return pd.Series(False, index=df.index)
+
+    invalid_pattern = "|".join(
+        re.escape(keyword.upper()) for keyword in INVALID_TRANSACTION_STATUS_KEYWORDS
+    )
+    return normalized_status.str.contains(invalid_pattern, na=False, regex=True)
+
+
 def _collect_dedup_match_signals(
     current_row: pd.Series, next_row: pd.Series
 ) -> Tuple[bool, int, List[str], int, List[str]]:
@@ -269,16 +307,6 @@ def _collect_dedup_match_signals(
         strong_matches += 1
         strong_reasons.append("余额")
 
-    current_source = _normalize_dedup_text(
-        current_row.get("数据来源", current_row.get("source_file", ""))
-    )
-    next_source = _normalize_dedup_text(
-        next_row.get("数据来源", next_row.get("source_file", ""))
-    )
-    if current_source and next_source and current_source == next_source:
-        strong_matches += 1
-        strong_reasons.append("来源文件")
-
     return True, weak_matches, weak_reasons, strong_matches, strong_reasons
 
 
@@ -297,8 +325,10 @@ def deduplicate_transactions(
     if df.empty:
         return df, {"original": 0, "duplicates": 0, "final": 0}
 
+    df = df.copy()
     original_count = len(df)
     logger.info(f"开始去重,原始记录数: {original_count}")
+    df["_original_order"] = range(original_count)
 
     # 排序以确保一致性
     df = df.sort_values("date").reset_index(drop=True)
@@ -324,41 +354,58 @@ def deduplicate_transactions(
     # 同一账号、相近时间(容差范围内)、相同金额的交易可能是重复
     duplicates_mask = pd.Series(False, index=df.index)
     dedup_details = []  # 记录去重详情
+    tx_id_duplicates_removed = 0
 
     # ====================================================================
     # 【P0 修复 - 2026-01-18】恢复流水号去重
     # 审计原则：交易流水号是银行出具的唯一电子凭证，不同流水号的交易不应被删除
     # ====================================================================
 
-    # 第一步：基于流水号去重（如果有可靠的流水号）
-    has_valid_tx_id = (
-        "transaction_id" in df.columns
-        and df["transaction_id"].notna().sum() > len(df) * 0.5  # 超过50%的记录有流水号
-    )
-
-    if has_valid_tx_id:
+    # 第一步：基于流水号去重（逐行启用，不再要求整表覆盖率超过 50%）
+    if "transaction_id" in df.columns:
         # 流水号可用：完全相同的流水号才视为重复
         tx_id_col = _normalize_optional_text_series(df["transaction_id"])
-        # 排除空值和占位符
-        valid_tx_ids = ~tx_id_col.isin(["", "nan", "None", "N/A", "-"])
+        # 保留原始非空流水号口径；建行等银行会用 "-" 作为占位流水号。
+        valid_tx_ids = ~tx_id_col.isin(["", "nan", "None", "N/A"])
 
-        # 对有有效流水号的记录：按流水号去重（保留第一条）
-        if valid_tx_ids.sum() > 0:
+        # 对有有效流水号的记录：按来源文件 + 流水号挑选主交易
+        if valid_tx_ids.any():
             df_with_tx_id = df[valid_tx_ids].copy()
             df_without_tx_id = df[~valid_tx_ids].copy()
+            df_with_tx_id["transaction_id"] = tx_id_col.loc[valid_tx_ids]
 
-            # 按流水号去重
+            source_col = "数据来源" if "数据来源" in df_with_tx_id.columns else "__txid_source"
+            if source_col == "__txid_source":
+                df_with_tx_id[source_col] = ""
+
             original_with_tx_id = len(df_with_tx_id)
+            df_with_tx_id = df_with_tx_id.sort_values(
+                [source_col, "_original_order"], kind="mergesort"
+            )
             df_with_tx_id_dedup = df_with_tx_id.drop_duplicates(
-                subset=["transaction_id"], keep="first"
+                subset=[source_col, "transaction_id"], keep="first"
             )
             tx_id_dups_removed = original_with_tx_id - len(df_with_tx_id_dedup)
+            tx_id_duplicates_removed += tx_id_dups_removed
+            if source_col == "__txid_source":
+                df_with_tx_id_dedup = df_with_tx_id_dedup.drop(
+                    [source_col], axis=1, errors="ignore"
+                )
 
             if tx_id_dups_removed > 0:
                 logger.info(f"基于流水号去重: 移除 {tx_id_dups_removed} 条完全重复记录")
 
             # 合并回来，继续处理无流水号的部分
-            df = pd.concat([df_with_tx_id_dedup, df_without_tx_id], ignore_index=True)
+            concat_frames = []
+            if not df_with_tx_id_dedup.empty:
+                concat_frames.append(df_with_tx_id_dedup)
+            if not df_without_tx_id.empty:
+                concat_frames.append(df_without_tx_id)
+            df = (
+                pd.concat(concat_frames, ignore_index=True)
+                if concat_frames
+                else df.iloc[0:0].copy()
+            )
             # 【P1-异常4修复】添加空DataFrame检查
             if df.empty:
                 return df, {"original": 0, "duplicates": 0, "final": 0}
@@ -379,6 +426,52 @@ def deduplicate_transactions(
     df["_counterparty_clean"] = _normalize_optional_text_series(df["counterparty"])
     df["_description_clean"] = _normalize_optional_text_series(df["description"])
     df["_description_prefix"] = df["_description_clean"].str[:10]
+
+    # 无流水号的零金额信息行、模板空白行，只允许按精确自然键去重。
+    # 这类记录常见于利息/回执/模板反馈，不能依赖启发式时间容差，否则会在逐户笔数上漂移。
+    exact_zero_or_blank_duplicates_removed = 0
+    if "transaction_id" in df.columns:
+        tx_id_col = _normalize_optional_text_series(df["transaction_id"])
+    else:
+        tx_id_col = pd.Series("", index=df.index, dtype="string")
+
+    exact_zero_or_blank_mask = tx_id_col.eq("") & (
+        df["_amount_rounded"].eq(0)
+        | (
+            df["_counterparty_clean"].eq("")
+            & df["_description_clean"].eq("")
+        )
+    )
+    if exact_zero_or_blank_mask.any():
+        exact_subset = ["_timestamp", "_direction_key", "_amount_rounded"]
+        source_col = "数据来源" if "数据来源" in df.columns else None
+        if source_col:
+            exact_subset.insert(0, source_col)
+        exact_subset.extend(["_counterparty_clean", "_description_clean"])
+        if "account_number" in df.columns:
+            exact_subset.append("account_number")
+
+        zero_or_blank_rows = df[exact_zero_or_blank_mask].sort_values(
+            "_original_order", kind="mergesort"
+        )
+        zero_or_blank_rows_dedup = zero_or_blank_rows.drop_duplicates(
+            subset=exact_subset, keep="first"
+        )
+        exact_zero_or_blank_duplicates_removed = (
+            len(zero_or_blank_rows) - len(zero_or_blank_rows_dedup)
+        )
+
+        if exact_zero_or_blank_duplicates_removed > 0:
+            logger.info(
+                "基于精确自然键去重: 移除 %s 条无流水号零金额/模板重复记录",
+                exact_zero_or_blank_duplicates_removed,
+            )
+            df = pd.concat(
+                [df[~exact_zero_or_blank_mask], zero_or_blank_rows_dedup],
+                ignore_index=True,
+            ).sort_values("date").reset_index(drop=True)
+
+    duplicates_mask = pd.Series(False, index=df.index)
 
     # 按金额分组进行向量化去重（金额相同的记录才可能是重复）
     tolerance = config.DEDUP_TIME_TOLERANCE_SECONDS
@@ -416,32 +509,31 @@ def deduplicate_transactions(
                         strong_reasons,
                     ) = _collect_dedup_match_signals(current_row, next_row)
 
+                    current_tx_id = _normalize_dedup_text(current_row.get("transaction_id", ""))
+                    next_tx_id = _normalize_dedup_text(next_row.get("transaction_id", ""))
+                    if current_tx_id and next_tx_id and current_tx_id != next_tx_id:
+                        j += 1
+                        continue
+
+                    exact_timestamp_match = timestamps[j] == current_ts
+                    has_balance_anchor = "余额" in strong_reasons
+
                     # 兼容旧规则的同时引入强特征兜底：
-                    # 1) 对手方+摘要都匹配：保持原有自动去重能力
-                    # 2) 只有一个弱特征时：至少再有一个强特征一致
-                    # 3) 弱特征都缺失时：至少两个强特征一致
+                    # 1) 对手方+摘要都匹配时，必须完全同一时间戳，避免误删同秒连续转账
+                    # 2) 若余额一致，可作为稳定账务锚点，允许一秒内自动去重
+                    # 3) 缺少余额锚点时，不再仅靠账号/渠道等弱锚点自动删账
                     should_dedup = candidate_match and (
-                        weak_matches >= 2
-                        or (weak_matches == 1 and strong_matches >= 1)
-                        or (weak_matches == 0 and strong_matches >= 2)
+                        (weak_matches >= 2 and exact_timestamp_match)
+                        or (has_balance_anchor and weak_matches >= 1)
+                        or (has_balance_anchor and weak_matches == 0 and strong_matches >= 2)
                     )
 
                     if should_dedup:
                         # 大额交易保护逻辑
                         current_amount = current_row["_amount_rounded"]
                         if current_amount >= config.ASSET_LARGE_AMOUNT_THRESHOLD:
-                            has_tx_id = (
-                                "transaction_id" in df.columns
-                                and pd.notna(current_row.get("transaction_id"))
-                                and pd.notna(next_row.get("transaction_id"))
-                            )
+                            has_tx_id = bool(current_tx_id and next_tx_id)
                             if has_tx_id:
-                                current_tx_id = str(
-                                    current_row.get("transaction_id", "")
-                                ).strip()
-                                next_tx_id = str(
-                                    next_row.get("transaction_id", "")
-                                ).strip()
                                 if (
                                     not current_tx_id
                                     or not next_tx_id
@@ -485,10 +577,14 @@ def deduplicate_transactions(
 
     # 清理临时列
     df_dedup = df_dedup.drop(
-        ["_timestamp", "_direction_key", "_amount_rounded"], axis=1
+        ["_timestamp", "_direction_key", "_amount_rounded", "_original_order"], axis=1
     )
 
-    duplicate_count = duplicates_mask.sum()
+    duplicate_count = (
+        tx_id_duplicates_removed
+        + exact_zero_or_blank_duplicates_removed
+        + int(duplicates_mask.sum())
+    )
     final_count = len(df_dedup)
 
     stats = {
@@ -533,6 +629,43 @@ def deduplicate_transactions(
     return df_dedup, stats
 
 
+def _build_missing_date_placeholder_mask(
+    df: pd.DataFrame,
+    income_col: pd.Series,
+    expense_col: pd.Series,
+) -> pd.Series:
+    """识别无日期但应保留的查询反馈/信息型记录。"""
+    total_amount = income_col.fillna(0) + expense_col.fillna(0)
+    description_series = (
+        _normalize_optional_text_series(df["description"])
+        if "description" in df.columns
+        else pd.Series("", index=df.index, dtype="string")
+    )
+    counterparty_series = (
+        _normalize_optional_text_series(df["counterparty"])
+        if "counterparty" in df.columns
+        else pd.Series("", index=df.index, dtype="string")
+    )
+    account_series = (
+        _normalize_optional_text_series(df["account_number"])
+        if "account_number" in df.columns
+        else pd.Series("", index=df.index, dtype="string")
+    )
+    tx_id_series = (
+        _normalize_optional_text_series(df["transaction_id"])
+        if "transaction_id" in df.columns
+        else pd.Series("", index=df.index, dtype="string")
+    )
+
+    return (
+        total_amount.eq(0)
+        & description_series.eq("")
+        & counterparty_series.eq("")
+        & account_series.ne("")
+        & tx_id_series.eq("")
+    )
+
+
 def validate_data_quality(
     df: pd.DataFrame, output_dir: str = None
 ) -> Tuple[pd.DataFrame, Dict]:
@@ -558,25 +691,6 @@ def validate_data_quality(
         return df, quality_report
 
     valid_mask = pd.Series(True, index=df.index)
-
-    # 1. 检查必需字段
-    if "date" not in df.columns or df["date"].isna().all():
-        logger.error("缺少日期字段")
-        quality_report["warnings"].append("缺少日期字段")
-        quality_report["invalid_rows"] = df.index.tolist()
-        quality_report["valid_rows"] = 0
-        quality_report["removed_rows"] = len(df)
-        return df.iloc[0:0].copy(), quality_report
-
-    # 标记日期缺失的行
-    invalid_date = df["date"].isna()
-    if invalid_date.any():
-        quality_report["invalid_rows"].extend(df[invalid_date].index.tolist())
-        quality_report["warnings"].append(f"发现{invalid_date.sum()}条记录日期缺失")
-        valid_mask &= ~invalid_date
-
-    # 2. 检查金额逻辑
-    # 【P1-异常3修复】添加列存在性检查，避免KeyError
     income_col = (
         pd.to_numeric(df["income"], errors="coerce")
         if "income" in df.columns
@@ -587,6 +701,75 @@ def validate_data_quality(
         if "expense" in df.columns
         else pd.Series(0.0, index=df.index)
     )
+    missing_date_placeholder_mask = _build_missing_date_placeholder_mask(
+        df, income_col, expense_col
+    )
+
+    # 1. 检查必需字段
+    if "date" not in df.columns or df["date"].isna().all():
+        logger.error("缺少日期字段")
+        quality_report["warnings"].append("缺少日期字段")
+        if missing_date_placeholder_mask.any() and missing_date_placeholder_mask.all():
+            retained_count = int(missing_date_placeholder_mask.sum())
+            quality_report["warnings"].append(
+                f"保留{retained_count}条无日期的信息型查询反馈记录，不纳入时序分析"
+            )
+            quality_report["audit_alerts"]["missing_date_placeholders"] = {
+                "count": retained_count,
+            }
+            quality_report["valid_rows"] = retained_count
+            quality_report["removed_rows"] = 0
+            return df.copy(), quality_report
+
+        quality_report["invalid_rows"] = df.index.tolist()
+        quality_report["valid_rows"] = 0
+        quality_report["removed_rows"] = len(df)
+        return df.iloc[0:0].copy(), quality_report
+
+    # 标记日期缺失的行
+    invalid_date = df["date"].isna()
+    if invalid_date.any():
+        retained_missing_dates = invalid_date & missing_date_placeholder_mask
+        removed_missing_dates = invalid_date & ~missing_date_placeholder_mask
+        if removed_missing_dates.any():
+            quality_report["invalid_rows"].extend(
+                df[removed_missing_dates].index.tolist()
+            )
+            quality_report["warnings"].append(
+                f"发现{int(removed_missing_dates.sum())}条记录日期缺失"
+            )
+            valid_mask &= ~removed_missing_dates
+        if retained_missing_dates.any():
+            retained_count = int(retained_missing_dates.sum())
+            quality_report["warnings"].append(
+                f"保留{retained_count}条无日期的信息型查询反馈记录，不纳入时序分析"
+            )
+            quality_report["audit_alerts"]["missing_date_placeholders"] = {
+                "count": retained_count,
+            }
+
+    invalid_status = _build_invalid_transaction_status_mask(df)
+    if invalid_status.any():
+        invalid_status_count = int(invalid_status.sum())
+        quality_report["invalid_rows"].extend(df[invalid_status].index.tolist())
+        quality_report["warnings"].append(
+            f"发现{invalid_status_count}条无效交易状态记录（失败/冲正/退汇/撤销等），已从主流水剔除"
+        )
+        quality_report["audit_alerts"]["invalid_transaction_status"] = {
+            "count": invalid_status_count,
+            "examples": (
+                _normalize_transaction_status_series(
+                    df.loc[invalid_status, "transaction_status"]
+                )
+                .drop_duplicates()
+                .head(5)
+                .tolist()
+            ),
+        }
+        valid_mask &= ~invalid_status
+
+    # 2. 检查金额逻辑
+    # 【P1-异常3修复】添加列存在性检查，避免KeyError
     total_amount = income_col.fillna(0) + expense_col.fillna(0)
 
     # 金额异常检测
@@ -748,7 +931,7 @@ def standardize_bank_fields(
         normalized["expense"] = 0.0
 
         # 向量化处理金额和借贷标志
-        amounts = _normalize_amount_series(df[amount_col], amount_col).abs()
+        amounts = _normalize_amount_series(df[amount_col], amount_col)
         flags = _normalize_optional_text_series(df[debit_credit_col]).str.upper()
 
         # 定义收入/支出标志
@@ -782,9 +965,11 @@ def standardize_bank_fields(
         normalized.loc[inferred_income_mask, "income"] = amounts[inferred_income_mask]
         normalized.loc[inferred_income_mask, "expense"] = 0.0
 
-        # 剩余的默认设为支出
+        # 无法识别借贷方向的记录保持为 0，避免把空标志/占位值粗暴记成支出。
         remaining_mask = ~credit_mask & ~debit_mask & ~inferred_income_mask
-        normalized.loc[remaining_mask, "expense"] = amounts[remaining_mask]
+        unclassified_count = int(remaining_mask.sum())
+        if unclassified_count > 0:
+            logger.info(f"发现 {unclassified_count} 条借贷标志未识别记录，暂不自动计入收支")
     else:
         # 回退到原有逻辑
         logger.warning("未找到借贷标志,使用原有收支字段逻辑")
@@ -808,13 +993,15 @@ def standardize_bank_fields(
         else:
             normalized["expense"] = 0.0
 
-    # 3.1 统一收支符号语义（收入/支出均为非负）
-    normalized["income"], normalized["expense"], sign_fixed_mask = (
-        _normalize_income_expense_signs(normalized["income"], normalized["expense"])
-    )
-    sign_fixed_count = int(sign_fixed_mask.sum())
-    if sign_fixed_count > 0:
-        logger.warning(f"检测到并修复 {sign_fixed_count} 条收支符号异常记录")
+    # 3.1 仅在退回到原始收支列时修正符号。
+    # 对“金额列 + 借贷标志”场景，原始红字/冲回金额必须原样保留。
+    if not (amount_col and debit_credit_col):
+        normalized["income"], normalized["expense"], sign_fixed_mask = (
+            _normalize_income_expense_signs(normalized["income"], normalized["expense"])
+        )
+        sign_fixed_count = int(sign_fixed_mask.sum())
+        if sign_fixed_count > 0:
+            logger.warning(f"检测到并修复 {sign_fixed_count} 条收支符号异常记录")
 
     # 4. 对手方字段 - 支持"交易对方名称"
     counterparty_col = None
@@ -837,6 +1024,14 @@ def standardize_bank_fields(
         normalized["balance"] = _normalize_amount_series(df[balance_col], balance_col)
     else:
         normalized["balance"] = 0.0
+
+    status_col = _find_first_matching_column(
+        df, config.BANK_FIELD_MAPPING.get("transaction_status", [])
+    )
+    if status_col:
+        normalized["transaction_status"] = _clean_optional_text_series(df[status_col])
+    else:
+        normalized["transaction_status"] = ""
 
     # 6. 现金标志
     # 6. 现金标志 (修正：仅识别物理现金)

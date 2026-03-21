@@ -225,6 +225,89 @@ def test_build_wallet_alerts_covers_large_scale_and_unmatched_account():
     assert all("evidence_summary" in item for item in alerts)
 
 
+def test_extract_wallet_data_backfills_wechat_phone_mapping_after_alias_match(tmp_path: Path):
+    root = tmp_path / "data" / "补充数据" / "电子钱包" / "批次_20260321"
+    root.mkdir(parents=True, exist_ok=True)
+
+    tenpay_dir = root / "TP_CASE" / "WX_ALIAS" / "IDCARD" / "372922197910112912" / "big_lu_1"
+    tenpay_dir.mkdir(parents=True, exist_ok=True)
+    (tenpay_dir / "TenpayRegInfo（公开）.txt").write_text(
+        "\n".join(
+            [
+                "账户状态\t账号\t注册姓名\t注册时间\t注册身份证号\t绑定手机\t绑定状态\t开户行信息\t银行账号",
+                "正常\tbig_lu_1\t马尚德\t2015-01-28 02:11:13\t372922197910112912\t15900578144\t绑定确认(正常)\t交行借记卡快捷支付\t6222600110033606521",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    wx_reg_dir = root / "WX_CASE" / "WX_ALIAS" / "IPHONE" / "18901918834"
+    wx_reg_dir.mkdir(parents=True, exist_ok=True)
+    (wx_reg_dir / "regInfobasicInfo（公开）.txt").write_text(
+        "\n".join(
+            [
+                "微信号: wxid_alias_case",
+                "别名: big_lu_1",
+                "昵称: 大陆",
+                "当前绑定手机号: 15900578144",
+                "注册时间: 2018-09-28 12:44:02",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    wx_login_dir = root / "WX_CASE_LOGIN" / "WX_ALIAS" / "IPHONE" / "18901918834"
+    wx_login_dir.mkdir(parents=True, exist_ok=True)
+    (wx_login_dir / "WX登录轨迹（公开）.txt").write_text(
+        "\n".join(
+            [
+                "登录日志：",
+                "\t时间\tIP",
+                "\t2026-01-27 11:53:50 +0800 CST\t127.0.0.1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    wallet_data = wallet_data_extractor.extract_wallet_data(
+        str(tmp_path / "data"),
+        known_person_names={"马尚德"},
+    )
+
+    assert wallet_data["summary"]["subjectCount"] == 1
+    assert wallet_data["summary"]["loginEventCount"] == 1
+    assert wallet_data["summary"]["unmatchedWechatCount"] == 0
+    subject = wallet_data["subjects"][0]
+    assert "18901918834" in subject["phones"]
+    assert subject["platforms"]["wechat"]["latestLoginAt"] == "2026-01-27 11:53:50"
+
+
+def test_extract_wallet_data_counts_unmatched_wechat_login_events_in_summary(tmp_path: Path):
+    root = tmp_path / "data" / "补充数据" / "电子钱包" / "批次_20260321"
+    root.mkdir(parents=True, exist_ok=True)
+
+    wx_login_dir = root / "WX_CASE_LOGIN" / "WX_ALIAS" / "IPHONE" / "18901918834"
+    wx_login_dir.mkdir(parents=True, exist_ok=True)
+    (wx_login_dir / "WX登录轨迹（公开）.txt").write_text(
+        "\n".join(
+            [
+                "登录日志：",
+                "\t时间\tIP",
+                "\t2026-01-27 11:53:50 +0800 CST\t127.0.0.1",
+                "\t2026-01-28 08:01:02 +0800 CST\t127.0.0.2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    wallet_data = wallet_data_extractor.extract_wallet_data(str(tmp_path / "data"))
+
+    assert wallet_data["summary"]["loginEventCount"] == 2
+    assert wallet_data["summary"]["unmatchedWechatCount"] == 1
+    assert wallet_data["unmatchedWechatAccounts"][0]["phone"] == "18901918834"
+    assert wallet_data["unmatchedWechatAccounts"][0]["loginEventCount"] == 2
+
+
 def test_build_wallet_alerts_covers_unmapped_large_scale_subject():
     wallet_data = {
         "subjects": [

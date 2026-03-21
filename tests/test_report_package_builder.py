@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
+import pandas as pd
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from investigation_report_builder import InvestigationReportBuilder
@@ -76,6 +78,8 @@ def _make_builder(tmp_path, *, summary_narrative=""):
                 "summary": {
                     "total_income": 800000,
                     "total_expense": 720000,
+                    "real_income": 650000,
+                    "real_expense": 610000,
                 },
             },
         },
@@ -90,6 +94,12 @@ def _make_builder(tmp_path, *, summary_narrative=""):
                     ],
                 }
             ],
+            "all_family_summaries": {
+                "张三": {
+                    "total_income": 400000,
+                    "total_expense": 180000,
+                }
+            },
             "aggregation": {
                 "summary": {
                     "极高风险实体数": 1,
@@ -210,6 +220,8 @@ def test_generate_complete_txt_report_emits_report_package_and_company_dossier()
             for item in payload["priority_board"]
         )
         assert payload["company_dossiers"][0]["entity_name"] == "测试科技有限公司"
+        assert payload["company_dossiers"][0]["real_income"] == 650000
+        assert payload["company_dossiers"][0]["real_expense"] == 610000
         assert "通道节点" in payload["company_dossiers"][0]["role_tags"]
         assert payload["company_dossiers"][0]["risk_overview"]["risk_level"] == "high"
         assert payload["risk_schema"]["allowed_levels"][0] == "critical"
@@ -419,6 +431,35 @@ def test_generate_complete_txt_report_materializes_family_and_company_explanatio
         assert "公司资金口径基本平衡，净结余8.00万元" in company_explanation["summary"]
         assert "当前角色标签为通道节点" in company_explanation["summary"]
         assert company_explanation["focus_issue_headlines"][0] == "张三与测试科技有限公司发生300,000元直接往来"
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_save_report_package_artifacts_without_report_preserves_existing_semantic_payload():
+    tmp_path = _make_workspace_tmp_dir()
+    try:
+        builder, report = _make_builder(tmp_path)
+        reports_dir = tmp_path / "analysis_results"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        report_path = reports_dir / "核查结果分析报告.txt"
+
+        builder.generate_complete_txt_report(str(report_path), report=report)
+
+        report_package_path = reports_dir / "qa" / "report_package.json"
+        initial_payload = json.loads(report_package_path.read_text(encoding="utf-8"))
+
+        builder.save_report_package_artifacts(
+            report=None,
+            formal_report_path=str(report_path),
+        )
+
+        refreshed_payload = json.loads(report_package_path.read_text(encoding="utf-8"))
+
+        assert len(refreshed_payload["issues"]) == len(initial_payload["issues"])
+        assert refreshed_payload["main_report_view"]["issues"] == initial_payload["main_report_view"]["issues"]
+        assert refreshed_payload["priority_board"] == initial_payload["priority_board"]
+        assert refreshed_payload["family_dossiers"][0]["total_income"] == 400000
+        assert refreshed_payload["family_dossiers"][0]["total_expense"] == 180000
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
 
@@ -768,6 +809,57 @@ def test_report_package_evidence_refs_use_report_friendly_labels():
         assert any("交易标识" in ref for ref in (direct_issue.get("evidence_refs") or []))
         assert not any("#L" in ref for ref in (direct_issue.get("evidence_refs") or []))
         assert not any("tx:" in ref for ref in (direct_issue.get("evidence_refs") or []))
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_build_report_package_enriches_conclusion_issue_with_cleaned_trace_refs():
+    tmp_path = _make_workspace_tmp_dir()
+    try:
+        builder, report = _make_builder(tmp_path)
+        cleaned_dir = tmp_path / "cleaned_data" / "个人"
+        cleaned_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            [
+                {
+                    "交易时间": "2026-03-16 08:15:30",
+                    "收入(元)": 300000,
+                    "支出(元)": 0,
+                    "交易对手": "测试科技有限公司",
+                    "交易摘要": "货款收入",
+                    "交易分类": "经营收入",
+                    "本方账号": "6222000011112222",
+                    "来源文件": "张三流水.xlsx",
+                    "流水号": "TX-TRACE-001",
+                    "source_row_index": 108,
+                }
+            ]
+        ).to_excel(cleaned_dir / "张三_合并流水.xlsx", index=False)
+
+        report["conclusion"]["issues"] = [
+            {
+                "person": "张三",
+                "issue_type": "收支不匹配",
+                "description": "工资收入仅24.6%，远低于正常水平。非工资收入263.22万元，建议结合收入分类结果核实构成",
+                "severity": "medium",
+            }
+        ]
+
+        report_package = builder.build_report_package(report=report)
+        conclusion_issue = next(
+            item
+            for item in (report_package.get("issues") or [])
+            if item.get("issue_id", "").startswith("CON-")
+        )
+        main_issue = next(
+            item
+            for item in (report_package.get("main_report_view", {}).get("issues") or [])
+            if item.get("issue_id") == conclusion_issue.get("issue_id")
+        )
+
+        assert any("张三流水.xlsx（解析记录第108行）" == ref for ref in conclusion_issue["evidence_refs"])
+        assert any("交易标识 TX-TRACE-001" == ref for ref in conclusion_issue["evidence_refs"])
+        assert main_issue["evidence_refs"] == conclusion_issue["evidence_refs"]
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)
 

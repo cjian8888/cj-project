@@ -7,6 +7,56 @@
 
 ---
 
+## [v4.5.5] - 2026-03-21
+
+### 🐛 Bug修复
+
+#### 银行流水清洗与去重修复 (`data_cleaner.py`)
+- **问题**: 银行流水存在过度去重、无效交易混入统计、无日期账号反馈行被误删等问题，导致总笔数与收支金额失真。
+- **修复**:
+  - 调整去重策略，优先按 `transaction_id` 精确去重，禁止不同非空流水号交易再被启发式误删。
+  - 收紧启发式去重条件，移除“同来源文件”这类弱判据，避免批量连续转账被错误压重。
+  - 新增无效状态识别，过滤 `失败`、`冲正`、`退汇`、`关闭` 等交易状态。
+  - 保留仅含账号信息的无日期查询反馈记录，避免主流水笔数口径继续丢数。
+  - 统一原始文件读取为字符串列，降低 Excel/CSV 类型漂移带来的误判。
+- **影响**: 修复银行总笔数、总流入/流出以及重点对象汇总偏差。
+
+#### 微信手机号归并修复 (`wallet_data_extractor.py`)
+- **问题**: 微信注册信息和登录轨迹没有利用“当前绑定手机号”和别名反查，导致部分手机号关联断裂。
+- **修复**:
+  - 新增 `_backfill_wechat_phone_mapping()`，把目录手机号、当前绑定手机号一并回填到主体映射。
+  - 注册解析阶段支持按绑定手机号、别名、`wxid` 回查主体。
+  - 登录轨迹解析阶段补充按绑定手机号、别名、`wxid` 聚合候选主体。
+- **影响**: 修复微信登录轨迹漏并问题，补齐缺失的手机号关联链。
+
+#### 报告语义与底稿对齐修复 (`report_generator.py` + `api_server.py` + `investigation_report_builder.py` + `report_fact_normalizer.py`)
+- **问题**: Excel 聚合风险页、报告证据引用和家庭汇总口径与正式语义层存在偏差。
+- **修复**:
+  - Excel 核查底稿优先读取 `report_package.json`，按正式 `priority_board` 生成聚合风险排序页。
+  - 前后端序列化补齐 `realIncome` / `realExpense` 字段，降低真实收支口径丢失风险。
+  - 为缺失 `evidence_refs` 的结论卡回填 `cleaned_data` 溯源记录。
+  - 家庭汇总优先复用 `all_family_summaries` 的真实收支指标。
+- **影响**: 报告主文、Excel 底稿、QA 产物三者口径一致。
+
+### ✅ 测试与验收
+
+#### 单元测试补强
+- 为 `data_cleaner.py` 增补去重、无效状态过滤、无日期占位记录保留等回归测试。
+- 为报告链路和电子钱包归并补充语义对齐与映射回归测试。
+
+#### 交付前盲盒验收补强
+- 新增真实数据验收脚本：
+  - `tmp_e2e_fault_injection_validation.py`
+  - `tmp_e2e_gold_standard_audit.py`
+  - `tmp_e2e_independent_recompute_audit.py`
+  - `tmp_e2e_final_acceptance_suite.py`
+- 新增金标准样本: `tests/fixtures/blindbox_gold_standard.json`
+- **结果**:
+  - 真实数据全量重跑通过
+  - HTML 报告生成通过
+  - 最终 6 项验收全绿，覆盖核心盲盒、边界盲盒、交付盲盒、金标准、故障注入、异实现复算
+
+
 ## [v4.5.4] - 2026-03-03
 
 ### 🐛 Bug修复

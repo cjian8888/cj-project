@@ -118,6 +118,62 @@ def test_generate_aggregation_summary_sheet_creates_excel_sheet(tmp_path):
     assert "张三" in detail_values
 
 
+def test_generate_aggregation_summary_sheet_prefers_report_package_priority_board(
+    tmp_path,
+):
+    output_path = tmp_path / "aggregation_semantic.xlsx"
+    report_package = {
+        "priority_board": [
+            {
+                "entity_name": "李四",
+                "priority_score": 81.6,
+                "confidence": 0.92,
+                "severity": 83,
+                "risk_label": "高风险",
+                "top_reasons": ["直接往来: 与测试公司发生大额转账"],
+                "issue_refs": ["FLOW-001", "FLOW-002"],
+            },
+            {
+                "entity_name": "测试公司",
+                "priority_score": 77.4,
+                "confidence": 0.88,
+                "severity": 79,
+                "risk_level": "high",
+                "top_reasons": ["关系簇: 位于重点网络中心"],
+                "issue_refs": ["CON-001"],
+            },
+        ]
+    }
+
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        _generate_aggregation_summary_sheet(
+            writer,
+            _make_derived_data(),
+            report_package=report_package,
+        )
+
+    workbook = load_workbook(output_path)
+    summary_sheet = workbook["聚合风险排序"]
+    detail_sheet = workbook["聚合风险重点对象"]
+
+    summary_values = {
+        summary_sheet[f"A{row}"].value: summary_sheet[f"B{row}"].value
+        for row in range(2, summary_sheet.max_row + 1)
+    }
+    assert summary_values["极高风险实体数"] == 0
+    assert summary_values["高风险实体数"] == 2
+    assert summary_values["高优先线索实体数"] == 2
+    assert summary_values["平均风险分"] == 79.5
+
+    detail_names = [
+        detail_sheet[f"A{row}"].value for row in range(2, detail_sheet.max_row + 1)
+    ]
+    assert detail_names == ["李四", "测试公司"]
+    assert "张三" not in detail_names
+    assert detail_sheet["D2"].value == 2
+    assert detail_sheet["G2"].value == "直接往来: 与测试公司发生大额转账"
+
+
 def test_generate_excel_workbook_hardens_aliases_and_quality(tmp_path):
     output_path = tmp_path / "底稿.xlsx"
 

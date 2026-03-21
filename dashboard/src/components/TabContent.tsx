@@ -356,13 +356,21 @@ function OverviewTab() {
         return Object.entries(data.profiles)
             .filter(([name]) => data.persons.includes(name))
             .map(([name, profile]) => {
+                const summary = (profile as any)?.summary || {};
                 const income = profile?.totalIncome || 0;
                 const expense = profile?.totalExpense || 0;
+                const realIncome = Number(
+                    profile?.realIncome ?? summary?.real_income ?? 0
+                );
+                const realExpense = Number(
+                    profile?.realExpense ?? summary?.real_expense ?? 0
+                );
                 const cashTotal = profile?.cashTotal || 0;
                 const cashTxCount = ((profile as any)?.cashTransactions || []).length;
                 const netFlow = income - expense;
                 const total = income + expense;
                 const cashRatio = total > 0 ? (cashTotal / total) * 100 : 0;
+                const accountLayerSummary = summary?.account_layer_summary || {};
 
                 // 新增：工资、理财、第三方支付
                 const salaryTotal = (profile as any)?.salaryTotal || 0;  // 工资金额
@@ -373,12 +381,14 @@ function OverviewTab() {
                 return {
                     name: truncate(name, 10),
                     fullName: name,
-                    收入: income / 10000,
-                    支出: expense / 10000,
+                    totalInflow: income / 10000,
+                    totalOutflow: expense / 10000,
                     income,
                     expense,
                     netFlow,
                     total: total / 10000,
+                    realIncome: realIncome / 10000,
+                    realExpense: realExpense / 10000,
                     cashTotal,
                     cashRatio,
                     cashTxCount,
@@ -388,6 +398,8 @@ function OverviewTab() {
                     wealthTotal: wealthTotal / 10000,  // 转万元
                     thirdPartyTotal: thirdPartyTotal / 10000,  // 转万元
                     transactionCount,
+                    hasMixedAccountActivity: Boolean(accountLayerSummary?.has_mixed_personal_corporate_activity),
+                    accountLayerNote: String(accountLayerSummary?.note || '').trim(),
                     // 风险等级：现金占比>15%为高，>8%为中
                     riskLevel: cashRatio > 15 ? 'high' : cashRatio > 8 ? 'medium' : 'low'
                 };
@@ -416,8 +428,8 @@ function OverviewTab() {
                 return {
                     name: truncate(name, 10),
                     fullName: name,
-                    收入: income / 10000,
-                    支出: expense / 10000,
+                    totalInflow: income / 10000,
+                    totalOutflow: expense / 10000,
                     income,
                     expense,
                     netFlow,
@@ -1966,19 +1978,43 @@ function OverviewTab() {
                                             <div className="flex items-center gap-4 text-xs theme-text-muted mb-2">
                                                 <span className="flex items-center gap-1">
                                                     <ArrowDownLeft className="w-3 h-3 text-green-400" />
-                                                    收入 <span className="text-green-400 font-medium">{person.收入.toFixed(0)}万</span>
+                                                    总流入 <span className="text-green-400 font-medium">{person.totalInflow.toFixed(0)}万</span>
                                                 </span>
                                                 <span className="flex items-center gap-1">
                                                     <ArrowUpRight className="w-3 h-3 text-orange-400" />
-                                                    支出 <span className="text-orange-400 font-medium">{person.支出.toFixed(0)}万</span>
+                                                    总流出 <span className="text-orange-400 font-medium">{person.totalOutflow.toFixed(0)}万</span>
                                                 </span>
                                                 <span className={`flex items-center gap-1 ${person.netFlow >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                                    净流 {person.netFlow >= 0 ? '+' : ''}{(person.netFlow / 10000).toFixed(0)}万
+                                                    原始净流 {person.netFlow >= 0 ? '+' : ''}{(person.netFlow / 10000).toFixed(0)}万
                                                 </span>
                                             </div>
 
+                                            {(person.realIncome > 0 || person.realExpense > 0) && (
+                                                <div className="flex flex-wrap items-center gap-4 text-[11px] theme-text-secondary mb-2">
+                                                    {person.realIncome > 0 && (
+                                                        <span>
+                                                            真实收入 <span className="font-medium text-emerald-300">{person.realIncome.toFixed(1)}万</span>
+                                                        </span>
+                                                    )}
+                                                    {person.realExpense > 0 && (
+                                                        <span>
+                                                            真实支出 <span className="font-medium text-rose-300">{person.realExpense.toFixed(1)}万</span>
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            )}
+
                                             {/* 指标徽章行 */}
                                             <div className="flex flex-wrap items-center gap-1.5">
+                                                {person.hasMixedAccountActivity && (
+                                                    <span
+                                                        title={person.accountLayerNote || '该主体名下同时存在个人账户与对公账户流水'}
+                                                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/30 cursor-help"
+                                                    >
+                                                        含对公账户
+                                                    </span>
+                                                )}
+
                                                 {/* 工资金额徽章 */}
                                                 {person.salaryTotal > 0 && (
                                                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-500/20 text-blue-400 ring-1 ring-blue-500/30 cursor-pointer hover:bg-blue-500/30 transition-colors">
@@ -2077,14 +2113,14 @@ function OverviewTab() {
                                             <div className="flex items-center gap-4 text-xs theme-text-muted mb-2">
                                                 <span className="flex items-center gap-1">
                                                     <ArrowDownLeft className="w-3 h-3 text-green-400" />
-                                                    收入 <span className="text-green-400 font-medium">{company.收入.toFixed(0)}万</span>
+                                                    总流入 <span className="text-green-400 font-medium">{company.totalInflow.toFixed(0)}万</span>
                                                 </span>
                                                 <span className="flex items-center gap-1">
                                                     <ArrowUpRight className="w-3 h-3 text-orange-400" />
-                                                    支出 <span className="text-orange-400 font-medium">{company.支出.toFixed(0)}万</span>
+                                                    总流出 <span className="text-orange-400 font-medium">{company.totalOutflow.toFixed(0)}万</span>
                                                 </span>
                                                 <span className={`flex items-center gap-1 ${company.netFlow >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                                    净流 {company.netFlow >= 0 ? '+' : ''}{(company.netFlow / 10000).toFixed(0)}万
+                                                    原始净流 {company.netFlow >= 0 ? '+' : ''}{(company.netFlow / 10000).toFixed(0)}万
                                                 </span>
                                             </div>
 
