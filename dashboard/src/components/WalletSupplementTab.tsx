@@ -152,13 +152,13 @@ export function WalletSupplementTab() {
   };
 
   if (analysis.status !== 'completed') {
-    return <EmptyState message="完成主分析后，这里会显示微信 / 支付宝 / 财付通补充摘要。" />;
+    return <EmptyState message="完成主分析后，这里会显示微信 / 支付宝 / 财付通电子钱包摘要。" />;
   }
 
   if (!walletData.available) {
     return (
       <div className="space-y-6">
-        <EmptyState message="未检测到电子钱包补充数据。把样本包放入输入目录下的“补充数据/电子钱包/”后重新分析即可。" />
+        <EmptyState message="未检测到电子钱包数据。把样本包放入输入目录下的“补充数据/电子钱包/”后重新分析即可。" />
         <div className="glass rounded-2xl border theme-border p-6 space-y-3">
           <h3 className="text-lg font-semibold theme-text-secondary">推荐放置目录</h3>
           <div className="rounded-xl theme-bg-muted p-4 border theme-border">
@@ -445,7 +445,7 @@ export function WalletSupplementTab() {
                 <div className="rounded-[24px] border theme-border p-5 theme-bg-muted space-y-4">
                   <div className="flex items-center gap-2">
                     <Wallet className="w-4 h-4 text-sky-300" />
-                    <h4 className="text-sm font-semibold theme-text-secondary">支付宝补充摘要</h4>
+                    <h4 className="text-sm font-semibold theme-text-secondary">支付宝摘要</h4>
                   </div>
                   <div className="grid grid-cols-2 gap-3 text-sm">
                     <div className="rounded-xl theme-bg-hover p-3">
@@ -471,7 +471,7 @@ export function WalletSupplementTab() {
                 <div className="rounded-[24px] border theme-border p-5 theme-bg-muted space-y-4">
                   <div className="flex items-center gap-2">
                     <CreditCard className="w-4 h-4 text-cyan-300" />
-                    <h4 className="text-sm font-semibold theme-text-secondary">微信 / 财付通补充摘要</h4>
+                    <h4 className="text-sm font-semibold theme-text-secondary">微信 / 财付通摘要</h4>
                   </div>
                   <div className="grid grid-cols-2 gap-3 text-sm">
                     <div className="rounded-xl theme-bg-hover p-3">
@@ -515,7 +515,7 @@ export function WalletSupplementTab() {
                 <div className="rounded-2xl border theme-border p-4 theme-bg-muted">
                   <div className="flex items-center gap-2 mb-3">
                     <ShieldCheck className="w-4 h-4 text-emerald-300" />
-                    <h4 className="text-sm font-semibold theme-text-secondary">补充结论</h4>
+                    <h4 className="text-sm font-semibold theme-text-secondary">电子钱包结论</h4>
                   </div>
                   <div className="flex flex-wrap gap-2">
                     {subject.signals.length > 0 ? subject.signals.map((signal) => (

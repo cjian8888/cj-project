@@ -431,51 +431,87 @@ def _render_markdown_document(markdown_text: str, page_title: str) -> str:
   <title>{page_title_html}</title>
   <style>
     :root {{
-      --bg: #09111f;
-      --panel: rgba(13, 25, 44, 0.92);
-      --panel-strong: #10203a;
-      --line: rgba(148, 163, 184, 0.18);
-      --text: #e2e8f0;
-      --muted: #9fb2c9;
-      --accent: #38bdf8;
-      --accent-soft: rgba(56, 189, 248, 0.14);
-      --code: #0b1220;
+      --bg: #07111d;
+      --bg-soft: #0b1727;
+      --panel: rgba(10, 19, 34, 0.9);
+      --panel-strong: rgba(12, 22, 39, 0.96);
+      --panel-muted: rgba(9, 17, 30, 0.72);
+      --line: rgba(148, 163, 184, 0.16);
+      --line-strong: rgba(125, 211, 252, 0.24);
+      --text: #e8eef7;
+      --text-soft: #dbe7f5;
+      --muted: #9db4cb;
+      --muted-strong: #bfd2e6;
+      --accent: #67d4ff;
+      --accent-strong: #22c3ee;
+      --accent-soft: rgba(56, 189, 248, 0.12);
+      --accent-glow: rgba(34, 195, 238, 0.2);
+      --code: #08111d;
+      --shadow: 0 26px 72px rgba(2, 6, 23, 0.34);
     }}
     * {{
       box-sizing: border-box;
     }}
     body {{
       margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", sans-serif;
+      min-height: 100vh;
+      font-family: "SF Pro Text", "Segoe UI Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", sans-serif;
       background:
-        radial-gradient(circle at top right, rgba(14, 165, 233, 0.18), transparent 30%),
-        linear-gradient(180deg, #09111f 0%, #0b1220 100%);
+        radial-gradient(circle at 12% 0%, rgba(56, 189, 248, 0.16), transparent 28%),
+        radial-gradient(circle at 88% 10%, rgba(96, 165, 250, 0.12), transparent 24%),
+        linear-gradient(180deg, #08111b 0%, #091420 38%, #0b1420 100%);
       color: var(--text);
-      line-height: 1.75;
+      line-height: 1.8;
+      font-size: 16.5px;
+      letter-spacing: 0.01em;
+    }}
+    body::before {{
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 20%),
+        radial-gradient(circle at bottom left, rgba(34, 195, 238, 0.08), transparent 26%);
+      opacity: 0.9;
     }}
     a {{
-      color: #7dd3fc;
+      color: #8ce0ff;
       text-decoration: none;
+      text-underline-offset: 0.18em;
     }}
     a:hover {{
+      color: #d7f4ff;
       text-decoration: underline;
+    }}
+    strong {{
+      color: #f8fbff;
+      font-weight: 650;
+    }}
+    p {{
+      margin: 1rem 0;
+      color: var(--text-soft);
     }}
     code {{
       font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-      background: rgba(15, 23, 42, 0.9);
-      border: 1px solid rgba(148, 163, 184, 0.15);
-      border-radius: 8px;
-      padding: 0.12rem 0.4rem;
-      font-size: 0.92em;
+      background: rgba(7, 15, 26, 0.9);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      border-radius: 9px;
+      padding: 0.14rem 0.42rem;
+      font-size: 0.9em;
+      color: #dff4ff;
     }}
     pre {{
-      margin: 1.2rem 0;
-      padding: 1rem 1.15rem;
+      position: relative;
+      margin: 1.35rem 0;
+      padding: 1.05rem 1.15rem 1.15rem;
       overflow: auto;
       background: var(--code);
       border: 1px solid var(--line);
-      border-radius: 16px;
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+      border-radius: 18px;
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.03),
+        0 16px 36px rgba(2, 6, 23, 0.2);
     }}
     pre code {{
       background: transparent;
@@ -485,156 +521,421 @@ def _render_markdown_document(markdown_text: str, page_title: str) -> str:
       display: block;
       color: #dbeafe;
     }}
+    pre code[data-language]::before {{
+      content: attr(data-language);
+      display: block;
+      margin-bottom: 0.85rem;
+      color: var(--muted);
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }}
     hr {{
       border: 0;
-      border-top: 1px solid var(--line);
-      margin: 2rem 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--line-strong), transparent);
+      margin: 2.4rem 0;
     }}
     blockquote {{
-      margin: 1.2rem 0;
-      padding: 0.9rem 1rem;
+      margin: 1.3rem 0;
+      padding: 1rem 1.15rem 1rem 1.35rem;
       border-left: 4px solid var(--accent);
-      background: rgba(15, 23, 42, 0.65);
-      color: #d5e5f6;
-      border-radius: 0 14px 14px 0;
+      border: 1px solid var(--line-strong);
+      background: linear-gradient(135deg, rgba(34, 195, 238, 0.09), rgba(15, 23, 42, 0.3));
+      color: #d9ecfb;
+      border-radius: 0 18px 18px 0;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
     }}
     img {{
       display: block;
       width: 100%;
       max-width: 100%;
-      border-radius: 20px;
+      border-radius: 18px;
       border: 1px solid var(--line);
-      box-shadow: 0 22px 60px rgba(2, 6, 23, 0.48);
+      box-shadow: 0 22px 60px rgba(2, 6, 23, 0.42);
     }}
     figure {{
-      margin: 1.6rem 0 2rem;
+      margin: 1.7rem 0 2.05rem;
+      padding: 14px;
+      border-radius: 24px;
+      border: 1px solid var(--line);
+      background: rgba(8, 14, 24, 0.42);
     }}
     figcaption {{
-      margin-top: 0.75rem;
+      margin-top: 0.95rem;
       color: var(--muted);
       font-size: 0.92rem;
       text-align: center;
     }}
     ul, ol {{
-      padding-left: 1.4rem;
-      margin: 1rem 0;
+      padding-left: 1.5rem;
+      margin: 1rem 0 1.2rem;
+      color: var(--text-soft);
+    }}
+    li::marker {{
+      color: #7dd3fc;
     }}
     li + li {{
-      margin-top: 0.4rem;
+      margin-top: 0.55rem;
+    }}
+    ::selection {{
+      background: rgba(34, 195, 238, 0.28);
+      color: #f8fbff;
+    }}
+    ::-webkit-scrollbar {{
+      width: 10px;
+      height: 10px;
+    }}
+    ::-webkit-scrollbar-thumb {{
+      background: rgba(125, 211, 252, 0.18);
+      border-radius: 999px;
+    }}
+    ::-webkit-scrollbar-track {{
+      background: transparent;
     }}
     .page {{
-      max-width: 1280px;
+      max-width: 1400px;
       margin: 0 auto;
-      padding: 32px 24px 48px;
+      padding: 26px 24px 56px;
+    }}
+    .topbar {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+      padding: 0 4px;
+    }}
+    .topbar-brand {{
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }}
+    .topbar-mark {{
+      width: 11px;
+      height: 11px;
+      border-radius: 999px;
+      background: radial-gradient(circle at 30% 30%, #d8f6ff, var(--accent-strong));
+      box-shadow: 0 0 0 6px rgba(34, 195, 238, 0.08);
+      flex-shrink: 0;
+    }}
+    .topbar-label {{
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }}
+    .topbar-kicker {{
+      color: var(--muted);
+      font-size: 0.74rem;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }}
+    .topbar-title {{
+      color: var(--text);
+      font-size: 0.96rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }}
+    .topbar-route {{
+      color: var(--muted);
+      font-size: 0.82rem;
     }}
     .hero {{
-      padding: 28px;
-      border-radius: 28px;
+      position: relative;
+      overflow: hidden;
+      padding: 34px 36px;
+      border-radius: 32px;
       border: 1px solid var(--line);
       background:
-        linear-gradient(135deg, rgba(56, 189, 248, 0.13), rgba(37, 99, 235, 0.04)),
+        linear-gradient(135deg, rgba(34, 195, 238, 0.18), rgba(17, 24, 39, 0.08) 48%, rgba(56, 189, 248, 0.08)),
         var(--panel);
-      box-shadow: 0 30px 80px rgba(2, 6, 23, 0.35);
-      display: flex;
-      justify-content: space-between;
-      gap: 20px;
+      box-shadow: var(--shadow);
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 24px;
       align-items: flex-start;
       margin-bottom: 24px;
     }}
+    .hero::before {{
+      content: "";
+      position: absolute;
+      inset: -120px auto auto -80px;
+      width: 280px;
+      height: 280px;
+      border-radius: 999px;
+      background: radial-gradient(circle, rgba(103, 212, 255, 0.18), transparent 68%);
+      pointer-events: none;
+    }}
+    .hero::after {{
+      content: "";
+      position: absolute;
+      right: -80px;
+      bottom: -110px;
+      width: 260px;
+      height: 260px;
+      border-radius: 999px;
+      background: radial-gradient(circle, rgba(96, 165, 250, 0.14), transparent 68%);
+      pointer-events: none;
+    }}
+    .hero-copy,
+    .hero-actions {{
+      position: relative;
+      z-index: 1;
+    }}
+    .hero-eyebrow {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 0.95rem;
+      padding: 0.42rem 0.75rem;
+      border-radius: 999px;
+      border: 1px solid rgba(125, 211, 252, 0.2);
+      background: rgba(6, 13, 23, 0.34);
+      color: #d8f5ff;
+      font-size: 0.76rem;
+      font-weight: 700;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }}
     .hero h1 {{
       margin: 0 0 0.75rem;
-      font-size: clamp(2rem, 3vw, 2.8rem);
+      font-size: clamp(2.1rem, 3vw, 3rem);
       line-height: 1.15;
+      letter-spacing: -0.02em;
     }}
     .hero p {{
       margin: 0;
       color: var(--muted);
-      max-width: 760px;
+      max-width: 64ch;
+      font-size: 1rem;
+    }}
+    .hero-meta {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 1.15rem;
+    }}
+    .meta-chip {{
+      display: inline-flex;
+      align-items: center;
+      padding: 0.44rem 0.72rem;
+      border-radius: 999px;
+      border: 1px solid rgba(125, 211, 252, 0.16);
+      background: rgba(7, 15, 26, 0.3);
+      color: var(--muted-strong);
+      font-size: 0.86rem;
+      font-weight: 600;
     }}
     .hero-actions {{
       display: flex;
+      flex-direction: column;
       gap: 12px;
-      flex-wrap: wrap;
     }}
     .hero-actions a {{
       display: inline-flex;
       align-items: center;
+      justify-content: center;
+      min-width: 214px;
       gap: 8px;
-      padding: 10px 14px;
-      border-radius: 12px;
-      background: var(--accent-soft);
-      border: 1px solid rgba(125, 211, 252, 0.18);
-      color: #dff4ff;
+      padding: 11px 15px;
+      border-radius: 14px;
       font-weight: 600;
       white-space: nowrap;
+      transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+    }}
+    .hero-actions a:hover {{
+      transform: translateY(-1px);
+      text-decoration: none;
+    }}
+    .hero-actions .primary-link {{
+      background: linear-gradient(135deg, rgba(34, 195, 238, 0.26), rgba(37, 99, 235, 0.14));
+      border: 1px solid rgba(125, 211, 252, 0.28);
+      color: #ebfbff;
+      box-shadow: 0 16px 30px rgba(14, 165, 233, 0.12);
+    }}
+    .hero-actions .secondary-link {{
+      background: rgba(7, 15, 26, 0.24);
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      color: var(--muted-strong);
     }}
     .layout {{
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 280px;
+      grid-template-columns: minmax(0, 1fr) 300px;
       gap: 24px;
       align-items: start;
     }}
     .content {{
-      padding: 28px 32px;
-      border-radius: 28px;
+      position: relative;
+      overflow: hidden;
+      padding: 34px 38px 42px;
+      border-radius: 32px;
       border: 1px solid var(--line);
-      background: var(--panel);
-      box-shadow: 0 20px 50px rgba(2, 6, 23, 0.26);
+      background: linear-gradient(180deg, rgba(13, 24, 40, 0.95), rgba(9, 16, 28, 0.93));
+      box-shadow: 0 24px 60px rgba(2, 6, 23, 0.28);
+    }}
+    .content::before {{
+      content: "";
+      position: absolute;
+      inset: 0 0 auto 0;
+      height: 120px;
+      background: linear-gradient(180deg, rgba(103, 212, 255, 0.06), transparent);
+      pointer-events: none;
+    }}
+    .content > * {{
+      position: relative;
     }}
     .content h1:first-child {{
       margin-top: 0;
+      padding-bottom: 0.9rem;
+      border-bottom: 1px solid var(--line);
+    }}
+    .content h1 {{
+      font-size: 1.9rem;
+      letter-spacing: -0.02em;
     }}
     .content h1, .content h2, .content h3, .content h4 {{
       scroll-margin-top: 88px;
       line-height: 1.25;
+      color: #f6fbff;
     }}
     .content h2 {{
-      margin-top: 2.4rem;
-      margin-bottom: 0.8rem;
-      font-size: 1.55rem;
-      padding-bottom: 0.55rem;
+      position: relative;
+      margin-top: 2.85rem;
+      margin-bottom: 0.95rem;
+      padding: 0 0 0.8rem 1rem;
       border-bottom: 1px solid var(--line);
+      font-size: 1.56rem;
+      letter-spacing: -0.01em;
+    }}
+    .content h2::before {{
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0.18rem;
+      bottom: 1rem;
+      width: 4px;
+      border-radius: 999px;
+      background: linear-gradient(180deg, var(--accent), rgba(103, 212, 255, 0.08));
     }}
     .content h3 {{
-      margin-top: 1.7rem;
-      margin-bottom: 0.45rem;
+      margin-top: 2rem;
+      margin-bottom: 0.55rem;
       font-size: 1.18rem;
+      color: #eef7ff;
+    }}
+    .content h4 {{
+      margin-top: 1.5rem;
+      margin-bottom: 0.4rem;
+      font-size: 1rem;
+      color: #dff1ff;
+    }}
+    .content > p,
+    .content > ul,
+    .content > ol,
+    .content > pre,
+    .content > blockquote,
+    .content > figure {{
+      max-width: 78ch;
+    }}
+    .content table {{
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.2rem 0 1.5rem;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      overflow: hidden;
     }}
     .toc {{
       position: sticky;
       top: 24px;
-      padding: 20px;
-      border-radius: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      max-height: calc(100vh - 48px);
+      padding: 18px;
+      border-radius: 28px;
       border: 1px solid var(--line);
-      background: rgba(8, 15, 28, 0.78);
-      backdrop-filter: blur(16px);
+      background: rgba(8, 15, 28, 0.82);
+      backdrop-filter: blur(18px);
+      box-shadow: 0 18px 46px rgba(2, 6, 23, 0.22);
+    }}
+    .toc-section {{
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }}
+    .toc-kicker {{
+      color: var(--muted);
+      font-size: 0.74rem;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      margin-bottom: 0.45rem;
     }}
     .toc h2 {{
-      margin: 0 0 0.8rem;
-      font-size: 1rem;
+      margin: 0 0 0.9rem;
+      font-size: 1.08rem;
+      color: #f4fbff;
+    }}
+    .toc-links {{
+      overflow: auto;
+      padding-right: 4px;
     }}
     .toc-item {{
       display: block;
-      padding: 8px 10px;
-      border-radius: 10px;
+      padding: 9px 10px;
+      border-radius: 12px;
       color: var(--muted);
-      font-size: 0.94rem;
+      font-size: 0.92rem;
+      transition: background 160ms ease, color 160ms ease, transform 160ms ease;
     }}
     .toc-item:hover {{
       background: rgba(56, 189, 248, 0.08);
-      color: var(--text);
+      color: #ecfbff;
+      transform: translateX(2px);
       text-decoration: none;
     }}
+    .toc-item.level-1 {{
+      font-weight: 650;
+      color: #dce8f5;
+    }}
+    .toc-item.level-2 {{
+      padding-left: 16px;
+    }}
     .toc-item.level-3 {{
-      padding-left: 18px;
+      padding-left: 26px;
       font-size: 0.88rem;
     }}
-    .toc-note {{
-      margin-top: 1rem;
-      padding-top: 1rem;
-      border-top: 1px solid var(--line);
+    .toc-empty {{
+      display: block;
       color: var(--muted);
-      font-size: 0.86rem;
+      font-size: 0.88rem;
+      padding: 0.2rem 0;
+    }}
+    .toc-meta {{
+      display: grid;
+      gap: 10px;
+      padding-top: 0.95rem;
+      border-top: 1px solid var(--line);
+    }}
+    .toc-meta-row {{
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 0.84rem;
+    }}
+    .toc-meta-row strong {{
+      color: #ecfbff;
+      font-size: 0.95rem;
+      font-weight: 650;
+    }}
+    .toc-meta-row code {{
+      width: fit-content;
     }}
     @media (max-width: 980px) {{
       .layout {{
@@ -642,37 +943,94 @@ def _render_markdown_document(markdown_text: str, page_title: str) -> str:
       }}
       .toc {{
         position: static;
+        max-height: none;
       }}
       .content {{
-        padding: 22px 20px;
+        padding: 24px 22px 28px;
       }}
       .hero {{
         flex-direction: column;
+        grid-template-columns: 1fr;
+        padding: 28px 24px;
+      }}
+      .hero-actions {{
+        width: 100%;
+      }}
+      .hero-actions a {{
+        width: 100%;
+      }}
+    }}
+    @media (max-width: 640px) {{
+      body {{
+        font-size: 15.5px;
+      }}
+      .page {{
+        padding: 18px 14px 36px;
+      }}
+      .topbar {{
+        align-items: flex-start;
+        flex-direction: column;
+      }}
+      .content h2 {{
+        font-size: 1.34rem;
+      }}
+      .content h1 {{
+        font-size: 1.62rem;
       }}
     }}
   </style>
 </head>
 <body>
   <div class="page">
+    <div class="topbar">
+      <div class="topbar-brand">
+        <span class="topbar-mark"></span>
+        <div class="topbar-label">
+          <span class="topbar-kicker">Delivery Readme</span>
+          <span class="topbar-title">穿云审计交付文档</span>
+        </div>
+      </div>
+      <span class="topbar-route">只读入口：/docs/readme</span>
+    </div>
     <section class="hero">
-      <div>
+      <div class="hero-copy">
+        <span class="hero-eyebrow">交付文档</span>
         <h1>{page_title_html}</h1>
         <p>这份文档是当前交付版本的唯一说明入口。前端只提供只读链接，不复制文案，避免系统行为与说明文档再次漂移。</p>
+        <div class="hero-meta">
+          <span class="meta-chip">只读文档</span>
+          <span class="meta-chip">离线交付</span>
+          <span class="meta-chip">当前版本 v{APP_RELEASE_VERSION}</span>
+        </div>
       </div>
       <div class="hero-actions">
-        <a href="/dashboard/">打开仪表盘</a>
-        <a href="/docs/file/README.md" target="_blank" rel="noreferrer">查看原始 Markdown</a>
+        <a class="primary-link" href="/dashboard/">打开仪表盘</a>
+        <a class="secondary-link" href="/docs/file/README.md" target="_blank" rel="noreferrer">查看原始 Markdown</a>
       </div>
     </section>
     <div class="layout">
       <main class="content">{''.join(body_parts)}</main>
       <aside class="toc">
-        <h2>目录</h2>
-        {toc_html or '<span class="toc-note">当前文档暂无可索引章节。</span>'}
-        <div class="toc-note">
-          当前应用版本：v{APP_RELEASE_VERSION}<br />
-          入口：<code>/dashboard/</code><br />
-          文档：<code>/docs/readme</code>
+        <div class="toc-section">
+          <span class="toc-kicker">目录导航</span>
+          <h2>交付文档</h2>
+          <div class="toc-links">
+            {toc_html or '<span class="toc-empty">当前文档暂无可索引章节。</span>'}
+          </div>
+        </div>
+        <div class="toc-meta">
+          <div class="toc-meta-row">
+            <span>当前应用版本</span>
+            <strong>v{APP_RELEASE_VERSION}</strong>
+          </div>
+          <div class="toc-meta-row">
+            <span>访问入口</span>
+            <code>/dashboard/</code>
+          </div>
+          <div class="toc-meta-row">
+            <span>文档地址</span>
+            <code>/docs/readme</code>
+          </div>
         </div>
       </aside>
     </div>

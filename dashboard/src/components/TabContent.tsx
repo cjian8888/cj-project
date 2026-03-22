@@ -82,7 +82,7 @@ export function TabContent() {
                     onClick={() => setActiveTab('graph')}
                 />
                 <TabButton
-                    label="补充数据"
+                    label="电子钱包"
                     icon={Wallet}
                     active={ui.activeTab === 'supplement'}
                     onClick={() => setActiveTab('supplement')}

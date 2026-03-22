@@ -6,88 +6,515 @@
 >
 > 应用内文档入口：启动后访问 `/docs/readme`，或在左下角点击“交付文档”
 
-穿云审计不是一套泛化 BI，也不是一个“导完 Excel 看图表”的轻系统。它的目标是把审计排查里最费人工、最容易口径漂移、最容易被报告打脸的工作链条收口成一条可复核的离线主线：
+穿云审计是一套面向审计核查、资金穿透和关联排查的离线系统。它不是通用 BI 工具，也不是“导入 Excel 看图表”的轻报表工具。它的核心目标只有一个：
 
-1. 从原始银行流水和外部协查数据中提取事实。
-2. 在 `output/cleaned_data/` 中沉淀可追溯的清洗结果。
-3. 在 `output/analysis_cache/` 中沉淀融合画像、分析结果和统一语义层输入。
-4. 在 `output/analysis_results/` 中输出正式 HTML/TXT/Excel、专项报告、QA 产物和报告清单。
-5. 由 `/dashboard/` 前端直接消费正式语义包、报告清单和 QA 结果，而不是再走一套独立口径。
+**把原始数据、清洗结果、分析缓存、正式报告和前端展示统一到一条可复核的主链上，尽量减少口径漂移和报告打脸。**
 
 ![当前仪表盘概览（已脱敏，仅保留聚合指标与交付界面）](docs/assets/readme/dashboard-overview-redacted.png)
 
 ---
 
-## 这次版本升级解决了什么
+## 首次使用帮助
 
-`v4.6.0` 对应的不是单点修补，而是一轮交付前收口：
+### 适合谁看
 
-- 银行流水清洗不再粗暴过度去重。
-- 无效交易状态会被统一过滤，避免冲正、失败、退汇混入总账。
-- 微信手机号归并补上“当前绑定手机号 / 别名 / wxid”链路。
-- 正式报告、Excel 底稿、QA 产物和前端报告中心统一围绕 `report_package.json` 工作。
-- 报告中心不再只是“文件下载列表”，而是直接展示：
-  - 主报告摘要
-  - 优先对象排序
-  - 问题卡
-  - 卷宗覆盖
-  - QA 摘要
-  - 预览与下载入口
-- 交付前新增了金标准、故障注入、异实现复算和总验收套件，不再只靠单一盲盒脚本自证。
+本 README 主要面向：
+
+- 首次接触系统的使用者
+- 负责运行分析、查看报告、导出结果的业务人员
+- 需要确认“哪个文件是最终结果、哪个文件只是内部检查产物”的交付接收人员
+
+如果你主要关心研发和二次开发，文末保留了最少量的开发入口，其余技术细节请看 `docs/` 下专题文档。
+
+### 第一次使用前先确认
+
+- 本机已安装 `Python 3.9+`
+- 原始协查数据已经放入 `data/` 目录
+- 正式访问入口固定为 `http://127.0.0.1:8000/dashboard/`
+- 如需重跑全量分析，应接受 `output/` 会被新的分析产物刷新
+
+### 最短上手路径
+
+第一次使用时，按这条最短路径就够了：
+
+`放数据 -> 启动系统 -> 打开 dashboard -> 开始分析 -> 看 HTML 报告 -> 必要时回看 cleaned_data`
+
+### 第一次启动怎么做
+
+#### 1. 准备数据
+
+- 原始数据放在 `data/` 目录
+- 目录中可以包含银行流水、账户信息、房产、车辆、证券、理财、电子钱包等外部协查数据
+
+#### 2. 启动系统
+
+普通使用只需要启动后端：
+
+```bash
+python api_server.py
+```
+
+启动后访问：
+
+```text
+http://127.0.0.1:8000/dashboard/
+```
+
+说明：
+
+- 这是正式访问入口
+- 交付环境下也应以这个地址为准
+- 前端开发服务器 `5173` 只用于调试，不是正式交付入口
+
+#### 3. 开始分析
+
+在前端页面完成对象归集/范围确认后，点击“开始分析”。
+
+系统会依次生成三层结果：
+
+1. `output/cleaned_data/`
+2. `output/analysis_cache/`
+3. `output/analysis_results/`
+
+### 输入目录 / 输出目录可以自己选吗
+
+可以，当前程序已真实支持手动切换输入目录和输出目录。
+
+使用方式：
+
+- 在左侧“数据源配置”里直接填写，或点击文件夹按钮选择目录
+- 输入目录决定本轮扫描的原始数据根目录
+- 输出目录决定 `cleaned_data`、`analysis_cache`、`analysis_results` 的实际生成位置
+
+生效方式：
+
+- 前端修改后会同步到后端当前活动路径
+- 点击“开始分析”时，分析任务会直接使用当前选中的输入目录和输出目录
+- 如果只是切换输出目录，前端还会尝试恢复该目录下已有的缓存和报告结果
+
+保留方式：
+
+- 你在前端选过的路径会保存在本机浏览器 `localStorage`
+- 下次重新打开前端时，系统会优先恢复这些路径，再同步到后端
+
+需要注意：
+
+- 分析运行中不允许切换输入/输出目录
+- 如果改了输出目录，本轮之后的报告、缓存和导出结果都会写到新目录
+
+### 第一次跑完后怎么判断是否成功
+
+至少检查这 4 件事：
+
+1. 能正常打开 `http://127.0.0.1:8000/dashboard/`
+2. `output/analysis_results/` 下已经生成 `初查报告.html`
+3. `output/analysis_results/` 下已经生成 `核查结果分析报告.txt` 和 `资金核查底稿.xlsx`
+4. 前端“审计报告”页能看到正式报告，而不是只剩空白卡片或报错提示
+
+#### 4. 查看结果
+
+建议按下面顺序看：
+
+1. `/dashboard/` 中的“审计报告”页
+2. `output/analysis_results/初查报告.html`
+3. `output/analysis_results/核查结果分析报告.txt`
+4. `output/analysis_results/资金核查底稿.xlsx`
+5. 如需追溯原始明细，再看 `output/cleaned_data/`
+
+如果导入了微信 / 支付宝 / 财付通样本，也可以在 `/dashboard/` 的“电子钱包”页查看电子钱包摘要、预警和未归并微信账号。
+
+#### 5. 哪些文件是正式交付结果
+
+优先认这几类：
+
+- `output/analysis_results/初查报告.html`
+- `output/analysis_results/核查结果分析报告.txt`
+- `output/analysis_results/资金核查底稿.xlsx`
+- `output/analysis_results/专项报告/` 下的正式附录
+
+不要把下面这些当成业务终稿：
+
+- `output/analysis_results/qa/`
+- `output/analysis_cache/*.json`
+- 各类中间语义包、检查包、调试文件
 
 ---
 
-## 当前系统应该怎么理解
+## 程序结构
 
-### 一句话架构
-
-`原始数据 -> 清洗成品 -> 分析缓存 -> 统一语义包 -> 正式报告 / QA / 前端报告中心`
-
-### 三层输出契约
-
-- `output/cleaned_data/`
-  - 这是全系统的事实成品层。
-  - 所有“银行流水到底有多少笔、某人流入流出到底是多少”的人工复核，应优先落在这里。
-- `output/analysis_cache/`
-  - 这是融合画像与分析中间层。
-  - 包含 `profiles.json`、`derived_data.json`、`suspicions.json`、`graph_data.json` 等缓存。
-  - 正式报告构建器和前端都从这里读取统一结果，不应再回原始 `data/` 重新拼事实。
-- `output/analysis_results/`
-  - 这是交付层。
-  - 包含正式 HTML/TXT/Excel、专项报告、日志、QA 产物、报告目录清单。
-
-### 报告主链
+下面展示的是交付视角下最值得认识的主结构。它不是完整源码清单，但足够帮助你判断“入口在哪、结果在哪、追溯去哪看”。
 
 ```text
-data/
-  -> data_cleaner.py
-  -> output/cleaned_data/
-  -> financial_profiler.py + analyzer modules
-  -> output/analysis_cache/
-  -> investigation_report_builder.py
-  -> qa/report_package.json
-  -> qa/report_consistency_check.{json,txt}
-  -> 初查报告.html / 核查结果分析报告.txt / 资金核查底稿.xlsx
-  -> /api/reports/manifest
-  -> /dashboard/ 审计报告中心
+cj-project/
+├── api_server.py                      # 后端唯一入口 /dashboard/ 也由它承载
+├── data_cleaner.py                    # 银行流水清洗、标准化、去重
+├── financial_profiler.py              # 人员/家庭/公司画像与收支口径汇总
+├── suspicion_engine.py                # 疑点识别与问题卡来源之一
+├── investigation_report_builder.py    # 正式报告、report_package、检查产物构建
+├── report_quality_guard.py            # 正式报告质量门控
+├── html_report_consistency_audit.py   # HTML 最终展示数字反查
+├── build_windows_package.py           # Windows 离线打包
+├── dashboard/
+│   ├── src/
+│   │   ├── components/                # 页面与核心卡片
+│   │   ├── services/                  # 前端 API 调用
+│   │   ├── contexts/                  # 全局状态
+│   │   └── types/                     # 前端类型定义
+│   └── dist/                          # 前端生产构建，交付时由后端直接提供
+├── classifiers/                       # 交易分类引擎
+├── detectors/                         # 疑点检测器
+├── schemas/                           # 数据模型
+├── output/
+│   ├── cleaned_data/                  # 清洗成品层
+│   ├── analysis_cache/                # 分析缓存层
+│   └── analysis_results/              # 正式结果层
+├── docs/
+│   ├── assets/                        # README 和交付截图等静态资源
+│   └── change_logs/                   # 按日期记录的重要修改
+├── data/                              # 原始协查数据入口
+└── tests/                             # 回归测试
+```
+
+输出目录也可以这样理解：
+
+```text
+output/
+├── cleaned_data/
+│   ├── 个人/
+│   └── 公司/
+├── analysis_cache/
+│   ├── profiles.json
+│   ├── derived_data.json
+│   ├── suspicions.json
+│   ├── graph_data.json
+│   └── ...
+└── analysis_results/
+    ├── 初查报告.html
+    ├── 核查结果分析报告.txt
+    ├── 资金核查底稿.xlsx
+    ├── 专项报告/
+    └── qa/
 ```
 
 ---
 
-## 交付标准
+## 系统主线怎么理解
 
-### 最终运行形态
+### 一句话主链
 
-- 目标平台：Windows
-- 运行方式：单机、离线
-- 交付形式：`one-folder`
-- 后端入口：`api_server.py`
-- 前端入口：由后端直接承载 `dashboard/dist`
-- 最终访问地址：`http://localhost:8000/dashboard/`
+`原始数据 -> 清洗成品 -> 分析缓存 -> 正式报告 -> 前端展示`
 
-### 开发态与交付态边界
+### 首次使用时要抓住的 3 个位置
 
-开发态：
+- `data/`：原始数据入口，所有分析都从这里开始
+- `output/analysis_results/`：正式交付结果集中区
+- `output/cleaned_data/`：发生争议时最先回看的事实层
+
+### 三层输出各自负责什么
+
+#### `output/cleaned_data/`
+
+这是事实层。
+
+如果你在核对：
+
+- 某个人到底有多少笔银行流水
+- 某家公司流入流出到底是多少
+- 某一笔钱能不能回到具体来源文件和来源行号
+
+优先看这里。
+
+#### `output/analysis_cache/`
+
+这是统一语义层。
+
+这里保存的是系统汇总后的画像与分析结果，例如：
+
+- `profiles.json`
+- `derived_data.json`
+- `suspicions.json`
+- `graph_data.json`
+
+正式报告构建器和前端都优先使用这里的结果，不应该各自再回原始 `data/` 重新拼口径。
+
+#### `output/analysis_results/`
+
+这是交付层。
+
+这里保存的是最终给人看的结果：
+
+- HTML 报告
+- TXT 报告
+- Excel 底稿
+- 专项报告
+- 报告目录清单
+
+---
+
+## 真实收入 / 真实支出是什么意思
+
+系统不会把银行原始总流入直接当成“可支配收入”。
+
+当前口径是：
+
+- 先统计原始总流入、原始总流出
+- 再识别并剔除不应算作真实收入/支出的内部循环项
+
+常见剔除项包括：
+
+- 本人账户互转
+- 理财 / 定存本金循环
+- 银行产品回摆、分期冲销
+- 家庭成员互转
+- 报销、退款、冲正类回流
+
+所以：
+
+- `总流入 / 总流出` 是原始盘子
+- `真实收入 / 真实支出` 是剔除内部循环后的口径
+
+这也是为什么系统会同时保留原始流量和真实流量两组数。
+
+---
+
+## 报告中心现在展示什么
+
+前端“审计报告”页面现在面向业务使用者，只展示正式可读产物。
+
+会展示的内容：
+
+- 主报告摘要
+- 优先对象
+- 问题卡
+- 卷宗覆盖
+- 正式报告预览与下载入口
+
+不会直接展示的内容：
+
+- `qa/` 目录检查产物
+- `.json` 结构化缓存
+- 内部语义包
+- 研发排障文件
+
+如需追溯，使用者可以直接打开：
+
+- `cleaned_data/个人`
+- `cleaned_data/公司`
+- `analysis_results`
+
+但业务视图层不会主动把内部 QA 物料暴露出来。
+
+---
+
+## 电子钱包页面展示什么
+
+前端“电子钱包”页对应的是微信、支付宝、财付通这类电子钱包数据。
+
+这个页面主要展示：
+
+- 电子钱包主体摘要
+- 高风险电子钱包预警
+- 未归并微信账号
+- 主体映射线索和主要对手方
+
+需要注意：
+
+- 电子钱包数据属于补充层，不覆盖银行主清洗链
+- 它会进入 `analysis_cache/walletData.json`，供前端页面和部分风险视图复用
+
+---
+
+## 归集配置怎么生效
+
+前端“审计报告”中的“归集配置”不是只影响页面展示，它会影响报告组织方式，并会在保存后参与后续分析复用。
+
+真实机制如下：
+
+1. 当当前输入目录下还没有 `primary_targets.json` 时，系统会先根据当前输出目录中的 `analysis_cache` 自动生成一份默认归集配置供界面使用。
+2. 如果存在官方同户人 / 户籍数据，默认主归集人优先取户主。
+3. 如果没有足够的官方户籍数据，系统会回退到自动识别的家庭单元或独立单元，此时默认锚点不一定等于“本人”。
+4. 在你手动调整“主归集人”并点击“保存配置”后，系统会把正式配置写入当前输入目录下的 `primary_targets.json`。
+5. 后续重新分析、生成 TXT 报告、生成 HTML 报告时，系统都会优先读取这个 `primary_targets.json`，而不是继续只用自动推断结果。
+
+需要特别区分两类文件：
+
+- `data/` 或当前输入目录下的 `primary_targets.json`
+  这是正式归集配置，只有手动保存后才会生成，并会被后续分析复用。
+- 当前输出目录 `analysis_cache/primary_targets.auto.json`
+  这是系统在未发现正式配置时自动生成的临时快照，用于复核和复现，不作为正式用户配置优先加载。
+
+这意味着：
+
+- 第一次运行后，系统可以先给出默认归集方案
+- 但只有你手动确认并保存后，这份归集方案才会成为后续分析默认使用的正式配置
+
+---
+
+## 检查函数怎么工作
+
+这里的“检查函数”不是做业务分析，而是做**质量门控和一致性检查**。它们的目的，是防止正式报告、前端展示和底层缓存再次各说各话。
+
+可以把这套逻辑理解成 4 道闸门：
+
+`先整理统一语义包 -> 再检查正式报告 -> 再反查 HTML 展示 -> 最后判断旧检查包是否过期`
+
+### 1. `report_package.json` 是怎么来的
+
+实现位置：
+
+- `investigation_report_builder.py`
+- 关键函数：`save_report_package_artifacts()`
+
+它会把正式报告里真正需要被前端和检查器复用的内容，整理成统一语义包，包括：
+
+- 主报告摘要
+- 附录摘要
+- 个人 / 家庭 / 公司报告条目
+- 问题卡
+- 证据索引
+- QA 检查结果
+
+你可以把它理解成“正式报告的结构化镜像”。
+
+前端报告中心优先读它，而不是再自己拼一套摘要。这样做的目的，是让前端展示、正式报告摘要和内部检查尽量共用同一份语义来源。
+
+### 2. `run_report_quality_checks()` 主要检查什么
+
+实现位置：
+
+- `report_quality_guard.py`
+
+它不是简单看文件存不存在，而是检查几类关键一致性问题，例如：
+
+- 是否生成了正式 HTML；如果没有，报告目录清单是否正确回退到 TXT
+- 个人财务缺口解释，是否真的出现在正式 TXT / HTML 中
+- 报告里如果写了“闭环”“团伙”等强结论，语义事实层是否真有对应证据
+- 正式报告是否泄露了 `analysis_cache` 之类的内部路径
+- 高风险问题卡是否带有最基本的 `evidence_refs` 和原因说明
+
+它的输出会写到：
+
+- `output/analysis_results/qa/report_consistency_check.json`
+- `output/analysis_results/qa/report_consistency_check.txt`
+
+这些文件是系统内部质量门控依据，不是业务终稿。
+
+如果这里失败，通常意味着“正式报告里缺了该写明的解释”或者“结论强度高于证据支撑”。
+
+### 3. `audit_html_report()` 主要检查什么
+
+实现位置：
+
+- `html_report_consistency_audit.py`
+
+这个脚本会直接解析最终 HTML，再反向核对：
+
+- 人员概览卡片里的总流入、总流出、工资收入、真实收入
+- 工资章节里的年度工资表和总额
+- 家庭章节、公司章节中的关键摘要
+
+它比“看脚本有没有跑完”更严格，因为它直接对最终展示结果下手。
+
+换句话说，前面几层都对，不代表最后渲染出来就一定对；这个审计就是专门防这种“底层对了、展示错了”的情况。
+
+输出位置：
+
+- `output/analysis_results/qa/html_report_consistency_audit.json`
+- `output/analysis_results/qa/html_report_consistency_audit.txt`
+
+### 4. 系统什么时候会自动刷新这些检查产物
+
+实现位置：
+
+- `api_server.py`
+- 关键逻辑：`_report_package_requires_refresh()`
+
+只要出现下面任一情况，系统就会认定旧检查包过期并尝试刷新：
+
+- QA 规则版本变了
+- 报告语义逻辑文件更新了
+- 正式报告文件比旧语义包更新
+- 人员 / 家庭 / 公司条目中缺少必要解释字段
+- `qa/` 下关键检查文件缺失
+
+这套逻辑的作用，是防止：
+
+**源码改了、报告改了，但前端还在读旧语义包。**
+
+### 5. 检查失败后应该先看哪里
+
+建议按这个顺序排：
+
+1. `output/cleaned_data/` 是否已经包含正确事实
+2. `output/analysis_cache/` 中的画像和汇总是否已同步更新
+3. `output/analysis_results/qa/report_package.json` 是否还是旧包
+4. `output/analysis_results/qa/report_consistency_check.txt` 和 `html_report_consistency_audit.txt` 报的是什么
+
+如果前两层是对的，而后两层报错，通常问题已经不在原始数据，而在报告构建或展示层。
+
+---
+
+## 哪些结果最值得优先看
+
+如果你是第一次接手一轮分析，建议按这个顺序：
+
+1. `output/analysis_results/初查报告.html`
+   - 最适合快速浏览
+2. `output/analysis_results/核查结果分析报告.txt`
+   - 适合正式存档和文本检索
+3. `output/analysis_results/资金核查底稿.xlsx`
+   - 适合人工追溯和对账
+4. `output/cleaned_data/`
+   - 适合逐笔核对
+
+如果你看到前端和报告数字不一致，不要先猜 UI 出错，先看：
+
+1. `output/cleaned_data/`
+2. `output/analysis_cache/profiles.json`
+3. `output/analysis_results/qa/report_package.json`
+
+---
+
+## 常见问题
+
+### 1. 我到底应该以哪里为准？
+
+- 核对交易事实：以 `output/cleaned_data/` 为准
+- 核对正式汇总口径：以 `output/analysis_cache/` 为准
+- 核对交付成稿：以 `output/analysis_results/` 为准
+
+### 2. 为什么前端页面不展示 QA 和 JSON 文件？
+
+因为这些文件是内部检查和结构化语义产物，普通业务人员看不懂，也容易造成误解。前端业务视图只应展示最终可阅读的正式结论。
+
+### 3. 为什么“真实收入”比“总流入”小很多？
+
+因为系统会剔除本人互转、理财本金循环、家庭互转、退款冲正等内部循环项。总流入是原始盘子，真实收入是剔除后的口径。
+
+### 4. 现在还需要单独启动前端开发服务器吗？
+
+普通使用不需要。正式访问只看：
+
+```text
+http://127.0.0.1:8000/dashboard/
+```
+
+---
+
+## 版权与免责
+
+- 当前交付版本及界面中的版权标识为 `© 811所纪委`，用于标识本次交付归属。
+- 本仓库代码和文档可以按需要开放查看、审计和二次开发。
+- 但项目按当前状态提供，不默认承诺后续持续升级、专项适配、兼容性修复、环境部署支持或结果解释支持。
+- 在正式生产、审计办案或对外引用前，使用方仍应结合本单位数据、流程和运行环境自行复核。
+
+---
+
+## 附：最少量调试入口
+
+普通使用可以跳过本节。只有在需要本地调试时才看这里。
+
+如果你确实需要调试前端，可以使用：
 
 ```bash
 python api_server.py
@@ -95,289 +522,21 @@ cd dashboard
 npm run dev
 ```
 
-交付态 / 打包态：
+如果你需要生成前端生产构建：
 
 ```bash
 cd dashboard
 npm run build
-cd ..
-python api_server.py
 ```
 
-Windows 打包态：
+如果你需要 Windows 离线打包：
 
 ```bash
-python -m pip install -r requirements.txt
-python -m pip install -r requirements-windows-build.txt
-cd dashboard
-npm install
-npm run build
-cd ..
 python build_windows_package.py
 ```
 
-### 新功能必须遵守的约束
-
-- 不依赖互联网服务。
-- 不依赖 Node 开发服务器作为最终运行方式。
-- 不写死 macOS / Windows 绝对路径。
-- 新增运行时资源必须能被 PyInstaller 带入离线包。
-
----
-
-## 报告中心现在怎么工作
-
-前端“审计报告”页面向业务使用者，只展示正式报告终稿，不再暴露内部工程物料。
-
-当前使用方式：
-
-- 只展示供业务阅读的正式报告文件。
-- 只保留 `HTML / PDF / TXT` 这类可直接阅读的终稿。
-- 前端默认屏蔽 `qa/` 目录产物、`.json` 结构化文件、工作底稿和其他内部技术文件。
-- “交付文档”入口打开的是只读使用说明页，不承担研发排障功能。
-
-前端当前能做的事情：
-
-- 预览正式主报告。
-- 下载正式主报告和业务附录。
-- 浏览正式问题卡、优先对象与卷宗覆盖摘要。
-- 在图谱页和报告页统一使用正式报告摘要作为浏览入口。
-
----
-
-## 数据处理主线
-
-### 1. 银行流水清洗
-
-核心文件：
-
-- `data_cleaner.py`
-- `bank_formats.py`
-- `data_validator.py`
-- `utils/safe_types.py`
-
-当前清洗阶段的重点：
-
-- 统一不同银行的列名、时间、金额、方向、摘要、对手方、账号。
-- 保留来源文件与来源行号，确保后续可追溯。
-- 优先使用 `transaction_id` 精确去重。
-- 拦截失败、冲正、退汇、关闭、撤销等无效交易状态。
-- 避免把“同时间同金额的合法连续转账”误删成重复。
-
-### 2. 融合画像与真实收支
-
-核心文件：
-
-- `financial_profiler.py`
-- `salary_analyzer.py`
-- `income_analyzer.py`
-- `loan_analyzer.py`
-- `wallet_data_extractor.py`
-
-当前画像层会收口这些口径：
-
-- 总流入 / 总流出
-- 真实收入 / 真实支出
-- 工资、自转、理财、本金回流、报销退款等剔除项
-- 钱包补充层的主体归并、登录轨迹、交易规模和平台交叉信号
-
-### 3. 全面分析与疑点检测
-
-核心文件：
-
-- `fund_penetration.py`
-- `related_party_analyzer.py`
-- `multi_source_correlator.py`
-- `time_series_analyzer.py`
-- `suspicion_engine.py`
-- `clue_aggregator.py`
-
-输出重点：
-
-- 资金闭环
-- 过账通道
-- 直接往来
-- 多源关系碰撞
-- 借贷模式
-- 时序异常
-- 统一风险线索
-
-### 4. 正式报告输出
-
-核心文件：
-
-- `investigation_report_builder.py`
-- `report_view_builder.py`
-- `report_dossier_builder.py`
-- `report_fact_normalizer.py`
-- `report_quality_guard.py`
-- `report_generator.py`
-- `api_server.py`
-
-当前交付给使用者的正式输出收口到：
-
-- `初查报告.html`
-- `核查结果分析报告.txt`
-- 业务附录（如存在）
-
-说明：
-
-- `report_package.json`、`report_consistency_check.*` 属于系统内部校验产物。
-- 这些内部文件不会在前端业务视图中展示。
-
----
-
-## 当前推荐的使用方式
-
-### 真实数据全量跑一轮
-
-```bash
-python api_server.py
-```
-
-然后在前端点击“开始分析”，或通过 API 触发完整分析。
-
-### 看结果时的优先级
-
-1. 先在 `/dashboard/` 查看正式问题、优先对象和卷宗覆盖
-2. 再看 `初查报告.html`、`核查结果分析报告.txt` 以及业务附录
-3. 如需回溯明细，再看 `output/cleaned_data/`
-
-### 哪些文件是交付基线
-
-- `output/cleaned_data/`
-- `output/analysis_results/初查报告.html`
-- `output/analysis_results/核查结果分析报告.txt`
-- `output/analysis_results/` 下的业务附录终稿（如存在）
-
----
-
-## 验收与自证
-
-这次交付不再只靠“脚本跑绿了”一句话，而是四层自证：
-
-- 真实数据全量重跑
-- 金标准样本校验
-- 故障注入验证
-- 异实现复算验证
-
-当前仓库内的关键验收脚本：
-
-- `tmp_e2e_blindbox_audit.py`
-- `tmp_e2e_boundary_blindbox_audit.py`
-- `tmp_e2e_delivery_blindbox_audit.py`
-- `tmp_e2e_gold_standard_audit.py`
-- `tmp_e2e_fault_injection_validation.py`
-- `tmp_e2e_independent_recompute_audit.py`
-- `tmp_e2e_final_acceptance_suite.py`
-
-建议的交付前命令：
-
-```bash
-python tmp_e2e_final_acceptance_suite.py
-```
-
-真实数据下的最终验收结果应落到：
-
-```text
-output/analysis_results/qa/e2e_final_acceptance_suite_report.txt
-```
-
----
-
-## 应用内文档策略
-
-这次没有把 README 文案再复制一份塞进前端业务页面，而是采用下面的策略：
-
-- `README.md` 是唯一事实源。
-- 前端左下角只提供“交付文档”入口。
-- 后端通过 `/docs/readme` 渲染只读文档页。
-- 文档内容只面向使用者，不展示内部 QA/JSON 产物与研发排障细节。
-
-这样做的原因很直接：
-
-- 避免 README、前端帮助页、交付说明三份文档继续漂移。
-- 让离线包在没有 GitHub、没有编辑器的环境里也能直接查看文档。
-- 保持文档更新成本最低，交付时只需要维护一份源文件。
-
----
-
-## 关键目录与入口文件
-
-后端主入口：
-
-- `api_server.py`
-
-数据清洗：
-
-- `data_cleaner.py`
-
-画像与分析：
-
-- `financial_profiler.py`
-- `loan_analyzer.py`
-- `income_analyzer.py`
-- `fund_penetration.py`
-- `related_party_analyzer.py`
-- `time_series_analyzer.py`
-
-报告与 QA：
-
-- `investigation_report_builder.py`
-- `report_generator.py`
-- `report_quality_guard.py`
-
-前端：
-
-- `dashboard/src/components/Sidebar.tsx`
-- `dashboard/src/components/TabContent.tsx`
-- `dashboard/src/components/NetworkGraph.tsx`
-- `dashboard/src/services/api.ts`
-- `dashboard/src/constants/appVersion.ts`
-
-打包：
-
-- `build_windows_package.py`
-- `build_windows_package.bat`
-- `fpas_windows.spec`
-
----
-
-## 常见问题
-
-### 1. 系统应该以哪里为准？
-
-如果你在核对数字，优先以 `output/cleaned_data/` 为准；如果你在核对正式报告是否一致，优先看 `qa/report_package.json` 与 `qa/report_consistency_check.*`。
-
-### 2. 为什么前端看起来和以前不一样？
-
-因为前端现在已经和正式语义层打通，不再只是展示旧式缓存字段或平铺文件列表。
-
-### 3. 为什么不把 README 整份复制到前端？
-
-复制一份最容易再次漂移。当前策略是前端只提供入口，README 仍是唯一事实源。
-
-### 4. 现在还需要 Vite 开发服务器吗？
-
-开发调试需要；交付运行不需要。最终交付必须由后端直接承载 `dashboard/dist`。
-
----
-
-## 补充说明
-
-如果你是新接手这个项目的开发者、审计人员或打包人员，先接受以下事实再继续工作：
-
-- `api_server.py` 是唯一后端入口。
-- 最终目标是 `Windows 单机离线 one-folder 包`。
-- `/dashboard/` 是正式前端入口，不是附属演示页。
-- 正式报告、Excel 底稿、QA 和前端报告中心已经进入统一语义层主线。
-- 交付前必须跑一轮真实数据和最终验收套件，而不是只看单元测试。
-
----
-
-## 相关文件
-
-- `CHANGELOG.md`
-- `WINDOWS_OFFLINE_DELIVERY.md`
-- `output/analysis_results/qa/`
-- `tests/fixtures/blindbox_gold_standard.json`
+更深入的研发说明请看：
+
+- [CHANGELOG.md](/Users/chenjian/Desktop/Code/cj-project/CHANGELOG.md)
+- [WINDOWS_OFFLINE_DELIVERY.md](/Users/chenjian/Desktop/Code/cj-project/WINDOWS_OFFLINE_DELIVERY.md)
+- [docs](/Users/chenjian/Desktop/Code/cj-project/docs)

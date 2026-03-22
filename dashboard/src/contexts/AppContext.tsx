@@ -86,7 +86,7 @@ const defaultWalletData: DataState['walletData'] = {
     subjectsByName: {},
     subjectsById: {},
     unmatchedWechatAccounts: [],
-    notes: ['暂无电子钱包补充数据'],
+    notes: ['暂无电子钱包数据'],
 };
 
 const defaultData: DataState = {

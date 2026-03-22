@@ -256,7 +256,7 @@ const buildWalletActivities = (alerts: WalletAlert[]): RiskActivity[] => {
         from: alert.person || '-',
         to: alert.counterparty || '-',
         amount: resolvePairAmount(alert.amount),
-        description: normalizeText(alert.description || alert.riskReason) || '电子钱包补充数据命中预警规则',
+        description: normalizeText(alert.description || alert.riskReason) || '电子钱包命中预警规则',
         riskLevel: resolveRiskLevel(alert.riskLevel),
     }));
 };

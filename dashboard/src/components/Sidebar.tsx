@@ -94,7 +94,7 @@ export function Sidebar() {
         { id: 'overview', label: '数据概览', icon: TrendingUp },
         { id: 'risk', label: '风险情报', icon: AlertTriangle },
         { id: 'graph', label: '关系图谱', icon: Network },
-        { id: 'supplement', label: '补充数据', icon: Wallet },
+        { id: 'supplement', label: '电子钱包', icon: Wallet },
         { id: 'report', label: '审计报告', icon: FileText },
     ];
 
@@ -429,6 +429,9 @@ export function Sidebar() {
                         <BookOpen className="w-4 h-4" />
                         交付文档
                     </a>
+                    <p className="mt-3 text-center text-[11px] font-medium text-cyan-200/85 tracking-[0.2em]">
+                        © 811所纪委
+                    </p>
                 </div>
             </aside>
         </>

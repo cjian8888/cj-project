@@ -3150,7 +3150,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
                     <div className="text-2xl font-bold text-amber-400">
                       {graphData.report.wallet_alerts.length}
                     </div>
-                    <div className="text-xs theme-text-muted">补充层风险命中</div>
+                    <div className="text-xs theme-text-muted">电子钱包风险命中</div>
                   </div>
                 </div>
                 {expandedSections['walletAlerts'] ?
