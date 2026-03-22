@@ -377,7 +377,7 @@ class ApiService {
 | start_phase_1-8.md | 启动文档 | ⭐⭐⭐ | ✅ 完整 |
 | report_guidelines.md | 报告准则 | ⭐⭐ | ✅ 完整 |
 | data_source_scan.md | 数据源扫描 | ⭐⭐ | ✅ 完整 |
-| DEVELOPMENT_LOG.md | 开发日志 | ⭐ | ✅ 完整 |
+| archive/architecture-history/DEVELOPMENT_LOG.md | 开发日志（历史归档） | ⭐ | ✅ 完整 |
 
 ### 4.2 文档质量评价
 

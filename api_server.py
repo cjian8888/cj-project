@@ -7610,13 +7610,14 @@ async def generate_investigation_report_v5(
         if semantic_paths:
             logger.info(f"[报告生成v5] report_package 已生成: {semantic_paths}")
 
-        logger.info(f"[报告生成v5] v5.0报告生成成功")
+        logger.info("[报告生成v5] 调查报告生成成功")
 
         return {
             "success": True,
             "report": report,
-            "message": "v5.0报告生成成功（完整四部分架构）",
-            "version": "5.0.0",
+            "message": "调查报告生成成功（完整四部分架构）",
+            "version": APP_RELEASE_VERSION,
+            "report_schema_version": "5.0.0",
             "config_info": {
                 "analysis_units_count": len(config.analysis_units),
                 "doc_number": config.doc_number,
@@ -7628,7 +7629,7 @@ async def generate_investigation_report_v5(
         logger.exception(f"[报告生成v5] 生成失败: {e}")
         return JSONResponse(
             status_code=500,
-            content={"success": False, "error": f"v5.0报告生成失败: {str(e)}"},
+            content={"success": False, "error": f"调查报告生成失败: {str(e)}"},
         )
 
 
