@@ -95,6 +95,38 @@ python3 -m py_compile api_server.py build_windows_package.py
 
 如果构建机高于 Windows 7，也必须以 `Python 3.8.x + PyInstaller 5.13.2` 为基线，并在最终成品上回到 `Windows7+` 实机验证。
 
+## 当前已验证通过的构建机
+
+截至 `2026-03-22`，下面这台 Windows 构建机已经把“真实重编译 exe”链路跑通：
+
+- 主机名：`UTM-WIN11`
+- 操作系统：`Windows 11 x64`
+- 仓库路径：`C:\Build\cj-project`
+- 虚拟环境：`C:\Build\cj-project\.venv38`
+- Python：`3.8.10`
+- Node.js：`20.19.0`
+- npm：`10.8.2`
+- PyInstaller：`5.13.2`
+
+已实测通过的命令链：
+
+```bash
+cd C:\Build\cj-project
+C:\Python38\python.exe -m venv .venv38
+.venv38\Scripts\python.exe -m pip install -r requirements.txt -r requirements-windows-build.txt
+cd dashboard
+npm install
+npm run build
+cd ..
+.venv38\Scripts\python.exe build_windows_package.py
+```
+
+已实测结果：
+
+- 成功生成 `dist/fpas-offline\fpas.exe`
+- 后台启动 `fpas.exe` 后，`http://127.0.0.1:8000/dashboard/` 返回 `200`
+- 打包产物包含 `dashboard`、`config`、`knowledge`、`templates`、`docs`、`README.md`
+
 ## 建议的 Windows 侧最终构建步骤
 
 ### 1. 建立专用虚拟环境
@@ -117,7 +149,7 @@ python -m pip install -r requirements-windows-build.txt
 python -m pip freeze > requirements-windows-lock.txt
 ```
 
-这一步很重要。`requirements.txt` 目前主要是下限约束，不是最终可复现锁文件。真正交付前，必须把 Windows 3.8 构建机里实际装进去的版本冻结下来。
+这一步很重要。`requirements.txt` 目前主要是下限约束，不是最终可复现锁文件。仓库根目录现在已经补入一份从真实 Windows 3.8 构建机导出的 [`requirements-windows-lock.txt`](requirements-windows-lock.txt)，后续只要 Windows 打包依赖有变化，就必须在同类构建机上重新刷新它。
 
 ### 4. 构建前端
 
@@ -139,14 +171,13 @@ python build_windows_package.py
 - 双击 `dist/fpas-offline/fpas.exe` 后，程序会自动拉起本机默认浏览器并打开 `http://127.0.0.1:8000/dashboard/`
 - 如果需要关闭这一行为，可在启动前设置环境变量 `FPAS_AUTO_OPEN_BROWSER=0`
 
-## 当前最重要的未闭环项
+## 当前剩余未闭环项
 
-截至现在，下面几件事仍然不能只靠 mac 收口：
+截至现在，mac 侧已经不再是这条链路的阻塞点；真正剩下的边界是：
 
-- `requirements.txt` 还不是 Windows 3.8 的最终锁文件
-- 还没有在真实 Windows 机器上完成一次完整打包
-- 还没有在 `Windows7+` 实机上做最终运行验收
-- 还没有对最终 `dist/fpas-offline/` 成品做空环境启动验证
+- 还没有在真实 `Windows7+` 目标机上做最终运行验收
+- 还没有在更接近空白环境的 Windows 机器上验证运行库缺失时的表现
+- 后续如果 `requirements.txt`、`dashboard/package-lock.json` 或 `build_windows_package.py` 再改动，必须回到这台 Windows 构建机重新跑一轮完整打包
 
 ## 对后续代理或开发者的要求
 
