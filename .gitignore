@@ -40,6 +40,8 @@ logs/
 # --- Project Specific ---
 output/
 output_recheck_*/
+output_reaudit_*/
+output_backup_*/
 *.xlsx
 *.csv
 MISSION_SNAPSHOT.md

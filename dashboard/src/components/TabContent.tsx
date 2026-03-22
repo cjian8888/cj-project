@@ -44,6 +44,12 @@ import {
 } from 'recharts';
 import { useApp } from '../contexts/AppContext';
 import { formatDate, formatCurrency, formatAmountInWan, truncate, getRiskLevelBadgeStyle, formatFileSize, formatRiskLevel, formatRiskDescription, formatPartyName, formatAnalysisType, formatAuditDateTime, sanitizeValue } from '../utils/formatters';
+import {
+    buildBusinessFacingReportGroups,
+    filterBusinessFacingReports,
+    filterBusinessSemanticOverview,
+    isBusinessFacingReport,
+} from '../utils/reportArtifacts';
 import { buildRiskActivityGroups, dedupeDirectTransfers, type RiskActivity, type RiskActivityType } from '../utils/suspicionUtils';
 import { EmptyState } from './common/EmptyState';
 import NetworkGraph from './NetworkGraph';
@@ -288,12 +294,27 @@ interface AuditMetric {
     icon: React.ElementType;
 }
 
+type FlowEntityType = 'person' | 'company';
+type FlowDetailSection = 'overview' | 'mixed_accounts' | 'wealth' | 'third_party' | 'cash';
+
+interface SelectedFlowDetail {
+    name: string;
+    entityType: FlowEntityType;
+    section: FlowDetailSection;
+}
+
+interface AuditNavigationFeedback {
+    kind: 'success' | 'error';
+    message: string;
+}
+
 function OverviewTab() {
     const { data, analysis, ui } = useApp();
 
     // Modal 状态
     const [selectedMetric, setSelectedMetric] = useState<AuditMetric | null>(null);
     const [selectedRiskInsight, setSelectedRiskInsight] = useState<any | null>(null);
+    const [selectedFlowDetail, setSelectedFlowDetail] = useState<SelectedFlowDetail | null>(null);
 
     // 实体选择器状态
     const [selectedEntity, setSelectedEntity] = useState<string>('all');
@@ -314,6 +335,8 @@ function OverviewTab() {
         };
     }
     const [auditNavigation, setAuditNavigation] = useState<AuditNavigationData | null>(null);
+    const [openingAuditFolderKey, setOpeningAuditFolderKey] = useState<string | null>(null);
+    const [auditNavigationFeedback, setAuditNavigationFeedback] = useState<AuditNavigationFeedback | null>(null);
 
     // 加载审计导航数据
     useEffect(() => {
@@ -334,6 +357,69 @@ function OverviewTab() {
             loadNavigationData();
         }
     }, [analysis.status]);
+
+    const handleOpenAuditFolder = useCallback(async (folderKey: string, relativePath: string, successLabel: string) => {
+        if (!relativePath) {
+            setAuditNavigationFeedback({ kind: 'error', message: '目录路径缺失，无法打开文件夹。' });
+            return;
+        }
+
+        try {
+            setOpeningAuditFolderKey(folderKey);
+            setAuditNavigationFeedback(null);
+
+            const response = await fetch(`${API_BASE_URL}/api/open-folder`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ relativePath }),
+            });
+
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok || payload.success !== true) {
+                throw new Error(String(payload.detail || payload.error || '打开文件夹失败'));
+            }
+
+            setAuditNavigationFeedback({
+                kind: 'success',
+                message: `${successLabel}目录已打开。`,
+            });
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : '打开文件夹失败';
+            console.error('打开核查目录失败:', error);
+            setAuditNavigationFeedback({
+                kind: 'error',
+                message: `${successLabel}目录打开失败：${errorMessage}`,
+            });
+        } finally {
+            setOpeningAuditFolderKey(null);
+        }
+    }, []);
+
+    const visibleAuditNavigationReports = useMemo(() => {
+        if (!auditNavigation?.reports?.length) {
+            return [];
+        }
+
+        return auditNavigation.reports.filter((report) => {
+            const normalizedName = String(report?.name || '')
+                .replace(/\\/g, '/')
+                .trim()
+                .toLowerCase();
+            if (!normalizedName) {
+                return false;
+            }
+
+            const basename = normalizedName.split('/').pop() || normalizedName;
+            return !(
+                normalizedName.startsWith('qa/')
+                || normalizedName.includes('/qa/')
+                || basename.startsWith('qa_')
+                || basename.startsWith('qa-')
+                || basename.startsWith('qa.')
+                || basename === 'qa'
+            );
+        });
+    }, [auditNavigation]);
 
     // 从真实数据生成趋势图数据（如果分析未完成，使用空数组）
     const hasRealData = analysis.status === 'completed' && Object.keys(data.profiles).length > 0;
@@ -356,6 +442,7 @@ function OverviewTab() {
         return Object.entries(data.profiles)
             .filter(([name]) => data.persons.includes(name))
             .map(([name, profile]) => {
+                const rawProfile = profile as any;
                 const summary = (profile as any)?.summary || {};
                 const income = profile?.totalIncome || 0;
                 const expense = profile?.totalExpense || 0;
@@ -371,11 +458,28 @@ function OverviewTab() {
                 const total = income + expense;
                 const cashRatio = total > 0 ? (cashTotal / total) * 100 : 0;
                 const accountLayerSummary = summary?.account_layer_summary || {};
+                const wealthManagement = rawProfile?.wealth_management || {};
+                const wealthTotalAmount =
+                    Number(wealthManagement?.wealth_purchase || 0)
+                    + Number(wealthManagement?.wealth_redemption || 0)
+                    + Number(wealthManagement?.wealth_income || 0);
+                const fundFlow = rawProfile?.fund_flow || {};
 
                 // 新增：工资、理财、第三方支付
-                const salaryTotal = (profile as any)?.salaryTotal || 0;  // 工资金额
-                const wealthTotal = profile?.wealthTotal || 0;  // 理财金额
-                const thirdPartyTotal = profile?.thirdPartyTotal || 0;  // 第三方支付
+                const salaryTotal = rawProfile?.salaryTotal || 0;  // 工资金额
+                const wealthTotal = wealthTotalAmount > 0
+                    ? wealthTotalAmount
+                    : Number(profile?.wealthTotal || 0);
+                const wealthTransactionCount = Number(
+                    rawProfile?.wealthTransactionCount
+                    ?? wealthManagement?.total_transactions
+                    ?? 0
+                );
+                const thirdPartyTotal = Number(
+                    profile?.thirdPartyTotal
+                    ?? ((Number(fundFlow?.third_party_income || 0) + Number(fundFlow?.third_party_expense || 0)))
+                    ?? 0
+                );
                 const transactionCount = profile?.transactionCount || 0;  // 交易笔数
 
                 return {
@@ -396,6 +500,7 @@ function OverviewTab() {
                     // 新增字段
                     salaryTotal: salaryTotal / 10000,  // 转万元
                     wealthTotal: wealthTotal / 10000,  // 转万元
+                    wealthTransactionCount,
                     thirdPartyTotal: thirdPartyTotal / 10000,  // 转万元
                     transactionCount,
                     hasMixedAccountActivity: Boolean(accountLayerSummary?.has_mixed_personal_corporate_activity),
@@ -450,6 +555,194 @@ function OverviewTab() {
 
     // 当前显示的流量数据
     const currentFlowData = entityType === 'person' ? personProfiles : companyProfiles;
+
+    const openFlowDetail = useCallback(
+        (name: string, detailEntityType: FlowEntityType, section: FlowDetailSection = 'overview') => {
+            setSelectedFlowDetail({ name, entityType: detailEntityType, section });
+        },
+        []
+    );
+
+    const closeFlowDetail = useCallback(() => {
+        setSelectedFlowDetail(null);
+    }, []);
+
+    const flowOffsetLabels: Record<string, string> = {
+        self_transfer: '本人互转',
+        wealth_redemption: '理财/定存本金回流',
+        wealth_principal: '理财本金对冲',
+        bank_product_adjustment: '银行卡产品回摆/还款冲销',
+        business_reimbursement: '单位报销/业务往来',
+        family_transfer: '家庭成员互转',
+        refund: '退款/冲正',
+        installment_adjustment: '账单分期/产品冲销',
+        loan: '贷款发放',
+        loan_inflow: '贷款发放',
+        deposit_redemption: '定存到期本金',
+    };
+
+    const safeFlowNumber = (value: unknown): number => {
+        const num = Number(value || 0);
+        return Number.isFinite(num) ? num : 0;
+    };
+
+    const formatMaskedAccount = (value: unknown): string => {
+        const digits = String(value || '').replace(/\s+/g, '').trim();
+        if (!digits) return '--';
+        if (digits.length <= 8) return digits;
+        return `${digits.slice(0, 4)}...${digits.slice(-4)}`;
+    };
+
+    const getFlowItemDate = (item: any): string =>
+        String(item?.date || item?.日期 || item?.交易日期 || item?.交易时间 || '').trim();
+
+    const getFlowItemAmount = (item: any): number => {
+        const candidates = [
+            item?.amount,
+            item?.金额,
+            item?.income,
+            item?.收入,
+            item?.expense,
+            item?.支出,
+        ];
+        for (const candidate of candidates) {
+            const amount = safeFlowNumber(candidate);
+            if (amount > 0) return amount;
+        }
+        return 0;
+    };
+
+    const getFlowItemCounterparty = (item: any): string =>
+        String(
+            item?.counterparty
+            || item?.对手方
+            || item?.对方户名
+            || item?.bank_name
+            || item?.account_name
+            || '--'
+        ).trim();
+
+    const getFlowItemDescription = (item: any): string =>
+        String(
+            item?.description
+            || item?.摘要
+            || item?.备注
+            || item?.判断依据
+            || item?.reason
+            || ''
+        ).trim();
+
+    const getFlowItemType = (item: any): string =>
+        String(
+            item?.type
+            || item?.类型
+            || item?.rule_bucket
+            || item?.reason
+            || ''
+        ).trim();
+
+    const selectedFlowProfile = selectedFlowDetail
+        ? (data.profiles[selectedFlowDetail.name] as any) || null
+        : null;
+    const selectedFlowSummary = selectedFlowProfile?.summary || {};
+    const selectedFlowFundFlow = selectedFlowProfile?.fund_flow || selectedFlowProfile?.fundFlow || {};
+    const selectedFlowWealth = selectedFlowProfile?.wealth_management || selectedFlowProfile?.wealthManagement || {};
+    const selectedFlowBankAccounts = Array.isArray(selectedFlowProfile?.bank_accounts)
+        ? selectedFlowProfile.bank_accounts
+        : Array.isArray(selectedFlowProfile?.bankAccounts)
+            ? selectedFlowProfile.bankAccounts
+        : [];
+    const selectedFlowWealthProducts = Array.isArray(selectedFlowProfile?.wealth_products)
+        ? selectedFlowProfile.wealth_products
+        : Array.isArray(selectedFlowProfile?.wealthProducts)
+            ? selectedFlowProfile.wealthProducts
+        : [];
+    const selectedFlowExcludedDetails = Array.isArray(selectedFlowSummary?.excluded_details)
+        ? selectedFlowSummary.excluded_details
+        : Array.isArray(selectedFlowSummary?.excludedDetails)
+            ? selectedFlowSummary.excludedDetails
+        : [];
+    const selectedFlowOffsetDetail = selectedFlowSummary?.offset_detail || selectedFlowSummary?.offsetDetail || {};
+    const selectedFlowExcludedBreakdownRaw = selectedFlowSummary?.excluded_breakdown
+        || selectedFlowSummary?.excludedBreakdown
+        || {};
+    const selectedFlowExcludedBreakdown = Object.keys(selectedFlowExcludedBreakdownRaw).length > 0
+        ? selectedFlowExcludedBreakdownRaw
+        : {
+            ...(safeFlowNumber(selectedFlowOffsetDetail?.self_transfer) > 0
+                ? { self_transfer: safeFlowNumber(selectedFlowOffsetDetail?.self_transfer) }
+                : {}),
+            ...((safeFlowNumber(selectedFlowOffsetDetail?.wealth_principal)
+                + safeFlowNumber(selectedFlowOffsetDetail?.wealth_historical)
+                + safeFlowNumber(selectedFlowOffsetDetail?.deposit_redemption)) > 0
+                ? {
+                    wealth_redemption:
+                        safeFlowNumber(selectedFlowOffsetDetail?.wealth_principal)
+                        + safeFlowNumber(selectedFlowOffsetDetail?.wealth_historical)
+                        + safeFlowNumber(selectedFlowOffsetDetail?.deposit_redemption),
+                }
+                : {}),
+            ...(safeFlowNumber(selectedFlowOffsetDetail?.bank_product_adjustment) > 0
+                ? { bank_product_adjustment: safeFlowNumber(selectedFlowOffsetDetail?.bank_product_adjustment) }
+                : {}),
+            ...(safeFlowNumber(selectedFlowOffsetDetail?.business_reimbursement) > 0
+                ? { business_reimbursement: safeFlowNumber(selectedFlowOffsetDetail?.business_reimbursement) }
+                : {}),
+            ...(safeFlowNumber(selectedFlowOffsetDetail?.family_transfer_in) > 0
+                ? { family_transfer: safeFlowNumber(selectedFlowOffsetDetail?.family_transfer_in) }
+                : {}),
+            ...(safeFlowNumber(selectedFlowOffsetDetail?.refund) > 0
+                ? { refund: safeFlowNumber(selectedFlowOffsetDetail?.refund) }
+                : {}),
+            ...(safeFlowNumber(selectedFlowOffsetDetail?.installment_adjustment) > 0
+                ? { installment_adjustment: safeFlowNumber(selectedFlowOffsetDetail?.installment_adjustment) }
+                : {}),
+            ...(safeFlowNumber(selectedFlowOffsetDetail?.loan) > 0
+                ? { loan: safeFlowNumber(selectedFlowOffsetDetail?.loan) }
+                : {}),
+        };
+    const selectedFlowThirdPartyTransactions = Array.isArray(selectedFlowFundFlow?.third_party_transactions)
+        ? selectedFlowFundFlow.third_party_transactions
+        : Array.isArray(selectedFlowFundFlow?.thirdPartyTransactions)
+            ? selectedFlowFundFlow.thirdPartyTransactions
+        : [];
+    const selectedFlowCashTransactions = Array.isArray(selectedFlowFundFlow?.cash_transactions)
+        ? selectedFlowFundFlow.cash_transactions
+        : Array.isArray(selectedFlowFundFlow?.cashTransactions)
+            ? selectedFlowFundFlow.cashTransactions
+        : Array.isArray(selectedFlowProfile?.cashTransactions)
+            ? selectedFlowProfile.cashTransactions
+            : [];
+    const selectedFlowWealthAmount = (
+        safeFlowNumber(selectedFlowWealth?.wealth_purchase)
+        + safeFlowNumber(selectedFlowWealth?.wealth_redemption)
+        + safeFlowNumber(selectedFlowWealth?.wealth_income)
+    ) || safeFlowNumber(selectedFlowProfile?.wealthTotal);
+    const selectedFlowThirdPartyTotal = safeFlowNumber(selectedFlowProfile?.thirdPartyTotal)
+        || (
+            safeFlowNumber(selectedFlowFundFlow?.third_party_income ?? selectedFlowFundFlow?.thirdPartyIncome)
+            + safeFlowNumber(selectedFlowFundFlow?.third_party_expense ?? selectedFlowFundFlow?.thirdPartyExpense)
+        );
+    const selectedFlowCorporateAccounts = selectedFlowBankAccounts.filter((account: any) => {
+        const category = String(account?.account_category || account?.accountCategory || '').trim();
+        const accountType = String(account?.account_type || account?.accountType || '').trim();
+        return category.includes('对公') || accountType.includes('对公');
+    });
+    const selectedFlowAccountLayerSummary = selectedFlowSummary?.account_layer_summary
+        || selectedFlowSummary?.accountLayerSummary
+        || {};
+    const selectedFlowCorporateLayer = selectedFlowAccountLayerSummary?.layers?.corporate || {};
+    const selectedFlowWealthTransactions = [
+        ...(Array.isArray(selectedFlowWealth?.wealth_purchase_transactions)
+            ? selectedFlowWealth.wealth_purchase_transactions.map((item: any) => ({ ...item, _direction: '购入' }))
+            : []),
+        ...(Array.isArray(selectedFlowWealth?.wealth_redemption_transactions)
+            ? selectedFlowWealth.wealth_redemption_transactions.map((item: any) => ({ ...item, _direction: '赎回' }))
+            : []),
+        ...(Array.isArray(selectedFlowWealth?.wealth_income_transactions)
+            ? selectedFlowWealth.wealth_income_transactions.map((item: any) => ({ ...item, _direction: '收益' }))
+            : []),
+    ].sort((a: any, b: any) => getFlowItemAmount(b) - getFlowItemAmount(a));
 
     // 实体列表（用于选择器）
     const entityList = useMemo(() => {
@@ -1319,6 +1612,34 @@ function OverviewTab() {
         };
     };
 
+    const selectedFlowOffsetEntries = Object.entries(selectedFlowExcludedBreakdown)
+        .map(([key, amount]) => ({
+            key,
+            label: flowOffsetLabels[key] || key,
+            amount: safeFlowNumber(amount),
+        }))
+        .filter((item) => item.amount > 0)
+        .sort((a, b) => b.amount - a.amount);
+    const selectedFlowThirdPartyIncome = safeFlowNumber(selectedFlowFundFlow?.third_party_income);
+    const selectedFlowThirdPartyExpense = safeFlowNumber(selectedFlowFundFlow?.third_party_expense);
+    const selectedFlowCashTotal = safeFlowNumber(selectedFlowProfile?.cashTotal);
+    const selectedFlowVisibleSections: Array<{ key: FlowDetailSection; label: string }> = [
+        { key: 'overview', label: '总览' },
+        ...(selectedFlowDetail?.entityType === 'person'
+            && (selectedFlowCorporateAccounts.length > 0 || selectedFlowAccountLayerSummary?.has_mixed_personal_corporate_activity)
+            ? [{ key: 'mixed_accounts' as FlowDetailSection, label: '对公账户' }]
+            : []),
+        ...(selectedFlowWealthAmount > 0 || selectedFlowWealthTransactions.length > 0
+            ? [{ key: 'wealth' as FlowDetailSection, label: '理财/定存' }]
+            : []),
+        ...(selectedFlowThirdPartyTotal > 0 || selectedFlowThirdPartyTransactions.length > 0
+            ? [{ key: 'third_party' as FlowDetailSection, label: '三方支付' }]
+            : []),
+        ...(selectedFlowCashTransactions.length > 0
+            ? [{ key: 'cash' as FlowDetailSection, label: '现金交易' }]
+            : []),
+    ];
+
     return (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             {/* Metric Detail Modal - 两级钻取设计 */}
@@ -1630,6 +1951,472 @@ function OverviewTab() {
                 </div>
             )}
 
+            {selectedFlowDetail && selectedFlowProfile && (
+                <div
+                    className="fixed inset-0 lg:left-72 z-50 flex items-center justify-center p-8 bg-black/60 backdrop-blur-sm"
+                    onClick={closeFlowDetail}
+                >
+                    <div
+                        className="theme-bg-elevated border theme-border rounded-2xl shadow-2xl max-w-5xl w-full max-h-[85vh] overflow-hidden"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex items-center justify-between p-4 border-b theme-border-muted">
+                            <div>
+                                <div className="text-[11px] uppercase tracking-[0.2em] text-cyan-300">
+                                    {selectedFlowDetail.entityType === 'person' ? '个人资金流量明细' : '企业资金流量明细'}
+                                </div>
+                                <h3 className="font-semibold text-white mt-1">{selectedFlowDetail.name}</h3>
+                                <p className="text-xs theme-text-dim mt-1">
+                                    共 {safeFlowNumber(selectedFlowProfile?.transactionCount)} 笔
+                                    {' · '}原始流入 {formatCurrency(safeFlowNumber(selectedFlowProfile?.totalIncome))}
+                                    {' · '}原始流出 {formatCurrency(safeFlowNumber(selectedFlowProfile?.totalExpense))}
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={closeFlowDetail}
+                                aria-label="关闭资金流量明细"
+                                title="关闭资金流量明细"
+                                className="p-2 theme-hover rounded-lg transition-colors"
+                            >
+                                <X className="w-5 h-5 theme-text-muted" />
+                            </button>
+                        </div>
+
+                        <div className="px-4 pt-4 border-b theme-border-muted">
+                            <div className="flex flex-wrap gap-2 pb-4">
+                                {selectedFlowVisibleSections.map((section) => (
+                                    <button
+                                        key={section.key}
+                                        type="button"
+                                        onClick={() => setSelectedFlowDetail({ ...selectedFlowDetail, section: section.key })}
+                                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${selectedFlowDetail.section === section.key
+                                            ? 'bg-cyan-500/20 text-cyan-300 ring-1 ring-cyan-500/30'
+                                            : 'theme-bg-muted/50 theme-text-muted hover:text-white hover:bg-white/5'
+                                            }`}
+                                    >
+                                        {section.label}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div className="p-4 overflow-auto max-h-[70vh] space-y-4">
+                            {selectedFlowDetail.section === 'overview' && (() => {
+                                const topExcludedDetails = [...selectedFlowExcludedDetails]
+                                    .sort((a: any, b: any) => getFlowItemAmount(b) - getFlowItemAmount(a))
+                                    .slice(0, 12);
+
+                                return (
+                                    <>
+                                        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+                                            <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">原始总流入</div>
+                                                <div className="mt-2 font-mono text-emerald-300 text-lg font-semibold">
+                                                    {formatCurrency(safeFlowNumber(selectedFlowProfile?.totalIncome))}
+                                                </div>
+                                            </div>
+                                            <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">原始总流出</div>
+                                                <div className="mt-2 font-mono text-rose-300 text-lg font-semibold">
+                                                    {formatCurrency(safeFlowNumber(selectedFlowProfile?.totalExpense))}
+                                                </div>
+                                            </div>
+                                            <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">真实收入</div>
+                                                <div className="mt-2 font-mono text-cyan-300 text-lg font-semibold">
+                                                    {formatCurrency(safeFlowNumber(selectedFlowProfile?.realIncome ?? selectedFlowSummary?.real_income))}
+                                                </div>
+                                            </div>
+                                            <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                                <div className="text-[10px] uppercase tracking-wide theme-text-dim">真实支出</div>
+                                                <div className="mt-2 font-mono text-orange-300 text-lg font-semibold">
+                                                    {formatCurrency(safeFlowNumber(selectedFlowProfile?.realExpense ?? selectedFlowSummary?.real_expense))}
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/10 p-4">
+                                            <div className="text-sm font-semibold text-cyan-200">真实收入口径说明</div>
+                                            <p className="text-sm theme-text-secondary leading-6 mt-2">
+                                                {selectedFlowDetail.entityType === 'person'
+                                                    ? '当前真实收入逻辑仍然有效：从个人总流入中扣除本人互转、理财/定存本金回流、单位报销/业务往来、贷款发放、退款/冲正、家庭成员转入后，才得到真实收入。'
+                                                    : '公司主体当前以原始收支和行为特征为主，不适用个人理财/家庭转账剔除口径。'}
+                                            </p>
+                                        </div>
+
+                                        {selectedFlowOffsetEntries.length > 0 && (
+                                            <div className="space-y-2">
+                                                <div className="text-sm font-semibold theme-text-secondary">剔除项汇总</div>
+                                                <div className="flex flex-wrap gap-2">
+                                                    {selectedFlowOffsetEntries.map((item) => (
+                                                        <span
+                                                            key={`offset-${item.key}`}
+                                                            className="text-[11px] px-2.5 py-1 rounded-full border border-amber-500/20 text-amber-300 bg-amber-500/10"
+                                                        >
+                                                            {item.label} {formatAmountInWan(item.amount)}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {topExcludedDetails.length > 0 && (
+                                            <div className="space-y-3">
+                                                <div className="text-sm font-semibold theme-text-secondary">重点剔除明细</div>
+                                                <div className="overflow-x-auto rounded-lg border theme-border">
+                                                    <table className="w-full text-sm">
+                                                        <thead className="theme-bg-muted sticky top-0">
+                                                            <tr className="text-left theme-text-secondary text-xs">
+                                                                <th className="px-4 py-3 font-medium">日期</th>
+                                                                <th className="px-4 py-3 font-medium">交易对手</th>
+                                                                <th className="px-4 py-3 font-medium text-right">金额</th>
+                                                                <th className="px-4 py-3 font-medium">剔除原因</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            {topExcludedDetails.map((item: any, idx: number) => (
+                                                                <tr
+                                                                    key={`overview-excluded-${idx}`}
+                                                                    className={`border-t theme-border-muted ${idx % 2 === 0 ? 'theme-bg-surface/30' : 'theme-bg-surface/60'}`}
+                                                                >
+                                                                    <td className="px-4 py-3 theme-text-muted font-mono text-xs whitespace-nowrap">
+                                                                        {formatAuditDateTime(getFlowItemDate(item) || null)}
+                                                                    </td>
+                                                                    <td className="px-4 py-3 theme-text-secondary">
+                                                                        {sanitizeValue(getFlowItemCounterparty(item))}
+                                                                    </td>
+                                                                    <td className="px-4 py-3 text-right font-mono text-amber-300">
+                                                                        {formatCurrency(getFlowItemAmount(item))}
+                                                                    </td>
+                                                                    <td className="px-4 py-3 theme-text-secondary text-xs">
+                                                                        {sanitizeValue(item?.reason || getFlowItemType(item) || '--')}
+                                                                    </td>
+                                                                </tr>
+                                                            ))}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </>
+                                );
+                            })()}
+
+                            {selectedFlowDetail.section === 'mixed_accounts' && (
+                                <div className="space-y-4">
+                                    <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4">
+                                        <div className="text-sm font-semibold text-amber-200">个人名下对公账户归并</div>
+                                        <p className="text-sm theme-text-secondary leading-6 mt-2">
+                                            {sanitizeValue(selectedFlowAccountLayerSummary?.note || '该主体名下存在对公账户流水，详情见下表。')}
+                                        </p>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+                                        <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                            <div className="text-[10px] uppercase tracking-wide theme-text-dim">对公账户层笔数</div>
+                                            <div className="mt-2 font-mono text-cyan-300 text-lg font-semibold">
+                                                {safeFlowNumber(selectedFlowCorporateLayer?.transaction_count ?? selectedFlowCorporateLayer?.transactionCount)}
+                                            </div>
+                                        </div>
+                                        <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                            <div className="text-[10px] uppercase tracking-wide theme-text-dim">对公账户数</div>
+                                            <div className="mt-2 font-mono text-amber-300 text-lg font-semibold">
+                                                {safeFlowNumber(selectedFlowCorporateLayer?.account_count ?? selectedFlowCorporateLayer?.accountCount)}
+                                            </div>
+                                        </div>
+                                        <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                            <div className="text-[10px] uppercase tracking-wide theme-text-dim">对公层总流入</div>
+                                            <div className="mt-2 font-mono text-emerald-300 text-lg font-semibold">
+                                                {formatCurrency(safeFlowNumber(selectedFlowCorporateLayer?.total_income ?? selectedFlowCorporateLayer?.totalIncome))}
+                                            </div>
+                                        </div>
+                                        <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                            <div className="text-[10px] uppercase tracking-wide theme-text-dim">对公层总流出</div>
+                                            <div className="mt-2 font-mono text-rose-300 text-lg font-semibold">
+                                                {formatCurrency(safeFlowNumber(selectedFlowCorporateLayer?.total_expense ?? selectedFlowCorporateLayer?.totalExpense))}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {selectedFlowCorporateAccounts.length > 0 ? (
+                                        <div className="overflow-x-auto rounded-lg border theme-border">
+                                            <table className="w-full text-sm">
+                                                <thead className="theme-bg-muted sticky top-0">
+                                                    <tr className="text-left theme-text-secondary text-xs">
+                                                        <th className="px-4 py-3 font-medium">银行</th>
+                                                        <th className="px-4 py-3 font-medium">账号</th>
+                                                        <th className="px-4 py-3 font-medium">账户类型</th>
+                                                        <th className="px-4 py-3 font-medium text-right">笔数</th>
+                                                        <th className="px-4 py-3 font-medium text-right">总流入</th>
+                                                        <th className="px-4 py-3 font-medium text-right">总流出</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {selectedFlowCorporateAccounts.map((account: any, idx: number) => (
+                                                        <tr
+                                                            key={`mixed-account-${idx}`}
+                                                            className={`border-t theme-border-muted ${idx % 2 === 0 ? 'theme-bg-surface/30' : 'theme-bg-surface/60'}`}
+                                                        >
+                                                            <td className="px-4 py-3 theme-text-secondary">{sanitizeValue(account?.bank_name || '--')}</td>
+                                                            <td className="px-4 py-3 font-mono text-xs theme-text-muted">{formatMaskedAccount(account?.account_number)}</td>
+                                                            <td className="px-4 py-3 theme-text-secondary">{sanitizeValue(account?.account_type || account?.accountType || account?.account_category || account?.accountCategory || '--')}</td>
+                                                            <td className="px-4 py-3 text-right font-mono text-cyan-300">{safeFlowNumber(account?.transaction_count ?? account?.transactionCount)}</td>
+                                                            <td className="px-4 py-3 text-right font-mono text-emerald-300">{formatCurrency(safeFlowNumber(account?.total_income ?? account?.totalIncome))}</td>
+                                                            <td className="px-4 py-3 text-right font-mono text-rose-300">{formatCurrency(safeFlowNumber(account?.total_expense ?? account?.totalExpense))}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    ) : (
+                                        <div className="rounded-xl border theme-border bg-black/10 p-6 text-sm theme-text-dim">
+                                            当前没有可展示的对公账户明细。
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {selectedFlowDetail.section === 'wealth' && (
+                                <div className="space-y-4">
+                                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
+                                        <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                            <div className="text-[10px] uppercase tracking-wide theme-text-dim">理财买入</div>
+                                            <div className="mt-2 font-mono text-indigo-300 text-lg font-semibold">
+                                                {formatCurrency(safeFlowNumber(selectedFlowWealth?.wealth_purchase))}
+                                            </div>
+                                        </div>
+                                        <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                            <div className="text-[10px] uppercase tracking-wide theme-text-dim">理财赎回</div>
+                                            <div className="mt-2 font-mono text-cyan-300 text-lg font-semibold">
+                                                {formatCurrency(safeFlowNumber(selectedFlowWealth?.wealth_redemption))}
+                                            </div>
+                                        </div>
+                                        <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                            <div className="text-[10px] uppercase tracking-wide theme-text-dim">理财收益</div>
+                                            <div className="mt-2 font-mono text-emerald-300 text-lg font-semibold">
+                                                {formatCurrency(safeFlowNumber(selectedFlowWealth?.wealth_income))}
+                                            </div>
+                                        </div>
+                                        <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                            <div className="text-[10px] uppercase tracking-wide theme-text-dim">估算当前持有</div>
+                                            <div className="mt-2 font-mono text-orange-300 text-lg font-semibold">
+                                                {formatCurrency(safeFlowNumber(selectedFlowWealth?.estimated_holding))}
+                                            </div>
+                                        </div>
+                                        <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                            <div className="text-[10px] uppercase tracking-wide theme-text-dim">已从真实收入剔除</div>
+                                            <div className="mt-2 font-mono text-amber-300 text-lg font-semibold">
+                                                {formatCurrency(safeFlowNumber(selectedFlowExcludedBreakdown?.wealth_redemption))}
+                                            </div>
+                                            <div className="text-[10px] theme-text-dim mt-1">
+                                                共 {safeFlowNumber(selectedFlowWealth?.total_transactions)} 笔理财相关交易
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="rounded-xl border border-indigo-500/20 bg-indigo-500/10 p-4">
+                                        <div className="text-sm font-semibold text-indigo-200">理财/定存与真实收入关系</div>
+                                        <p className="text-sm theme-text-secondary leading-6 mt-2">
+                                            这里展示的是理财相关流水规模；真实收入计算时，系统只保留理财收益，理财/定存本金回流不会算作真实收入。
+                                        </p>
+                                    </div>
+
+                                    {selectedFlowWealthProducts.length > 0 && (
+                                        <div className="space-y-3">
+                                            <div className="text-sm font-semibold theme-text-secondary">外部理财持仓</div>
+                                            <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                                                {selectedFlowWealthProducts.slice(0, 6).map((product: any, idx: number) => (
+                                                    <div key={`wealth-product-${idx}`} className="rounded-xl border theme-border bg-black/10 p-3">
+                                                        <div className="text-sm font-medium theme-text-secondary">
+                                                            {sanitizeValue(product?.product_name || product?.bank || '--')}
+                                                        </div>
+                                                        <div className="text-[11px] theme-text-dim mt-1">
+                                                            {sanitizeValue(product?.product_code || product?.product_type || '--')}
+                                                        </div>
+                                                        <div className="font-mono text-cyan-300 text-sm mt-3">
+                                                            {formatCurrency(safeFlowNumber(product?.amount || product?.available_amount))}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {selectedFlowWealthTransactions.length > 0 ? (
+                                        <div className="overflow-x-auto rounded-lg border theme-border">
+                                            <table className="w-full text-sm">
+                                                <thead className="theme-bg-muted sticky top-0">
+                                                    <tr className="text-left theme-text-secondary text-xs">
+                                                        <th className="px-4 py-3 font-medium">日期</th>
+                                                        <th className="px-4 py-3 font-medium">方向</th>
+                                                        <th className="px-4 py-3 font-medium">交易对手</th>
+                                                        <th className="px-4 py-3 font-medium text-right">金额</th>
+                                                        <th className="px-4 py-3 font-medium">说明</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {selectedFlowWealthTransactions.slice(0, 15).map((item: any, idx: number) => (
+                                                        <tr
+                                                            key={`wealth-tx-${idx}`}
+                                                            className={`border-t theme-border-muted ${idx % 2 === 0 ? 'theme-bg-surface/30' : 'theme-bg-surface/60'}`}
+                                                        >
+                                                            <td className="px-4 py-3 theme-text-muted font-mono text-xs whitespace-nowrap">
+                                                                {formatAuditDateTime(getFlowItemDate(item) || null)}
+                                                            </td>
+                                                            <td className="px-4 py-3 theme-text-secondary">{sanitizeValue(item?._direction || getFlowItemType(item) || '--')}</td>
+                                                            <td className="px-4 py-3 theme-text-secondary">{sanitizeValue(getFlowItemCounterparty(item))}</td>
+                                                            <td className="px-4 py-3 text-right font-mono text-indigo-300">{formatCurrency(getFlowItemAmount(item))}</td>
+                                                            <td className="px-4 py-3 theme-text-secondary text-xs">{sanitizeValue(getFlowItemDescription(item) || '--')}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    ) : (
+                                        <div className="rounded-xl border theme-border bg-black/10 p-6 text-sm theme-text-dim">
+                                            当前没有可展示的理财交易明细。
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {selectedFlowDetail.section === 'third_party' && (
+                                <div className="space-y-4">
+                                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+                                        <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                            <div className="text-[10px] uppercase tracking-wide theme-text-dim">三方流入</div>
+                                            <div className="mt-2 font-mono text-emerald-300 text-lg font-semibold">
+                                                {formatCurrency(selectedFlowThirdPartyIncome)}
+                                            </div>
+                                        </div>
+                                        <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                            <div className="text-[10px] uppercase tracking-wide theme-text-dim">三方流出</div>
+                                            <div className="mt-2 font-mono text-rose-300 text-lg font-semibold">
+                                                {formatCurrency(selectedFlowThirdPartyExpense)}
+                                            </div>
+                                        </div>
+                                        <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                            <div className="text-[10px] uppercase tracking-wide theme-text-dim">三方合计</div>
+                                            <div className="mt-2 font-mono text-cyan-300 text-lg font-semibold">
+                                                {formatCurrency(selectedFlowThirdPartyTotal)}
+                                            </div>
+                                        </div>
+                                        <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                            <div className="text-[10px] uppercase tracking-wide theme-text-dim">三方笔数</div>
+                                            <div className="mt-2 font-mono text-cyan-300 text-lg font-semibold">
+                                                {selectedFlowThirdPartyTransactions.length}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {selectedFlowThirdPartyTransactions.length > 0 ? (
+                                        <div className="overflow-x-auto rounded-lg border theme-border">
+                                            <table className="w-full text-sm">
+                                                <thead className="theme-bg-muted sticky top-0">
+                                                    <tr className="text-left theme-text-secondary text-xs">
+                                                        <th className="px-4 py-3 font-medium">日期</th>
+                                                        <th className="px-4 py-3 font-medium">交易对手</th>
+                                                        <th className="px-4 py-3 font-medium text-right">金额</th>
+                                                        <th className="px-4 py-3 font-medium">说明</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {[...selectedFlowThirdPartyTransactions]
+                                                        .sort((a: any, b: any) => getFlowItemAmount(b) - getFlowItemAmount(a))
+                                                        .slice(0, 20)
+                                                        .map((item: any, idx: number) => (
+                                                            <tr
+                                                                key={`third-party-${idx}`}
+                                                                className={`border-t theme-border-muted ${idx % 2 === 0 ? 'theme-bg-surface/30' : 'theme-bg-surface/60'}`}
+                                                            >
+                                                                <td className="px-4 py-3 theme-text-muted font-mono text-xs whitespace-nowrap">
+                                                                    {formatAuditDateTime(getFlowItemDate(item) || null)}
+                                                                </td>
+                                                                <td className="px-4 py-3 theme-text-secondary">{sanitizeValue(getFlowItemCounterparty(item))}</td>
+                                                                <td className="px-4 py-3 text-right font-mono text-cyan-300">{formatCurrency(getFlowItemAmount(item))}</td>
+                                                                <td className="px-4 py-3 theme-text-secondary text-xs">{sanitizeValue(getFlowItemDescription(item) || '--')}</td>
+                                                            </tr>
+                                                        ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    ) : (
+                                        <div className="rounded-xl border theme-border bg-black/10 p-6 text-sm theme-text-dim">
+                                            当前没有可展示的第三方支付明细。
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {selectedFlowDetail.section === 'cash' && (
+                                <div className="space-y-4">
+                                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                                        <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                            <div className="text-[10px] uppercase tracking-wide theme-text-dim">现金交易总额</div>
+                                            <div className="mt-2 font-mono text-amber-300 text-lg font-semibold">
+                                                {formatCurrency(selectedFlowCashTotal)}
+                                            </div>
+                                        </div>
+                                        <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                            <div className="text-[10px] uppercase tracking-wide theme-text-dim">现金交易笔数</div>
+                                            <div className="mt-2 font-mono text-amber-300 text-lg font-semibold">
+                                                {selectedFlowCashTransactions.length}
+                                            </div>
+                                        </div>
+                                        <div className="rounded-xl border theme-border bg-black/10 p-3">
+                                            <div className="text-[10px] uppercase tracking-wide theme-text-dim">现金占比</div>
+                                            <div className="mt-2 font-mono text-amber-300 text-lg font-semibold">
+                                                {safeFlowNumber(selectedFlowProfile?.cashTotal) > 0 && safeFlowNumber(selectedFlowProfile?.totalIncome) + safeFlowNumber(selectedFlowProfile?.totalExpense) > 0
+                                                    ? `${((safeFlowNumber(selectedFlowProfile?.cashTotal) / (safeFlowNumber(selectedFlowProfile?.totalIncome) + safeFlowNumber(selectedFlowProfile?.totalExpense))) * 100).toFixed(1)}%`
+                                                    : '0.0%'}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {selectedFlowCashTransactions.length > 0 ? (
+                                        <div className="overflow-x-auto rounded-lg border theme-border">
+                                            <table className="w-full text-sm">
+                                                <thead className="theme-bg-muted sticky top-0">
+                                                    <tr className="text-left theme-text-secondary text-xs">
+                                                        <th className="px-4 py-3 font-medium">日期</th>
+                                                        <th className="px-4 py-3 font-medium">交易对手</th>
+                                                        <th className="px-4 py-3 font-medium text-right">金额</th>
+                                                        <th className="px-4 py-3 font-medium">说明</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {[...selectedFlowCashTransactions]
+                                                        .sort((a: any, b: any) => getFlowItemAmount(b) - getFlowItemAmount(a))
+                                                        .slice(0, 20)
+                                                        .map((item: any, idx: number) => (
+                                                            <tr
+                                                                key={`cash-${idx}`}
+                                                                className={`border-t theme-border-muted ${idx % 2 === 0 ? 'theme-bg-surface/30' : 'theme-bg-surface/60'}`}
+                                                            >
+                                                                <td className="px-4 py-3 theme-text-muted font-mono text-xs whitespace-nowrap">
+                                                                    {formatAuditDateTime(getFlowItemDate(item) || null)}
+                                                                </td>
+                                                                <td className="px-4 py-3 theme-text-secondary">{sanitizeValue(getFlowItemCounterparty(item))}</td>
+                                                                <td className="px-4 py-3 text-right font-mono text-amber-300">{formatCurrency(getFlowItemAmount(item))}</td>
+                                                                <td className="px-4 py-3 theme-text-secondary text-xs">{sanitizeValue(getFlowItemDescription(item) || '--')}</td>
+                                                            </tr>
+                                                        ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    ) : (
+                                        <div className="rounded-xl border theme-border bg-black/10 p-6 text-sm theme-text-dim">
+                                            当前没有可展示的现金交易明细。
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
 
             {/* 🆕 智能审计导航区域 - 重新设计 */}
             {hasRealData && (
@@ -1728,6 +2515,19 @@ function OverviewTab() {
                                 </div>
                             </div>
 
+                            {auditNavigationFeedback && (
+                                <div
+                                    className={`mb-4 flex items-start gap-3 rounded-xl border px-4 py-3 text-sm ${
+                                        auditNavigationFeedback.kind === 'success'
+                                            ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                                            : 'border-amber-500/30 bg-amber-500/10 text-amber-200'
+                                    }`}
+                                >
+                                    <Info className="mt-0.5 h-4 w-4 flex-none" />
+                                    <span>{auditNavigationFeedback.message}</span>
+                                </div>
+                            )}
+
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                                 {/* 个人清洗数据 */}
                                 <div className="theme-bg-muted/40 rounded-xl p-4 border theme-border flex flex-col">
@@ -1752,17 +2552,16 @@ function OverviewTab() {
                                     </div>
                                     {/* 打开文件夹按钮 */}
                                     <button
-                                        onClick={() => {
-                                            fetch(`${API_BASE_URL}/api/open-folder`, {
-                                                method: 'POST',
-                                                headers: { 'Content-Type': 'application/json' },
-                                                body: JSON.stringify({ relativePath: auditNavigation.paths.cleanedDataPerson })
-                                            }).catch(console.error);
-                                        }}
+                                        onClick={() => { void handleOpenAuditFolder('person-cleaned', auditNavigation.paths.cleanedDataPerson, '个人清洗数据'); }}
+                                        disabled={openingAuditFolderKey === 'person-cleaned'}
                                         className="mt-3 w-full flex items-center justify-center gap-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 text-xs font-medium py-2 rounded-lg transition-colors"
                                     >
-                                        <ExternalLink className="w-3.5 h-3.5" />
-                                        打开文件夹
+                                        {openingAuditFolderKey === 'person-cleaned' ? (
+                                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                        ) : (
+                                            <ExternalLink className="w-3.5 h-3.5" />
+                                        )}
+                                        {openingAuditFolderKey === 'person-cleaned' ? '正在打开...' : '打开文件夹'}
                                     </button>
                                 </div>
 
@@ -1789,17 +2588,16 @@ function OverviewTab() {
                                     </div>
                                     {/* 打开文件夹按钮 */}
                                     <button
-                                        onClick={() => {
-                                            fetch(`${API_BASE_URL}/api/open-folder`, {
-                                                method: 'POST',
-                                                headers: { 'Content-Type': 'application/json' },
-                                                body: JSON.stringify({ relativePath: auditNavigation.paths.cleanedDataCompany })
-                                            }).catch(console.error);
-                                        }}
+                                        onClick={() => { void handleOpenAuditFolder('company-cleaned', auditNavigation.paths.cleanedDataCompany, '公司清洗数据'); }}
+                                        disabled={openingAuditFolderKey === 'company-cleaned'}
                                         className="mt-3 w-full flex items-center justify-center gap-2 bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-400 text-xs font-medium py-2 rounded-lg transition-colors"
                                     >
-                                        <ExternalLink className="w-3.5 h-3.5" />
-                                        打开文件夹
+                                        {openingAuditFolderKey === 'company-cleaned' ? (
+                                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                        ) : (
+                                            <ExternalLink className="w-3.5 h-3.5" />
+                                        )}
+                                        {openingAuditFolderKey === 'company-cleaned' ? '正在打开...' : '打开文件夹'}
                                     </button>
                                 </div>
 
@@ -1809,14 +2607,14 @@ function OverviewTab() {
                                         <FileText className="w-4 h-4 text-orange-400" />
                                         <span className="font-medium text-white text-sm">核查底稿报告</span>
                                         <span className="ml-auto bg-orange-500/20 text-orange-400 text-xs px-2 py-0.5 rounded-full">
-                                            {auditNavigation.reports.length} 个
+                                            {visibleAuditNavigationReports.length} 个
                                         </span>
                                     </div>
                                     <div className="text-xs theme-text-dim mb-3 font-mono">
                                         {auditNavigation.outputDir}/analysis_results/
                                     </div>
                                     <div className="space-y-1.5 flex-1 max-h-40 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-gray-800/50 pr-1">
-                                        {auditNavigation.reports.map((r, idx) => (
+                                        {visibleAuditNavigationReports.map((r, idx) => (
                                             <div key={idx} className={`flex items-center gap-2 text-xs transition-colors ${r.isPrimary ? 'text-orange-300 font-medium' : 'theme-text-muted hover:theme-text'}`}>
                                                 {r.name.endsWith('.xlsx') ? (
                                                     <FileSpreadsheet className={`w-3 h-3 flex-shrink-0 ${r.isPrimary ? 'text-orange-400' : 'text-emerald-500'}`} />
@@ -1829,20 +2627,24 @@ function OverviewTab() {
                                                 <span className="theme-text-dim ml-auto flex-shrink-0">{r.sizeFormatted}</span>
                                             </div>
                                         ))}
+                                        {visibleAuditNavigationReports.length === 0 && (
+                                            <div className="text-xs theme-text-dim py-4 text-center">
+                                                当前没有可展示的核查底稿终稿文件。
+                                            </div>
+                                        )}
                                     </div>
                                     {/* 打开文件夹按钮 */}
                                     <button
-                                        onClick={() => {
-                                            fetch(`${API_BASE_URL}/api/open-folder`, {
-                                                method: 'POST',
-                                                headers: { 'Content-Type': 'application/json' },
-                                                body: JSON.stringify({ relativePath: auditNavigation.paths.analysisResults })
-                                            }).catch(console.error);
-                                        }}
+                                        onClick={() => { void handleOpenAuditFolder('analysis-results', auditNavigation.paths.analysisResults, '核查底稿报告'); }}
+                                        disabled={openingAuditFolderKey === 'analysis-results'}
                                         className="mt-3 w-full flex items-center justify-center gap-2 bg-orange-500/20 hover:bg-orange-500/30 text-orange-400 text-xs font-medium py-2 rounded-lg transition-colors"
                                     >
-                                        <ExternalLink className="w-3.5 h-3.5" />
-                                        打开文件夹
+                                        {openingAuditFolderKey === 'analysis-results' ? (
+                                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                        ) : (
+                                            <ExternalLink className="w-3.5 h-3.5" />
+                                        )}
+                                        {openingAuditFolderKey === 'analysis-results' ? '正在打开...' : '打开文件夹'}
                                     </button>
                                 </div>
                             </div>
@@ -2007,54 +2809,80 @@ function OverviewTab() {
                                             {/* 指标徽章行 */}
                                             <div className="flex flex-wrap items-center gap-1.5">
                                                 {person.hasMixedAccountActivity && (
-                                                    <span
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => openFlowDetail(person.fullName, 'person', 'mixed_accounts')}
                                                         title={person.accountLayerNote || '该主体名下同时存在个人账户与对公账户流水'}
-                                                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/30 cursor-help"
+                                                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/30 hover:bg-amber-500/30 transition-colors"
                                                     >
                                                         含对公账户
-                                                    </span>
+                                                    </button>
                                                 )}
 
                                                 {/* 工资金额徽章 */}
                                                 {person.salaryTotal > 0 && (
-                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-500/20 text-blue-400 ring-1 ring-blue-500/30 cursor-pointer hover:bg-blue-500/30 transition-colors">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => openFlowDetail(person.fullName, 'person', 'overview')}
+                                                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-500/20 text-blue-400 ring-1 ring-blue-500/30 hover:bg-blue-500/30 transition-colors"
+                                                    >
                                                         💼 工资{person.salaryTotal.toFixed(0)}万
-                                                    </span>
+                                                    </button>
                                                 )}
 
                                                 {/* 理财金额徽章 */}
                                                 {person.wealthTotal > 0 && (
-                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-indigo-500/20 text-indigo-400 ring-1 ring-indigo-500/30 cursor-pointer hover:bg-indigo-500/30 transition-colors">
-                                                        📊 理财{person.wealthTotal.toFixed(0)}万
-                                                    </span>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => openFlowDetail(person.fullName, 'person', 'wealth')}
+                                                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-indigo-500/20 text-indigo-400 ring-1 ring-indigo-500/30 hover:bg-indigo-500/30 transition-colors"
+                                                    >
+                                                        📊 理财流水{person.wealthTotal.toFixed(0)}万
+                                                    </button>
                                                 )}
 
                                                 {/* 现金占比徽章 */}
-                                                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium cursor-pointer transition-colors ${person.riskLevel === 'high' ? 'bg-red-500/20 text-red-400 ring-1 ring-red-500/30 hover:bg-red-500/30' :
+                                                <button
+                                                    type="button"
+                                                    onClick={() => openFlowDetail(person.fullName, 'person', 'cash')}
+                                                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium transition-colors ${person.riskLevel === 'high' ? 'bg-red-500/20 text-red-400 ring-1 ring-red-500/30 hover:bg-red-500/30' :
                                                     person.riskLevel === 'medium' ? 'bg-yellow-500/20 text-yellow-400 ring-1 ring-yellow-500/30 hover:bg-yellow-500/30' :
                                                         'bg-green-500/20 text-green-400 ring-1 ring-green-500/30 hover:bg-green-500/30'
-                                                    }`}>
+                                                    }`}
+                                                >
                                                     <Banknote className="w-3 h-3" />
                                                     现金{person.cashRatio.toFixed(0)}% ({person.cashTxCount}笔)
-                                                </span>
+                                                </button>
 
                                                 {/* 第三方支付徽章 */}
                                                 {person.thirdPartyTotal > 0 && (
-                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-cyan-500/20 text-cyan-400 ring-1 ring-cyan-500/30 cursor-pointer hover:bg-cyan-500/30 transition-colors">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => openFlowDetail(person.fullName, 'person', 'third_party')}
+                                                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-cyan-500/20 text-cyan-400 ring-1 ring-cyan-500/30 hover:bg-cyan-500/30 transition-colors"
+                                                    >
                                                         📱 三方{person.thirdPartyTotal.toFixed(0)}万
-                                                    </span>
+                                                    </button>
                                                 )}
 
                                                 {/* 异常收入徽章 */}
                                                 {person.anomalyCount > 0 && (
-                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-purple-500/20 text-purple-400 ring-1 ring-purple-500/30 cursor-pointer hover:bg-purple-500/30 transition-colors">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => openFlowDetail(person.fullName, 'person', 'overview')}
+                                                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-purple-500/20 text-purple-400 ring-1 ring-purple-500/30 hover:bg-purple-500/30 transition-colors"
+                                                    >
                                                         <AlertTriangle className="w-3 h-3" />
                                                         异常{person.anomalyCount}笔
-                                                    </span>
+                                                    </button>
                                                 )}
 
                                                 {/* 查看详情按钮 */}
-                                                <button className="ml-auto opacity-0 group-hover:opacity-100 text-[10px] text-blue-400 hover:text-blue-300 transition-all flex items-center gap-1 bg-blue-500/10 hover:bg-blue-500/20 px-2 py-0.5 rounded-md">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => openFlowDetail(person.fullName, 'person', 'overview')}
+                                                    className="ml-auto opacity-0 group-hover:opacity-100 text-[10px] text-blue-400 hover:text-blue-300 transition-all flex items-center gap-1 bg-blue-500/10 hover:bg-blue-500/20 px-2 py-0.5 rounded-md"
+                                                >
                                                     详情 <ChevronRight className="w-3 h-3" />
                                                 </button>
                                             </div>
@@ -2127,30 +2955,46 @@ function OverviewTab() {
                                             {/* 企业专属指标徽章行 */}
                                             <div className="flex flex-wrap items-center gap-1.5">
                                                 {/* 现金占比徽章 */}
-                                                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium cursor-pointer transition-colors ${company.riskLevel === 'high' ? 'bg-red-500/20 text-red-400 ring-1 ring-red-500/30 hover:bg-red-500/30' :
+                                                <button
+                                                    type="button"
+                                                    onClick={() => openFlowDetail(company.fullName, 'company', 'cash')}
+                                                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium transition-colors ${company.riskLevel === 'high' ? 'bg-red-500/20 text-red-400 ring-1 ring-red-500/30 hover:bg-red-500/30' :
                                                     company.riskLevel === 'medium' ? 'bg-yellow-500/20 text-yellow-400 ring-1 ring-yellow-500/30 hover:bg-yellow-500/30' :
                                                         'bg-green-500/20 text-green-400 ring-1 ring-green-500/30 hover:bg-green-500/30'
-                                                    }`}>
+                                                    }`}
+                                                >
                                                     <Banknote className="w-3 h-3" />
                                                     现金{company.cashRatio.toFixed(0)}% ({company.cashTxCount}笔)
-                                                </span>
+                                                </button>
 
                                                 {/* 第三方支付徽章 */}
                                                 {company.thirdPartyTotal > 0 && (
-                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-cyan-500/20 text-cyan-400 ring-1 ring-cyan-500/30 cursor-pointer hover:bg-cyan-500/30 transition-colors">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => openFlowDetail(company.fullName, 'company', 'third_party')}
+                                                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-cyan-500/20 text-cyan-400 ring-1 ring-cyan-500/30 hover:bg-cyan-500/30 transition-colors"
+                                                    >
                                                         📱 三方{company.thirdPartyTotal.toFixed(0)}万
-                                                    </span>
+                                                    </button>
                                                 )}
 
                                                 {/* 最大单笔交易徽章 */}
                                                 {company.maxTransaction > 0 && (
-                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-orange-500/20 text-orange-400 ring-1 ring-orange-500/30 cursor-pointer hover:bg-orange-500/30 transition-colors">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => openFlowDetail(company.fullName, 'company', 'overview')}
+                                                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-orange-500/20 text-orange-400 ring-1 ring-orange-500/30 hover:bg-orange-500/30 transition-colors"
+                                                    >
                                                         💰 最大{company.maxTransaction.toFixed(0)}万
-                                                    </span>
+                                                    </button>
                                                 )}
 
                                                 {/* 查看详情按钮 */}
-                                                <button className="ml-auto opacity-0 group-hover:opacity-100 text-[10px] text-cyan-400 hover:text-cyan-300 transition-all flex items-center gap-1 bg-cyan-500/10 hover:bg-cyan-500/20 px-2 py-0.5 rounded-md">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => openFlowDetail(company.fullName, 'company', 'overview')}
+                                                    className="ml-auto opacity-0 group-hover:opacity-100 text-[10px] text-cyan-400 hover:text-cyan-300 transition-all flex items-center gap-1 bg-cyan-500/10 hover:bg-cyan-500/20 px-2 py-0.5 rounded-md"
+                                                >
                                                     详情 <ChevronRight className="w-3 h-3" />
                                                 </button>
                                             </div>
@@ -3772,19 +4616,28 @@ function AuditReportTab() {
         void fetchReports();
     }, [fetchReports, reportPackageRefreshKey, resetReportCenterState]);
 
+    const visibleReports = useMemo(() => filterBusinessFacingReports(reports), [reports]);
+    const visibleReportGroups = useMemo(
+        () => buildBusinessFacingReportGroups(reportGroups, reports),
+        [reportGroups, reports],
+    );
+    const visibleSemanticOverview = useMemo(
+        () => filterBusinessSemanticOverview(semanticOverview, visibleReportGroups),
+        [semanticOverview, visibleReportGroups],
+    );
     const reportGroupLookup = useMemo(() => {
-        return reportGroups.reduce<Record<string, ReportGroup>>((lookup, group) => {
+        return visibleReportGroups.reduce<Record<string, ReportGroup>>((lookup, group) => {
             lookup[group.key] = group;
             return lookup;
         }, {});
-    }, [reportGroups]);
+    }, [visibleReportGroups]);
     const reportLookup = useMemo(() => {
-        return reports.reduce<Record<string, Report>>((lookup, item) => {
+        return visibleReports.reduce<Record<string, Report>>((lookup, item) => {
             lookup[item.name] = item;
             return lookup;
         }, {});
-    }, [reports]);
-    const hasLoadedReports = reports.length > 0 || reportGroups.some((group) => group.count > 0 || group.items.length > 0);
+    }, [visibleReports]);
+    const hasLoadedReports = visibleReports.length > 0 || visibleReportGroups.some((group) => group.count > 0 || group.items.length > 0);
     const showReportLoadingState = loading && !hasLoadedReports;
     const showBlockingReportError = Boolean(error) && !hasLoadedReports;
     const showRefreshError = Boolean(error) && hasLoadedReports;
@@ -3893,14 +4746,12 @@ function AuditReportTab() {
 
     const primaryReportGroup = reportGroupLookup.primary_reports;
     const appendicesGroup = reportGroupLookup.appendices;
-    const qaArtifactsGroup = reportGroupLookup.qa_artifacts;
-    const firstPreviewablePrimaryReport = primaryReportGroup?.items.find((item) => item.isPreviewable) || primaryReportGroup?.items[0] || null;
-    const firstPreviewableAppendix = appendicesGroup?.items.find((item) => item.isPreviewable) || appendicesGroup?.items[0] || null;
-    const qaConsistencyPreview = qaArtifactsGroup?.items.find((item) => item.name.endsWith('report_consistency_check.txt'))
-        || qaArtifactsGroup?.items.find((item) => item.name.endsWith('report_consistency_check.json'))
-        || qaArtifactsGroup?.items.find((item) => item.isPreviewable)
+    const firstPreviewablePrimaryReport = primaryReportGroup?.items.find((item) => item.isPreviewable)
+        || primaryReportGroup?.items[0]
+        || visibleReports.find((item) => item.isPreviewable)
+        || visibleReports[0]
         || null;
-    const reportPackagePreview = qaArtifactsGroup?.items.find((item) => item.name.endsWith('report_package.json')) || null;
+    const firstPreviewableAppendix = appendicesGroup?.items.find((item) => item.isPreviewable) || appendicesGroup?.items[0] || null;
 
     const appendixPreviewLookup = useMemo(() => {
         const lookup: Record<string, Report> = {};
@@ -3920,7 +4771,6 @@ function AuditReportTab() {
         || issueCatalog.filter((issue) => ['high', 'critical'].includes(String(issue.risk_level || '').trim().toLowerCase())).length
         || 0
     );
-    const qaSummary = reportPackage?.qa_checks?.summary;
     const hasReportCenterData = Boolean(
         mainSummary
         || priorityBoard.length
@@ -3930,11 +4780,10 @@ function AuditReportTab() {
         || dossierCounts.person
         || dossierCounts.company
     );
-    const showMainReportSemanticPanel = !hasReportCenterData && hasSemanticSectionContent(semanticOverview?.mainReport);
+    const showMainReportSemanticPanel = !hasReportCenterData && hasSemanticSectionContent(visibleSemanticOverview?.mainReport);
     const showSemanticOverview = showMainReportSemanticPanel
-        || hasSemanticSectionContent(semanticOverview?.appendices)
-        || hasSemanticSectionContent(semanticOverview?.qa)
-        || hasSemanticSectionContent(semanticOverview?.dossiers);
+        || hasSemanticSectionContent(visibleSemanticOverview?.appendices)
+        || hasSemanticSectionContent(visibleSemanticOverview?.dossiers);
     const previewSummary = useMemo(() => {
         if (!previewFile) {
             return null;
@@ -4095,11 +4944,15 @@ function AuditReportTab() {
 
     // P2-3: 预览报告
     const handlePreview = async (filename: string, report?: Report | null) => {
-        // 只支持 txt/html/markdown/json 文件预览
+        if (report && !isBusinessFacingReport(report)) {
+            return;
+        }
+
+        // 只支持业务终稿的 txt/html 文件预览
         const ext = filename.toLowerCase().split('.').pop();
-        if (!['txt', 'html', 'htm', 'md', 'json'].includes(ext || '')) {
+        if (!['txt', 'html', 'htm'].includes(ext || '')) {
             // 不支持的文件类型直接下载
-            handleDownload(filename);
+            await handleDownload(filename);
             return;
         }
 
@@ -4127,7 +4980,7 @@ function AuditReportTab() {
     };
 
     const openReportArtifact = async (report?: Report | null) => {
-        if (!report) {
+        if (!report || !isBusinessFacingReport(report)) {
             return;
         }
         if (report.isPreviewable) {
@@ -4244,10 +5097,10 @@ function AuditReportTab() {
                             <div className="flex-1 space-y-3">
                                 <div>
                                     <h3 className="font-semibold text-white">正式报告中心</h3>
-                                    <p className="text-xs theme-text-dim mt-1">报告页第一屏直接消费统一语义层 `report_package`</p>
+                                    <p className="text-xs theme-text-dim mt-1">报告页聚焦正式问题、优先对象和卷宗摘要</p>
                                 </div>
                                 <p className="text-sm theme-text-secondary leading-7">
-                                    {mainSummary || '统一语义层已生成正式报告包，当前可直接浏览主问题、优先对象与卷宗覆盖。'}
+                                    {mainSummary || '正式报告摘要已生成，当前可直接浏览主问题、优先对象与卷宗覆盖。'}
                                 </p>
                                 <div className="flex flex-wrap gap-2">
                                     <span className="text-[11px] px-2.5 py-1 rounded-full border border-cyan-500/20 text-cyan-300 bg-cyan-500/10">
@@ -4259,11 +5112,6 @@ function AuditReportTab() {
                                     <span className="text-[11px] px-2.5 py-1 rounded-full border border-emerald-500/20 text-emerald-300 bg-emerald-500/10">
                                         卷宗覆盖 {dossierCounts.family + dossierCounts.person + dossierCounts.company} 份
                                     </span>
-                                    {Number(qaSummary?.fail || 0) > 0 && (
-                                        <span className="text-[11px] px-2.5 py-1 rounded-full border border-amber-500/20 text-amber-300 bg-amber-500/10">
-                                            QA 阻断 {Number(qaSummary?.fail || 0)} 项
-                                        </span>
-                                    )}
                                 </div>
                                 <div className="flex flex-wrap gap-2 pt-1">
                                     <SemanticLinkActionButton
@@ -4665,7 +5513,7 @@ function AuditReportTab() {
                         </div>
                         <div>
                             <h3 className="font-semibold text-white">导出审计成果</h3>
-                            <p className="text-xs theme-text-dim">下载分析报告和数据文件</p>
+                            <p className="text-xs theme-text-dim">仅展示供业务人员阅读的正式报告终稿</p>
                         </div>
                     </div>
                     <button
@@ -4699,8 +5547,8 @@ function AuditReportTab() {
                             </button>
                         </div>
                     </div>
-                ) : reports.length === 0 ? (
-                    <EmptyState type="data" message="暂无报告" />
+                ) : visibleReports.length === 0 ? (
+                    <EmptyState type="data" message="暂无可供业务阅读的正式报告" />
                 ) : (
                     <div className="space-y-6">
                         {showRefreshError && (
@@ -4720,7 +5568,7 @@ function AuditReportTab() {
                                     <ReportSemanticPanel
                                         title="主报告导航"
                                         icon={FileText}
-                                        section={semanticOverview?.mainReport}
+                                        section={visibleSemanticOverview?.mainReport}
                                         accentClass="bg-blue-500/10 text-blue-400"
                                         actions={[
                                             {
@@ -4744,85 +5592,59 @@ function AuditReportTab() {
                                         highlightActionIcon={Network}
                                     />
                                 )}
-                                <ReportSemanticPanel
-                                    title="附录导航"
-                                    icon={Folder}
-                                    section={semanticOverview?.appendices}
-                                    accentClass="bg-emerald-500/10 text-emerald-400"
-                                    actions={[
-                                        {
-                                            label: '查看附录文件',
-                                            icon: Folder,
-                                            onClick: () => scrollToReportSection('group:appendices'),
-                                        },
-                                        {
-                                            label: '预览首个附录',
-                                            icon: Eye,
-                                            onClick: () => { void openReportArtifact(firstPreviewableAppendix); },
-                                            disabled: !firstPreviewableAppendix,
-                                            variant: 'secondary',
-                                        },
-                                    ]}
-                                    onHighlightSelect={(item) => { void handleAppendixHighlightSelect(item.title); }}
-                                    highlightActionLabel="预览主题"
-                                    highlightActionIcon={Eye}
-                                />
-                                <ReportSemanticPanel
-                                    title="QA 门控"
-                                    icon={AlertTriangle}
-                                    section={semanticOverview?.qa}
-                                    accentClass="bg-amber-500/10 text-amber-400"
-                                    actions={[
-                                        {
-                                            label: '查看 QA 文件',
-                                            icon: Folder,
-                                            onClick: () => scrollToReportSection('group:qa_artifacts'),
-                                        },
-                                        {
-                                            label: '预览一致性检查',
-                                            icon: Eye,
-                                            onClick: () => { void openReportArtifact(qaConsistencyPreview); },
-                                            disabled: !qaConsistencyPreview,
-                                            variant: 'secondary',
-                                        },
-                                        {
-                                            label: '预览语义包',
-                                            icon: FileText,
-                                            onClick: () => { void openReportArtifact(reportPackagePreview); },
-                                            disabled: !reportPackagePreview,
-                                            variant: 'secondary',
-                                        },
-                                    ]}
-                                    onHighlightSelect={() => { void openReportArtifact(qaConsistencyPreview); }}
-                                    highlightActionLabel="查看检查"
-                                    highlightActionIcon={Eye}
-                                />
-                                <ReportSemanticPanel
-                                    title="卷宗覆盖"
-                                    icon={Users}
-                                    section={semanticOverview?.dossiers}
-                                    accentClass="bg-cyan-500/10 text-cyan-400"
-                                    actions={[
-                                        {
-                                            label: '查看卷宗覆盖',
-                                            icon: Users,
-                                            onClick: () => scrollToReportSection('report-dossiers'),
-                                        },
-                                        {
-                                            label: '查看正式问题卡',
-                                            icon: AlertTriangle,
-                                            onClick: () => scrollToReportSection('report-issues'),
-                                            variant: 'secondary',
-                                        },
-                                    ]}
-                                    onHighlightSelect={() => scrollToReportSection('report-dossiers')}
-                                    highlightActionLabel="查看卷宗"
-                                    highlightActionIcon={Users}
-                                />
+                                {(appendicesGroup || hasSemanticSectionContent(visibleSemanticOverview?.appendices)) && (
+                                    <ReportSemanticPanel
+                                        title="附录导航"
+                                        icon={Folder}
+                                        section={visibleSemanticOverview?.appendices}
+                                        accentClass="bg-emerald-500/10 text-emerald-400"
+                                        actions={[
+                                            {
+                                                label: '查看附录文件',
+                                                icon: Folder,
+                                                onClick: () => scrollToReportSection('group:appendices'),
+                                            },
+                                            {
+                                                label: '预览首个附录',
+                                                icon: Eye,
+                                                onClick: () => { void openReportArtifact(firstPreviewableAppendix); },
+                                                disabled: !firstPreviewableAppendix,
+                                                variant: 'secondary',
+                                            },
+                                        ]}
+                                        onHighlightSelect={(item) => { void handleAppendixHighlightSelect(item.title); }}
+                                        highlightActionLabel="预览主题"
+                                        highlightActionIcon={Eye}
+                                    />
+                                )}
+                                {(dossierCounts.family + dossierCounts.person + dossierCounts.company > 0 || hasSemanticSectionContent(visibleSemanticOverview?.dossiers)) && (
+                                    <ReportSemanticPanel
+                                        title="卷宗覆盖"
+                                        icon={Users}
+                                        section={visibleSemanticOverview?.dossiers}
+                                        accentClass="bg-cyan-500/10 text-cyan-400"
+                                        actions={[
+                                            {
+                                                label: '查看卷宗覆盖',
+                                                icon: Users,
+                                                onClick: () => scrollToReportSection('report-dossiers'),
+                                            },
+                                            {
+                                                label: '查看正式问题卡',
+                                                icon: AlertTriangle,
+                                                onClick: () => scrollToReportSection('report-issues'),
+                                                variant: 'secondary',
+                                            },
+                                        ]}
+                                        onHighlightSelect={() => scrollToReportSection('report-dossiers')}
+                                        highlightActionLabel="查看卷宗"
+                                        highlightActionIcon={Users}
+                                    />
+                                )}
                             </div>
                         )}
 
-                        {reportGroups.map((group) => (
+                        {visibleReportGroups.map((group) => (
                             <div key={group.key} ref={setReportSectionRef(`group:${group.key}`)} className="space-y-3">
                                 <div className="flex items-center justify-between">
                                     <div>
@@ -4867,14 +5689,11 @@ function AuditReportTab() {
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     {group.items.map((report) => {
                                         const Icon = (
-                                            report.name.includes('xlsx') || report.name.includes('xls') ? FileSpreadsheet :
-                                                report.name.includes('html') || report.name.includes('htm') ? Network :
-                                                    report.name.includes('json') ? Folder :
-                                                        report.name.includes('pdf') ? FileText : FileText
+                                            report.name.includes('html') || report.name.includes('htm') ? Network : FileText
                                         );
                                         const isDownloading = downloading === report.name;
                                         const ext = report.name.toLowerCase().split('.').pop() || '';
-                                        const canPreview = ['txt', 'html', 'htm', 'md', 'json'].includes(ext);
+                                        const canPreview = ['txt', 'html', 'htm'].includes(ext);
 
                                         return (
                                             <div

@@ -248,7 +248,7 @@ fund_flow_analysis:
       - level: "normal"
         phrases:
           summary: "资金流向总体可解释"
-          detail: "{name}资金流入主要来源于工资收入（占比{salary_ratio:.1f}%），资金流向符合一般生活消费及理财投资规律"
+          detail: "{name}资金流入主要来源于工资性收入（占比{salary_ratio:.1f}%），资金流向符合一般生活消费及理财投资规律"
           suggestion: "持续关注异常波动"
       - level: "warning"
         phrases:

@@ -4,6 +4,7 @@ import {
     Play,
     Square,
     FolderOpen,
+    BookOpen,
     HardDrive,
     ChevronDown,
     Network,
@@ -23,7 +24,7 @@ import {
 import Logo from '../assets/logo.png';
 import { useApp } from '../contexts/AppContext';
 import type { TabType } from '../types';
-import { api } from '../services/api';
+import { api, API_BASE_URL } from '../services/api';
 import { APP_VERSION } from '../constants/appVersion';
 
 export function Sidebar() {
@@ -96,6 +97,8 @@ export function Sidebar() {
         { id: 'supplement', label: '补充数据', icon: Wallet },
         { id: 'report', label: '审计报告', icon: FileText },
     ];
+
+    const deliveryReadmeUrl = API_BASE_URL ? `${API_BASE_URL}/docs/readme` : '/docs/readme';
 
     return (
         <>
@@ -417,6 +420,15 @@ export function Sidebar() {
                             上次运行: {analysis.lastRunTime.toLocaleTimeString()}
                         </p>
                     )}
+                    <a
+                        href={deliveryReadmeUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg border theme-border px-3 py-2 text-xs font-medium theme-text-muted hover:text-cyan-300 hover:border-cyan-500/40 hover:bg-cyan-500/10 transition-colors"
+                    >
+                        <BookOpen className="w-4 h-4" />
+                        交付文档
+                    </a>
                 </div>
             </aside>
         </>

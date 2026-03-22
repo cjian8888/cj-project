@@ -62,7 +62,8 @@ export interface Profile {
     // 新增审计关键字段（对应后端 serialize_profiles 扩展）
     cashTotal?: number;        // 现金交易总额（取现+存现）
     thirdPartyTotal?: number;  // 第三方支付交易总额
-    wealthTotal?: number;      // 理财产品交易总额
+    wealthTotal?: number;      // 理财相关交易金额（购买+赎回+收益）
+    wealthTransactionCount?: number; // 理财相关交易笔数
     maxTransaction?: number;   // 最大单笔交易金额
     salaryRatio?: number;      // 工资收入占比
     // 旧字段保留向后兼容

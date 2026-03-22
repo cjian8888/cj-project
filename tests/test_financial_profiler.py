@@ -21,6 +21,7 @@ from financial_profiler import (
     extract_bank_accounts, calculate_yearly_salary, recalculate_income_metrics,  # Phase 1.2/2.1 新增
     build_company_profile, _calculate_real_income_expense  # Phase 2.3 新增
 )
+from data_cleaner import standardize_bank_fields
 
 
 class TestCalculateStableCV:
@@ -740,6 +741,42 @@ def test_calculate_yearly_salary_recognizes_bank_payroll_channel():
 
     assert result['summary']['total'] == 8050.19
     assert result['details'][0]['reason'] == '摘要含强工资关键词'
+
+
+def test_calculate_yearly_salary_uses_transaction_type_when_counterparty_missing():
+    """对手方缺失且摘要为“正常”的工资行，仍应凭交易类型进入年度工资统计"""
+    raw_df = pd.DataFrame({
+        '交易时间': ['2025-05-25 03:32:30', '2025-06-25 03:48:26'],
+        '交易金额': [4500.00, 4704.82],
+        '借贷标志': ['进', '进'],
+        '交易类型': ['工资', '工资'],
+        '交易摘要': ['正常', '正常'],
+        '交易对方名称': [None, None],
+    })
+    df = standardize_bank_fields(raw_df, bank_name='工商银行', entity_name='马尚德')
+
+    result = calculate_yearly_salary(df, '马尚德')
+
+    assert round(result['summary']['total'], 2) == 9204.82
+    assert [round(item['amount'], 2) for item in result['details']] == [4500.00, 4704.82]
+
+
+def test_calculate_yearly_salary_excludes_procurement_reimbursement_from_known_payer():
+    """同一已知发薪单位的采购/材料回款，不应被工资白名单整体吞并"""
+    df = pd.DataFrame({
+        'date': pd.to_datetime(['2025-04-01', '2025-04-08', '2025-05-09']),
+        'income': [3865.00, 12149.30, 3185.00],
+        'expense': [0, 0, 0],
+        'counterparty': ['中国科学院过程工程研究所'] * 3,
+        'description': ['购买真空封装袋', '工资', '购买标签打印机进纸器'],
+    })
+
+    result = calculate_yearly_salary(df, '王永健')
+
+    assert round(result['summary']['total'], 2) == 12149.30
+    assert len(result['details']) == 1
+    assert result['details'][0]['counterparty'] == '中国科学院过程工程研究所'
+    assert result['details'][0]['reason'] == '已知发薪单位'
 
 
 class TestCategorizeTransactions:

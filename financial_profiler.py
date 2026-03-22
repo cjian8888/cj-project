@@ -516,6 +516,17 @@ def _identify_business_reimbursement_income(df: pd.DataFrame) -> pd.DataFrame:
         "停车费",
         "油费",
     ]
+    procurement_keywords = [
+        "采购",
+        "购买",
+        "购置",
+        "材料",
+        "耗材",
+        "设备",
+        "维修",
+        "邮寄费",
+        "运费",
+    ]
     immunity_keywords = [
         "工资",
         "薪资",
@@ -549,6 +560,7 @@ def _identify_business_reimbursement_income(df: pd.DataFrame) -> pd.DataFrame:
 
     strong_pattern = _build_pattern(strong_keywords)
     business_scene_pattern = _build_pattern(business_scene_keywords)
+    procurement_pattern = _build_pattern(procurement_keywords)
     immunity_pattern = _build_pattern(immunity_keywords)
     wealth_pattern = _build_pattern(wealth_keywords)
     salary_pattern = _build_pattern(salary_keywords)
@@ -565,6 +577,11 @@ def _identify_business_reimbursement_income(df: pd.DataFrame) -> pd.DataFrame:
     has_business_scene_kw = (
         description.str.contains(business_scene_pattern, regex=True, na=False)
         if business_scene_pattern
+        else pd.Series(False, index=work_df.index)
+    )
+    has_procurement_kw = (
+        description.str.contains(procurement_pattern, regex=True, na=False)
+        if procurement_pattern
         else pd.Series(False, index=work_df.index)
     )
     has_immunity = (
@@ -589,7 +606,7 @@ def _identify_business_reimbursement_income(df: pd.DataFrame) -> pd.DataFrame:
     strong_reimbursement_mask = self_mask & has_strong_kw & ~has_immunity & ~has_wealth_hint
     business_reimbursement_mask = (
         self_mask
-        & has_business_scene_kw
+        & (has_business_scene_kw | has_procurement_kw)
         & has_institution
         & ~has_immunity
         & ~has_wealth_hint
@@ -787,6 +804,17 @@ def _identify_salary_by_whitelist(
     wealth_mask = desc_series.str.contains(
         "赎回|卖出|本金|退保|分红", regex=True, na=False
     )
+    # 已知发薪单位也可能回款采购/维修/材料等业务款，不能整单位吞进工资口径
+    business_desc_mask = desc_series.str.contains(
+        "采购|购买|购置|材料|耗材|设备|维修|邮寄费|运费",
+        regex=True,
+        na=False,
+    )
+    salary_hint_mask = desc_series.str.contains(
+        "工资|薪资|薪金|奖金|绩效|补贴|补助|代发",
+        regex=True,
+        na=False,
+    )
 
     # 3. 【向量化】检查对手方是否匹配任何白名单单位
     # 将所有白名单单位组合成正则表达式模式
@@ -796,6 +824,7 @@ def _identify_salary_by_whitelist(
 
     # 4. 综合掩码：符合白名单但未被标记且非理财特征的记录
     final_mask = whitelist_mask & ~skip_mask & ~wealth_mask
+    final_mask &= ~(business_desc_mask & ~salary_hint_mask)
 
     # 5. 批量设置工资标记
     # 【P1修复】空group检查优化

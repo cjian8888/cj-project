@@ -429,6 +429,12 @@ def _map_property_fields(prop: Dict) -> Dict:
     - 数据质量
     """
     return {
+        "交易金额": prop.get("交易金额", "")
+        or (
+            f"{float(prop.get('transaction_price_wan', 0) or prop.get('transaction_price', 0)):.2f}万"
+            if float(prop.get("transaction_price_wan", 0) or prop.get("transaction_price", 0) or 0) > 0
+            else ""
+        ),
         "房地坐落": prop.get("location", ""),
         "建筑面积": prop.get("area", 0),
         "规划用途": prop.get("usage", ""),

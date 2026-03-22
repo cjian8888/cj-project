@@ -1,523 +1,110 @@
 # 穿云审计 (F.P.A.S)
 
-> 当前版本: `v4.5.4`
+> 当前版本：`v4.6.0`
+>
+> 当前交付形态：`Windows 单机离线 one-folder 包`
+>
+> 应用内文档入口：启动后访问 `/docs/readme`，或在左下角点击“交付文档”
 
-资金穿透与关联排查系统。当前主交付形态为 `Windows 单机离线 one-folder 包`，开发态使用 `FastAPI + React/Vite`。
+穿云审计不是一套泛化 BI，也不是一个“导完 Excel 看图表”的轻系统。它的目标是把审计排查里最费人工、最容易口径漂移、最容易被报告打脸的工作链条收口成一条可复核的离线主线：
 
-系统目标不是做一套泛化 BI，而是把审计排查里最费人工的几件事固化下来：
+1. 从原始银行流水和外部协查数据中提取事实。
+2. 在 `output/cleaned_data/` 中沉淀可追溯的清洗结果。
+3. 在 `output/analysis_cache/` 中沉淀融合画像、分析结果和统一语义层输入。
+4. 在 `output/analysis_results/` 中输出正式 HTML/TXT/Excel、专项报告、QA 产物和报告清单。
+5. 由 `/dashboard/` 前端直接消费正式语义包、报告清单和 QA 结果，而不是再走一套独立口径。
 
-- 银行流水清洗与统一标准化
-- 真实收入/真实支出重估
-- 资金闭环、过账通道、关系碰撞、同源线索穿透
-- 外部协查数据与银行流水的融合画像
-- 可直接交付的 TXT / Excel / HTML / 图谱产物
-
-## 核心特性
-
-- `api_server.py` 是唯一后端入口
-- 以 `output/cleaned_data/` 为唯一成品数据源
-- 分析流程分为 7 个 Phase，外部数据先提取、再融合画像、再做全面分析
-- 报告阶段优先读取 `analysis_cache`，不回到原始 `data/` 重算
-- 支持银行流水主链 + 电子钱包补充层双轨并行
-- 支持后端直接承载前端生产构建：`/dashboard/`
-- 支持完全离线运行，不依赖 CDN 和在线服务
+![当前仪表盘概览（已脱敏，仅保留聚合指标与交付界面）](docs/assets/readme/dashboard-overview-redacted.png)
 
 ---
 
-## 系统架构
+## 这次版本升级解决了什么
 
-```mermaid
-flowchart TD
-    A[data/ 原始数据目录] --> B[Phase 1 文件扫描]
-    B --> C[Phase 2 数据清洗]
-    C --> D[output/cleaned_data]
+`v4.6.0` 对应的不是单点修补，而是一轮交付前收口：
 
-    A --> E[Phase 4 外部数据提取]
-    E --> E0[P0 核心上下文]
-    E --> E1[P1 资产数据]
-    E --> E2[P2 行为数据]
-    E --> EW[电子钱包补充层]
-
-    D --> F[Phase 5 融合画像]
-    E0 --> F
-    E1 --> F
-    E2 --> F
-    EW --> F
-
-    F --> G[financial_profiler<br/>真实收入 / 工资 / 理财 / 家庭口径]
-    F --> H[Phase 6 全面分析<br/>时序 / 借贷 / 穿透 / 关联 / ML]
-    H --> I[Phase 7 疑点检测插件]
-    G --> J[clue_aggregator 线索聚合]
-    H --> J
-    I --> J
-
-    F --> K[output/analysis_cache]
-    H --> K
-    I --> K
-    J --> K
-
-    K --> L[investigation_report_builder]
-    K --> M[specialized_reports]
-    K --> N[report_generator / wallet_report_builder]
-
-    N --> O[output/analysis_results]
-    M --> O
-    L --> O
-
-    K --> P[FastAPI]
-    P --> Q[/dashboard/ 生产前端]
-    P --> R[Vite 开发前端]
-```
+- 银行流水清洗不再粗暴过度去重。
+- 无效交易状态会被统一过滤，避免冲正、失败、退汇混入总账。
+- 微信手机号归并补上“当前绑定手机号 / 别名 / wxid”链路。
+- 正式报告、Excel 底稿、QA 产物和前端报告中心统一围绕 `report_package.json` 工作。
+- 报告中心不再只是“文件下载列表”，而是直接展示：
+  - 主报告摘要
+  - 优先对象排序
+  - 问题卡
+  - 卷宗覆盖
+  - QA 摘要
+  - 预览与下载入口
+- 交付前新增了金标准、故障注入、异实现复算和总验收套件，不再只靠单一盲盒脚本自证。
 
 ---
 
-## 分析主链路
+## 当前系统应该怎么理解
 
-`run_analysis_refactored()` 当前按以下 7 个 Phase 执行：
+### 一句话架构
 
-1. `Phase 1` 文件扫描
-2. `Phase 2` 数据清洗与标准化
-3. `Phase 3` 线索提取
-4. `Phase 4` 外部数据提取
-5. `Phase 5` 融合数据画像
-6. `Phase 6` 全面分析
-7. `Phase 7` 疑点检测
+`原始数据 -> 清洗成品 -> 分析缓存 -> 统一语义包 -> 正式报告 / QA / 前端报告中心`
 
-### Phase 4 外部数据分层
+### 三层输出契约
 
-#### P0 核心上下文
+- `output/cleaned_data/`
+  - 这是全系统的事实成品层。
+  - 所有“银行流水到底有多少笔、某人流入流出到底是多少”的人工复核，应优先落在这里。
+- `output/analysis_cache/`
+  - 这是融合画像与分析中间层。
+  - 包含 `profiles.json`、`derived_data.json`、`suspicions.json`、`graph_data.json` 等缓存。
+  - 正式报告构建器和前端都从这里读取统一结果，不应再回原始 `data/` 重新拼事实。
+- `output/analysis_results/`
+  - 这是交付层。
+  - 包含正式 HTML/TXT/Excel、专项报告、日志、QA 产物、报告目录清单。
 
-- 人民银行账户
-- 反洗钱数据与预警
-- 企业登记信息
-- 征信数据与预警
-- 银行业金融机构账户信息
-
-#### P1 资产数据
-
-- 机动车
-- 银行理财产品
-- 证券信息
-- 精准房产查询
-
-#### P2 行为数据
-
-- 保险
-- 出入境
-- 旅馆住宿 / 同住
-- 同住址 / 同车违章
-- 铁路
-- 航班
-
-#### 电子钱包补充层
-
-- 支付宝实名账户 / 交易
-- 微信注册信息 / 登录轨迹
-- 财付通实名账户 / 交易
-
-电子钱包不进入银行主清洗链，而是以补充证据层进入画像、聚合评分和专项报告。
-
----
-
-## 关键技术实现
-
-这部分是当前 README 里最容易失真的地方。下面按现有代码口径描述。
-
-### 1. 数据清洗与标准化
-
-核心文件：
-
-- `data_cleaner.py`
-- `bank_formats.py`
-- `utils/safe_types.py`
-- `data_validator.py`
-
-实现重点：
-
-- 将不同银行、不同字段命名的流水统一到标准列
-- 统一日期、金额、对手方、摘要、账号等字段类型
-- 保留来源文件和来源行号，后续所有报告支持回溯
-- 个人 / 公司清洗结果分别落到 `output/cleaned_data/个人` 与 `output/cleaned_data/公司`
-
-这是全系统的“真源层”。后续页面、图谱、报告都应该建立在这里之上。
-
-### 2. 真实收入识别与工资口径收口
-
-核心文件：
-
-- `financial_profiler.py`
-- `classifiers/category_engine.py`
-- `classifiers/salary_classifier.py`
-- `classifiers/self_transfer_classifier.py`
-- `classifiers/wealth_classifier.py`
-
-当前实现不是单一规则，而是分层扣减：
-
-1. 先做工资识别
-   - 关键词匹配
-   - 发薪主体别名集合
-   - 银联代付 / 委托代发 / 批量代发等发薪通道语义
-2. 再做自转识别
-   - 同名账户
-   - 本人名下账号集合
-   - 虚拟账户 / 理财账户 / 映射账户
-3. 再做理财与定存识别
-   - `WealthAccountAnalyzer` 对账号做账户级分类
-   - 结合同日配对、利息尾差、长账号、内部账户等信号识别本金回流
-4. 再做收入来源分类
-   - 合法收入
-   - 来源不明
-   - 个人转账
-   - 家庭转入
-   - 报销 / 退款 / 贷款 / 理财赎回等剔除项
-5. 最后重算 `real_income` / `real_expense`
-
-当前真实收入计算已经专门补强以下易漏场景：
-
-- `网银跨行汇款CHN` 二次识别
-- `无法足额扣款，请补足账户余额`
-- `还款成功 , 谢谢 !`
-- 银行产品回摆 / 账单分期 / 还款冲销类文本
-
-并且工资相关口径已对齐，避免出现“工资统计进去了，但真实收入已经剔除了”的口径错位。
-
-### 3. 资金穿透图与闭环识别
-
-核心文件：
-
-- `fund_penetration.py`
-- `flow_visualizer.py`
-
-实现重点：
-
-- 以交易对手关系构建有向加权资金图
-- 对镜像转账做去重，避免同一笔双边流水被算成两条边
-- 资金闭环检测加入：
-  - 单步时间窗口
-  - 全链路时间窗口
-  - 工资边排除
-  - 公共支付平台节点过滤
-- 过账通道识别不只看“中转次数”，还看：
-  - 入出金额匹配度
-  - 时间连续性
-  - 语义角色
-  - 支撑流水数量
-- 所有闭环 / 通道都会生成 explainability 结构，供图谱页和报告直接引用
-
-### 4. 关联方与关系碰撞分析
-
-核心文件：
-
-- `related_party_analyzer.py`
-- `multi_source_correlator.py`
-- `family_analyzer.py`
-- `cohabitation_extractor.py`
-
-实现重点：
-
-- 在核心人员、企业、同户成员、同住址、同住宿、同行记录之间建立碰撞关系
-- 检测资金闭环、直接往来、共享节点、高频交互
-- 将同住址、同车违章、住宿同住、铁路/航班同行等“非资金证据”转成可聚合的关系证据
-
-这里的设计目标不是“关系越多越好”，而是尽量减少公共节点和常见平台带来的伪关联。
-
-### 5. 时序异常分析
-
-核心文件：
-
-- `time_series_analyzer.py`
-- `holiday_service.py`
-
-主要输出：
-
-- 周期性收入模式
-- 资金突变事件
-- 固定延迟转账
-
-实现方式：
-
-- 周期性收入：按对手方、金额、时间间隔寻找稳定模式
-- 突变：使用统计波动和 `z-score` 检测异常峰值
-- 延迟转账：寻找稳定的先入后出 / 先出后入延迟模式
-- 节假日判断优先识别法定节日，普通周末不再误判为“节假日”
-
-### 6. 电子钱包补充层
-
-核心文件：
-
-- `wallet_data_extractor.py`
-- `wallet_risk_analyzer.py`
-- `wallet_report_builder.py`
-
-这部分不是简单“导入支付宝 Excel”，而是补一层跨平台证据：
-
-- 统一归并主体 ID / 姓名 / 别名 / 手机号
-- 汇总平台级收支、交易笔数、实名账户、登录轨迹
-- 输出跨平台交叉信号：
-  - 银行卡重叠
-  - 别名重叠
-  - 手机号重叠
-  - 未归并微信账号
-- 高风险增强会主动排除误报：
-  - 本人互转
-  - 家庭成员往来
-  - 已明确识别为工资的对手方
-  - 工资入账后的快速转出
-
-### 7. 疑点检测插件系统
-
-核心文件：
-
-- `suspicion_engine.py`
-- `detectors/`
-
-当前疑点检测是插件化加载，不是写死在一个大函数里。
-
-已接入的检测器包括：
-
-- 直接转账检测
-- 现金碰撞检测
-- 固定金额检测
-- 固定频率检测
-- 频率异常检测
-- 整数金额检测
-- 异常模式检测
-- 时间异常检测
-
-`SuspicionEngine` 会自动扫描 `detectors/` 目录，加载所有继承 `BaseDetector` 的检测器。
-
-### 8. 线索聚合与统一风险评分
-
-核心文件：
-
-- `clue_aggregator.py`
-- `risk_scoring.py`
-- `unified_risk_model.py`
-
-实现重点：
-
-- 按实体维护 `evidence_pack`
-- 将闭环、过账、时序异常、钱包预警、ML 异常、关系碰撞统一归档
-- 每类证据都保留风险分、置信度、支撑证据、路径解释
-- 最终统一计算：
-  - 实体总风险分
-  - 风险等级
-  - 最强证据分
-  - 高优先级线索数
-  - explainability 指标
-
-这一步的产物会直接喂给：
-
-- Dashboard 概览页
-- 报告摘要
-- 实体证据包
-- 风险排序
-
-### 9. ML 异常分析
-
-核心文件：
-
-- `ml_analyzer.py`
-
-当前实现不是依赖 `scikit-learn` 的黑盒模型，而是原生 `Python/NumPy/Pandas` 统计学习方案。
-
-主要做两类事：
-
-- 单笔异常交易打分
-- 基于交易图的轻量社区发现
-
-同时引入了大量低风险公共商户排除，避免把支付平台、公共服务、生活消费误聚成“大团伙”。
-
-### 10. 报告构建与缓存优先读取
-
-核心文件：
-
-- `investigation_report_builder.py`
-- `report_generator.py`
-- `specialized_reports.py`
-- `report_service.py`
-- `cache_manager.py`
-
-当前报告层最重要的工程约束：
-
-- 优先读 `output/analysis_cache/`
-- 不在报告阶段回 `data/` 重算
-- `profiles.json` 已承载完整画像数据，不再维护 `profiles_full.json`
-- 报告构建器按需加载 `walletData`、`precisePropertyData`、`hotelData`、`flightData` 等外部缓存
-
-这保证了“页面看到什么，报告写什么，缓存里就是什么”，减少多套口径漂移。
-
----
-
-## 输出目录说明
-
-当前程序的输出目录不是只有三四个文件，而是分层落盘。
+### 报告主链
 
 ```text
-output/
-├── cleaned_data/                    # 成品清洗层，唯一真理源
-│   ├── 个人/
-│   └── 公司/
-├── analysis_cache/                  # JSON 缓存层
-│   ├── profiles.json                # 完整画像
-│   ├── suspicions.json              # 疑点检测结果
-│   ├── derived_data.json            # 全面分析结果
-│   ├── graph_data.json              # 图谱数据
-│   ├── metadata.json                # 元信息、版本、生成时间、id 映射
-│   ├── walletData.json              # 电子钱包补充层（按需）
-│   ├── external_p0.json             # P0 外部数据总缓存（按需）
-│   ├── external_p1.json             # P1 外部数据总缓存（按需）
-│   ├── external_p2.json             # P2 外部数据总缓存（按需）
-│   ├── amlData.json                 # 细分外部缓存（按需）
-│   ├── creditData.json
-│   ├── precisePropertyData.json
-│   ├── vehicleData.json
-│   ├── wealthProductData.json
-│   ├── securitiesData.json
-│   ├── insuranceData.json
-│   ├── immigrationData.json
-│   ├── hotelData.json
-│   ├── hotelCohabitation.json
-│   ├── railwayData.json
-│   ├── flightData.json
-│   ├── coaddressData.json
-│   └── coviolationData.json
-├── analysis_results/                # 正式报告层
-│   ├── 核查结果分析报告.txt
-│   ├── 资金核查底稿.xlsx
-│   ├── 分析执行日志.txt
-│   ├── 报告目录清单.txt
-│   ├── 电子钱包补充分析报告.txt      # 按需
-│   ├── 电子钱包补充清洗表.xlsx       # 按需
-│   ├── 电子钱包重点核查清单.txt      # 按需
-│   └── 专项报告/
-│       ├── 借贷行为分析报告.txt
-│       ├── 时序分析报告.txt
-│       ├── 行为特征分析报告.txt
-│       ├── 疑点检测分析报告.txt
-│       ├── 异常收入来源分析报告.txt
-│       ├── 资产全貌分析报告.txt
-│       └── 资金穿透分析报告.txt
-├── analysis_logs/                   # 运行日志固化层
-│   ├── analysis_run_*.log
-│   └── analysis_run_latest.log
-└── audit_system.db                  # 审计库
-```
-
-说明：
-
-- `analysis_cache` 的核心文件是固定的，外部缓存和电子钱包缓存按数据存在情况落盘
-- `analysis_results` 是最终交付物
-- `cleaned_data` 是后续所有分析的基础真源，不能直接跳过
-
----
-
-## 项目结构
-
-下面是按职责重组后的结构图，比“列几个脚本名”更接近当前代码现实：
-
-```text
-cj-project/
-├── api_server.py                    # 唯一入口，FastAPI 服务与 7-Phase 主流程
-├── paths.py                         # 开发态 / PyInstaller 资源路径统一解析
-├── cache_manager.py                 # analysis_cache 生命周期管理
-├── config.py                        # 阈值、关键词、规则常量
-├── config/                          # YAML 配置
-├── knowledge/                       # 知识库
-├── report_config/                   # 报表配置
-├── templates/                       # HTML / 报表模板
-│
-├── data_cleaner.py                  # 银行流水清洗主链
-├── data_extractor.py                # 输入扫描与提取辅助
-├── bank_formats.py                  # 银行字段映射
-├── data_validator.py                # 清洗结果校验
-│
-├── financial_profiler.py            # 画像、工资、理财、真实收入、家庭口径
-├── income_analyzer.py               # 收入分析
-├── loan_analyzer.py                 # 借贷分析
-├── time_series_analyzer.py          # 时序异常
-├── fund_penetration.py              # 资金穿透 / 闭环 / 过账通道
-├── related_party_analyzer.py        # 关联方资金关系
-├── clue_aggregator.py               # 线索聚合与证据包
-├── ml_analyzer.py                   # 统计学习异常分析
-├── suspicion_engine.py              # 疑点检测插件调度
-├── behavioral_profiler.py           # 行为特征画像
-├── professional_finance_analyzer.py # 职业财务特征
-│
-├── *_extractor.py                   # 外部协查数据提取器
-│   ├── pboc_account_extractor.py
-│   ├── company_info_extractor.py
-│   ├── credit_report_extractor.py
-│   ├── vehicle_extractor.py
-│   ├── wealth_product_extractor.py
-│   ├── securities_extractor.py
-│   ├── insurance_extractor.py
-│   ├── immigration_extractor.py
-│   ├── hotel_extractor.py
-│   ├── railway_extractor.py
-│   ├── flight_extractor.py
-│   └── ...
-│
-├── wallet_data_extractor.py         # 电子钱包补充数据抽取
-├── wallet_risk_analyzer.py          # 电子钱包预警增强
-├── wallet_report_builder.py         # 电子钱包专项 TXT / Excel
-│
-├── report_generator.py              # HTML / Excel 报告生成
-├── investigation_report_builder.py  # 主 TXT 报告构建器
-├── specialized_reports.py           # 各专项报告
-├── report_service.py                # 缓存读取与报告服务层
-│
-├── detectors/                       # 疑点检测插件
-├── classifiers/                     # 交易分类器
-├── learners/                        # 规则/学习结果辅助模块
-├── schemas/                         # Pydantic / 报告数据结构
-├── utils/                           # 安全类型、路径解释、通用工具
-│
-├── dashboard/                       # React 19 + TypeScript + Vite 前端
-│   ├── src/components/
-│   ├── src/contexts/
-│   ├── src/services/
-│   ├── src/types/
-│   └── src/utils/
-│
-├── tests/                           # pytest
-├── docs/                            # 设计、交付、变更日志
-├── output/                          # 运行输出
-└── dist/                            # Windows 离线打包产物
+data/
+  -> data_cleaner.py
+  -> output/cleaned_data/
+  -> financial_profiler.py + analyzer modules
+  -> output/analysis_cache/
+  -> investigation_report_builder.py
+  -> qa/report_package.json
+  -> qa/report_consistency_check.{json,txt}
+  -> 初查报告.html / 核查结果分析报告.txt / 资金核查底稿.xlsx
+  -> /api/reports/manifest
+  -> /dashboard/ 审计报告中心
 ```
 
 ---
 
-## 运行方式
+## 交付标准
 
-### 开发态
+### 最终运行形态
+
+- 目标平台：Windows
+- 运行方式：单机、离线
+- 交付形式：`one-folder`
+- 后端入口：`api_server.py`
+- 前端入口：由后端直接承载 `dashboard/dist`
+- 最终访问地址：`http://localhost:8000/dashboard/`
+
+### 开发态与交付态边界
+
+开发态：
 
 ```bash
-# 后端
 python api_server.py
-
-# 前端开发服务器
 cd dashboard
 npm run dev
 ```
 
-访问地址：
-
-- 前端开发服务器：`http://localhost:5173/`
-- 后端 API：`http://localhost:8000/`
-- 后端承载生产前端：`http://localhost:8000/dashboard/`
-- OpenAPI 文档：`http://localhost:8000/docs`
-
-### 生产前端构建
+交付态 / 打包态：
 
 ```bash
 cd dashboard
 npm run build
+cd ..
+python api_server.py
 ```
 
-构建产物输出到 `dashboard/dist/`，后端会直接承载它。
-
-### Windows one-folder 打包
+Windows 打包态：
 
 ```bash
 python -m pip install -r requirements.txt
@@ -529,128 +116,268 @@ cd ..
 python build_windows_package.py
 ```
 
-默认产物位于 `dist/fpas-offline/`。
+### 新功能必须遵守的约束
+
+- 不依赖互联网服务。
+- 不依赖 Node 开发服务器作为最终运行方式。
+- 不写死 macOS / Windows 绝对路径。
+- 新增运行时资源必须能被 PyInstaller 带入离线包。
 
 ---
 
-## 输入目录约定
+## 报告中心现在怎么工作
 
-### 银行主链数据
+前端“审计报告”页面向业务使用者，只展示正式报告终稿，不再暴露内部工程物料。
 
-- 推荐放在用户选择的 `data/` 根目录下
-- 程序会递归扫描个人、公司、银行、协查等常见目录
+当前使用方式：
 
-### 电子钱包补充数据
+- 只展示供业务阅读的正式报告文件。
+- 只保留 `HTML / PDF / TXT` 这类可直接阅读的终稿。
+- 前端默认屏蔽 `qa/` 目录产物、`.json` 结构化文件、工作底稿和其他内部技术文件。
+- “交付文档”入口打开的是只读使用说明页，不承担研发排障功能。
 
-推荐目录：
+前端当前能做的事情：
 
-```text
-<inputDirectory>/补充数据/电子钱包/批次_YYYYMMDD/
-```
-
-支持的补充样本包括：
-
-- 支付宝注册信息
-- 支付宝账户明细
-- 微信注册信息
-- 微信登录轨迹
-- 财付通注册信息
-- 财付通交易明细
-
-设计原则：
-
-- 没有电子钱包目录时，主程序行为不变
-- 有电子钱包目录时，只增强证据层与专项产物，不改写银行主链真源
+- 预览正式主报告。
+- 下载正式主报告和业务附录。
+- 浏览正式问题卡、优先对象与卷宗覆盖摘要。
+- 在图谱页和报告页统一使用正式报告摘要作为浏览入口。
 
 ---
 
-## 技术栈
+## 数据处理主线
 
-### 后端
+### 1. 银行流水清洗
 
-- Python 3.9+
-- FastAPI
-- Uvicorn
-- Pandas / NumPy
-- OpenPyXL / XlsxWriter
-- Jinja2
-- chinese-calendar
-- Neo4j 适配层（可选）
+核心文件：
 
-### 前端
+- `data_cleaner.py`
+- `bank_formats.py`
+- `data_validator.py`
+- `utils/safe_types.py`
 
-- React 19
-- TypeScript 5.9
-- Vite 7
-- Recharts
-- vis-network
-- Tailwind CSS 4
-- Lucide React
+当前清洗阶段的重点：
 
-### 工程约束
+- 统一不同银行的列名、时间、金额、方向、摘要、对手方、账号。
+- 保留来源文件与来源行号，确保后续可追溯。
+- 优先使用 `transaction_id` 精确去重。
+- 拦截失败、冲正、退汇、关闭、撤销等无效交易状态。
+- 避免把“同时间同金额的合法连续转账”误删成重复。
 
-- 无互联网依赖
-- 无 CDN 依赖
-- 无硬编码绝对路径
-- 前端生产构建由后端承载
-- 兼容 PyInstaller one-folder
+### 2. 融合画像与真实收支
+
+核心文件：
+
+- `financial_profiler.py`
+- `salary_analyzer.py`
+- `income_analyzer.py`
+- `loan_analyzer.py`
+- `wallet_data_extractor.py`
+
+当前画像层会收口这些口径：
+
+- 总流入 / 总流出
+- 真实收入 / 真实支出
+- 工资、自转、理财、本金回流、报销退款等剔除项
+- 钱包补充层的主体归并、登录轨迹、交易规模和平台交叉信号
+
+### 3. 全面分析与疑点检测
+
+核心文件：
+
+- `fund_penetration.py`
+- `related_party_analyzer.py`
+- `multi_source_correlator.py`
+- `time_series_analyzer.py`
+- `suspicion_engine.py`
+- `clue_aggregator.py`
+
+输出重点：
+
+- 资金闭环
+- 过账通道
+- 直接往来
+- 多源关系碰撞
+- 借贷模式
+- 时序异常
+- 统一风险线索
+
+### 4. 正式报告输出
+
+核心文件：
+
+- `investigation_report_builder.py`
+- `report_view_builder.py`
+- `report_dossier_builder.py`
+- `report_fact_normalizer.py`
+- `report_quality_guard.py`
+- `report_generator.py`
+- `api_server.py`
+
+当前交付给使用者的正式输出收口到：
+
+- `初查报告.html`
+- `核查结果分析报告.txt`
+- 业务附录（如存在）
+
+说明：
+
+- `report_package.json`、`report_consistency_check.*` 属于系统内部校验产物。
+- 这些内部文件不会在前端业务视图中展示。
 
 ---
 
-## 开发命令
+## 当前推荐的使用方式
+
+### 真实数据全量跑一轮
 
 ```bash
-# 后端
 python api_server.py
-
-# 前端
-cd dashboard && npm run dev
-
-# 类型检查
-cd dashboard && npm run type-check
-
-# 前端生产构建
-cd dashboard && npm run build
-
-# 测试
-pytest tests/ -v
 ```
+
+然后在前端点击“开始分析”，或通过 API 触发完整分析。
+
+### 看结果时的优先级
+
+1. 先在 `/dashboard/` 查看正式问题、优先对象和卷宗覆盖
+2. 再看 `初查报告.html`、`核查结果分析报告.txt` 以及业务附录
+3. 如需回溯明细，再看 `output/cleaned_data/`
+
+### 哪些文件是交付基线
+
+- `output/cleaned_data/`
+- `output/analysis_results/初查报告.html`
+- `output/analysis_results/核查结果分析报告.txt`
+- `output/analysis_results/` 下的业务附录终稿（如存在）
 
 ---
 
-## 数据铁律
+## 验收与自证
+
+这次交付不再只靠“脚本跑绿了”一句话，而是四层自证：
+
+- 真实数据全量重跑
+- 金标准样本校验
+- 故障注入验证
+- 异实现复算验证
+
+当前仓库内的关键验收脚本：
+
+- `tmp_e2e_blindbox_audit.py`
+- `tmp_e2e_boundary_blindbox_audit.py`
+- `tmp_e2e_delivery_blindbox_audit.py`
+- `tmp_e2e_gold_standard_audit.py`
+- `tmp_e2e_fault_injection_validation.py`
+- `tmp_e2e_independent_recompute_audit.py`
+- `tmp_e2e_final_acceptance_suite.py`
+
+建议的交付前命令：
+
+```bash
+python tmp_e2e_final_acceptance_suite.py
+```
+
+真实数据下的最终验收结果应落到：
 
 ```text
-任何 API、图谱、报告、统计口径，都必须以 output/cleaned_data 为基础，
-并优先读取 output/analysis_cache 的已落盘结果。
-
-原始 data/ 只负责输入，不允许在报告阶段绕过 cleaned_data/analysis_cache 直接重算并输出。
+output/analysis_results/qa/e2e_final_acceptance_suite_report.txt
 ```
 
-这条铁律对应的工程意义是：
+---
 
-- 防止页面口径与报告口径不一致
-- 防止缓存与最终报告脱节
-- 防止调试态“临时重算”污染正式产物
+## 应用内文档策略
+
+这次没有把 README 文案再复制一份塞进前端业务页面，而是采用下面的策略：
+
+- `README.md` 是唯一事实源。
+- 前端左下角只提供“交付文档”入口。
+- 后端通过 `/docs/readme` 渲染只读文档页。
+- 文档内容只面向使用者，不展示内部 QA/JSON 产物与研发排障细节。
+
+这样做的原因很直接：
+
+- 避免 README、前端帮助页、交付说明三份文档继续漂移。
+- 让离线包在没有 GitHub、没有编辑器的环境里也能直接查看文档。
+- 保持文档更新成本最低，交付时只需要维护一份源文件。
 
 ---
 
-## 相关文档
+## 关键目录与入口文件
 
-- [WINDOWS_OFFLINE_DELIVERY.md](WINDOWS_OFFLINE_DELIVERY.md)
-- [CHANGELOG.md](CHANGELOG.md)
-- [docs/TECHNICAL_REFERENCE.md](docs/TECHNICAL_REFERENCE.md)
-- [docs/change_logs](docs/change_logs)
+后端主入口：
+
+- `api_server.py`
+
+数据清洗：
+
+- `data_cleaner.py`
+
+画像与分析：
+
+- `financial_profiler.py`
+- `loan_analyzer.py`
+- `income_analyzer.py`
+- `fund_penetration.py`
+- `related_party_analyzer.py`
+- `time_series_analyzer.py`
+
+报告与 QA：
+
+- `investigation_report_builder.py`
+- `report_generator.py`
+- `report_quality_guard.py`
+
+前端：
+
+- `dashboard/src/components/Sidebar.tsx`
+- `dashboard/src/components/TabContent.tsx`
+- `dashboard/src/components/NetworkGraph.tsx`
+- `dashboard/src/services/api.ts`
+- `dashboard/src/constants/appVersion.ts`
+
+打包：
+
+- `build_windows_package.py`
+- `build_windows_package.bat`
+- `fpas_windows.spec`
 
 ---
 
-## 当前 README 的边界
+## 常见问题
 
-这个 README 主要解决四件事：
+### 1. 系统应该以哪里为准？
 
-- 当前程序到底怎么跑
-- 主链路模块现在怎么分工
-- 输出目录现在到底会生成什么
-- 几个核心算法大致怎么实现
+如果你在核对数字，优先以 `output/cleaned_data/` 为准；如果你在核对正式报告是否一致，优先看 `qa/report_package.json` 与 `qa/report_consistency_check.*`。
 
-更细的规则、阈值、专题报告格式和交付细节，请继续看对应代码与 `docs/` 下专项文档。
+### 2. 为什么前端看起来和以前不一样？
+
+因为前端现在已经和正式语义层打通，不再只是展示旧式缓存字段或平铺文件列表。
+
+### 3. 为什么不把 README 整份复制到前端？
+
+复制一份最容易再次漂移。当前策略是前端只提供入口，README 仍是唯一事实源。
+
+### 4. 现在还需要 Vite 开发服务器吗？
+
+开发调试需要；交付运行不需要。最终交付必须由后端直接承载 `dashboard/dist`。
+
+---
+
+## 补充说明
+
+如果你是新接手这个项目的开发者、审计人员或打包人员，先接受以下事实再继续工作：
+
+- `api_server.py` 是唯一后端入口。
+- 最终目标是 `Windows 单机离线 one-folder 包`。
+- `/dashboard/` 是正式前端入口，不是附属演示页。
+- 正式报告、Excel 底稿、QA 和前端报告中心已经进入统一语义层主线。
+- 交付前必须跑一轮真实数据和最终验收套件，而不是只看单元测试。
+
+---
+
+## 相关文件
+
+- `CHANGELOG.md`
+- `WINDOWS_OFFLINE_DELIVERY.md`
+- `output/analysis_results/qa/`
+- `tests/fixtures/blindbox_gold_standard.json`

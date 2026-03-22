@@ -353,6 +353,7 @@ def cross_validate_with_transactions(assets: Dict,
 # =============================================================================
 
 PRECISE_PROPERTY_DIR_NAME = "自然资源部精准查询（定向查询）"
+NATIONAL_PROPERTY_DIR_NAME = "自然资源部全国总库（定向查询）"
 
 
 def extract_precise_property_info(data_dir: str, person_id: str = None) -> Dict[str, List[Dict]]:
@@ -381,6 +382,8 @@ def extract_precise_property_info(data_dir: str, person_id: str = None) -> Dict[
         f"开始解析自然资源部精准查询数据: {len(precise_dirs)} 个目录"
     )
     
+    national_price_index = _build_national_property_price_index(data_dir, person_id)
+
     # 遍历所有xlsx文件
     xlsx_files = []
     for precise_dir in precise_dirs:
@@ -405,6 +408,11 @@ def extract_precise_property_info(data_dir: str, person_id: str = None) -> Dict[
             properties = parse_precise_property_file(str(file_path))
             
             if file_person_id and properties:
+                _enrich_precise_property_prices(
+                    file_person_id,
+                    properties,
+                    national_price_index.get(file_person_id, {}),
+                )
                 if file_person_id not in result:
                     result[file_person_id] = []
                 result[file_person_id].extend(properties)
@@ -497,7 +505,20 @@ def _parse_precise_property_row(row, source_file: str) -> Optional[Dict]:
             "is_sealed": safe_bool(row.get("是否查封")),
             "query_region": safe_str(row.get("查询申请地区", "")),
             "query_unit": safe_str(row.get("查询单位", "")),
-            "transaction_price": safe_float_util(row.get("交易金额(万元)", 0)) or 0.0,
+            "transaction_price": _normalize_property_price_wan(
+                row.get("交易金额(万元)")
+                or row.get("交易金额（万元）")
+                or row.get("交易金额")
+                or row.get("成交价格")
+                or row.get("不动产价格")
+            ),
+            "transaction_price_wan": _normalize_property_price_wan(
+                row.get("交易金额(万元)")
+                or row.get("交易金额（万元）")
+                or row.get("交易金额")
+                or row.get("成交价格")
+                or row.get("不动产价格")
+            ),
             "source_file": source_file
         }
         
@@ -521,6 +542,137 @@ def _find_precise_property_dirs(data_dir: str) -> List[str]:
         }
     )
     return matched_dirs
+
+
+def _find_national_property_dirs(data_dir: str) -> List[str]:
+    """查找所有自然资源部全国总库目录。"""
+    from pathlib import Path
+
+    data_path = Path(data_dir)
+    matched_dirs = sorted(
+        {
+            str(path)
+            for path in data_path.rglob("*")
+            if path.is_dir() and NATIONAL_PROPERTY_DIR_NAME in path.name
+        }
+    )
+    return matched_dirs
+
+
+def _normalize_property_price_wan(value) -> float:
+    """将房产交易金额统一转换为万元。"""
+    amount_wan = utils.format_amount_to_wan(value, unit_hint_multiplier=10000.0)
+    if amount_wan > 50000:
+        amount_wan = amount_wan / 10000.0
+    return round(amount_wan, 4) if amount_wan > 0 else 0.0
+
+
+def _normalize_property_lookup_text(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = text.replace("（", "(").replace("）", ")")
+    text = re.sub(r"\s+", "", text)
+    return text
+
+
+def _build_property_lookup_keys(property_number: str, location: str) -> List[str]:
+    keys = []
+    property_key = _normalize_property_lookup_text(property_number)
+    location_key = _normalize_property_lookup_text(location)
+    if property_key:
+        keys.append(f"id:{property_key}")
+    if location_key:
+        keys.append(f"loc:{location_key}")
+    return keys
+
+
+def _build_national_property_price_index(
+    data_dir: str, person_id: str = None
+) -> Dict[str, Dict[str, float]]:
+    """从全国总库构建房产成交金额索引，用于回填精准查询缺失的交易金额。"""
+    import pandas as pd
+    from pathlib import Path
+
+    result: Dict[str, Dict[str, float]] = {}
+    national_dirs = _find_national_property_dirs(data_dir)
+    if not national_dirs:
+        return result
+
+    xlsx_files = []
+    for national_dir in national_dirs:
+        national_path = Path(national_dir)
+        xlsx_files.extend(
+            [f for f in national_path.glob("*.xlsx") if not f.name.startswith("~$")]
+        )
+
+    for file_path in xlsx_files:
+        file_person_id = _extract_id_from_filename_precise(file_path.name)
+        if not file_person_id:
+            continue
+        if person_id and file_person_id != person_id:
+            continue
+
+        try:
+            xls = pd.ExcelFile(file_path)
+        except Exception as e:
+            logger.error(f"读取全国总库文件失败 {file_path}: {e}")
+            continue
+
+        person_index = result.setdefault(file_person_id, {})
+        for sheet_name in xls.sheet_names:
+            try:
+                df = pd.read_excel(xls, sheet_name=sheet_name)
+            except Exception as e:
+                logger.error(f"读取全国总库sheet失败 {file_path}#{sheet_name}: {e}")
+                continue
+            if df.empty:
+                continue
+
+            for _, row in df.iterrows():
+                amount_wan = _normalize_property_price_wan(
+                    row.get("交易金额(万元)")
+                    or row.get("交易金额（万元）")
+                    or row.get("交易金额")
+                    or row.get("成交价格")
+                    or row.get("不动产价格")
+                )
+                if amount_wan <= 0:
+                    continue
+
+                keys = _build_property_lookup_keys(
+                    row.get("不动产单元号", ""),
+                    row.get("房地坐落", "") or row.get("坐落", ""),
+                )
+                for key in keys:
+                    person_index[key] = max(person_index.get(key, 0.0), amount_wan)
+
+    return result
+
+
+def _enrich_precise_property_prices(
+    person_id: str, properties: List[Dict], price_index: Dict[str, float]
+) -> None:
+    """按不动产单元号/地址，将全国总库成交金额回填到精准查询记录。"""
+    if not person_id or not properties or not isinstance(price_index, dict):
+        return
+
+    for prop in properties:
+        existing_price = prop.get("transaction_price_wan") or prop.get("transaction_price")
+        if safe_float_util(existing_price) and safe_float_util(existing_price) > 0:
+            continue
+
+        for key in _build_property_lookup_keys(
+            prop.get("property_number", ""),
+            prop.get("location", ""),
+        ):
+            price_wan = price_index.get(key, 0.0)
+            if price_wan <= 0:
+                continue
+            prop["transaction_price"] = price_wan
+            prop["transaction_price_wan"] = price_wan
+            prop["交易金额"] = f"{price_wan:.2f}万"
+            break
 
 
 def _extract_id_from_filename_precise(filename: str) -> Optional[str]:

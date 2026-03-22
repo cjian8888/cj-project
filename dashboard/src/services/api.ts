@@ -102,6 +102,11 @@ export interface Profile {
     transactionCount: number;
     cashTotal?: number;
     maxTransaction?: number;
+    realIncome?: number;
+    realExpense?: number;
+    thirdPartyTotal?: number;
+    wealthTotal?: number;
+    wealthTransactionCount?: number;
 }
 
 export interface SuspiciousTransaction {

@@ -368,7 +368,8 @@ def deduplicate_transactions(
         # 保留原始非空流水号口径；建行等银行会用 "-" 作为占位流水号。
         valid_tx_ids = ~tx_id_col.isin(["", "nan", "None", "N/A"])
 
-        # 对有有效流水号的记录：按来源文件 + 流水号挑选主交易
+        # 对有有效流水号的记录：仅对“同来源 + 同流水号 + 同方向 + 同金额”的完全重复行去重。
+        # 不能再把同一流水号下的双分录/手续费/利息补记压成一条，否则会直接吃掉合法流水。
         if valid_tx_ids.any():
             df_with_tx_id = df[valid_tx_ids].copy()
             df_without_tx_id = df[~valid_tx_ids].copy()
@@ -379,11 +380,14 @@ def deduplicate_transactions(
                 df_with_tx_id[source_col] = ""
 
             original_with_tx_id = len(df_with_tx_id)
+            tx_id_subset = [source_col, "transaction_id", "_direction_key", "_amount_rounded"]
+            if "account_number" in df_with_tx_id.columns:
+                tx_id_subset.append("account_number")
             df_with_tx_id = df_with_tx_id.sort_values(
                 [source_col, "_original_order"], kind="mergesort"
             )
             df_with_tx_id_dedup = df_with_tx_id.drop_duplicates(
-                subset=[source_col, "transaction_id"], keep="first"
+                subset=tx_id_subset, keep="first"
             )
             tx_id_dups_removed = original_with_tx_id - len(df_with_tx_id_dedup)
             tx_id_duplicates_removed += tx_id_dups_removed
@@ -912,7 +916,50 @@ def standardize_bank_fields(
     if desc_col:
         normalized["description"] = _clean_optional_text_series(df[desc_col])
     else:
-        normalized["description"] = ""
+        normalized["description"] = pd.Series("", index=df.index, dtype="string")
+
+    transaction_type_col = _find_first_matching_column(
+        df, config.BANK_FIELD_MAPPING.get("transaction_type", [])
+    )
+    if transaction_type_col:
+        transaction_type_series = _clean_optional_text_series(df[transaction_type_col])
+    else:
+        transaction_type_series = pd.Series("", index=df.index, dtype="string")
+
+    # 工行等银行会出现“交易类型有强语义，但交易摘要仅为正常/空白”的流水。
+    # 若此时不把交易类型补回摘要，后续工资/现金识别都会整笔漏掉。
+    salary_type_mask = transaction_type_series.str.contains(
+        r"工资|薪资|薪金|薪酬|代发", regex=True, na=False
+    )
+    cash_type_mask = transaction_type_series.str.contains(
+        r"ATM存款|ATM取款|柜台存款|柜台取款|柜面存款|柜面取款|存现|取现|现金存入|现金支取|支取现金|存入现金|现钞",
+        regex=True,
+        na=False,
+    )
+    weak_description_mask = (
+        normalized["description"].astype(str).str.strip().isin(["", "正常", "普通", "其他"])
+    )
+    missing_hint_mask = ~normalized["description"].astype(str).str.contains(
+        r"工资|薪资|薪金|薪酬|代发|ATM|柜台存款|柜台取款|柜面存款|柜面取款|存现|取现|现金存入|现金支取|支取现金|存入现金|现钞",
+        regex=True,
+        na=False,
+    )
+    enrich_description_mask = (
+        (salary_type_mask | cash_type_mask) & weak_description_mask & missing_hint_mask
+    )
+    if enrich_description_mask.any():
+        normalized.loc[enrich_description_mask, "description"] = (
+            transaction_type_series[enrich_description_mask]
+            .astype(str)
+            .str.strip()
+            .str.cat(
+                normalized.loc[enrich_description_mask, "description"]
+                .astype(str)
+                .str.strip(),
+                sep=" ",
+            )
+            .str.strip()
+        )
 
     # 3. 金额字段 - 重要!需要处理借贷标志
     amount_col = None
@@ -1059,7 +1106,14 @@ def standardize_bank_fields(
 
         is_cash_by_flag = df[cash_col].apply(is_strict_physical_cash)
 
-    normalized["is_cash"] = is_cash_by_desc | is_cash_by_flag
+    # 某些银行原始摘要只有“正常”，现金语义完全落在交易类型上。
+    is_cash_by_type = transaction_type_series.str.contains(
+        r"ATM|柜台存款|柜台取款|柜面存款|柜面取款|存现|取现|现金存入|现金支取|支取现金|存入现金|现钞",
+        regex=True,
+        na=False,
+    )
+
+    normalized["is_cash"] = is_cash_by_desc | is_cash_by_flag | is_cash_by_type
 
     # 7. 账号字段(用于去重)
     account_col = None

@@ -47,6 +47,8 @@ class CacheManager:
         "precisePropertyData": "precisePropertyData.json",
         "wealthProductData": "wealthProductData.json",
         "securitiesData": "securitiesData.json",
+        "bankAccountInfo": "bankAccountInfo.json",
+        "taxData": "taxData.json",
         "creditData": "creditData.json",
         "amlData": "amlData.json",
         "insuranceData": "insuranceData.json",

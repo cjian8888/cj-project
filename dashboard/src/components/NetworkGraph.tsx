@@ -17,6 +17,7 @@ import {
   Building2
 } from 'lucide-react';
 import { formatPartyName, formatRiskLevel, getRiskLevelBadgeStyle } from '../utils/formatters';
+import { pickPreferredBusinessPreviewReport } from '../utils/reportArtifacts';
 import { useApp } from '../contexts/AppContext';
 import type { ReportIssue, ReportPackage, ReportPriorityBoardItem } from '../types';
 
@@ -1233,15 +1234,7 @@ function NetworkGraph({ onLog }: NetworkGraphProps) {
       try {
         const manifest = await api.getReportManifest();
         const reports = Array.isArray(manifest.reports) ? manifest.reports : [];
-        const preferredReport = reports.find((item) => {
-          const extension = String(item.extension || '').toLowerCase();
-          return item.groupKey === 'primary_reports' && (extension === '.html' || extension === '.htm');
-        }) || reports.find((item) => item.groupKey === 'primary_reports' && item.isPreviewable) || reports.find((item) => {
-          const extension = String(item.extension || '').toLowerCase();
-          return item.isPreviewable && (extension === '.html' || extension === '.htm');
-        }) || reports.find((item) => {
-          return item.isPreviewable;
-        });
+        const preferredReport = pickPreferredBusinessPreviewReport(reports);
 
         if (disposed || !preferredReport) {
           if (!disposed) {

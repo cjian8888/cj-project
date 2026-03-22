@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+import pandas as pd
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -1845,7 +1846,7 @@ def test_generate_complete_txt_report_includes_frontend_landing_and_log_review(t
     assert "【前端关键视图落地】" in text
     assert "个人资金流量: 共1人" in text
     assert "张三 | 流水总额150.00万元" in text
-    assert "张三的收入、支出和交易笔数口径来自资金画像汇总结果。" in text
+    assert "张三的总流入、总流出和交易笔数口径来自资金画像汇总结果" in text
     assert 'analysis_cache/profiles.json -> ["张三"].totalIncome / totalExpense / transactionCount' not in text
     assert "张三: 直接往来2；过账通道1" in text
     assert "【分析执行日志落地复盘】" in text
@@ -1951,6 +1952,203 @@ def test_property_analysis_marks_missing_value_without_wan_placeholder():
     assert result["value_available"] is False
     assert result["value_text"] == "成交价信息缺失"
     assert "房产总交易价格信息缺失" in result["narrative"]
+
+
+def test_temporal_analysis_uses_cleaned_data_yearly_flow_not_salary_breakdown(tmp_path):
+    output_dir = tmp_path / "output"
+    cleaned_dir = output_dir / "cleaned_data" / "个人"
+    cleaned_dir.mkdir(parents=True)
+
+    pd.DataFrame(
+        [
+            {"交易时间": "2024-01-01 10:00:00", "收入(元)": 100000, "支出(元)": 40000},
+            {"交易时间": "2024-06-01 12:00:00", "收入(元)": 20000, "支出(元)": 5000},
+            {"交易时间": "2025-03-01 08:00:00", "收入(元)": 30000, "支出(元)": 10000},
+        ]
+    ).to_excel(cleaned_dir / "张三_合并流水.xlsx", index=False)
+
+    builder = InvestigationReportBuilder(
+        {
+            "profiles": {"张三": {"summary": {}}},
+            "derived_data": {},
+            "suspicions": {},
+            "graph_data": {},
+            "metadata": {},
+        },
+        output_dir=str(output_dir),
+    )
+
+    section = {
+        "asset_income_section": {
+            "salary_income": {
+                "yearly_breakdown": ["2024年999.99万元", "2025年888.88万元"]
+            }
+        }
+    }
+
+    result = builder._build_temporal_analysis_from_section("张三", section)
+
+    assert result["yearly_data"] == [
+        {
+            "year": "2024",
+            "inflow": 12.0,
+            "outflow": 4.5,
+            "anomaly": False,
+            "anomaly_type": None,
+        },
+        {
+            "year": "2025",
+            "inflow": 3.0,
+            "outflow": 1.0,
+            "anomaly": False,
+            "anomaly_type": None,
+        },
+    ]
+
+
+def test_build_bank_accounts_prefers_official_balance_over_last_balance():
+    profile = {
+        "bank_accounts": [
+            {
+                "bank_name": "工商银行",
+                "account_number": "6222000011112222",
+                "account_type": "个人账户",
+                "card_type": "借记卡",
+                "status": "正常",
+                "last_balance": 999999.99,
+            }
+        ],
+        "bank_accounts_official": [
+            {
+                "bank_name": "工商银行",
+                "account_number": "6222000011112222",
+                "balance": 49562.68,
+                "status": "正常",
+            }
+        ],
+    }
+
+    builder = _make_builder(profile)
+    result = builder._build_bank_accounts("张三", profile)
+
+    assert len(result) == 1
+    assert result[0].balance == 49562.68
+
+
+def test_build_bank_accounts_deduplicates_equivalent_official_account_numbers():
+    profile = {
+        "bank_accounts": [
+            {
+                "bank_name": "工商银行",
+                "account_number": "10010566012184939",
+                "account_type": "个人账户",
+                "card_type": "借记卡",
+                "status": "正常",
+                "last_balance": 77129.50,
+            }
+        ],
+        "bank_accounts_official": [
+            {
+                "bank_name": "中国工商银行",
+                "account_number": "1001056601218493945",
+                "card_number": "6212261001097198029",
+                "balance": 49562.68,
+                "status": "正常",
+            }
+        ],
+    }
+
+    builder = _make_builder(profile)
+    result = builder._build_bank_accounts("张三", profile)
+
+    assert len(result) == 1
+    assert result[0].account_number == "10010566012184939"
+    assert result[0].balance == 49562.68
+
+
+def test_large_cash_analysis_falls_back_to_cleaned_data_when_profile_cash_is_empty(tmp_path):
+    output_dir = tmp_path / "output"
+    cleaned_dir = output_dir / "cleaned_data" / "个人"
+    cleaned_dir.mkdir(parents=True)
+
+    pd.DataFrame(
+        [
+            {
+                "交易时间": "2024-08-18 16:47:14",
+                "收入(元)": 10000,
+                "支出(元)": 0,
+                "交易摘要": "ATM存款 正常",
+                "交易分类": "其他",
+                "现金": True,
+                "交易对手": "",
+            },
+            {
+                "交易时间": "2024-08-19 10:00:00",
+                "收入(元)": 0,
+                "支出(元)": 1500,
+                "交易摘要": "ATM取款 正常",
+                "交易分类": "其他",
+                "现金": True,
+                "交易对手": "",
+            },
+        ]
+    ).to_excel(cleaned_dir / "张三_合并流水.xlsx", index=False)
+
+    profile = {"fund_flow": {"cash_income": 0, "cash_expense": 0, "cash_transactions": []}}
+    builder = InvestigationReportBuilder(
+        {
+            "profiles": {"张三": profile},
+            "derived_data": {},
+            "suspicions": {},
+            "graph_data": {},
+            "metadata": {},
+        },
+        output_dir=str(output_dir),
+    )
+
+    result = builder._build_large_cash_analysis_v4("张三", profile)
+
+    assert result["income"] == 10000
+    assert result["expense"] == 1500
+    assert result["transaction_count"] == 2
+    assert result["has_cash_activity"] is True
+
+
+def test_property_analysis_reads_transaction_price_from_precise_property_records():
+    profile = {
+        "properties_precise": [
+            {
+                "location": "上海市某路1号",
+                "property_number": "P-1",
+                "transaction_price_wan": 347.18,
+            }
+        ]
+    }
+
+    builder = _make_builder(profile)
+    result = builder._build_property_analysis_v4("张三", profile)
+
+    assert result["has_data"] is True
+    assert result["value_available"] is True
+    assert result["total_value"] == 347.18
+    assert "347.18万元" in result["narrative"]
+
+
+def test_tax_analysis_mentions_non_income_tax_types_when_present():
+    profile = {
+        "tax_records": [
+            {"tax_name": "个人所得税", "amount": 100.0},
+            {"tax_name": "印花税", "amount": 200.0},
+            {"tax_name": "契税", "amount": 300.0},
+        ]
+    }
+
+    builder = _make_builder(profile)
+    result = builder._build_tax_analysis_v4("张三", profile)
+
+    assert "印花税" in result["tax_narrative"]
+    assert "契税" in result["tax_narrative"]
+    assert "共查见3条缴税记录" in result["tax_narrative"]
 
 
 def test_build_family_summary_v5_uses_yuan_inputs_and_outputs_wan():

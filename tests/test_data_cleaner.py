@@ -79,8 +79,8 @@ class TestDeduplicateTransactions:
         assert len(result) == 2
         assert stats['duplicates'] == 1
 
-    def test_deduplicate_transaction_id_prefers_principal_row_over_fee_row(self):
-        """同一流水号存在主交易和手续费时，应保留主交易而不是随机留手续费"""
+    def test_deduplicate_transaction_id_keeps_principal_and_fee_rows(self):
+        """同一流水号下的主交易和手续费属于合法双分录，不能再压成一条"""
         df = pd.DataFrame({
             'date': pd.to_datetime(['2025-02-09 15:27:30', '2025-02-09 15:27:30']),
             'income': [0, 0],
@@ -92,13 +92,30 @@ class TestDeduplicateTransactions:
             'source_row_index': [11, 12],
         })
         result, stats = deduplicate_transactions(df)
-        assert len(result) == 1
-        assert stats['duplicates'] == 1
-        assert float(result.iloc[0]['expense']) == 500000
-        assert result.iloc[0]['counterparty'] == '北京鑫兴航科技有限公司'
+        assert len(result) == 2
+        assert stats['duplicates'] == 0
+        assert set(result['expense'].astype(float).tolist()) == {500000.0, 9.0}
 
-    def test_deduplicate_placeholder_transaction_id_uses_raw_non_empty_txid_semantics(self):
-        """建行等银行的 '-' 占位流水号也应按非空流水号口径精确去重"""
+    def test_deduplicate_transaction_id_keeps_opposite_direction_pair_rows(self):
+        """同一流水号下一进一出的合法双分录不能被流水号去重误删"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime(['2025-02-04 10:58:48', '2025-02-04 10:58:48']),
+            'income': [0, 110000],
+            'expense': [110000, 0],
+            'counterparty': ['于巧云', '于巧云'],
+            'description': ['', ''],
+            'transaction_id': ['ECT0001J70340000', 'ECT0001J70340000'],
+            'account_number': ['6222600220004293728', '6222600220004293728'],
+            '数据来源': ['交通银行交易流水.xlsx', '交通银行交易流水.xlsx'],
+        })
+        result, stats = deduplicate_transactions(df)
+        assert len(result) == 2
+        assert stats['duplicates'] == 0
+        assert sorted(result['income'].astype(float).tolist()) == [0.0, 110000.0]
+        assert sorted(result['expense'].astype(float).tolist()) == [0.0, 110000.0]
+
+    def test_deduplicate_placeholder_transaction_id_keeps_distinct_rows(self):
+        """占位流水号 '-' 不能再把不同日期/金额的合法记录压成一条"""
         df = pd.DataFrame({
             'date': pd.to_datetime([
                 '2025-03-21 00:07:54',
@@ -112,8 +129,32 @@ class TestDeduplicateTransactions:
             '数据来源': ['中国建设银行交易流水.xlsx', '中国建设银行交易流水.xlsx'],
         })
         result, stats = deduplicate_transactions(df)
+        assert len(result) == 2
+        assert stats['duplicates'] == 0
+
+    def test_deduplicate_transaction_id_collapses_same_sign_same_amount_mirror_rows(self):
+        """同流水号/同方向/同金额的银行镜像重复应继续视为重复，只保留一条"""
+        df = pd.DataFrame({
+            'date': pd.to_datetime([
+                '2024-12-07 15:29:36',
+                '2024-11-22 00:00:00',
+            ]),
+            'income': [104212.55, 104212.55],
+            'expense': [0, 0],
+            'counterparty': ['', ''],
+            'description': ['', ''],
+            'transaction_id': [
+                'ORXTNA2412073100020000012145',
+                'ORXTNA2412073100020000012145',
+            ],
+            'account_number': ['103324757001001', '103324757001001'],
+            '数据来源': ['招商银行股份有限公司交易流水.xlsx', '招商银行股份有限公司交易流水.xlsx'],
+            'source_row_index': [1626, 1642],
+        })
+        result, stats = deduplicate_transactions(df)
         assert len(result) == 1
         assert stats['duplicates'] == 1
+        assert float(result.iloc[0]['income']) == 104212.55
 
     def test_deduplicate_exact_blank_natural_key_template_rows(self):
         """无流水号且对手方/摘要全空的模板重复行应按精确自然键去重"""
@@ -692,6 +733,33 @@ class TestStandardizeBankFields:
         assert result.iloc[1]['description'] == ''
         assert result.iloc[0]['counterparty'] == '某某公司'
         assert result.iloc[1]['counterparty'] == ''
+
+    def test_standardize_keeps_salary_signal_from_transaction_type_when_summary_is_weak(self):
+        """交易摘要仅为“正常”时，仍应保留交易类型里的工资语义"""
+        df = pd.DataFrame({
+            '交易时间': ['2025-05-25 03:32:30'],
+            '交易金额': [4500],
+            '借贷标志': ['进'],
+            '交易类型': ['工资'],
+            '交易摘要': ['正常'],
+            '交易对方名称': [None],
+        })
+        result = standardize_bank_fields(df)
+        assert result.iloc[0]['description'] == '工资 正常'
+
+    def test_standardize_keeps_cash_signal_from_transaction_type_when_summary_is_weak(self):
+        """交易摘要仅为“正常”时，仍应保留交易类型里的现金语义并标记 is_cash"""
+        df = pd.DataFrame({
+            '交易时间': ['2024-08-18 16:47:14'],
+            '交易金额': [10000],
+            '借贷标志': ['进'],
+            '交易类型': ['ATM存款'],
+            '交易摘要': ['正常'],
+            '交易对方名称': [None],
+        })
+        result = standardize_bank_fields(df)
+        assert result.iloc[0]['description'] == 'ATM存款 正常'
+        assert bool(result.iloc[0]['is_cash']) is True
 
 
 class TestGenerateCleaningReport:

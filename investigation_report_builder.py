@@ -466,6 +466,24 @@ class InvestigationReportBuilder:
         self._external_coaddress_cache = analysis_cache.get("coaddressData", {})
         self._external_coviolation_cache = analysis_cache.get("coviolationData", {})
         self._wallet_cache = analysis_cache.get("walletData", {})
+        external_data_bundle = analysis_cache.get("externalData", {})
+        if not isinstance(external_data_bundle, dict):
+            external_data_bundle = {}
+        external_p0 = external_data_bundle.get("p0", {})
+        if not isinstance(external_p0, dict):
+            external_p0 = {}
+        self._external_bank_account_info_cache = analysis_cache.get(
+            "bankAccountInfo",
+            external_p0.get("bank_account_info", {}),
+        )
+        if not isinstance(self._external_bank_account_info_cache, dict):
+            self._external_bank_account_info_cache = {}
+        self._external_tax_data_cache = analysis_cache.get(
+            "taxData",
+            external_p0.get("tax_data", {}),
+        )
+        if not isinstance(self._external_tax_data_cache, dict):
+            self._external_tax_data_cache = {}
 
         # 【2026-03-03 新增】加载风险等级阈值配置
         try:
@@ -490,6 +508,7 @@ class InvestigationReportBuilder:
         # 核查底稿Excel缓存（延迟加载）
         self._workbook_cache = {}
         self._cleaned_trace_candidates_cache: Dict[str, List[Dict[str, Any]]] = {}
+        self._cleaned_entity_df_cache: Dict[str, Any] = {}
         self._effective_family_units_cache: Optional[List[Dict[str, Any]]] = None
         self.profiles = analysis_cache.get("profiles", {})
         # 缓存核心人员列表
@@ -585,6 +604,12 @@ class InvestigationReportBuilder:
             else {},
             "securitiesData": self._external_securities_cache
             if isinstance(self._external_securities_cache, dict)
+            else {},
+            "bankAccountInfo": self._external_bank_account_info_cache
+            if isinstance(self._external_bank_account_info_cache, dict)
+            else {},
+            "taxData": self._external_tax_data_cache
+            if isinstance(self._external_tax_data_cache, dict)
             else {},
             "insuranceData": self._external_insurance_cache
             if isinstance(self._external_insurance_cache, dict)
@@ -700,6 +725,243 @@ class InvestigationReportBuilder:
 
         self._cleaned_trace_candidates_cache[entity] = candidates
         return candidates
+
+    def _load_cleaned_entity_dataframe(self, entity_name: str):
+        """读取某主体的 cleaned_data 明细，并在报告阶段复用缓存。"""
+        entity = str(entity_name or "").strip()
+        if not entity:
+            return None
+        if entity in self._cleaned_entity_df_cache:
+            return self._cleaned_entity_df_cache[entity]
+
+        import pandas as pd
+
+        candidate_paths = [
+            os.path.join(self.output_dir, "cleaned_data", "个人", f"{entity}_合并流水.xlsx"),
+            os.path.join(self.output_dir, "cleaned_data", "公司", f"{entity}_合并流水.xlsx"),
+        ]
+
+        for path in candidate_paths:
+            if not os.path.isfile(path):
+                continue
+            try:
+                df = pd.read_excel(path, dtype=object)
+            except Exception as exc:
+                logger.warning("[report_builder] 读取 cleaned_data 失败 %s: %s", path, exc)
+                continue
+            self._cleaned_entity_df_cache[entity] = df
+            return df
+
+        self._cleaned_entity_df_cache[entity] = None
+        return None
+
+    def _extract_yearly_flow_from_cleaned_data(self, name: str) -> List[Dict[str, Any]]:
+        """基于 cleaned_data 汇总年度流入流出，禁止再用工资字段伪造年度资金时序。"""
+        df = self._load_cleaned_entity_dataframe(name)
+        if df is None or getattr(df, "empty", True):
+            return []
+
+        import pandas as pd
+
+        date_col = "交易时间" if "交易时间" in df.columns else "date" if "date" in df.columns else None
+        income_col = "收入(元)" if "收入(元)" in df.columns else "income" if "income" in df.columns else None
+        expense_col = "支出(元)" if "支出(元)" in df.columns else "expense" if "expense" in df.columns else None
+        if not date_col or not income_col or not expense_col:
+            return []
+
+        yearly_df = pd.DataFrame(
+            {
+                "date": pd.to_datetime(df[date_col], errors="coerce"),
+                "income": pd.to_numeric(df[income_col], errors="coerce").fillna(0.0),
+                "expense": pd.to_numeric(df[expense_col], errors="coerce").fillna(0.0),
+            }
+        )
+        yearly_df = yearly_df[yearly_df["date"].notna()].copy()
+        if yearly_df.empty:
+            return []
+
+        yearly_df["year"] = yearly_df["date"].dt.year.astype(int)
+        grouped = (
+            yearly_df.groupby("year", as_index=False)[["income", "expense"]]
+            .sum()
+            .sort_values("year")
+        )
+
+        yearly_data: List[Dict[str, Any]] = []
+        for row in grouped.itertuples(index=False):
+            yearly_data.append(
+                {
+                    "year": str(int(row.year)),
+                    "inflow": round(float(row.income) / 10000, 2),
+                    "outflow": round(float(row.expense) / 10000, 2),
+                    "anomaly": False,
+                    "anomaly_type": None,
+                }
+            )
+        return yearly_data
+
+    def _extract_cash_metrics_from_cleaned_data(self, name: str) -> Dict[str, Any]:
+        """当 profile.fund_flow 现金字段缺失时，直接从 cleaned_data 回补现金统计。"""
+        df = self._load_cleaned_entity_dataframe(name)
+        if df is None or getattr(df, "empty", True):
+            return {
+                "cash_transactions": [],
+                "cash_income": 0.0,
+                "cash_expense": 0.0,
+                "cash_income_count": 0,
+                "cash_expense_count": 0,
+            }
+
+        import pandas as pd
+
+        index = df.index
+        summary_series = (
+            df["交易摘要"]
+            if "交易摘要" in df.columns
+            else df["description"]
+            if "description" in df.columns
+            else pd.Series("", index=index, dtype=object)
+        )
+        category_series = (
+            df["交易分类"]
+            if "交易分类" in df.columns
+            else pd.Series("", index=index, dtype=object)
+        )
+        cash_flag_series = (
+            df["现金"] if "现金" in df.columns else pd.Series("", index=index, dtype=object)
+        )
+        date_series = (
+            df["交易时间"]
+            if "交易时间" in df.columns
+            else df["date"]
+            if "date" in df.columns
+            else pd.Series("", index=index, dtype=object)
+        )
+        counterparty_series = (
+            df["交易对手"]
+            if "交易对手" in df.columns
+            else df["counterparty"]
+            if "counterparty" in df.columns
+            else pd.Series("", index=index, dtype=object)
+        )
+        income_series = pd.to_numeric(
+            df["收入(元)"] if "收入(元)" in df.columns else df.get("income", 0),
+            errors="coerce",
+        ).fillna(0.0)
+        expense_series = pd.to_numeric(
+            df["支出(元)"] if "支出(元)" in df.columns else df.get("expense", 0),
+            errors="coerce",
+        ).fillna(0.0)
+
+        def _is_truthy_cash_flag(value: Any) -> bool:
+            if value is None:
+                return False
+            if isinstance(value, bool):
+                return value
+            try:
+                if pd.isna(value):
+                    return False
+            except Exception:
+                pass
+            text = str(value).strip()
+            if not text or text.lower() in {"nan", "none", "null", "false", "0"}:
+                return False
+            if text in {"是", "Y", "y", "True", "true", "1"}:
+                return True
+            return utils.contains_keywords(text, config.CASH_KEYWORDS)
+
+        cash_mask = (
+            summary_series.fillna("").astype(str).apply(
+                lambda text: utils.contains_keywords(text, config.CASH_KEYWORDS)
+            )
+            | category_series.fillna("").astype(str).str.contains("现金", na=False)
+            | cash_flag_series.apply(_is_truthy_cash_flag)
+        )
+
+        if not bool(cash_mask.any()):
+            return {
+                "cash_transactions": [],
+                "cash_income": 0.0,
+                "cash_expense": 0.0,
+                "cash_income_count": 0,
+                "cash_expense_count": 0,
+            }
+
+        cash_transactions: List[Dict[str, Any]] = []
+        cash_income = 0.0
+        cash_expense = 0.0
+        cash_income_count = 0
+        cash_expense_count = 0
+
+        for idx in df.index[cash_mask]:
+            income = self._safe_float_value(income_series.loc[idx], 0.0)
+            expense = self._safe_float_value(expense_series.loc[idx], 0.0)
+            summary = str(summary_series.loc[idx] or "").strip()
+            counterparty = str(counterparty_series.loc[idx] or "").strip()
+            date_value = date_series.loc[idx]
+            if hasattr(date_value, "strftime"):
+                date_text = date_value.strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                date_text = str(date_value or "").strip()
+
+            if income > 0 and expense <= 0:
+                tx_type = "存现"
+                amount = income
+                cash_income += income
+                cash_income_count += 1
+            elif expense > 0:
+                tx_type = "取现"
+                amount = expense
+                cash_expense += expense
+                cash_expense_count += 1
+            else:
+                continue
+
+            cash_transactions.append(
+                {
+                    "日期": date_text,
+                    "date": date_text,
+                    "金额": amount,
+                    "amount": amount,
+                    "类型": tx_type,
+                    "type": tx_type,
+                    "摘要": summary,
+                    "description": summary,
+                    "对手方": counterparty,
+                    "counterparty": counterparty,
+                }
+            )
+
+        return {
+            "cash_transactions": cash_transactions,
+            "cash_income": cash_income,
+            "cash_expense": cash_expense,
+            "cash_income_count": cash_income_count,
+            "cash_expense_count": cash_expense_count,
+        }
+
+    def _normalize_property_value_to_wan(self, *candidates: Any) -> float:
+        """统一解析房产金额为万元，兼容元/万元/字符串格式。"""
+        for candidate in candidates:
+            if candidate in (None, ""):
+                continue
+            if isinstance(candidate, (int, float)) and not isinstance(candidate, bool):
+                value = float(candidate)
+                if value <= 0:
+                    continue
+                return round(value / 10000, 4) if value > 1000000 else round(value, 4)
+
+            text = str(candidate).strip()
+            if not text or text.lower() in {"nan", "none", "null"}:
+                continue
+            if re.fullmatch(r"\d+(?:\.\d+)?", text):
+                numeric = float(text)
+                if 0 < numeric <= 10000:
+                    return round(numeric, 4)
+            value_wan = utils.format_amount_to_wan(text, unit_hint_multiplier=1.0)
+            if value_wan > 0:
+                return round(value_wan, 4)
+        return 0.0
 
     def _pick_issue_fallback_evidence_refs(
         self,
@@ -3498,44 +3760,8 @@ class InvestigationReportBuilder:
 
     def _build_temporal_analysis_from_section(self, name: str, section: Dict) -> Dict:
         """从 section 构建时序分析"""
-        asset_section = section.get("asset_income_section", {})
-        salary_info = asset_section.get("salary_income", {})
-        yearly_breakdown = salary_info.get("yearly_breakdown", [])
-
-        yearly_data = []
-        anomaly_years = []
-
-        if yearly_breakdown:
-            for item in yearly_breakdown:
-                # 解析 "2023年123.45万元" 格式
-                if isinstance(item, str) and "年" in item:
-                    year = item[:4]
-                    try:
-                        amount = float(item.split("年")[1].replace("万元", ""))
-                        # 检测异常（简化规则：>100万或<5万）
-                        is_anomaly = amount > 100 or (amount < 5 and amount > 0)
-                        yearly_data.append(
-                            {
-                                "year": year,
-                                "inflow": amount,
-                                "outflow": round(amount * 0.95, 2),  # 简化估算
-                                "anomaly": is_anomaly,
-                                "anomaly_type": "收入异常" if is_anomaly else None,
-                            }
-                        )
-                        if is_anomaly:
-                            anomaly_years.append(
-                                {
-                                    "year": year,
-                                    "issue": "收入异常偏高"
-                                    if amount > 100
-                                    else "收入偏低",
-                                }
-                            )
-                    except (ValueError, IndexError):
-                        continue
-
-        return {"yearly_data": yearly_data, "anomaly_years": anomaly_years}
+        yearly_data = self._extract_yearly_flow_from_cleaned_data(name)
+        return {"yearly_data": yearly_data, "anomaly_years": []}
 
     def _build_relationship_analysis_from_section(
         self, name: str, section: Dict
@@ -4030,17 +4256,17 @@ class InvestigationReportBuilder:
             verdict = "收支基本匹配"
         elif coverage_ratio >= 0.5 and expense_income_ratio <= 1.2:
             score = 15
-            verdict = "工资覆盖偏低，需关注其他收入来源"
+            verdict = "工资性收入覆盖偏低，需关注其他收入来源"
         else:
             score = 25
             verdict = "收支明显不匹配"
 
         details = (
             f"真实收入{real_income / 10000:.2f}万元，真实支出{real_expense / 10000:.2f}万元，"
-            f"工资覆盖率{coverage_ratio * 100:.1f}%。"
+            f"工资性收入覆盖率{coverage_ratio * 100:.1f}%。"
         )
         if salary_total > 0:
-            details += f" 工资收入{salary_total / 10000:.2f}万元。"
+            details += f" 工资性收入{salary_total / 10000:.2f}万元。"
 
         return LegacyDimensionScore(score=score, verdict=verdict, details=details)
 
@@ -5536,7 +5762,7 @@ class InvestigationReportBuilder:
             score = max(score, 10)
             risk_level = "medium" if risk_level != "high" else "high"
             findings.append(
-                f"工资收入仅占总收入{salary_ratio:.0f}%，非工资收入占比较大"
+                f"工资性收入仅占总收入{salary_ratio:.0f}%，非工资性收入占比较大"
             )
 
         # 生成话术（优先使用配置）
@@ -5931,7 +6157,7 @@ class InvestigationReportBuilder:
                 )
             elif salary_total <= 0 or salary_ratio < 20:
                 fallback_narrative = (
-                    f"{name}资金流入以非工资往来为主（工资占比{salary_ratio:.0f}%），暂未发现狭义来源不明收入，建议结合交易对手与用途持续核验。"
+                    f"{name}资金流入以非工资性往来为主（工资性收入占比{salary_ratio:.0f}%），暂未发现狭义来源不明收入，建议结合交易对手与用途持续核验。"
                 )
                 narrative = fallback_narrative
                 return DimensionAnalysis(
@@ -5945,7 +6171,7 @@ class InvestigationReportBuilder:
                 )
             else:
                 fallback_narrative = (
-                    f"{name}资金流入主要来源于工资收入（占比{salary_ratio:.0f}%），资金流向符合一般生活消费及理财投资规律。"
+                    f"{name}资金流入主要来源于工资性收入（占比{salary_ratio:.0f}%），资金流向符合一般生活消费及理财投资规律。"
                 )
             narrative = fallback_narrative
         else:
@@ -6683,6 +6909,82 @@ class InvestigationReportBuilder:
         """构建银行账户列表（剔除非真实账户，整合官方余额数据）"""
         accounts = []
 
+        def _normalize_account_number(value: Any) -> str:
+            text = str(value or "").strip()
+            if not text or text.lower() in {"nan", "none", "null"}:
+                return ""
+            if re.fullmatch(r"\d+\.0", text):
+                text = text[:-2]
+            return re.sub(r"\s+", "", text)
+
+        def _normalize_bank_name(value: Any) -> str:
+            text = re.sub(r"\s+", "", str(value or "").strip())
+            text = re.sub(r"^(中国)", "", text)
+            for token in ("股份有限公司", "有限责任公司", "有限公司", "股份"):
+                text = text.replace(token, "")
+            return text
+
+        def _bank_names_equivalent(left: Any, right: Any) -> bool:
+            left_norm = _normalize_bank_name(left)
+            right_norm = _normalize_bank_name(right)
+            if not left_norm or not right_norm:
+                return False
+            return (
+                left_norm == right_norm
+                or left_norm in right_norm
+                or right_norm in left_norm
+            )
+
+        def _normalize_account_digits(value: Any) -> str:
+            return re.sub(r"\D+", "", _normalize_account_number(value))
+
+        def _account_numbers_equivalent(left: Any, right: Any) -> bool:
+            left_digits = _normalize_account_digits(left)
+            right_digits = _normalize_account_digits(right)
+            if not left_digits or not right_digits:
+                return False
+            if left_digits == right_digits:
+                return True
+            shorter, longer = sorted((left_digits, right_digits), key=len)
+            return (
+                len(shorter) >= 12
+                and len(longer) - len(shorter) <= 4
+                and (longer.startswith(shorter) or longer.endswith(shorter))
+            )
+
+        def _find_matching_official_account(
+            bank_name: str, account_number: str
+        ) -> Optional[Dict[str, Any]]:
+            for oa in official_accounts:
+                if not isinstance(oa, dict):
+                    continue
+                official_bank = oa.get("bank_name", "") or oa.get("反馈单位", "")
+                if not _bank_names_equivalent(bank_name, official_bank):
+                    continue
+                official_numbers = [
+                    oa.get("account_number", ""),
+                    oa.get("card_number", ""),
+                ]
+                if any(
+                    _account_numbers_equivalent(account_number, candidate)
+                    for candidate in official_numbers
+                    if candidate
+                ):
+                    return oa
+            return None
+
+        def _already_has_equivalent_account(
+            bank_name: str, account_number: str, card_number: str = ""
+        ) -> bool:
+            for existing in accounts:
+                if not _bank_names_equivalent(bank_name, existing.bank_name):
+                    continue
+                existing_number = getattr(existing, "account_number", "")
+                for candidate in (account_number, card_number):
+                    if _account_numbers_equivalent(candidate, existing_number):
+                        return True
+            return False
+
         # 【2026-02-12 改进】简化数据获取逻辑
         # profiles.json 现在包含完整原始数据，统一从这里获取
         raw_accounts = (
@@ -6694,11 +6996,20 @@ class InvestigationReportBuilder:
 
         # 获取官方账户数据（含余额）用于匹配和补充
         official_accounts = profile.get("bank_accounts_official", []) or []
+        if not official_accounts:
+            person_id = self._guess_person_id_from_profile(name, profile)
+            if person_id and person_id in self._external_bank_account_info_cache:
+                official_payload = self._external_bank_account_info_cache.get(person_id, {})
+                if isinstance(official_payload, dict):
+                    official_accounts = official_payload.get("accounts", []) or []
+
         # 构建账号到余额的映射
         balance_map = {}
         for oa in official_accounts:
             if isinstance(oa, dict):
-                acc_num = oa.get("account_number", "") or oa.get("card_number", "")
+                acc_num = _normalize_account_number(
+                    oa.get("account_number", "") or oa.get("card_number", "")
+                )
                 if acc_num:
                     balance_map[acc_num] = (
                         oa.get("balance", 0) or oa.get("available_balance", 0) or 0
@@ -6712,7 +7023,7 @@ class InvestigationReportBuilder:
                     or acc.get("bank_name", "")
                     or acc.get("bankName", "")
                 )
-                account_number = (
+                account_number = _normalize_account_number(
                     acc.get("完整账号", "")
                     or acc.get("账号", "")
                     or acc.get("account_number", "")
@@ -6734,16 +7045,37 @@ class InvestigationReportBuilder:
                     )
 
                 if is_real:
-                    # 【2026-01-22 修复】优先使用 last_balance（流水末尾余额），其次 balance
-                    # 注意：只使用真实余额数据，不使用净流入估算（净流入≠余额）
-                    balance = (
-                        acc.get("last_balance", 0)
-                        or acc.get("balance", 0)
-                        or acc.get("余额", 0)
-                        or 0
+                    matched_official = _find_matching_official_account(
+                        bank_name, account_number
                     )
-                    if balance == 0 and account_number in balance_map:
+                    # 官方账户余额优先于流水末笔余额，避免 HTML 稳定展示成“最后一笔流水余额”。
+                    if account_number in balance_map:
                         balance = balance_map[account_number]
+                    elif matched_official:
+                        balance = (
+                            matched_official.get("balance", 0)
+                            or matched_official.get("available_balance", 0)
+                            or acc.get("last_balance", 0)
+                            or acc.get("balance", 0)
+                            or acc.get("余额", 0)
+                            or 0
+                        )
+                    else:
+                        balance = (
+                            acc.get("last_balance", 0)
+                            or acc.get("balance", 0)
+                            or acc.get("余额", 0)
+                            or 0
+                        )
+
+                    if matched_official:
+                        official_bank_name = (
+                            matched_official.get("bank_name", "")
+                            or matched_official.get("反馈单位", "")
+                        )
+                        if official_bank_name:
+                            bank_name = official_bank_name
+                        status = matched_official.get("status", "") or status
 
                     accounts.append(
                         BankAccountInfo(
@@ -6760,13 +7092,21 @@ class InvestigationReportBuilder:
                     )
 
         # 如果流水账户为空，直接使用官方账户
-        if not accounts and official_accounts:
+        if official_accounts:
             for oa in official_accounts:
                 if isinstance(oa, dict):
                     bank_name = oa.get("bank_name", "") or oa.get("反馈单位", "")
-                    account_number = oa.get("account_number", "") or oa.get(
-                        "card_number", ""
+                    official_account_number = _normalize_account_number(
+                        oa.get("account_number", "")
                     )
+                    card_number = _normalize_account_number(oa.get("card_number", ""))
+                    account_number = official_account_number or card_number
+                    if not account_number:
+                        continue
+                    if _already_has_equivalent_account(
+                        bank_name, official_account_number, card_number
+                    ):
+                        continue
                     if self._is_real_bank_account(bank_name, account_number, ""):
                         accounts.append(
                             BankAccountInfo(
@@ -10620,6 +10960,23 @@ class InvestigationReportBuilder:
         cash_deposit_count = int(profile.get("cashIncomeCount", 0) or 0)
         cash_withdrawal_count = int(profile.get("cashExpenseCount", 0) or 0)
 
+        fallback_cash = self._extract_cash_metrics_from_cleaned_data(name)
+        if not cash_transactions and fallback_cash.get("cash_transactions"):
+            cash_transactions = fallback_cash.get("cash_transactions", [])
+        if cash_deposit_total <= 0 and fallback_cash.get("cash_income", 0) > 0:
+            cash_deposit_total = _as_float(fallback_cash.get("cash_income", 0))
+        if cash_withdrawal_total <= 0 and fallback_cash.get("cash_expense", 0) > 0:
+            cash_withdrawal_total = _as_float(fallback_cash.get("cash_expense", 0))
+        if cash_deposit_count <= 0 and fallback_cash.get("cash_income_count", 0) > 0:
+            cash_deposit_count = int(fallback_cash.get("cash_income_count", 0) or 0)
+        if (
+            cash_withdrawal_count <= 0
+            and fallback_cash.get("cash_expense_count", 0) > 0
+        ):
+            cash_withdrawal_count = int(
+                fallback_cash.get("cash_expense_count", 0) or 0
+            )
+
         # 兼容 profiles 中缺失 cashIncomeCount/cashExpenseCount 的情况
         derived_deposit_count = 0
         derived_withdrawal_count = 0
@@ -12003,7 +12360,7 @@ class InvestigationReportBuilder:
     def _build_property_info_v4(self, name: str, profile: Dict) -> Dict:
         """构建房产情况"""
         # 【修复】优先从profile读取，如果为空则从外部缓存中按身份证号查找
-        properties = profile.get("properties", [])
+        properties = profile.get("properties", []) or profile.get("properties_precise", [])
 
         if not properties:
             # 尝试从外部缓存中查找
@@ -12033,27 +12390,18 @@ class InvestigationReportBuilder:
                 area = f"{area}平方米"
 
             # 【1.5修复】房产交易金额处理 - 增强版：从多个可能字段获取
-            value = (
+            value_wan = self._normalize_property_value_to_wan(
                 prop.get("value", 0)
-                or prop.get("交易金额", 0)
-                or prop.get("不动产价格", 0)
-                or prop.get("房产价值", 0)
-                or prop.get("transaction_amount", 0)
-                or prop.get("成交价格", 0)
-                or prop.get("price", 0)
-                or 0
+                or prop.get("交易金额", 0),
+                prop.get("不动产价格", 0),
+                prop.get("房产价值", 0),
+                prop.get("transaction_amount", 0),
+                prop.get("transaction_price_wan", 0),
+                prop.get("transaction_price", 0),
+                prop.get("成交价格", 0),
+                prop.get("price", 0),
             )
-
-            # 处理不同单位的情况（有的数据已经是万元，有的是元）
-            if value and value > 0:
-                # 如果金额大于100万，假设单位是元，转换为万元
-                if value > 1000000:
-                    value_display = f"{value / 10000:.2f}"
-                else:
-                    # 金额较小，假设已经是万元
-                    value_display = f"{value:.2f}"
-            else:
-                value_display = "暂无数据"
+            value_display = f"{value_wan:.2f}" if value_wan > 0 else "暂无数据"
 
             # 【1.3修复】统一身份证号格式
             co_owners = (
@@ -13063,7 +13411,7 @@ class InvestigationReportBuilder:
 
         inflow_components = []
         if salary_total > 0:
-            inflow_components.append(f"工资收入{salary_total / 10000:.2f}万元")
+            inflow_components.append(f"工资性收入{salary_total / 10000:.2f}万元")
         if cash_income >= narrative_display_floor:
             inflow_components.append(f"现金流入{cash_income / 10000:.2f}万元")
         if personal_transfers_in >= narrative_display_floor:
@@ -13373,6 +13721,14 @@ class InvestigationReportBuilder:
         )
         cash_income = fund_flow.get("cash_income", profile.get("cashIncome", 0)) or 0
         cash_expense = fund_flow.get("cash_expense", profile.get("cashExpense", 0)) or 0
+
+        fallback_cash = self._extract_cash_metrics_from_cleaned_data(name)
+        if not cash_transactions and fallback_cash.get("cash_transactions"):
+            cash_transactions = fallback_cash.get("cash_transactions", [])
+        if cash_income <= 0 and fallback_cash.get("cash_income", 0) > 0:
+            cash_income = fallback_cash.get("cash_income", 0)
+        if cash_expense <= 0 and fallback_cash.get("cash_expense", 0) > 0:
+            cash_expense = fallback_cash.get("cash_expense", 0)
         cash_total = cash_income + cash_expense
 
         # 判断是否与调查公司存在关联
@@ -13585,7 +13941,7 @@ class InvestigationReportBuilder:
 
         in_narrative = (
             f"查看单笔{threshold_wan:.2f}万元以上银行流入流水，共{len(person_transfers_in)}笔共计金额{in_total / 10000:.2f}万元，"
-            f"主要是工资收入、个人转账等。{company_clause}"
+            f"主要是工资性收入、个人转账等。{company_clause}"
         )
         out_narrative = (
             f"查看单笔{threshold_wan:.2f}万元以上银行支出流水，共{len(person_transfers_out)}笔共计金额{out_total / 10000:.2f}万元，"
@@ -13654,28 +14010,17 @@ class InvestigationReportBuilder:
         # 【2.1修复】统一房产交易金额的显示逻辑 - 增强版
         def _get_property_value(p):
             """从房产数据中获取交易金额（统一单位处理）"""
-            value = (
-                p.get("value", 0)
-                or p.get("交易金额", 0)
-                or p.get("不动产价格", 0)
-                or p.get("房产价值", 0)
-                or p.get("transaction_amount", 0)
-                or p.get("成交价格", 0)
-                or p.get("price", 0)
-                or 0
+            return self._normalize_property_value_to_wan(
+                p.get("value", 0),
+                p.get("交易金额", 0),
+                p.get("不动产价格", 0),
+                p.get("房产价值", 0),
+                p.get("transaction_amount", 0),
+                p.get("transaction_price_wan", 0),
+                p.get("transaction_price", 0),
+                p.get("成交价格", 0),
+                p.get("price", 0),
             )
-
-            # 【修复】确保 value 是数字类型
-            try:
-                value = float(value) if value else 0
-            except (ValueError, TypeError):
-                value = 0
-
-            # 处理不同单位的情况
-            if value and value > 1000000:
-                # 如果金额大于100万，假设单位是元，转换为万元
-                return value / 10000
-            return value
 
         total_value = sum(_get_property_value(p) for p in properties)
 
@@ -13800,23 +14145,80 @@ class InvestigationReportBuilder:
         tax_records = profile.get("tax_records", [])
         if not tax_records:
             tax_records = profile.get("taxRecords", [])
+        if not tax_records:
+            person_id = self._guess_person_id_from_profile(name, profile)
+            if person_id and person_id in self._external_tax_data_cache:
+                external_tax_payload = self._external_tax_data_cache.get(person_id, {})
+                if isinstance(external_tax_payload, dict):
+                    tax_records = external_tax_payload.get("tax_records", []) or []
 
         has_company = len(normalized_companies) > 0
 
+        normalized_tax_records = []
+        tax_types = []
+        tax_type_seen = set()
+        total_tax_amount = 0.0
+        for record in tax_records:
+            if not isinstance(record, dict):
+                continue
+            tax_name = (
+                record.get("tax_name")
+                or record.get("税种名称")
+                or record.get("征收项目名称")
+                or ""
+            )
+            levy_item = (
+                record.get("item_name")
+                or record.get("征收品目名称")
+                or record.get("征收品目")
+                or ""
+            )
+            amount = self._safe_float_value(
+                record.get("amount", record.get("应纳税额", record.get("应补（退）税额", 0))),
+                0.0,
+            )
+            normalized_record = dict(record)
+            normalized_record.setdefault("tax_name", tax_name)
+            normalized_record.setdefault("item_name", levy_item)
+            normalized_record.setdefault("amount", amount)
+            normalized_tax_records.append(normalized_record)
+            if tax_name and tax_name not in tax_type_seen:
+                tax_type_seen.add(tax_name)
+                tax_types.append(tax_name)
+            total_tax_amount += amount
+
         if not has_company:
             company_narrative = "本人名下无登记企业"
-            tax_narrative = "本人仅缴纳个人所得税，无其他税款缴纳记录。"
         else:
             company_names = []
             for company in normalized_companies[:3]:
                 display_name = company.get("name", "")
                 role = company.get("role", "")
                 if role:
-                    display_name = f"{display_name}（{role}）"
+                            display_name = f"{display_name}（{role}）"
                 company_names.append(display_name)
             company_names = "、".join(company_names)
             company_narrative = f"名下有登记企业：{company_names}"
-            tax_narrative = "当前未发现异常企业纳税记录。"
+
+        if not normalized_tax_records:
+            tax_narrative = "当前未提取到可用纳税记录。"
+        else:
+            tax_type_text = "、".join(tax_types[:5]) if tax_types else "未标明税种"
+            if total_tax_amount > 0:
+                tax_amount_text = f"，应纳税额合计{total_tax_amount:,.2f}元"
+            else:
+                tax_amount_text = ""
+
+            if len(tax_types) == 1 and tax_types[0] == "个人所得税":
+                tax_narrative = (
+                    f"税务数据共查见{len(normalized_tax_records)}条个人所得税缴纳记录"
+                    f"{tax_amount_text}。"
+                )
+            else:
+                tax_narrative = (
+                    f"税务数据共查见{len(normalized_tax_records)}条缴税记录，"
+                    f"涉及{tax_type_text}{tax_amount_text}。"
+                )
 
         narrative = f"{name}{company_narrative}，{tax_narrative}"
 
@@ -13824,7 +14226,7 @@ class InvestigationReportBuilder:
             "has_registered_company": has_company,
             "has_registered_companies": has_company,
             "registered_companies": normalized_companies,
-            "tax_records": tax_records,
+            "tax_records": normalized_tax_records,
             "company_count": len(normalized_companies),
             "company_narrative": company_narrative,
             "tax_narrative": tax_narrative,
@@ -14248,15 +14650,15 @@ class InvestigationReportBuilder:
         if total_income > 0:
             if salary_ratio >= 70:
                 fund_characteristics_parts.append(
-                    f"{name}资金主要来源于工资收入，收入来源合法稳定"
+                    f"{name}资金主要来源于工资性收入，收入来源合法稳定"
                 )
             elif salary_ratio >= 40:
                 fund_characteristics_parts.append(
-                    f"{name}资金来源较为多元，工资收入占比{salary_ratio:.0f}%"
+                    f"{name}资金来源较为多元，工资性收入占比{salary_ratio:.0f}%"
                 )
             else:
                 fund_characteristics_parts.append(
-                    f"{name}非工资收入占比较高，需关注资金来源"
+                    f"{name}非工资性收入占比较高，需关注资金来源"
                 )
         else:
             fund_characteristics_parts.append(
@@ -14295,7 +14697,7 @@ class InvestigationReportBuilder:
 
         if five_dimension["income_expense_match"]["risk_level"] == "high":
             high_risk_warnings.append(
-                "收支不匹配：工资收入占比较低，需关注其他收入来源"
+                "收支不匹配：工资性收入占比较低，需关注其他收入来源"
             )
 
         if lending["has_multi_platform"]:
@@ -16987,6 +17389,8 @@ def load_investigation_report_builder(
         "vehicleData": "vehicleData.json",
         "wealthProductData": "wealthProductData.json",
         "securitiesData": "securitiesData.json",
+        "bankAccountInfo": "bankAccountInfo.json",
+        "taxData": "taxData.json",
         "creditData": "creditData.json",
         "amlData": "amlData.json",
         "insuranceData": "insuranceData.json",

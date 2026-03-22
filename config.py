@@ -434,6 +434,7 @@ PROPERTY_MATCH_CONFIG: Dict[str, Any] = {
 # 真实银行流水字段映射
 BANK_FIELD_MAPPING: Dict[str, List[str]] = {
     'transaction_time': ['交易时间', '发生时间', '记账时间', '交易日期'],
+    'transaction_type': ['交易类型', '业务类型', '交易种类'],
     'transaction_amount': ['交易金额', '发生额', '金额'],
     'debit_credit_flag': ['借贷标志', '借贷', '收支标志'],
     'transaction_status': ['交易状态', '交易结果', '业务状态', '处理结果', '状态', '交易是否成功', '查询反馈结果原因'],

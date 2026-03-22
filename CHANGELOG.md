@@ -7,6 +7,30 @@
 
 ---
 
+## [v4.6.0] - 2026-03-21
+
+### 📘 交付文档与版本统一
+
+#### 交付版 README 重写 (`README.md`)
+- **变更**: 按当前交付形态重写 README，不再沿用旧版“零散功能说明书”结构。
+- **新增重点**:
+  - 明确 `Windows 单机离线 one-folder` 为最终目标形态
+  - 明确 `output/cleaned_data -> output/analysis_cache -> output/analysis_results` 三层输出契约
+  - 明确 `report_package -> QA -> HTML/TXT/Excel -> /dashboard/` 报告主链
+  - 明确交付前推荐的真实数据验收与总验收脚本
+- **影响**: README 现在可直接作为交付说明，而不是只适合开发者读源码时参考。
+
+#### 应用内文档入口 (`api_server.py` + `dashboard/src/components/Sidebar.tsx`)
+- **变更**:
+  - 后端新增 `/docs/readme` 只读文档页
+  - 前端侧栏新增“交付文档”入口
+  - README 保持唯一事实源，前端不再复制一份独立帮助文案
+- **影响**: 离线包环境下也能直接查看当前交付文档，降低 README 与前端说明漂移风险。
+
+#### 版本号统一 (`dashboard/src/constants/appVersion.ts` + `dashboard/package.json` + `api_server.py`)
+- **变更**: 应用展示版本统一升级为 `v4.6.0`
+- **影响**: 前端版本、README 版本和后端对外版本信息保持一致。
+
 ## [v4.5.5] - 2026-03-21
 
 ### 🐛 Bug修复

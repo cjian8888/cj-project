@@ -3700,7 +3700,39 @@ def test_run_analysis_refactored_e2e_preserves_plugin_outputs_and_cache_restore(
         monkeypatch.setattr(api_server.company_info_extractor, "extract_company_info", lambda *_: {})
         monkeypatch.setattr(api_server.credit_report_extractor, "extract_credit_data", lambda *_: {})
         monkeypatch.setattr(api_server.credit_report_extractor, "get_credit_alerts", lambda *_: [])
-        monkeypatch.setattr(api_server.bank_account_info_extractor, "extract_bank_account_info", lambda *_: {})
+        monkeypatch.setattr(
+            api_server.bank_account_info_extractor,
+            "extract_bank_account_info",
+            lambda *_: {
+                "310101199001010011": {
+                    "accounts": [
+                        {
+                            "account_number": "6222000011112222",
+                            "bank_name": "工商银行",
+                            "balance": 49562.68,
+                            "status": "正常",
+                        }
+                    ]
+                }
+            },
+        )
+        monkeypatch.setattr(
+            api_server.tax_info_extractor,
+            "extract_tax_data",
+            lambda *_: {
+                "310101199001010011": {
+                    "tax_records": [
+                        {
+                            "period_start": "2024-01-01",
+                            "period_end": "2024-12-31",
+                            "tax_name": "印花税",
+                            "amount": 300.0,
+                            "source_file": "test_tax.xlsx",
+                        }
+                    ]
+                }
+            },
+        )
         monkeypatch.setattr(
             api_server.vehicle_extractor,
             "extract_vehicle_data",
@@ -3817,6 +3849,8 @@ def test_run_analysis_refactored_e2e_preserves_plugin_outputs_and_cache_restore(
 
         first_results = api_server.analysis_state.results
         assert first_results["profiles"]["张三"]["entity_id"] == "310101199001010011"
+        assert first_results["profiles"]["张三"]["bank_accounts_official"][0]["balance"] == 49562.68
+        assert first_results["profiles"]["张三"]["tax_records"][0]["tax_name"] == "印花税"
         assert first_results["profiles"]["张三"]["vehicles"][0]["plate_number"] == "沪A12345"
         assert first_results["externalData"]["p1"]["vehicle_data"]["310101199001010011"][0]["plate_number"] == "沪A12345"
         assert first_results["runtimeLogPaths"]["run"].endswith(".log")

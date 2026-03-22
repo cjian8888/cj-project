@@ -21,6 +21,8 @@ import json
 import re
 import shutil
 import logging
+import math
+from html import escape as html_escape
 from pathlib import Path
 from datetime import datetime, timedelta, date
 from typing import Dict, List, Optional, Any
@@ -29,6 +31,7 @@ import threading
 import queue
 import pandas as pd
 import time
+from urllib.parse import quote
 
 from fastapi import (
     FastAPI,
@@ -98,6 +101,7 @@ import aml_analyzer
 import company_info_extractor
 import credit_report_extractor
 import bank_account_info_extractor
+import tax_info_extractor
 import vehicle_extractor
 import wealth_product_extractor
 import securities_extractor
@@ -218,6 +222,486 @@ _current_config = {}
 _ws_connections = set()
 _log_queue = queue.Queue()  # 日志队列，用于 WebSocket 广播
 _cache_manager: Optional[CacheManager] = None  # 缓存管理器（懒加载）
+APP_RELEASE_VERSION = "4.6.0"
+
+
+def _slugify_doc_heading(text: str) -> str:
+    normalized = re.sub(r"[^\w\u4e00-\u9fff-]+", "-", str(text or "").strip().lower())
+    normalized = re.sub(r"-{2,}", "-", normalized).strip("-")
+    return normalized or "section"
+
+
+def _resolve_docs_link_target(url: str) -> str:
+    target = str(url or "").strip()
+    if not target:
+        return "#"
+    if re.match(r"^(?:https?:|mailto:|#)", target, flags=re.IGNORECASE):
+        return target
+    normalized = os.path.normpath(target).replace("\\", "/").lstrip("/")
+    return f"/docs/file/{quote(normalized)}"
+
+
+def _render_markdown_inline(text: str) -> str:
+    pattern = re.compile(r"(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))")
+    result: List[str] = []
+    cursor = 0
+
+    for match in pattern.finditer(text):
+        if match.start() > cursor:
+            result.append(html_escape(text[cursor : match.start()]))
+        token = match.group(0)
+        if token.startswith("`") and token.endswith("`"):
+            result.append(f"<code>{html_escape(token[1:-1])}</code>")
+        elif token.startswith("**") and token.endswith("**"):
+            result.append(f"<strong>{html_escape(token[2:-2])}</strong>")
+        else:
+            link_match = re.match(r"\[([^\]]+)\]\(([^)]+)\)", token)
+            if link_match:
+                label, url = link_match.groups()
+                href = html_escape(_resolve_docs_link_target(url), quote=True)
+                safe_label = html_escape(label)
+                result.append(
+                    f'<a href="{href}" target="_blank" rel="noreferrer">{safe_label}</a>'
+                )
+            else:
+                result.append(html_escape(token))
+        cursor = match.end()
+
+    if cursor < len(text):
+        result.append(html_escape(text[cursor:]))
+    return "".join(result)
+
+
+def _render_markdown_document(markdown_text: str, page_title: str) -> str:
+    toc: List[Dict[str, str]] = []
+    body_parts: List[str] = []
+    paragraph_lines: List[str] = []
+    unordered_items: List[str] = []
+    ordered_items: List[str] = []
+    quote_lines: List[str] = []
+    code_lines: List[str] = []
+    code_language = ""
+    in_code_block = False
+
+    def flush_paragraph() -> None:
+        if not paragraph_lines:
+            return
+        text = " ".join(line.strip() for line in paragraph_lines if line.strip())
+        if text:
+            body_parts.append(f"<p>{_render_markdown_inline(text)}</p>")
+        paragraph_lines.clear()
+
+    def flush_unordered_list() -> None:
+        if not unordered_items:
+            return
+        body_parts.append(
+            "<ul>" + "".join(f"<li>{item}</li>" for item in unordered_items) + "</ul>"
+        )
+        unordered_items.clear()
+
+    def flush_ordered_list() -> None:
+        if not ordered_items:
+            return
+        body_parts.append(
+            "<ol>" + "".join(f"<li>{item}</li>" for item in ordered_items) + "</ol>"
+        )
+        ordered_items.clear()
+
+    def flush_quote() -> None:
+        if not quote_lines:
+            return
+        quote_html = "<br>".join(_render_markdown_inline(line) for line in quote_lines)
+        body_parts.append(f"<blockquote>{quote_html}</blockquote>")
+        quote_lines.clear()
+
+    def flush_all() -> None:
+        flush_paragraph()
+        flush_unordered_list()
+        flush_ordered_list()
+        flush_quote()
+
+    for raw_line in markdown_text.splitlines():
+        line = raw_line.rstrip("\n")
+        stripped = line.strip()
+
+        if in_code_block:
+            if stripped.startswith("```"):
+                safe_code = html_escape("\n".join(code_lines))
+                language_attr = (
+                    f' data-language="{html_escape(code_language)}"' if code_language else ""
+                )
+                body_parts.append(
+                    f'<pre><code{language_attr}>{safe_code}</code></pre>'
+                )
+                code_lines.clear()
+                code_language = ""
+                in_code_block = False
+            else:
+                code_lines.append(line)
+            continue
+
+        if stripped.startswith("```"):
+            flush_all()
+            in_code_block = True
+            code_language = stripped[3:].strip()
+            continue
+
+        if not stripped:
+            flush_all()
+            continue
+
+        if stripped == "---":
+            flush_all()
+            body_parts.append("<hr>")
+            continue
+
+        image_match = re.match(r"^!\[(.*?)\]\((.*?)\)$", stripped)
+        if image_match:
+            flush_all()
+            alt_text, image_url = image_match.groups()
+            resolved_src = html_escape(_resolve_docs_link_target(image_url), quote=True)
+            safe_alt = html_escape(alt_text or "文档配图")
+            caption = f"<figcaption>{safe_alt}</figcaption>" if alt_text else ""
+            body_parts.append(
+                f'<figure><img src="{resolved_src}" alt="{safe_alt}" loading="lazy" />{caption}</figure>'
+            )
+            continue
+
+        heading_match = re.match(r"^(#{1,4})\s+(.*)$", stripped)
+        if heading_match:
+            flush_all()
+            level = min(len(heading_match.group(1)), 4)
+            heading_text = heading_match.group(2).strip()
+            anchor = _slugify_doc_heading(heading_text)
+            toc.append(
+                {
+                    "level": str(level),
+                    "text": heading_text,
+                    "anchor": anchor,
+                }
+            )
+            body_parts.append(
+                f'<h{level} id="{anchor}">{_render_markdown_inline(heading_text)}</h{level}>'
+            )
+            continue
+
+        unordered_match = re.match(r"^[-*]\s+(.*)$", stripped)
+        if unordered_match:
+            flush_paragraph()
+            flush_ordered_list()
+            flush_quote()
+            unordered_items.append(_render_markdown_inline(unordered_match.group(1)))
+            continue
+
+        ordered_match = re.match(r"^\d+\.\s+(.*)$", stripped)
+        if ordered_match:
+            flush_paragraph()
+            flush_unordered_list()
+            flush_quote()
+            ordered_items.append(_render_markdown_inline(ordered_match.group(1)))
+            continue
+
+        quote_match = re.match(r"^>\s?(.*)$", stripped)
+        if quote_match:
+            flush_paragraph()
+            flush_unordered_list()
+            flush_ordered_list()
+            quote_lines.append(quote_match.group(1).strip())
+            continue
+
+        paragraph_lines.append(stripped)
+
+    flush_all()
+
+    toc_html = "".join(
+        (
+            f'<a class="toc-item level-{item["level"]}" href="#{item["anchor"]}">'
+            f"{html_escape(item['text'])}</a>"
+        )
+        for item in toc
+        if int(item["level"]) <= 3
+    )
+    page_title_html = html_escape(page_title)
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{page_title_html}</title>
+  <style>
+    :root {{
+      --bg: #09111f;
+      --panel: rgba(13, 25, 44, 0.92);
+      --panel-strong: #10203a;
+      --line: rgba(148, 163, 184, 0.18);
+      --text: #e2e8f0;
+      --muted: #9fb2c9;
+      --accent: #38bdf8;
+      --accent-soft: rgba(56, 189, 248, 0.14);
+      --code: #0b1220;
+    }}
+    * {{
+      box-sizing: border-box;
+    }}
+    body {{
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", sans-serif;
+      background:
+        radial-gradient(circle at top right, rgba(14, 165, 233, 0.18), transparent 30%),
+        linear-gradient(180deg, #09111f 0%, #0b1220 100%);
+      color: var(--text);
+      line-height: 1.75;
+    }}
+    a {{
+      color: #7dd3fc;
+      text-decoration: none;
+    }}
+    a:hover {{
+      text-decoration: underline;
+    }}
+    code {{
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid rgba(148, 163, 184, 0.15);
+      border-radius: 8px;
+      padding: 0.12rem 0.4rem;
+      font-size: 0.92em;
+    }}
+    pre {{
+      margin: 1.2rem 0;
+      padding: 1rem 1.15rem;
+      overflow: auto;
+      background: var(--code);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    }}
+    pre code {{
+      background: transparent;
+      border: 0;
+      padding: 0;
+      border-radius: 0;
+      display: block;
+      color: #dbeafe;
+    }}
+    hr {{
+      border: 0;
+      border-top: 1px solid var(--line);
+      margin: 2rem 0;
+    }}
+    blockquote {{
+      margin: 1.2rem 0;
+      padding: 0.9rem 1rem;
+      border-left: 4px solid var(--accent);
+      background: rgba(15, 23, 42, 0.65);
+      color: #d5e5f6;
+      border-radius: 0 14px 14px 0;
+    }}
+    img {{
+      display: block;
+      width: 100%;
+      max-width: 100%;
+      border-radius: 20px;
+      border: 1px solid var(--line);
+      box-shadow: 0 22px 60px rgba(2, 6, 23, 0.48);
+    }}
+    figure {{
+      margin: 1.6rem 0 2rem;
+    }}
+    figcaption {{
+      margin-top: 0.75rem;
+      color: var(--muted);
+      font-size: 0.92rem;
+      text-align: center;
+    }}
+    ul, ol {{
+      padding-left: 1.4rem;
+      margin: 1rem 0;
+    }}
+    li + li {{
+      margin-top: 0.4rem;
+    }}
+    .page {{
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 32px 24px 48px;
+    }}
+    .hero {{
+      padding: 28px;
+      border-radius: 28px;
+      border: 1px solid var(--line);
+      background:
+        linear-gradient(135deg, rgba(56, 189, 248, 0.13), rgba(37, 99, 235, 0.04)),
+        var(--panel);
+      box-shadow: 0 30px 80px rgba(2, 6, 23, 0.35);
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      align-items: flex-start;
+      margin-bottom: 24px;
+    }}
+    .hero h1 {{
+      margin: 0 0 0.75rem;
+      font-size: clamp(2rem, 3vw, 2.8rem);
+      line-height: 1.15;
+    }}
+    .hero p {{
+      margin: 0;
+      color: var(--muted);
+      max-width: 760px;
+    }}
+    .hero-actions {{
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }}
+    .hero-actions a {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 12px;
+      background: var(--accent-soft);
+      border: 1px solid rgba(125, 211, 252, 0.18);
+      color: #dff4ff;
+      font-weight: 600;
+      white-space: nowrap;
+    }}
+    .layout {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 280px;
+      gap: 24px;
+      align-items: start;
+    }}
+    .content {{
+      padding: 28px 32px;
+      border-radius: 28px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      box-shadow: 0 20px 50px rgba(2, 6, 23, 0.26);
+    }}
+    .content h1:first-child {{
+      margin-top: 0;
+    }}
+    .content h1, .content h2, .content h3, .content h4 {{
+      scroll-margin-top: 88px;
+      line-height: 1.25;
+    }}
+    .content h2 {{
+      margin-top: 2.4rem;
+      margin-bottom: 0.8rem;
+      font-size: 1.55rem;
+      padding-bottom: 0.55rem;
+      border-bottom: 1px solid var(--line);
+    }}
+    .content h3 {{
+      margin-top: 1.7rem;
+      margin-bottom: 0.45rem;
+      font-size: 1.18rem;
+    }}
+    .toc {{
+      position: sticky;
+      top: 24px;
+      padding: 20px;
+      border-radius: 24px;
+      border: 1px solid var(--line);
+      background: rgba(8, 15, 28, 0.78);
+      backdrop-filter: blur(16px);
+    }}
+    .toc h2 {{
+      margin: 0 0 0.8rem;
+      font-size: 1rem;
+    }}
+    .toc-item {{
+      display: block;
+      padding: 8px 10px;
+      border-radius: 10px;
+      color: var(--muted);
+      font-size: 0.94rem;
+    }}
+    .toc-item:hover {{
+      background: rgba(56, 189, 248, 0.08);
+      color: var(--text);
+      text-decoration: none;
+    }}
+    .toc-item.level-3 {{
+      padding-left: 18px;
+      font-size: 0.88rem;
+    }}
+    .toc-note {{
+      margin-top: 1rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.86rem;
+    }}
+    @media (max-width: 980px) {{
+      .layout {{
+        grid-template-columns: 1fr;
+      }}
+      .toc {{
+        position: static;
+      }}
+      .content {{
+        padding: 22px 20px;
+      }}
+      .hero {{
+        flex-direction: column;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="page">
+    <section class="hero">
+      <div>
+        <h1>{page_title_html}</h1>
+        <p>这份文档是当前交付版本的唯一说明入口。前端只提供只读链接，不复制文案，避免系统行为与说明文档再次漂移。</p>
+      </div>
+      <div class="hero-actions">
+        <a href="/dashboard/">打开仪表盘</a>
+        <a href="/docs/file/README.md" target="_blank" rel="noreferrer">查看原始 Markdown</a>
+      </div>
+    </section>
+    <div class="layout">
+      <main class="content">{''.join(body_parts)}</main>
+      <aside class="toc">
+        <h2>目录</h2>
+        {toc_html or '<span class="toc-note">当前文档暂无可索引章节。</span>'}
+        <div class="toc-note">
+          当前应用版本：v{APP_RELEASE_VERSION}<br />
+          入口：<code>/dashboard/</code><br />
+          文档：<code>/docs/readme</code>
+        </div>
+      </aside>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
+def _resolve_docs_file(relative_path: str) -> Optional[Path]:
+    normalized = os.path.normpath(str(relative_path or "")).replace("\\", "/").lstrip("/")
+    if not normalized:
+        return None
+
+    readme_path = (APP_ROOT / "README.md").resolve()
+    if normalized == "README.md":
+        return readme_path if readme_path.is_file() else None
+
+    candidate = (APP_ROOT / normalized).resolve()
+    allowed_roots = [
+        (APP_ROOT / "docs" / "assets").resolve(),
+    ]
+    for root in allowed_roots:
+        root_str = str(root)
+        candidate_str = str(candidate)
+        if candidate.is_file() and (
+            candidate == root or candidate_str.startswith(root_str + os.sep)
+        ):
+            return candidate
+    return None
 _analysis_log_lock = threading.Lock()
 _active_analysis_log_paths: Dict[str, str] = {}
 _last_analysis_log_paths: Dict[str, str] = {}
@@ -684,7 +1168,7 @@ def _sync_analysis_state_with_active_output(force_reload: bool = False) -> bool:
     else:
         _sync_analysis_log_paths_with_output(target_output_dir, {})
 
-    analysis_state.results = results_data
+    analysis_state.results = _normalize_results_contract(results_data)
     if not analysis_state.end_time:
         analysis_state.end_time = datetime.now()
     analysis_state.update(
@@ -960,6 +1444,8 @@ def _save_external_report_caches(
         "vehicleData": external_data.get("p1", {}).get("vehicle_data", {}),
         "wealthProductData": external_data.get("p1", {}).get("wealth_product_data", {}),
         "securitiesData": external_data.get("p1", {}).get("securities_data", {}),
+        "bankAccountInfo": external_data.get("p0", {}).get("bank_account_info", {}),
+        "taxData": external_data.get("p0", {}).get("tax_data", {}),
         "creditData": external_data.get("p0", {}).get("credit_data", {}),
         "amlData": external_data.get("p0", {}).get("aml_data", {}),
         "insuranceData": external_data.get("p2", {}).get("insurance_data", {}),
@@ -1394,6 +1880,11 @@ def serialize_profiles(profiles: Dict) -> Dict:
             third_party_total = fund_flow.get("third_party_income", 0) + fund_flow.get(
                 "third_party_expense", 0
             )
+            wealth_total_amount = (
+                wealth_mgmt.get("wealth_purchase", 0)
+                + wealth_mgmt.get("wealth_redemption", 0)
+                + wealth_mgmt.get("wealth_income", 0)
+            )
             max_transaction = _calculate_profile_max_transaction(profile_dict)
 
             # 【2026-02-12 关键改进】保留完整的原始数据，供报告生成使用
@@ -1423,7 +1914,8 @@ def serialize_profiles(profiles: Dict) -> Dict:
                 # 将 cash_transactions 提升到顶层字段，以便前端直接访问
                 "cashTransactions": fund_flow.get("cash_transactions", []),
                 "thirdPartyTotal": third_party_total,
-                "wealthTotal": wealth_mgmt.get("total_transactions", 0),
+                "wealthTotal": wealth_total_amount,
+                "wealthTransactionCount": wealth_mgmt.get("total_transactions", 0),
                 "maxTransaction": max_transaction,
                 "salaryRatio": summary.get("salary_ratio", 0),
                 # 【修复】保留房产/车辆/理财等资产数据，供报告生成使用
@@ -1490,11 +1982,120 @@ def serialize_profiles(profiles: Dict) -> Dict:
                 "cashTotal": 0,
                 "thirdPartyTotal": 0,
                 "wealthTotal": 0,
+                "wealthTransactionCount": 0,
                 "maxTransaction": 0,
                 "salaryRatio": 0,
                 "_error": str(e),
             }
     return result
+
+
+def _safe_profile_amount(value: Any) -> float:
+    """安全转换画像金额字段，异常值统一回落为 0。"""
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if math.isfinite(number) else 0.0
+
+
+def _build_profile_excluded_breakdown(summary: Dict[str, Any]) -> Dict[str, float]:
+    """
+    从旧版 summary.offset_detail 反推出前端需要的 excluded_breakdown。
+
+    旧缓存里很多主体只有 offset_detail，没有 excluded_breakdown。
+    为了让真实收入剔除明细在前端稳定展示，这里统一补齐兼容结构。
+    """
+    if not isinstance(summary, dict):
+        return {}
+
+    existing = summary.get("excluded_breakdown")
+    if isinstance(existing, dict) and existing:
+        return existing
+
+    offset_detail = summary.get("offset_detail")
+    if not isinstance(offset_detail, dict):
+        return {}
+
+    wealth_redemption = (
+        _safe_profile_amount(offset_detail.get("wealth_principal"))
+        + _safe_profile_amount(offset_detail.get("wealth_historical"))
+        + _safe_profile_amount(offset_detail.get("deposit_redemption"))
+    )
+
+    derived = {
+        "self_transfer": _safe_profile_amount(offset_detail.get("self_transfer")),
+        "wealth_redemption": wealth_redemption,
+        "bank_product_adjustment": _safe_profile_amount(
+            offset_detail.get("bank_product_adjustment")
+        ),
+        "business_reimbursement": _safe_profile_amount(
+            offset_detail.get("business_reimbursement")
+        ),
+        "family_transfer": _safe_profile_amount(offset_detail.get("family_transfer_in")),
+        "refund": _safe_profile_amount(offset_detail.get("refund")),
+        "installment_adjustment": _safe_profile_amount(
+            offset_detail.get("installment_adjustment")
+        ),
+        "loan": _safe_profile_amount(offset_detail.get("loan")),
+    }
+
+    return {key: value for key, value in derived.items() if value > 0}
+
+
+def _normalize_profile_contract(profile: Any) -> Any:
+    """
+    兼容旧版 profiles.json 字段语义。
+
+    重点修复：
+    1. wealthTotal 旧值曾保存为“笔数”，新版必须统一为“金额”
+    2. wealthTransactionCount 需要从 wealth_management 反补
+    3. excluded_breakdown 需要从旧版 offset_detail 推导
+    """
+    if not isinstance(profile, dict):
+        return profile
+
+    normalized = dict(profile)
+
+    wealth_mgmt = normalized.get("wealth_management")
+    if isinstance(wealth_mgmt, dict):
+        wealth_total_amount = (
+            _safe_profile_amount(wealth_mgmt.get("wealth_purchase"))
+            + _safe_profile_amount(wealth_mgmt.get("wealth_redemption"))
+            + _safe_profile_amount(wealth_mgmt.get("wealth_income"))
+        )
+        if wealth_total_amount > 0:
+            normalized["wealthTotal"] = wealth_total_amount
+
+        wealth_tx_count = wealth_mgmt.get("total_transactions")
+        if wealth_tx_count is not None:
+            normalized["wealthTransactionCount"] = wealth_tx_count
+
+    summary = normalized.get("summary")
+    if isinstance(summary, dict):
+        summary_copy = dict(summary)
+        derived_breakdown = _build_profile_excluded_breakdown(summary_copy)
+        if derived_breakdown:
+            summary_copy["excluded_breakdown"] = derived_breakdown
+        normalized["summary"] = summary_copy
+
+    return normalized
+
+
+def _normalize_results_contract(results_data: Any) -> Any:
+    """统一修正缓存恢复后的结果契约，避免旧缓存污染当前接口。"""
+    if not isinstance(results_data, dict):
+        return results_data
+
+    normalized = dict(results_data)
+    profiles = normalized.get("profiles")
+    if isinstance(profiles, dict):
+        normalized["profiles"] = {
+            name: _normalize_profile_contract(profile)
+            for name, profile in profiles.items()
+        }
+
+    return normalized
 
 
 def _pick_first_existing_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
@@ -3186,6 +3787,15 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
             logger.warning(f"    ✗ 银行账户信息提取失败: {e}")
             external_data["p0"]["bank_account_info"] = {}
 
+        # P0.6: 国税登记及纳税信息
+        try:
+            tax_data = tax_info_extractor.extract_tax_data(data_dir)
+            external_data["p0"]["tax_data"] = tax_data
+            logger.info(f"    ✓ 税务数据: {len(tax_data)} 个主体")
+        except Exception as e:
+            logger.warning(f"    ✗ 税务数据提取失败: {e}")
+            external_data["p0"]["tax_data"] = {}
+
         # ========== P1: 资产数据 ==========
         logger.info("  [P1] 提取资产数据...")
 
@@ -3435,15 +4045,59 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                     profile["credit_info"] = external_data["p0"]["credit_data"][entity]
 
                 # P0.5: 银行账户信息补充
-                if entity in external_data["p0"].get("bank_account_info", {}):
+                bank_account_info_map = external_data["p0"].get("bank_account_info", {})
+                bank_account_subject = None
+                if entity_id and entity_id in bank_account_info_map:
+                    bank_account_subject = bank_account_info_map.get(entity_id)
+                elif entity in bank_account_info_map:
+                    bank_account_subject = bank_account_info_map.get(entity)
+                if isinstance(bank_account_subject, dict):
                     existing = profile.get("bank_accounts_official", [])
                     existing_nums = {a.get("account_number") for a in existing}
-                    for acc in external_data["p0"]["bank_account_info"][entity].get(
-                        "accounts", []
-                    ):
+                    for acc in bank_account_subject.get("accounts", []):
                         if acc.get("account_number") not in existing_nums:
                             existing.append(acc)
                     profile["bank_accounts_official"] = existing
+
+                # P0.6: 税务数据补充
+                tax_data_map = external_data["p0"].get("tax_data", {})
+                tax_subject = None
+                if entity_id and entity_id in tax_data_map:
+                    tax_subject = tax_data_map.get(entity_id)
+                elif entity in tax_data_map:
+                    tax_subject = tax_data_map.get(entity)
+                if isinstance(tax_subject, dict):
+                    existing_tax_records = profile.get("tax_records", []) or []
+                    existing_tax_keys = {
+                        (
+                            str(record.get("period_start") or ""),
+                            str(record.get("period_end") or ""),
+                            str(record.get("tax_name") or record.get("税种名称") or ""),
+                            round(float(record.get("amount", record.get("应纳税额", 0)) or 0), 2),
+                            str(record.get("source_file") or ""),
+                        )
+                        for record in existing_tax_records
+                        if isinstance(record, dict)
+                    }
+                    for record in tax_subject.get("tax_records", []) or []:
+                        if not isinstance(record, dict):
+                            continue
+                        record_key = (
+                            str(record.get("period_start") or ""),
+                            str(record.get("period_end") or ""),
+                            str(record.get("tax_name") or record.get("税种名称") or ""),
+                            round(float(record.get("amount", record.get("应纳税额", 0)) or 0), 2),
+                            str(record.get("source_file") or ""),
+                        )
+                        if record_key in existing_tax_keys:
+                            continue
+                        existing_tax_records.append(record)
+                        existing_tax_keys.add(record_key)
+                    profile["tax_records"] = existing_tax_records
+                    if tax_subject.get("registration") and not profile.get("tax_registration"):
+                        profile["tax_registration"] = tax_subject.get("registration", {})
+                    if tax_subject.get("employers"):
+                        profile["tax_employers"] = tax_subject.get("employers", [])
 
                 # 5. 🔄 融合外部数据 (P1 - 资产)
                 # P1.1: 车辆 (使用身份证号映射)
@@ -4494,7 +5148,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="资金穿透审计系统 API (重构版)",
     description="数据流向优化: 外部数据提取 → 融合画像 → 全面分析 → 疑点检测",
-    version="3.2.0",
+    version=APP_RELEASE_VERSION,
     lifespan=lifespan,
 )
 
@@ -4512,11 +5166,12 @@ app.add_middleware(
 async def root():
     return {
         "name": "资金穿透审计系统 API (重构版)",
-        "version": "3.2.0",
+        "version": APP_RELEASE_VERSION,
         "status": "running",
         "dataFlow": "external_data_first",
         "refactored": True,
         "dashboardUrl": "/dashboard/",
+        "readmeUrl": "/docs/readme",
         "deliveryTarget": "windows-offline-one-folder",
     }
 
@@ -4539,6 +5194,32 @@ async def serve_dashboard(requested_path: str = ""):
         raise HTTPException(status_code=404, detail="Dashboard 资源不存在")
 
     return FileResponse(str(asset_path))
+
+
+@app.get("/docs/readme", include_in_schema=False)
+async def serve_delivery_readme():
+    readme_path = (APP_ROOT / "README.md").resolve()
+    if not readme_path.exists():
+        raise HTTPException(status_code=404, detail="README.md 不存在")
+
+    try:
+        readme_text = readme_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"读取 README 失败: {exc}") from exc
+
+    html_content = _render_markdown_document(
+        readme_text,
+        page_title=f"穿云审计交付文档 v{APP_RELEASE_VERSION}",
+    )
+    return Response(content=html_content, media_type="text/html; charset=utf-8")
+
+
+@app.get("/docs/file/{relative_path:path}", include_in_schema=False)
+async def serve_delivery_doc_file(relative_path: str):
+    resolved = _resolve_docs_file(relative_path)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="文档资源不存在")
+    return FileResponse(str(resolved))
 
 
 @app.get("/api/status")
@@ -4623,7 +5304,7 @@ async def start_analysis(config: AnalysisConfig, background_tasks: BackgroundTas
         error=None,
     )
     background_tasks.add_task(run_analysis_refactored, config)
-    return {"message": "分析任务已启动 (重构版)", "version": "3.2.0"}
+    return {"message": "分析任务已启动 (重构版)", "version": APP_RELEASE_VERSION}
 
 
 @app.post("/api/analysis/stop")
@@ -4652,7 +5333,9 @@ async def get_results():
 
         # 如果内存中有结果，直接返回
         if analysis_state.status == "completed" and analysis_state.results:
-            results_data = serialize_for_json(analysis_state.results)
+            results_data = serialize_for_json(
+                _normalize_results_contract(analysis_state.results)
+            )
             results_data = to_camel_case(results_data)
             results_data = serialize_for_json(results_data)
             if isinstance(results_data, dict):
