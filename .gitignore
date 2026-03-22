@@ -10,7 +10,9 @@ env/
 node_modules/
 npm-debug.log
 yarn-error.log
-dist/
+dist/*
+!dist/fpas-offline/
+!dist/fpas-offline/**
 build/
 
 # --- System & IDE ---
