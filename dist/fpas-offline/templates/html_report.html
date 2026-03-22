@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{REPORT_TITLE}}</title>
+    <style>
+        /* ========== 基础样式 ========== */
+        body {
+            font-family: 'SimSun', '宋体', sans-serif;
+            line-height: 1.8;
+            color: #333;
+            margin: 0 auto;
+            padding: 20px;
+            max-width: 900px;
+            background-color: #f9f9f9;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            border-radius: 8px;
+        }
+        
+        .page {
+            padding: 20px;
+            background-color: #fff;
+            border-radius: 5px;
+        }
+        
+        /* ========== 标题样式 ========== */
+        h1 {
+            font-size: 28px;
+            text-align: center;
+            margin-bottom: 30px;
+            color: #2c3e50;
+        }
+        
+        h2 {
+            font-size: 24px;
+            color: #2c3e50;
+            border-bottom: 2px solid #eee;
+            padding-bottom: 10px;
+            margin-top: 40px;
+        }
+        
+        h3 {
+            font-size: 20px;
+            color: #34495e;
+            margin-top: 30px;
+        }
+        
+        /* ========== 段落样式 ========== */
+        p {
+            margin-bottom: 15px;
+            text-indent: 2em;
+        }
+        
+        strong {
+            color: #2c3e50;
+        }
+        
+        /* ========== 表格样式 ========== */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            font-size: 14px;
+        }
+        
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+        }
+        
+        th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }
+        
+        /* ========== 段落标题 ========== */
+        .section-title {
+            font-size: 22px;
+            font-weight: bold;
+            margin-top: 30px;
+            margin-bottom: 15px;
+            color: #2c3e50;
+            border-bottom: 1px solid #ccc;
+            padding-bottom: 5px;
+        }
+        
+        .subsection-title {
+            font-size: 18px;
+            font-weight: bold;
+            margin-top: 20px;
+            margin-bottom: 10px;
+            color: #34495e;
+        }
+        
+        /* ========== 高亮样式 ========== */
+        .highlight {
+            color: red;
+            background-color: #fff0f0;
+            padding: 2px 5px;
+            border-radius: 3px;
+        }
+        
+        .highlight-yellow {
+            background-color: #fffde7;
+            padding: 2px 5px;
+            border-radius: 3px;
+        }
+        
+        /* ========== 人员卡片 ========== */
+        .person-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+        
+        .person-card h3 {
+            color: white;
+            margin-top: 0;
+            border-bottom: 1px solid rgba(255,255,255,0.3);
+            padding-bottom: 10px;
+        }
+        
+        .person-card .stat {
+            display: inline-block;
+            margin-right: 30px;
+            margin-bottom: 10px;
+        }
+        
+        .person-card .stat-label {
+            font-size: 12px;
+            opacity: 0.8;
+        }
+        
+        .person-card .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+        }
+        
+        /* ========== 账户表格 ========== */
+        .account-table {
+            width: 100%;
+            margin: 15px 0;
+        }
+        
+        .account-table th {
+            background-color: #3498db;
+            color: white;
+        }
+        
+        .account-table tr:nth-child(even) {
+            background-color: #f8f9fa;
+        }
+        
+        .account-table tr:hover {
+            background-color: #e8f4f8;
+        }
+        
+        /* ========== 风险标签 ========== */
+        .risk-high {
+            background-color: #e74c3c;
+            color: white;
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-size: 12px;
+        }
+        
+        .risk-medium {
+            background-color: #f39c12;
+            color: white;
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-size: 12px;
+        }
+        
+        .risk-low {
+            background-color: #27ae60;
+            color: white;
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-size: 12px;
+        }
+        
+        /* ========== 页脚 ========== */
+        .footer {
+            text-align: center;
+            margin-top: 50px;
+            font-size: 14px;
+            color: #777;
+            border-top: 1px solid #eee;
+            padding-top: 20px;
+        }
+        
+        /* ========== 打印样式 ========== */
+        @media print {
+            body {
+                background-color: white;
+                box-shadow: none;
+            }
+            .page {
+                padding: 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+        {{CONTENT}}
+    </div>
+    <div class="footer">
+        <p>本报告由资金穿透与关联排查系统自动生成</p>
+        <p>生成时间: {{GENERATE_TIME}}</p>
+    </div>
+</body>
+</html>

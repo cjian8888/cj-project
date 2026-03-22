@@ -1,0 +1,113 @@
+version: "1.0.0"
+updated_at: "2026-02-22"
+source: "公开信息 + 中国理财网"
+
+# 理财子公司内部代码前缀 - 各理财子公司产品代码的内部编码规则
+internal_prefixes:
+  光大理财:
+    prefixes: [EW, EB]
+    examples: [EW0345, EW1012, EW761D, EB4718]
+    description: 光大理财产品代码前缀，EW系列为主流产品，EB系列为特定产品线
+    
+  交银理财:
+    prefixes: ["581", JY]
+    examples: [5811221110, 5811221036, JY012205]
+    description: 交银理财产品代码前缀，581开头为数字编码体系，JY开头为字母编码体系
+  
+  南银理财:
+    prefixes: [ZZ]
+    examples: [ZZ700322201887]
+    description: 南银理财产品代码前缀，ZZ开头为南银理财内部编码
+  
+  信银理财:
+    prefixes: [AF, BF]
+    examples: [AF212235, BF255490]
+    description: 信银理财产品代码前缀，AF/BF为不同产品系列标识
+  
+  兴银理财:
+    prefixes: ["662"]
+    examples: [662301240440]
+    description: 兴银理财产品代码前缀，662开头为兴银理财内部编码
+  
+  工银理财:
+    prefixes: ["19", "20", "21"]
+    examples: [19GS2801, 20GS3015, 21GS4520]
+    description: 工银理财产品代码前缀，数字开头代表不同年份或系列
+  
+  农银理财:
+    prefixes: [NY]
+    examples: [NY010001, NY020045]
+    description: 农银理财产品代码前缀，NY开头为农银理财内部编码
+  
+  中银理财:
+    prefixes: [ZY, AM]
+    examples: [ZY001234, AM567890]
+    description: 中银理财产品代码前缀，ZY和AM为不同产品系列
+  
+  建信理财:
+    prefixes: [JX]
+    examples: [JX001234, JX567890]
+    description: 建信理财产品代码前缀，JX开头为建信理财内部编码
+  
+  招银理财:
+    prefixes: [ZY, ZB]
+    examples: [ZY123456, ZB789012]
+    description: 招银理财产品代码前缀，ZY和ZB为不同产品系列标识
+  
+  民生理财:
+    prefixes: [MS]
+    examples: [MS001234, MS567890]
+    description: 民生理财产品代码前缀，MS开头为民生理财内部编码
+
+# 全国银行业理财信息登记系统编码 - 理财产品在国家理财登记系统的统一编码
+registration_codes:
+  format: "前缀(4位) + 年份(2-4位) + 序号(6位)"
+  prefixes:
+    Z700:
+      description: 新版理财产品登记编码，自2018年起使用，覆盖全国银行业理财产品
+      examples: [Z7002621000613, Z7002623000843, Z7002724001234]
+      start_year: 2018
+      
+    C103:
+      description: 早期理财产品登记编码，部分历史产品仍在使用
+      examples: [C1030317000163, C1030318000234]
+      start_year: 2014
+      end_year: 2018
+      
+    C106:
+      description: 理财产品登记编码，主要覆盖2016-2018年间发行的产品
+      examples: [C1067112000211, C1067113000345]
+      start_year: 2016
+      end_year: 2018
+      
+    C107:
+      description: 外资银行理财产品登记编码前缀
+      examples: [C1077114000123]
+      applicable_to: 外资银行
+      
+    C108:
+      description: 城商行理财产品登记编码前缀
+      examples: [C1087115000456]
+      applicable_to: 城市商业银行
+      
+    C109:
+      description: 农商行理财产品登记编码前缀
+      examples: [C1097116000789]
+      applicable_to: 农村商业银行
+
+# 特殊编码规则
+special_formats:
+  私募基金:
+    format: "SL+6位数字"
+    examples: [SL123456, SL789012]
+    description: 私募基金产品编码格式
+    
+  信托计划:
+    format: "字母+数字组合"
+    examples: [XT2024A001, TJ2024B002]
+    description: 信托计划产品编码，各信托公司格式略有差异
+    
+  保险资管:
+    format: "BX+6位数字"
+    examples: [BX123456, BX789012]
+    description: 保险资产管理产品编码格式

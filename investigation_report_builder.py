@@ -15,6 +15,8 @@
 日期: 2026-01-24
 """
 
+from __future__ import annotations
+
 import os
 import json
 import re

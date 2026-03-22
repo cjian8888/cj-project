@@ -1,0 +1,128 @@
+{% extends "base_report.html" %}
+
+{% block content %}
+<h2 class="section-title">三、发现的可疑交易</h2>
+
+{% if modules.suspicious_transactions and modules.suspicious_transactions.data %}
+
+<p>
+    <strong>筛查结论：</strong>{{ modules.suspicious_transactions.reasoning }}
+</p>
+
+<p>
+    共发现可疑交易 <strong>{{ modules.suspicious_transactions.total_count }}</strong> 笔，
+    其中高风险 <strong class="risk-high">{{ modules.suspicious_transactions.high_risk_count }}</strong> 笔，
+    中风险 <strong class="risk-medium">{{ modules.suspicious_transactions.medium_risk_count }}</strong> 笔。
+</p>
+
+<h3 class="subsection-title">3.1 高风险交易明细</h3>
+
+<table>
+    <thead>
+        <tr>
+            <th>序号</th>
+            <th>日期</th>
+            <th>人员/公司</th>
+            <th>交易对手</th>
+            <th>金额(元)</th>
+            <th>方向</th>
+            <th>风险原因</th>
+            <th>证据行号</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for tx in modules.suspicious_transactions.data[:20] %}
+        <tr class="risk-{{ tx.risk_level }}">
+            <td>{{ loop.index }}</td>
+            <td>{{ tx.date[:10] if tx.date else '-' }}</td>
+            <td>{{ tx.entity }}</td>
+            <td>{{ tx.counterparty[:15] }}{% if tx.counterparty|length > 15 %}...{% endif %}</td>
+            <td>{{ "%.2f"|format(tx.amount) }}</td>
+            <td>{{ '收入' if tx.direction == 'income' or tx.direction == 'receive' else '支出' }}</td>
+            <td>{{ tx.risk_reason[:30] }}{% if tx.risk_reason|length > 30 %}...{% endif %}</td>
+            <td>
+                {% if tx.evidence_refs and tx.evidence_refs.source_row_index %}
+                <span class="evidence-ref">行{{ tx.evidence_refs.source_row_index }}</span>
+                {% else %}
+                -
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% if modules.suspicious_transactions.data|length > 20 %}
+<p style="text-align: center; color: #666;">
+    ... 共 {{ modules.suspicious_transactions.total_count }} 笔，仅显示前 20 笔
+</p>
+{% endif %}
+
+{% else %}
+<p>未发现可疑交易。</p>
+{% endif %}
+
+<!-- 资金闭环 -->
+{% if modules.fund_cycles and modules.fund_cycles.data %}
+<h3 class="subsection-title">3.2 资金闭环（利益回流）</h3>
+
+<p>
+    <strong>审计说明：</strong>{{ modules.fund_cycles.reasoning }}
+</p>
+
+<ol>
+    {% for cycle in modules.fund_cycles.data[:10] %}
+    <li>
+        <strong>{{ cycle.cycle_str }}</strong>
+        <span style="color: #666;">（{{ cycle.length }} 节点）</span>
+    </li>
+    {% endfor %}
+</ol>
+
+{% if modules.fund_cycles.data|length > 10 %}
+<p style="color: #666;">... 共 {{ modules.fund_cycles.total_count }} 个资金闭环</p>
+{% endif %}
+{% endif %}
+
+<!-- 现金时空伴随 -->
+{% if modules.cash_collisions and modules.cash_collisions.data %}
+<h3 class="subsection-title">3.3 现金时空伴随</h3>
+
+<p>
+    <strong>审计说明：</strong>{{ modules.cash_collisions.reasoning }}
+</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>取现方</th>
+            <th>取现日期</th>
+            <th>取现金额</th>
+            <th>存现方</th>
+            <th>存现日期</th>
+            <th>存现金额</th>
+            <th>时间差</th>
+            <th>风险等级</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for cc in modules.cash_collisions.data[:10] %}
+        <tr class="risk-{{ cc.risk_level }}">
+            <td>{{ cc.withdrawal_entity }}</td>
+            <td>{{ cc.withdrawal_date[:10] if cc.withdrawal_date else '-' }}</td>
+            <td>{{ "%.2f"|format(cc.withdrawal_amount) }}</td>
+            <td>{{ cc.deposit_entity }}</td>
+            <td>{{ cc.deposit_date[:10] if cc.deposit_date else '-' }}</td>
+            <td>{{ "%.2f"|format(cc.deposit_amount) }}</td>
+            <td>{{ "%.1f"|format(cc.time_diff_hours) }} 小时</td>
+            <td>{{ '高风险' if cc.risk_level == 'high' else ('中风险' if cc.risk_level == 'medium' else '低风险') }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% if modules.cash_collisions.data|length > 10 %}
+<p style="color: #666;">... 共 {{ modules.cash_collisions.total_count }} 条现金时空伴随记录</p>
+{% endif %}
+{% endif %}
+{% endblock %}

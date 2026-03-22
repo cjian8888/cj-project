@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+
+{% block title %}{{ report.meta.doc_number }} - 信息查询结果分析报告{% endblock %}
+
+{% block content %}
+{% set enabled_sections = report.meta.generation_options.sections if report.meta and report.meta.generation_options and report.meta.generation_options.sections else [] %}
+{% set show_summary = enabled_sections|length == 0 or 'summary' in enabled_sections %}
+{% set show_assets = enabled_sections|length == 0 or 'assets' in enabled_sections %}
+{% set show_risks = enabled_sections|length == 0 or 'risks' in enabled_sections %}
+{% set title_subject = report.get('_title_subject', '相关人员') %}
+{% set wallet_summary = report.meta.wallet_data_summary if report.meta and report.meta.wallet_data_summary else {} %}
+{% set wallet_available = report.meta.wallet_data_available if report.meta else false %}
+{% set semantic = report.report_package if report.report_package else {} %}
+{% set coverage = semantic.coverage if semantic and semantic.coverage else {} %}
+{% set main_report_view = semantic.main_report_view if semantic and semantic.main_report_view else {} %}
+{% set semantic_conclusion = report.get('_semantic_conclusion', {}) %}
+{% set semantic_summary = main_report_view.summary_narrative if main_report_view and main_report_view.summary_narrative else (semantic_conclusion.get('summary_narrative', '') if semantic_conclusion else '') %}
+{% set priority_board = semantic.priority_board if semantic and semantic.priority_board else [] %}
+{% set appendix_views = semantic.appendix_views if semantic and semantic.appendix_views else {} %}
+{% set appendix_index = appendix_views['appendix_index'] if appendix_views and appendix_views['appendix_index'] else {} %}
+{% set appendix_items = appendix_index['items'] if appendix_index and appendix_index['items'] else [] %}
+{% set appendix_render_sections = report.get('_semantic_appendix_render_sections', []) %}
+{% set company_sections_render = report.get('_company_render_sections', report.company_sections if report.company_sections else []) %}
+{# 报告标题 #}
+<div class="report-title">关于{{ title_subject }}等信息查询结果分析报告</div>
+
+{# 报告开头说明 #}
+{% if show_summary %}
+<p class="report-intro">
+    {{ report.preface.case_background }}
+</p>
+
+{# ==================== 数据来源及完整性声明 ==================== #}
+<div style="background: #f8f9fa; border-left: 4px solid #007bff; padding: 15px; margin: 20px 0; border-radius: 4px;">
+    <h3 style="margin-top: 0; color: #007bff;">数据来源及完整性声明</h3>
+    
+    <h4 style="margin: 15px 0 10px 0;">【数据来源】</h4>
+    <ul style="margin: 0; padding-left: 20px; line-height: 1.8;">
+        <li>银行流水: 由各商业银行提供的账户交易明细{% if coverage.bank_transaction_count %}（当前纳入{{ coverage.bank_transaction_count }}条交易记录）{% endif %}</li>
+        <li>房产信息: 不动产登记中心查询回执</li>
+        <li>车辆信息: 车辆管理所查询回执</li>
+        <li>理财信息: 银行理财账户对账单</li>
+        {% if wallet_available %}
+        <li>电子钱包补充数据: 已结构化接入微信、支付宝及财付通，覆盖{{ wallet_summary.subjectCount or 0 }}个主体</li>
+        {% endif %}
+    </ul>
+    
+    <h4 style="margin: 15px 0 10px 0;">【数据完整性】</h4>
+    <ul style="margin: 0; padding-left: 20px; line-height: 1.8;">
+        <li>已调取被核查人名下主要银行账户流水</li>
+        <li>房产信息来源于不动产登记查询回执</li>
+        <li>车辆信息来源于车辆管理所查询回执</li>
+        {% if wallet_available %}
+        <li>已补充第三方支付明细摘要: 支付宝{{ wallet_summary.alipayTransactionCount or 0 }}笔、财付通{{ wallet_summary.tenpayTransactionCount or 0 }}笔、微信登录轨迹{{ wallet_summary.loginEventCount or 0 }}条</li>
+        {% endif %}
+        {% if coverage.available_external_sources %}
+        <li>统一语义层已接入来源: {{ coverage.available_external_sources | format_external_source_list }}</li>
+        {% endif %}
+    </ul>
+    
+    <h4 style="margin: 15px 0 10px 0;">【待补充数据】</h4>
+    <ul style="margin: 0; padding-left: 20px; line-height: 1.8;">
+        <li><strong style="color: #dc3545;">房产交易价格</strong>: 需调取不动产登记中心交易档案</li>
+        {% if wallet_available %}
+        <li><strong style="color: #28a745;">第三方支付</strong>: 本次已补充调取电子钱包数据，覆盖{{ wallet_summary.subjectCount or 0 }}个主体，可继续补充订单、聊天及凭证材料</li>
+        {% else %}
+        <li><strong style="color: #ffc107;">第三方支付</strong>: 建议调取微信、支付宝账户流水</li>
+        {% endif %}
+        <li><strong style="color: #ffc107;">配偶资产</strong>: 建议调取配偶银行流水及资产信息</li>
+        {% if coverage.missing_sources %}
+        <li><strong style="color: #ffc107;">仍缺数据源</strong>: {{ coverage.missing_sources | format_external_source_list }}</li>
+        {% endif %}
+    </ul>
+</div>
+
+{% if semantic_summary %}
+<div style="background: #eef4ff; border-left: 4px solid #1d39c4; padding: 15px; margin: 20px 0; border-radius: 4px;">
+    <h3 style="margin-top: 0; color: #1d39c4;">正式报告综合研判</h3>
+    <p style="margin: 0; line-height: 1.8;">{{ semantic_summary }}</p>
+</div>
+{% endif %}
+
+{% if priority_board %}
+<div style="background: #fff7e6; border-left: 4px solid #d48806; padding: 15px; margin: 20px 0; border-radius: 4px;">
+    <h3 style="margin-top: 0; color: #ad6800;">统一语义层重点对象</h3>
+    <ol style="margin: 0; padding-left: 20px; line-height: 1.8;">
+        {% for item in priority_board[:5] %}
+        <li>
+            {{ item.entity_name }}{% if item.risk_level %}（{{ item.risk_level | format_risk_label }}）{% endif %}
+            {% if item.top_reasons %}：{{ item.top_reasons | join('；') }}{% endif %}
+        </li>
+        {% endfor %}
+    </ol>
+</div>
+{% endif %}
+
+{% if appendix_items %}
+<div style="background: #eef6ff; border-left: 4px solid #2f6fab; padding: 15px; margin: 20px 0; border-radius: 4px;">
+    <h3 style="margin-top: 0; color: #204d74;">统一语义层附录摘要</h3>
+    <ol style="margin: 0; padding-left: 20px; line-height: 1.8;">
+        {% for item in appendix_items[:5] %}
+        <li>
+            {{ item.title }}
+            {% if item.summary_line %}：{{ item.summary_line }}{% endif %}
+        </li>
+        {% endfor %}
+    </ol>
+</div>
+{% endif %}
+{% endif %}
+
+
+
+{# ==================== 家庭章节循环（v4.1新结构） ==================== #}
+{% if show_assets or show_risks %}
+{% if report.family_sections %}
+{% for family in report.family_sections %}
+{% set family_num = loop.index %}
+
+{# 家庭章节标题 #}
+<h1 class="section-title">{{ ['一','二','三','四','五','六','七','八','九','十'][family_num-1] if family_num <= 10 else family_num
+        }}、{{ family.family_name }}资产收入情况及数据分析</h1>
+
+        {# 家庭汇总（如果有多个成员） #}
+        {% if family.member_count > 1 and family.family_summary %}
+        <div class="family-summary-block">
+            <p><strong>家庭概况：</strong>{{ family.family_summary.narrative }}</p>
+            <p>家庭成员共{{ family.member_count }}人：
+                {% for member in family.family_summary.member_relations %}
+                {{ member.name }}（{{ member.relation }}）{% if not loop.last %}、{% endif %}
+                {% endfor %}
+            </p>
+            {% if family.current_analysis_members and family.anchor and family.anchor not in family.current_analysis_members %}
+            <p><strong>当前可展开分析成员：</strong>{{ family.current_analysis_members | join('、') }}。</p>
+            {% endif %}
+            {% if family.pending_members %}
+            <p><strong>待补数据成员：</strong>
+                {% for member in family.pending_members %}
+                {{ member.name }}（{{ member.relation }}）{% if not loop.last %}、{% endif %}
+                {% endfor %}
+                。上述成员已纳入家庭关系识别，但当前未见可展开的银行流水画像。
+            </p>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        {# 遍历家庭成员 #}
+        {% for person in family.member_sections %}
+        {% set unit = person %}
+        {% include 'person_section.html' %}
+        {% endfor %}
+
+        {% endfor %}
+
+        {% else %}
+        {# ==================== 兼容旧版：个人章节循环 ==================== #}
+        {% for person in report.person_sections %}
+        {% set section_num = loop.index %}
+        {# 一、XXX家庭资产收入情况及数据分析 #}
+        <h1 class="section-title">{{ ['一','二','三','四','五','六','七','八','九','十'][section_num-1] if section_num <= 10 else
+                section_num }}、{{ person.name }}家庭资产收入情况及数据分析</h1>
+
+                {% set unit = person %}
+                {% include 'person_section.html' %}
+
+                {% endfor %}
+                {% endif %}
+
+                {# ==================== 公司章节循环 ==================== #}
+                {% set company_start_num = (report.family_sections|length if report.family_sections else
+                report.person_sections|length) + 1 %}
+                {% for company in company_sections_render %}
+                {% set company_num = company_start_num + loop.index0 %}
+                <h1 class="section-title">{{ ['一','二','三','四','五','六','七','八','九','十'][company_num-1] if company_num <=
+                        10 else company_num }}、{{ company.company_name }}及相关人员查询数据分析</h1>
+
+                        {% set company_data = company %}
+                        {% include 'company_section.html' %}
+
+                        {% endfor %}
+                        {% endif %}
+
+                        {# ==================== 结论章节 ==================== #}
+                        {% if show_summary %}
+                        {% set conclusion_num = (report.family_sections|length if report.family_sections else
+                        report.person_sections|length) + company_sections_render|length + 1 %}
+                        <h1 class="section-title">{{ ['一','二','三','四','五','六','七','八','九','十'][conclusion_num-1] if
+                            conclusion_num <= 10 else conclusion_num }}、结论</h1>
+
+                                {% include 'conclusion.html' %}
+
+                                {# ==================== 下一步工作计划章节 ==================== #}
+                                {% set nextstep_num = conclusion_num + 1 %}
+                                        <h1 class="section-title">{{ ['一','二','三','四','五','六','七','八','九','十'][nextstep_num-1]
+                                            if
+                                            nextstep_num <= 10 else nextstep_num }}、下一步工作计划</h1>
+
+                                        {% include 'next_steps.html' %}
+                                        {% endif %}
+
+                                        {% for appendix in appendix_render_sections %}
+                                        {% set appendix_data = appendix %}
+                                        {% include 'appendix_section.html' %}
+                                        {% endfor %}
+
+                                        {# 报告尾部区域（可选） #}
+                                        {% if report.meta.show_footer %}
+                                        <div class="report-footer">
+                                            <p>报告生成时间：{{ report.meta.generated_at[:10] }}</p>
+                                            <p>报告编号：{{ report.meta.doc_number }}</p>
+                                        </div>
+                                        {% endif %}
+
+                                        {% endblock %}

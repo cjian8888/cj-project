@@ -1,0 +1,106 @@
+{#
+结论章节模板 - 优先读取统一语义层结论视图
+#}
+
+<p>通过对查询结果分析，发现异常情况：</p>
+
+{% set semantic = report.report_package if report.report_package else {} %}
+{% set semantic_conclusion = report.get('_semantic_conclusion', {}) %}
+{% set semantic_issues = semantic.issues if semantic and semantic.issues else [] %}
+{% set priority_board = semantic.priority_board if semantic and semantic.priority_board else [] %}
+{% set appendix_views = semantic.appendix_views if semantic and semantic.appendix_views else {} %}
+{% set company_issue_overview = appendix_views['company_issue_overview'] if appendix_views and appendix_views['company_issue_overview'] else {} %}
+{% set company_issue_items = company_issue_overview['items'] if company_issue_overview and company_issue_overview['items'] else [] %}
+{% set company_issue_summary = company_issue_overview['summary'] if company_issue_overview and company_issue_overview['summary'] else {} %}
+{% set semantic_qa_alerts = report.get('_semantic_qa_alerts', []) %}
+{% set semantic_conclusion_issues = semantic_conclusion.get('issues', []) if semantic_conclusion else [] %}
+{% set semantic_conclusion_summary = semantic_conclusion.get('summary_narrative', '') if semantic_conclusion else '' %}
+
+{% if priority_board %}
+<p><strong>优先核查对象：</strong>
+    {% for item in priority_board[:3] %}
+    {{ item.entity_name }}{% if item.risk_level %}（{{ item.risk_level | format_risk_label }}）{% endif %}{% if not loop.last %}、{% endif %}
+    {% endfor %}
+</p>
+{% endif %}
+
+{% if company_issue_items %}
+<p>
+    <strong>涉案公司问题：</strong>
+    已归集{{ company_issue_summary.companies_with_issues or company_issue_items|length }}家公司问题，
+    其中高风险公司{{ company_issue_summary.high_risk_company_count or 0 }}家。
+</p>
+<ol class="indent-list">
+    {% for item in company_issue_items[:5] %}
+    <li>
+        {{ item.entity_name }}{% if item.risk_label %}（{{ item.risk_label }}）{% endif %}
+        {% if item.role_tags %}，角色标签：{{ item.role_tags | join('、') }}{% endif %}
+        {% if item.summary %}。{{ item.summary }}{% endif %}
+        {% if item.key_issue_cards %}
+        。重点问题：
+        {% for issue in item.key_issue_cards[:2] %}
+        {{ issue.headline }}{% if not loop.last %}；{% endif %}
+        {% endfor %}
+        {% endif %}
+        {% if item.next_actions %}
+        。建议动作：{{ item.next_actions | join('；') }}
+        {% endif %}
+    </li>
+    {% endfor %}
+</ol>
+{% endif %}
+
+{% if semantic_conclusion_issues %}
+<p><strong>{% if company_issue_items %}其他重点问题{% else %}重点问题{% endif %}：</strong></p>
+<ol class="indent-list">
+    {% for issue in semantic_conclusion_issues[:10] %}
+    <li>
+        {{ issue.entity_name or issue.company_name or issue.family_name or '待核实对象' }}
+        {% if issue.category %}（{{ issue.category }}）{% endif %}：
+        {{ issue.headline or issue.narrative }}
+    </li>
+    {% endfor %}
+</ol>
+{% elif semantic_issues %}
+<p><strong>{% if company_issue_items %}其他重点问题{% else %}重点问题{% endif %}：</strong></p>
+<ol class="indent-list">
+    {% for issue in semantic_issues[:10] %}
+    {% set scope = issue.scope if issue.scope else {} %}
+    <li>
+        {{ scope.entity or scope.company or '待核实对象' }}
+        {% if issue.category %}（{{ issue.category }}）{% endif %}：
+        {{ issue.headline or issue.narrative }}
+    </li>
+    {% endfor %}
+</ol>
+{% elif report.conclusion.issues and report.conclusion.issues|length > 0 %}
+<ol class="indent-list">
+    {% for issue in report.conclusion.issues %}
+    <li>{{ issue.person }}{% if issue.issue_type %}（{{ issue.issue_type }}）{% endif %}：{{ issue.description }}</li>
+    {% endfor %}
+</ol>
+{% else %}
+<p>未发现明显异常情况。</p>
+{% endif %}
+
+{% if semantic_conclusion_summary %}
+<p>{{ semantic_conclusion_summary }}</p>
+{% elif semantic_issues and (priority_board or company_issue_items) %}
+<p>统一语义层已将问题卡、优先级排序、对象卷宗和公司问题总览汇总到同一报告包，正式报告结论优先以该语义包为准。</p>
+{% elif report.conclusion.summary_narrative %}
+<p>{{ report.conclusion.summary_narrative }}</p>
+{% endif %}
+
+{% if semantic_qa_alerts %}
+<div style="background: #fff7e6; border-left: 4px solid #d48806; padding: 15px; margin: 20px 0; border-radius: 4px;">
+    <p style="margin-top: 0;"><strong>语义层QA提示：</strong></p>
+    <ol class="indent-list" style="margin-bottom: 0;">
+        {% for alert in semantic_qa_alerts %}
+        <li>
+            {{ alert.title }}{% if alert.summary %}：{{ alert.summary }}{% endif %}
+            {% if alert.action_hint %}。建议动作：{{ alert.action_hint }}{% endif %}
+        </li>
+        {% endfor %}
+    </ol>
+</div>
+{% endif %}

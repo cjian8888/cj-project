@@ -1,1 +1,3 @@
-pyinstaller>=6.0
+# Win7 目标构建机请固定使用 Python 3.8.x，并使用 PyInstaller 5.x。
+# PyInstaller 6.x 官方运行时要求已提升到 Windows 8+，不适合作为 Win7 交付基线。
+pyinstaller==5.13.2

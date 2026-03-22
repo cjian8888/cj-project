@@ -1,0 +1,116 @@
+# 业务规则配置文件
+# 用于定义审计分析规则的阈值和参数
+# 支持运行时动态加载，无需修改代码
+
+# ==================== 资金异常规则组 ====================
+fund_anomaly:
+  # R001: 大额现金收入
+  large_cash_income:
+    enabled: true
+    threshold: 50000  # 触发阈值（元）
+    high_risk_threshold: 100000  # 高风险阈值
+    priority: high
+    description: "检测单笔或累计大额现金收入"
+    tags: ["fund", "cash", "income"]
+
+  # R002: 收支严重失衡
+  income_expense_imbalance:
+    enabled: true
+    ratio_threshold: 2.0  # 支出/收入比例阈值
+    high_risk_ratio: 5.0  # 高风险比例
+    priority: high
+    description: "检测支出远超收入的异常情况"
+    tags: ["fund", "balance"]
+
+  # R003: 短期大额资金流入
+  short_term_large_inflow:
+    enabled: true
+    threshold: 100000  # 触发阈值
+    high_risk_threshold: 500000  # 高风险阈值
+    priority: high
+    description: "检测单笔大额资金流入"
+    tags: ["fund", "income", "large"]
+
+# ==================== 交易行为规则组 ====================
+transaction_behavior:
+  # R004: 频繁小额现金交易
+  frequent_small_cash:
+    enabled: true
+    count_threshold: 20  # 触发次数
+    amount_max: 5000  # 小额定义
+    priority: medium
+    description: "检测频繁的小额现金交易"
+    tags: ["transaction", "cash", "frequency"]
+
+  # R005: 节假日大额交易
+  holiday_large_transaction:
+    enabled: true
+    amount_threshold: 50000  # 大额定义
+    high_risk_count: 3  # 高风险次数
+    priority: high
+    description: "检测节假日的大额交易"
+    tags: ["transaction", "holiday", "timing"]
+
+  # R006: 固定频率转账
+  fixed_frequency_transfer:
+    enabled: true
+    min_occurrences: 3  # 最少出现次数
+    date_tolerance: 3  # 日期容差（天）
+    amount_tolerance: 0.1  # 金额容差（比例）
+    priority: high
+    description: "检测固定频率的转账模式"
+    tags: ["transaction", "frequency", "pattern"]
+
+# ==================== 关联关系规则组 ====================
+relationship:
+  # R007: 与涉案公司直接往来
+  suspicious_company_transfer:
+    enabled: true
+    high_risk_count: 3  # 高风险公司数
+    priority: critical
+    description: "检测与涉案公司的直接资金往来"
+    tags: ["relationship", "company", "suspicious"]
+
+  # R008: 家族成员资金往来
+  family_transfer:
+    enabled: true
+    count_threshold: 5  # 触发次数
+    priority: medium
+    description: "检测与家族成员的资金往来"
+    tags: ["relationship", "family"]
+
+  # R009: 第三方中转
+  third_party_relay:
+    enabled: true
+    time_window_hours: 72  # 时间窗口
+    amount_tolerance: 0.15  # 金额容差
+    high_risk_count: 2  # 高风险链路数
+    priority: high
+    description: "检测通过第三方中转的资金链路"
+    tags: ["relationship", "relay", "hidden"]
+
+# ==================== 资产负债规则组 ====================
+asset_liability:
+  # R010: 资产收入不匹配
+  asset_income_mismatch:
+    enabled: true
+    ratio_threshold: 10  # 资产/收入比例阈值
+    high_risk_ratio: 20  # 高风险比例
+    priority: high
+    description: "检测资产与收入不匹配的情况"
+    tags: ["asset", "income", "mismatch"]
+
+  # R011: 大额负债
+  large_liability:
+    enabled: true
+    threshold: 500000  # 触发阈值
+    high_risk_threshold: 1000000  # 高风险阈值
+    priority: high
+    description: "检测大额负债情况"
+    tags: ["liability", "large"]
+
+# ==================== 全局设置 ====================
+global:
+  version: "1.0.0"
+  last_updated: "2026-01-18"
+  description: "资金穿透审计系统规则配置"

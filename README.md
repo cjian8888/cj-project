@@ -64,6 +64,8 @@ http://127.0.0.1:8000/dashboard/
 
 - 这是正式访问入口
 - 交付环境下也应以这个地址为准
+- Windows one-folder 交付包双击 `fpas.exe` 后，会默认自动打开系统默认浏览器并进入这个地址
+- 如果需要关闭自动打开浏览器，可在启动前设置环境变量 `FPAS_AUTO_OPEN_BROWSER=0`
 - 前端开发服务器 `5173` 只用于调试，不是正式交付入口
 
 #### 3. 开始分析
@@ -530,6 +532,16 @@ npm run build
 ```
 
 如果你需要 Windows 离线打包：
+
+```bash
+python build_windows_package.py --preflight
+```
+
+说明：
+
+- 在 macOS 上，当前只能执行 `--preflight` 预检和 `npm run build` 这类交付前准备，不能产出最终 Windows one-folder 包
+- 目标是 `Windows7+` 时，最终打包机应为 `Windows + Python 3.8.x`
+- 真正产出离线交付包时，再在 Windows 机器上执行：
 
 ```bash
 python build_windows_package.py

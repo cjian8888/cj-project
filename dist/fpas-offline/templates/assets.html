@@ -1,0 +1,39 @@
+{% extends "base_report.html" %}
+
+{% block content %}
+<h2 class="section-title">二、个人资产情况</h2>
+
+{% if modules.personal_assets and modules.personal_assets.data %}
+<table>
+    <thead>
+        <tr>
+            {% for col in modules.personal_assets.columns %}
+            <th>{{ col }}</th>
+            {% endfor %}
+        </tr>
+    </thead>
+    <tbody>
+        {% for item in modules.personal_assets.data %}
+        <tr>
+            <td>{{ item.entity_name }}</td>
+            <td>{{ "%.2f"|format(item.deposit_estimate) }}</td>
+            <td>{{ "%.2f"|format(item.wealth_holding) }}</td>
+            <td>{{ item.property_count }}</td>
+            <td>{{ "%.2f"|format(item.property_value) }}</td>
+            <td>{{ item.vehicle_count }}</td>
+            <td>{{ "%.2f"|format(item.total_income / 10000) }}</td>
+            <td>{{ "%.2f"|format(item.total_expense / 10000) }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<p>
+    上表汇总了各核心人员的资产情况，包括存款估算、理财持仓、房产和车辆等。
+    存款估算采用净流入法计算，理财持仓采用理财产品购买减赎回金额估算。
+</p>
+
+{% else %}
+<p>暂无个人资产数据。</p>
+{% endif %}
+{% endblock %}

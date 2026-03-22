@@ -1,0 +1,124 @@
+version: "1.0.0"
+updated_at: "2026-02-22"
+source: "config.py 提取"
+
+# 大额现金交易检测 - 识别短期内相近金额的大额现金存取
+cash_collision:
+  enabled: true
+  time_window_hours: 48
+  amount_tolerance: 0.05
+  min_amount: 10000
+  description: 检测48小时内现金存取金额相近度超过95%且金额大于1万元的交易
+
+# 快进快出检测 - 识别短期内资金快速流入流出的异常行为
+fast_in_out:
+  enabled: true
+  max_time_hours: 24
+  min_amount: 10000
+  amount_ratio: 0.8
+  description: 检测24小时内转出金额达到转入金额80%以上且金额大于1万元的快进快出行为
+
+# 休眠激活检测 - 识别长期休眠账户突然大额交易的异常情况
+dormant_activation:
+  enabled: true
+  min_days: 180
+  activation_min_amount: 50000
+  description: 检测休眠180天以上账户发生单笔5万元以上交易的情况
+
+# 借贷分析阈值 - 识别民间借贷和高利贷行为
+loan:
+  min_match_amount: 5000
+  time_window_days: 365
+  usury_rate: 36.0
+  high_rate: 24.0
+  description: |
+    借贷行为分析参数：
+    - 最小匹配金额：5000元
+    - 分析时间窗口：365天
+    - 高利贷利率阈值：年利率36%（超过即属违法高利贷）
+    - 高利率阈值：年利率24%（超过即不受法律保护）
+
+# 分期受贿检测 - 识别分批次、定期性的受贿资金流入
+bribe_installment:
+  min_occurrences: 4
+  min_amount: 10000
+  max_cv: 0.5
+  min_months: 4
+  description: |
+    分期受贿检测参数：
+    - 最小出现次数：4次
+    - 最小金额：1万元
+    - 变异系数阈值：0.5（金额波动不超过50%）
+    - 最小持续月份：4个月
+
+# 固定频率检测 - 识别定期发生的规律性交易
+fixed_frequency:
+  enabled: true
+  min_occurrences: 3
+  interval_tolerance_days: 3
+  amount_variance_threshold: 0.3
+  description: |
+    固定频率交易检测参数：
+    - 最小出现次数：3次
+    - 间隔容差：3天
+    - 金额方差阈值：0.3（金额波动不超过30%）
+
+# 资金归集检测 - 识别多账户向单一账户归集资金的行为
+fund_collection:
+  enabled: true
+  min_source_accounts: 3
+  min_total_amount: 100000
+  time_window_days: 30
+  description: |
+    资金归集检测参数：
+    - 最小来源账户数：3个
+    - 最小总金额：10万元
+    - 时间窗口：30天
+
+# 拆分交易检测 - 识别大额资金拆分为多笔小额交易的行为
+split_transaction:
+  enabled: true
+  min_parts: 5
+  min_total_amount: 50000
+  time_window_hours: 24
+  amount_similarity: 0.8
+  description: |
+    拆分交易检测参数：
+    - 最小拆分笔数：5笔
+    - 最小总金额：5万元
+    - 时间窗口：24小时
+    - 金额相似度：0.8（各笔金额相似度超过80%）
+
+# 可疑对手方检测 - 识别与高风险账户的交易往来
+suspicious_counterparty:
+  enabled: true
+  high_risk_categories:
+    - 地下钱庄
+    - 网络赌博
+    - 电信诈骗
+    - 非法集资
+    - 传销组织
+  alert_threshold_amount: 50000
+  description: 检测与高风险类别账户发生5万元以上交易的情况
+
+# 跨境异常检测 - 识别跨境资金的异常流动
+cross_border:
+  enabled: true
+  min_amount: 50000
+  frequency_threshold: 3
+  time_window_days: 90
+  high_risk_countries: []
+  description: |
+    跨境异常检测参数：
+    - 最小金额：5万元
+    - 频率阈值：90天内3次
+
+# 亲属账户异常检测 - 识别亲属账户间的异常资金往来
+family_account:
+  enabled: true
+  transaction_types:
+    - 大额借贷
+    - 频繁转账
+    - 资金归集
+  min_amount: 100000
+  description: 检测亲属账户间单笔10万元以上的异常资金往来

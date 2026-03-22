@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
@@ -125,7 +125,7 @@ class TransactionBatch(BaseModel):
         extra='ignore'
     )
 
-    transactions: list[Transaction] = Field(
+    transactions: List[Transaction] = Field(
         default_factory=list,
         max_length=100000,
         description="交易记录列表，最多10万条"

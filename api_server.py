@@ -13,15 +13,19 @@
   4. 分析模块并行执行
 """
 
+from __future__ import annotations
+
 import asyncio
 import sys
 import warnings
 import os
 import json
+import http.client
 import re
 import shutil
 import logging
 import math
+import subprocess
 from html import escape as html_escape
 from pathlib import Path
 from datetime import datetime, timedelta, date
@@ -223,6 +227,9 @@ _ws_connections = set()
 _log_queue = queue.Queue()  # 日志队列，用于 WebSocket 广播
 _cache_manager: Optional[CacheManager] = None  # 缓存管理器（懒加载）
 APP_RELEASE_VERSION = "4.6.0"
+_cli_entrypoint_invoked = False
+_browser_auto_open_started = False
+_browser_auto_open_lock = threading.Lock()
 
 
 def _slugify_doc_heading(text: str) -> str:
@@ -1089,6 +1096,101 @@ def _get_server_port() -> int:
 
     logger.warning(f"越界 FPAS_PORT={raw_port!r}，回退到默认端口 8000")
     return 8000
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    normalized = raw_value.strip().lower()
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    return default
+
+
+def _should_auto_open_dashboard_browser() -> bool:
+    default_enabled = sys.platform == "win32" and _cli_entrypoint_invoked
+    return _env_flag("FPAS_AUTO_OPEN_BROWSER", default_enabled)
+
+
+def _get_dashboard_launch_url() -> str:
+    return f"http://127.0.0.1:{_get_server_port()}/dashboard/"
+
+
+def _wait_for_dashboard_ready(timeout_seconds: float = 15.0) -> bool:
+    deadline = time.time() + max(timeout_seconds, 1.0)
+    port = _get_server_port()
+
+    while time.time() < deadline:
+        connection: Optional[http.client.HTTPConnection] = None
+        try:
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+            connection.request("GET", "/dashboard/")
+            response = connection.getresponse()
+            response.read(1)
+            if response.status == 200:
+                return True
+        except Exception:
+            pass
+        finally:
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+        time.sleep(0.5)
+
+    return False
+
+
+def _open_url_in_default_browser(url: str) -> None:
+    if sys.platform == "win32":
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.Popen(
+            ["cmd", "/c", "start", "", url],
+            creationflags=creationflags,
+        )
+        return
+
+    import webbrowser
+
+    webbrowser.open(url, new=2)
+
+
+def _schedule_dashboard_browser_launch() -> None:
+    global _browser_auto_open_started
+
+    if not _should_auto_open_dashboard_browser():
+        return
+
+    with _browser_auto_open_lock:
+        if _browser_auto_open_started:
+            return
+        _browser_auto_open_started = True
+
+    target_url = _get_dashboard_launch_url()
+
+    def _launch_worker() -> None:
+        launch_logger = logging.getLogger("uvicorn.error")
+        ready = _wait_for_dashboard_ready()
+        if not ready:
+            launch_logger.warning(f"自动打开浏览器前未探测到 Dashboard 就绪: {target_url}")
+            return
+
+        try:
+            launch_logger.info(f"正在自动打开默认浏览器: {target_url}")
+            _open_url_in_default_browser(target_url)
+            launch_logger.info(f"已自动打开默认浏览器: {target_url}")
+        except Exception as exc:
+            launch_logger.warning(f"自动打开默认浏览器失败: {exc}")
+
+    threading.Thread(
+        target=_launch_worker,
+        name="fpas-dashboard-launcher",
+        daemon=True,
+    ).start()
 
 
 def _resolve_dashboard_file(requested_path: str = "") -> Optional[Path]:
@@ -5495,10 +5597,11 @@ def _save_analysis_cache_refactored(results, cache_dir, id_to_name_map=None):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger("uvicorn.error")
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     logger.info("🚀 资金穿透审计系统启动 (重构版)")
+    _schedule_dashboard_browser_launch()
     yield
     logger.info("🛑 资金穿透审计系统关闭")
 
@@ -8106,6 +8209,7 @@ async def websocket_endpoint(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
 
+    _cli_entrypoint_invoked = True
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",

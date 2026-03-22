@@ -5,6 +5,8 @@
 分析核心人员之间的直接资金往来、第三方中转、资金闭环等模式
 """
 
+from __future__ import annotations
+
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple

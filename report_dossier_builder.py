@@ -3,7 +3,7 @@
 """Build family/person/company dossiers for the unified report package."""
 
 import re
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from unified_risk_model import build_risk_overview, normalize_risk_level
 

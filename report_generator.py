@@ -5,6 +5,8 @@
 生成Excel底稿和公文格式报告
 """
 
+from __future__ import annotations
+
 import os
 import re
 from decimal import Decimal, InvalidOperation

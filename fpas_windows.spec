@@ -1,40 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+import sys
 
 
-project_root = Path(SPECPATH)
+project_root = Path(SPECPATH).resolve()
+sys.path.insert(0, str(project_root))
 
-datas = [
-    (str(project_root / "utils.py"), "."),
-    (str(project_root / "config"), "config"),
-    (str(project_root / "knowledge"), "knowledge"),
-    (str(project_root / "report_config"), "report_config"),
-    (str(project_root / "templates"), "templates"),
-    (str(project_root / "dashboard" / "dist"), "dashboard/dist"),
-    (
-        str(
-            project_root
-            / "dashboard"
-            / "node_modules"
-            / "vis-network"
-            / "standalone"
-            / "umd"
-            / "vis-network.min.js"
-        ),
-        "dashboard/node_modules/vis-network/standalone/umd",
-    ),
-]
+from build_windows_package import get_pyinstaller_datas, get_pyinstaller_hiddenimports
 
-hiddenimports = [
-    "chinese_calendar",
-    "neo4j",
-    "uvicorn.logging",
-    "uvicorn.loops.auto",
-    "uvicorn.protocols.http.auto",
-    "uvicorn.protocols.websockets.auto",
-    "uvicorn.lifespan.on",
-]
+
+datas = get_pyinstaller_datas(project_root)
+hiddenimports = get_pyinstaller_hiddenimports()
 
 
 a = Analysis(

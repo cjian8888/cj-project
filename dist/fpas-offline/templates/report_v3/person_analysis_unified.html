@@ -1,0 +1,576 @@
+{#
+人员分析统一模板 - 六维一体通用模板
+
+数据结构：
+person = {
+    overview: {
+        name,           # 姓名
+        total_inflow,   # 总流入（万元）
+        real_income,    # 真实收入（万元）
+        salary_ratio,   # 工资占比（%）
+        risk_level      # 风险等级：low/medium/high
+    },
+    key_findings: [
+        {
+            type,       # 问题类型
+            impact,     # 影响量化
+            description # 详细说明
+        }
+    ],
+    income_breakdown: {
+        raw_inflow,     # 原始流水
+        deductions: [   # 剔除项
+            { name, amount, reason }
+        ],
+        real_income,    # 真实收入
+        status          # 状态标识
+    },
+    outflow_analysis: {
+        top_counterparties: [  # TOP5对手方
+            { name, amount, count, category }
+        ],
+        total_outflow,
+        narrative
+    },
+    temporal_chart: {
+        yearly_data: [
+            { year, inflow, outflow, anomaly, anomaly_type }
+        ],
+        anomaly_years: [  # 异常年份标注
+            { year, issue }
+        ]
+    },
+    relationship_flow: {
+        family_members: [
+            { name, relation, net_flow, direction }
+        ],
+        total_family_inflow,
+        total_family_outflow
+    }
+}
+#}
+
+{% extends "base.html" %}
+
+{% block title %}{{ overview.name }} - 人员分析报告{% endblock %}
+
+{% block content %}
+{# ==================== 一、概览卡片 ==================== #}
+<section class="person-overview">
+    <div class="overview-card">
+        <h2 class="overview-title">{{ overview.name }}{% if overview.relation %}（{{ overview.relation }}）{% endif %}</h2>
+        <div class="overview-metrics">
+            <div class="metric-item">
+                <span class="metric-label">总流入</span>
+                <span class="metric-value">{{ overview.total_inflow|round(2) }}万元</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">真实收入</span>
+                <span class="metric-value">{{ overview.real_income|round(2) }}万元</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">工资占比</span>
+                <span class="metric-value">{{ overview.salary_ratio|round(1) }}%</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">风险等级</span>
+                <span class="metric-value risk-{{ overview.risk_level }}">
+                    {% if overview.risk_level == 'high' %}高
+                    {% elif overview.risk_level == 'medium' %}中
+                    {% else %}低{% endif %}
+                </span>
+            </div>
+        </div>
+    </div>
+</section>
+
+{# ==================== 二、关键发现 ==================== #}
+<section class="key-findings">
+    <h3 class="section-label">关键发现</h3>
+    {% if key_findings and key_findings|length > 0 %}
+    <ul class="findings-list">
+        {% for finding in key_findings %}
+        <li class="finding-item finding-{{ finding.type }}">
+            <span class="finding-icon">
+                {% if finding.type == 'risk' %}⚠️
+                {% elif finding.type == 'warning' %}⚡
+                {% else %}ℹ️{% endif %}
+            </span>
+            <span class="finding-content">
+                <strong>{{ finding.description }}</strong>
+                {% if finding.impact %}
+                <span class="finding-impact">（影响：{{ finding.impact }}）</span>
+                {% endif %}
+            </span>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="no-data">暂无关键发现。</p>
+    {% endif %}
+</section>
+
+{# ==================== 三、收入透视 ==================== #}
+<section class="income-breakdown">
+    <h3 class="section-label">收入透视</h3>
+    {% set income = income_breakdown %}
+    <div class="income-flow">
+        {# 原始流水 #}
+        <div class="income-stage stage-raw">
+            <div class="stage-header">
+                <span class="stage-label">原始流水</span>
+                <span class="stage-amount">{{ income.raw_inflow|round(2) }}万元</span>
+            </div>
+            <div class="stage-desc">银行流水总流入金额</div>
+        </div>
+        
+        {# 剔除项 #}
+        <div class="income-arrow">→</div>
+        <div class="income-stage stage-deduction">
+            <div class="stage-header">
+                <span class="stage-label">剔除项</span>
+                <span class="stage-amount">-{{ income.deductions|sum(attribute='amount')|round(2) }}万元</span>
+            </div>
+            {% if income.deductions and income.deductions|length > 0 %}
+            <ul class="deduction-list">
+                {% for item in income.deductions %}
+                <li>
+                    <span class="deduction-name">{{ item.name }}</span>
+                    <span class="deduction-amount">{{ item.amount|round(2) }}万元</span>
+                    <span class="deduction-reason">{{ item.reason }}</span>
+                </li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+        </div>
+        
+        {# 真实收入 #}
+        <div class="income-arrow">→</div>
+        <div class="income-stage stage-real">
+            <div class="stage-header">
+                <span class="stage-label">真实收入</span>
+                <span class="stage-amount">{{ income.real_income|round(2) }}万元</span>
+            </div>
+            <div class="stage-status status-{{ income.status }}">
+                {% if income.status == 'verified' %}✓ 已核实
+                {% elif income.status == 'partial' %}◐ 部分核实
+                {% else %}○ 待核实{% endif %}
+            </div>
+        </div>
+    </div>
+</section>
+
+{# ==================== 四、支出去向 ==================== #}
+<section class="outflow-analysis">
+    <h3 class="section-label">支出去向</h3>
+    {% set outflow = outflow_analysis %}
+    {% if outflow.top_counterparties and outflow.top_counterparties|length > 0 %}
+    <p class="outflow-summary">
+        资金主要流向{{ outflow.top_counterparties|length }}个对手方，合计支出{{ outflow.total_outflow|round(2) }}万元。
+    </p>
+    <table class="outflow-table">
+        <thead>
+            <tr>
+                <th class="seq-col">序号</th>
+                <th>对手方名称</th>
+                <th>金额（万元）</th>
+                <th>交易笔数</th>
+                <th>类别</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for cp in outflow.top_counterparties %}
+            <tr>
+                <td class="seq-col">{{ loop.index }}</td>
+                <td>{{ cp.name }}</td>
+                <td class="money-col">{{ cp.amount|round(2) }}</td>
+                <td class="text-center">{{ cp.count }}</td>
+                <td class="text-center">{{ cp.category or '—' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% if outflow.narrative %}
+    <p class="outflow-narrative">{{ outflow.narrative }}</p>
+    {% endif %}
+    {% else %}
+    <p class="no-data">暂无大额支出流向数据。</p>
+    {% endif %}
+</section>
+
+{# ==================== 五、时序分析 ==================== #}
+<section class="temporal-chart">
+    <h3 class="section-label">时序分析</h3>
+    {% set temporal = temporal_chart %}
+    {% if temporal.yearly_data and temporal.yearly_data|length > 0 %}
+    
+    {# 年度异常点标注 #}
+    {% if temporal.anomaly_years and temporal.anomaly_years|length > 0 %}
+    <div class="anomaly-alert">
+        <span class="anomaly-icon">⚠️</span>
+        <span class="anomaly-text">
+            检测到{{ temporal.anomaly_years|length }}个异常年度：
+            {% for ay in temporal.anomaly_years %}
+            <strong>{{ ay.year }}年</strong>（{{ ay.issue }}）{% if not loop.last %}、{% endif %}
+            {% endfor %}
+        </span>
+    </div>
+    {% endif %}
+    
+    {# 年度数据表格 #}
+    <table class="temporal-table">
+        <thead>
+            <tr>
+                <th class="seq-col">序号</th>
+                <th>年份</th>
+                <th>流入（万元）</th>
+                <th>流出（万元）</th>
+                <th>状态</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for year_data in temporal.yearly_data %}
+            <tr class="{% if year_data.anomaly %}row-anomaly{% endif %}">
+                <td class="seq-col">{{ loop.index }}</td>
+                <td class="text-center">{{ year_data.year }}</td>
+                <td class="money-col">{{ year_data.inflow|round(2) }}</td>
+                <td class="money-col">{{ year_data.outflow|round(2) }}</td>
+                <td class="text-center">
+                    {% if year_data.anomaly %}
+                    <span class="status-anomaly">{{ year_data.anomaly_type or '异常' }}</span>
+                    {% else %}
+                    <span class="status-normal">正常</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="no-data">暂无时序分析数据。</p>
+    {% endif %}
+</section>
+
+{# ==================== 六、关联分析 ==================== #}
+<section class="relationship-flow">
+    <h3 class="section-label">关联分析</h3>
+    {% set relation = relationship_flow %}
+    {% if relation.family_members and relation.family_members|length > 0 %}
+    <p class="relationship-summary">
+        与{{ relation.family_members|length }}位家庭成员存在资金往来，
+        净流入{{ relation.total_family_inflow|round(2) }}万元，
+        净流出{{ relation.total_family_outflow|round(2) }}万元。
+    </p>
+    <table class="relationship-table">
+        <thead>
+            <tr>
+                <th class="seq-col">序号</th>
+                <th>家庭成员</th>
+                <th>关系</th>
+                <th>净流向</th>
+                <th>金额（万元）</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for member in relation.family_members %}
+            <tr>
+                <td class="seq-col">{{ loop.index }}</td>
+                <td>{{ member.name }}</td>
+                <td class="text-center">{{ member.relation }}</td>
+                <td class="text-center">
+                    {% if member.direction == 'inflow' %}
+                    <span class="flow-inflow">↑ 流入</span>
+                    {% else %}
+                    <span class="flow-outflow">↓ 流出</span>
+                    {% endif %}
+                </td>
+                <td class="money-col">{{ member.net_flow|round(2) }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="no-data">暂无家庭成员资金往来数据。</p>
+    {% endif %}
+</section>
+
+{# ==================== 扩展样式 ==================== #}
+<style>
+    /* 概览卡片样式 */
+    .person-overview {
+        margin: 20px 0;
+    }
+    
+    .overview-card {
+        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        padding: 20px;
+    }
+    
+    .overview-title {
+        font-size: 18px;
+        font-weight: bold;
+        margin: 0 0 15px 0;
+        padding-bottom: 10px;
+        border-bottom: 2px solid #333;
+    }
+    
+    .overview-metrics {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 20px;
+    }
+    
+    .metric-item {
+        flex: 1;
+        min-width: 120px;
+        text-align: center;
+        padding: 10px;
+        background: #fff;
+        border-radius: 4px;
+    }
+    
+    .metric-label {
+        display: block;
+        font-size: 12px;
+        color: #666;
+        margin-bottom: 5px;
+    }
+    
+    .metric-value {
+        display: block;
+        font-size: 18px;
+        font-weight: bold;
+        color: #333;
+    }
+    
+    .metric-value.risk-high { color: #d9534f; }
+    .metric-value.risk-medium { color: #f0ad4e; }
+    .metric-value.risk-low { color: #5cb85c; }
+    
+    /* 关键发现样式 */
+    .key-findings {
+        margin: 20px 0;
+        padding: 15px;
+        background: #fff9e6;
+        border-left: 4px solid #f0ad4e;
+    }
+    
+    .section-label {
+        font-size: 16px;
+        font-weight: bold;
+        margin: 0 0 10px 0;
+    }
+    
+    .findings-list {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+    }
+    
+    .finding-item {
+        padding: 8px 0;
+        border-bottom: 1px dashed #ddd;
+    }
+    
+    .finding-item:last-child {
+        border-bottom: none;
+    }
+    
+    .finding-icon {
+        margin-right: 8px;
+    }
+    
+    .finding-impact {
+        color: #666;
+        font-size: 14px;
+    }
+    
+    /* 收入透视样式 */
+    .income-breakdown {
+        margin: 20px 0;
+    }
+    
+    .income-flow {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        padding: 15px;
+        background: #f8f9fa;
+        border-radius: 8px;
+        overflow-x: auto;
+    }
+    
+    .income-stage {
+        flex: 1;
+        min-width: 180px;
+        padding: 15px;
+        background: #fff;
+        border-radius: 6px;
+        border: 1px solid #dee2e6;
+    }
+    
+    .stage-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 10px;
+    }
+    
+    .stage-label {
+        font-weight: bold;
+        color: #333;
+    }
+    
+    .stage-amount {
+        font-size: 16px;
+        font-weight: bold;
+    }
+    
+    .stage-deduction .stage-amount {
+        color: #d9534f;
+    }
+    
+    .stage-real .stage-amount {
+        color: #5cb85c;
+    }
+    
+    .stage-desc {
+        font-size: 12px;
+        color: #666;
+    }
+    
+    .stage-status {
+        font-size: 12px;
+        padding: 4px 8px;
+        border-radius: 4px;
+        display: inline-block;
+        margin-top: 5px;
+    }
+    
+    .status-verified {
+        background: #dff0d8;
+        color: #3c763d;
+    }
+    
+    .status-partial {
+        background: #fcf8e3;
+        color: #8a6d3b;
+    }
+    
+    .status-pending {
+        background: #f2dede;
+        color: #a94442;
+    }
+    
+    .income-arrow {
+        font-size: 24px;
+        color: #999;
+        align-self: center;
+    }
+    
+    .deduction-list {
+        list-style: none;
+        padding: 0;
+        margin: 10px 0 0 0;
+        font-size: 12px;
+    }
+    
+    .deduction-list li {
+        padding: 4px 0;
+        border-bottom: 1px dotted #eee;
+    }
+    
+    .deduction-amount {
+        color: #d9534f;
+        margin: 0 5px;
+    }
+    
+    .deduction-reason {
+        color: #999;
+    }
+    
+    /* 支出去向样式 */
+    .outflow-analysis {
+        margin: 20px 0;
+    }
+    
+    .outflow-summary {
+        text-indent: 2em;
+        margin-bottom: 10px;
+    }
+    
+    .outflow-table {
+        margin: 10px 0;
+    }
+    
+    .outflow-narrative {
+        text-indent: 2em;
+        margin-top: 10px;
+        font-size: 14px;
+        color: #666;
+    }
+    
+    /* 时序分析样式 */
+    .temporal-chart {
+        margin: 20px 0;
+    }
+    
+    .anomaly-alert {
+        padding: 10px 15px;
+        background: #fff3cd;
+        border: 1px solid #ffc107;
+        border-radius: 4px;
+        margin-bottom: 15px;
+        display: flex;
+        align-items: center;
+    }
+    
+    .anomaly-icon {
+        margin-right: 10px;
+    }
+    
+    .anomaly-text {
+        font-size: 14px;
+    }
+    
+    .temporal-table .row-anomaly {
+        background: #fff9e6;
+    }
+    
+    .status-anomaly {
+        color: #d9534f;
+        font-weight: bold;
+    }
+    
+    .status-normal {
+        color: #5cb85c;
+    }
+    
+    /* 关联分析样式 */
+    .relationship-flow {
+        margin: 20px 0;
+    }
+    
+    .relationship-summary {
+        text-indent: 2em;
+        margin-bottom: 10px;
+    }
+    
+    .flow-inflow {
+        color: #5cb85c;
+    }
+    
+    .flow-outflow {
+        color: #d9534f;
+    }
+    
+    /* 通用样式 */
+    .no-data {
+        text-indent: 2em;
+        color: #999;
+        font-style: italic;
+    }
+</style>
+{% endblock %}

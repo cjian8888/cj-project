@@ -2,6 +2,8 @@
 SuspicionEngine - 自动注册引擎
 实现检测器的自动发现、注册和统一调用。
 """
+from __future__ import annotations
+
 import importlib
 import inspect
 import logging
