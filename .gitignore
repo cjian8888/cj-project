@@ -38,6 +38,9 @@ logs/
 .cline/
 .roo/
 .benchmarks/
+.codex/
+.codex_runtime_logs/
+.playwright-cli/
 
 # --- Project Specific ---
 output/
@@ -66,3 +69,19 @@ nul
 *WORK_LOG*.md
 *COMPLETION-REPORT*.md
 *OPCODE-HANDOVER*.md
+
+# --- Local Temp & Build Scratch ---
+.pytest_*/
+.tmp_*/
+.tmp_*.bin
+.tmp_*.json
+tmp_pytest*/
+pytest_tmp*/
+tmp_test_report_package/
+pytest-cache-files-*/
+core/
+exe/
+lib/
+pip/
+tcltk/
+win7-patches/

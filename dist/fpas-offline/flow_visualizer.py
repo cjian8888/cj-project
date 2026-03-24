@@ -1,0 +1,1047 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+资金流向可视化模块 (重构版)
+生成Mermaid格式和HTML格式的资金流向图
+让审计人员更直观地看到资金流向
+
+重构说明 (2026-01-09):
+- 将HTML模板提取到外部文件 templates/flow_visualization.html
+- 添加 _prepare_graph_data 函数分离数据准备逻辑
+- 代码更清晰，模板修改更方便
+"""
+
+import os
+import json
+from datetime import datetime
+from typing import Dict, List, Tuple, Any
+from collections import defaultdict
+import pandas as pd
+import config
+
+from counterparty_utils import should_skip_payment_platform_counterparty
+# 导入统一路径管理器
+from paths import RESOURCE_ROOT
+import utils
+
+logger = utils.setup_logger(__name__)
+
+
+def generate_flow_visualizations(
+    all_transactions: Dict[str, pd.DataFrame],
+    core_persons: List[str],
+    loan_results: Dict,
+    income_results: Dict,
+    output_dir: str,
+) -> Dict[str, str]:
+    """
+    生成资金流向可视化文件
+
+    Args:
+        all_transactions: 所有交易数据
+        core_persons: 核心人员列表
+        loan_results: 借贷分析结果
+        income_results: 异常收入分析结果
+        output_dir: 输出目录
+
+    Returns:
+        生成的文件路径字典
+    """
+    logger.info("=" * 60)
+    logger.info("开始生成资金流向可视化")
+    logger.info("=" * 60)
+
+    output_files = {}
+
+    # 1. 生成Mermaid格式的资金流向图
+    logger.info("【阶段1】生成Mermaid资金流向图")
+    mermaid_path = _generate_mermaid_flow(
+        all_transactions, core_persons, loan_results, income_results, output_dir
+    )
+    output_files["mermaid"] = mermaid_path
+
+    # 2. 生成HTML交互式图表
+    logger.info("【阶段2】生成HTML交互式图表")
+    html_path = _generate_html_visualization(
+        all_transactions, core_persons, loan_results, income_results, output_dir
+    )
+    output_files["html"] = html_path
+
+    logger.info("")
+    logger.info(f"可视化生成完成:")
+    for k, v in output_files.items():
+        logger.info(f"  {k}: {v}")
+
+    return output_files
+
+
+def _write_mermaid_report_header(f: Any, title: str = "资金流向可视化报告") -> None:
+    """
+    写入Mermaid报告头部信息。
+
+    Args:
+        f: 文件对象
+        title: 报告标题
+    """
+    f.write(f"# {title}\n\n")
+    f.write(f"**生成时间**: {datetime.now().strftime('%Y年%m月%d日 %H:%M:%S')}\n\n")
+    f.write("> 本报告使用Mermaid格式生成，可在支持Mermaid的Markdown预览器中查看\n\n")
+
+
+def _generate_core_network_mermaid(
+    f: Any, flow_stats: Dict, core_persons: List[str]
+) -> None:
+    """
+    生成核心人员资金网络Mermaid图。
+
+    Args:
+        f: 文件对象
+        flow_stats: 资金流向统计
+        core_persons: 核心人员列表
+    """
+    f.write("## 一、核心人员资金网络\n\n")
+    f.write("展示核心人员之间以及与主要对手方的资金往来关系\n\n")
+
+    f.write("```mermaid\n")
+    f.write("graph LR\n")
+    f.write("    %% 核心人员资金流向图\n")
+
+    # 定义节点样式
+    f.write("    \n")
+    f.write("    %% 节点样式定义\n")
+    for person in core_persons:
+        safe_id = _safe_node_id(person)
+        f.write(f'    {safe_id}["{person}"]\n')
+        f.write(
+            f"    style {safe_id} fill:#ff6b6b,stroke:#333,stroke-width:2px,color:#fff\n"
+        )
+
+    # 添加资金流向边
+    f.write("    \n")
+    f.write("    %% 资金流向\n")
+    edge_count = 0
+    for (from_node, to_node), stats in sorted(
+        flow_stats.items(), key=lambda x: -x[1]["total"]
+    ):
+        if edge_count >= 20:  # 限制边数
+            break
+
+        from_id = _safe_node_id(from_node)
+        to_id = _safe_node_id(to_node)
+        amount = stats["total"]
+        count = stats["count"]
+
+        if amount >= config.DISPLAY_AMOUNT_THRESHOLD:  # 只显示大于阈值的
+            amount_str = (
+                f"{amount / config.UNIT_WAN:.1f}万"
+                if amount >= config.UNIT_WAN
+                else f"{amount:.0f}元"
+            )
+            f.write(f'    {from_id} -->|"{amount_str} ({count}笔)"| {to_id}\n')
+            edge_count += 1
+
+    f.write("```\n\n")
+
+
+def _generate_loan_relations_mermaid(f: Any, loan_results: Dict) -> None:
+    """
+    生成借贷关系Mermaid图。
+
+    Args:
+        f: 文件对象
+        loan_results: 借贷分析结果
+    """
+    if not (loan_results.get("loan_pairs") or loan_results.get("bidirectional_flows")):
+        return
+
+    f.write("## 二、借贷关系图\n\n")
+    f.write("展示借贷配对和双向资金往来关系\n\n")
+
+    f.write("```mermaid\n")
+    f.write("graph TB\n")
+    f.write("    %% 借贷关系图\n")
+
+    # 双向往来
+    for flow in loan_results.get("bidirectional_flows", [])[:10]:
+        person = flow["person"]
+        cp = flow["counterparty"]
+        income = flow["income_total"]
+        expense = flow["expense_total"]
+
+        person_id = _safe_node_id(person)
+        cp_id = _safe_node_id(cp)
+
+        income_str = f"{income / 10000:.1f}万" if income >= 10000 else f"{income:.0f}"
+        expense_str = (
+            f"{expense / 10000:.1f}万" if expense >= 10000 else f"{expense:.0f}"
+        )
+
+        f.write(
+            f'    {cp_id}["🔄 {cp}"] -->|"收入{income_str}"| {person_id}["{person}"]\n'
+        )
+        f.write(f'    {person_id} -->|"支出{expense_str}"| {cp_id}\n')
+
+    # 借贷配对
+    for i, pair in enumerate(loan_results.get("loan_pairs", [])[:5]):
+        person = pair["person"]
+        cp = pair["counterparty"]
+        loan_amt = pair["loan_amount"]
+        repay_amt = pair["repay_amount"]
+
+        person_id = _safe_node_id(person)
+        cp_id = _safe_node_id(f"借_{cp}")
+
+        loan_str = f"{loan_amt / 10000:.1f}万"
+        repay_str = f"{repay_amt / 10000:.1f}万"
+
+        f.write(
+            f'    {cp_id}["💰 {cp}"] -->|"借入{loan_str}"| {person_id}["{person}"]\n'
+        )
+        f.write(f'    {person_id} -->|"还款{repay_str}"| {cp_id}\n')
+
+    f.write("```\n\n")
+
+
+def _generate_no_repayment_mermaid(f: Any, no_repayment_loans: List[Dict]) -> None:
+    """
+    生成无还款借贷Mermaid图（疑似利益输送）。
+
+    Args:
+        f: 文件对象
+        no_repayment_loans: 无还款借贷列表
+    """
+    if not no_repayment_loans:
+        return
+
+    f.write("## 三、无还款借贷（疑似利益输送）\n\n")
+    f.write("> ⚠️ 以下收入长期无对应还款，需重点核查\n\n")
+
+    f.write("```mermaid\n")
+    f.write("graph LR\n")
+    f.write("    %% 无还款借贷\n")
+
+    for i, loan in enumerate(no_repayment_loans[:10]):
+        person = loan["person"]
+        cp = loan["counterparty"]
+        amount = loan["income_amount"]
+        days = loan["days_since"]
+
+        person_id = _safe_node_id(person)
+        cp_id = _safe_node_id(f"无还_{cp}_{i}")
+
+        amount_str = f"{amount / 10000:.1f}万"
+
+        f.write(
+            f'    {cp_id}["⚠️ {cp}"] -->|"{amount_str} ({days}天未还)"| {person_id}["{person}"]\n'
+        )
+        f.write(f"    style {cp_id} fill:#ff9800,stroke:#333,stroke-width:2px\n")
+
+    f.write("```\n\n")
+
+
+def _generate_high_risk_income_mermaid(f: Any, high_risk_income: List[Dict]) -> None:
+    """
+    生成高风险异常收入Mermaid图。
+
+    Args:
+        f: 文件对象
+        high_risk_income: 高风险收入列表
+    """
+    if not high_risk_income:
+        return
+
+    f.write("## 四、高风险异常收入\n\n")
+    f.write("> 🔴 以下收入来源存在较高风险\n\n")
+
+    f.write("```mermaid\n")
+    f.write("graph LR\n")
+    f.write("    %% 高风险异常收入\n")
+
+    for i, item in enumerate(high_risk_income[:15]):
+        person = item["person"]
+        cp = item["counterparty"]
+        amount = item["amount"]
+
+        person_id = _safe_node_id(person)
+        cp_id = _safe_node_id(f"风险_{cp}_{i}")
+
+        amount_str = f"{amount / 10000:.1f}万" if amount >= 10000 else f"{amount:.0f}元"
+
+        f.write(
+            f'    {cp_id}["🔴 {cp[:10]}"] -->|"{amount_str}"| {person_id}["{person}"]\n'
+        )
+
+    f.write("```\n\n")
+
+
+def _generate_platform_stats_markdown(f: Any, online_loans: List[Dict]) -> None:
+    """
+    生成网贷平台使用情况统计表格。
+
+    Args:
+        f: 文件对象
+        online_loans: 网贷列表
+    """
+    if not online_loans:
+        return
+
+    f.write("## 五、网贷平台使用情况\n\n")
+
+    # 按平台分组统计
+    platform_stats = defaultdict(lambda: {"count": 0, "total": 0})
+    for loan in online_loans:
+        platform = loan.get("platform", "其他")
+        platform_stats[platform]["count"] += 1
+        platform_stats[platform]["total"] += loan.get("amount", 0)
+
+    f.write("| 平台 | 笔数 | 金额 |\n")
+    f.write("|------|------|------|\n")
+    for platform, stats in sorted(platform_stats.items(), key=lambda x: -x[1]["total"]):
+        amount_str = (
+            f"¥{stats['total'] / 10000:.2f}万"
+            if stats["total"] >= 10000
+            else f"¥{stats['total']:.0f}"
+        )
+        f.write(f"| {platform} | {stats['count']} | {amount_str} |\n")
+    f.write("\n")
+
+
+def _write_mermaid_legend(f: Any) -> None:
+    """
+    写入Mermaid图例说明。
+
+    Args:
+        f: 文件对象
+    """
+    f.write("---\n\n")
+    f.write("## 图例说明\n\n")
+    f.write("| 符号 | 含义 |\n")
+    f.write("|------|------|\n")
+    f.write("| 🔴 | 高风险项目 |\n")
+    f.write("| ⚠️ | 警告/需关注 |\n")
+    f.write("| 🔄 | 双向往来 |\n")
+    f.write("| 💰 | 借贷关系 |\n")
+    f.write("| 红色节点 | 核心人员 |\n")
+    f.write("| 橙色节点 | 可疑对手方 |\n")
+    f.write("\n")
+
+
+def _generate_mermaid_flow(
+    all_transactions: Dict[str, pd.DataFrame],
+    core_persons: List[str],
+    loan_results: Dict,
+    income_results: Dict,
+    output_dir: str,
+) -> str:
+    """
+    生成Mermaid格式的资金流向图。
+
+    将资金流向分析结果生成为Mermaid格式的Markdown报告，
+    包含核心人员网络、借贷关系、无还款借贷、高风险收入等多个章节。
+
+    Args:
+        all_transactions: 所有交易数据
+        core_persons: 核心人员列表
+        loan_results: 借贷分析结果
+        income_results: 收入分析结果
+        output_dir: 输出目录
+
+    Returns:
+        生成的报告文件路径
+    """
+    report_path = os.path.join(output_dir, "资金流向图.md")
+
+    # 统计资金流向
+    flow_stats = _calculate_flow_stats(all_transactions, core_persons)
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        # 写入头部
+        _write_mermaid_report_header(f)
+
+        # 生成核心人员资金网络图
+        _generate_core_network_mermaid(f, flow_stats, core_persons)
+
+        # 生成借贷关系图
+        _generate_loan_relations_mermaid(f, loan_results)
+
+        # 生成无还款借贷图
+        _generate_no_repayment_mermaid(f, loan_results.get("no_repayment_loans", []))
+
+        # 生成高风险收入图
+        _generate_high_risk_income_mermaid(f, income_results.get("high_risk", []))
+
+        # 生成平台统计
+        _generate_platform_stats_markdown(f, loan_results.get("online_loans", []))
+
+        # 写入图例
+        _write_mermaid_legend(f)
+
+    logger.info(f"  Mermaid资金流向图已生成: {report_path}")
+    return report_path
+
+
+def _generate_html_visualization(
+    all_transactions: Dict[str, pd.DataFrame],
+    core_persons: List[str],
+    loan_results: Dict,
+    income_results: Dict,
+    output_dir: str,
+) -> str:
+    """
+    生成HTML交互式可视化（重构版）
+    使用外部模板文件，逻辑与样式分离
+    """
+    from template_engine import render_template
+
+    html_path = os.path.join(output_dir, "资金流向可视化.html")
+
+    # 计算资金流向统计
+    flow_stats = _calculate_flow_stats(all_transactions, core_persons)
+
+    # 获取涉案公司列表
+    involved_companies = []
+    for key in all_transactions.keys():
+        base_name = os.path.basename(key).replace("_合并流水", "").replace(".xlsx", "")
+        if "公司" in base_name or "有限" in base_name:
+            involved_companies.append(base_name)
+
+    # 准备节点和边的数据
+    nodes, edges, edge_stats = _prepare_graph_data(
+        flow_stats, core_persons, involved_companies
+    )
+
+    # 准备节点JSON
+    nodes_json = json.dumps(
+        [
+            {
+                "id": n["id"],
+                "label": n["label"],
+                "group": n["group"],
+                "size": n["size"],
+                "font": {"color": "#fff", "size": 14},
+            }
+            for n in nodes
+        ],
+        ensure_ascii=False,
+    )
+
+    # 准备边JSON
+    edges_json = json.dumps(
+        [
+            {
+                "from": e["from"],
+                "to": e["to"],
+                "value": e["value"],
+                "title": e["title"],
+                "arrows": "to",
+                "color": {"color": "#00d2ff", "opacity": 0.8},
+                "smooth": {"type": "curvedCW", "roundness": 0.2},
+            }
+            for e in edges
+        ],
+        ensure_ascii=False,
+    )
+
+    # 读取本地 vis-network.min.js（用于内联到 HTML，实现离线渲染）
+    vis_js_paths = [
+        os.path.join(
+            str(RESOURCE_ROOT),
+            "dashboard/node_modules/vis-network/standalone/umd/vis-network.min.js",
+        ),
+        os.path.join(
+            str(RESOURCE_ROOT),
+            "node_modules/vis-network/standalone/umd/vis-network.min.js",
+        ),
+    ]
+    vis_js_content = ""
+    for vis_js_path in vis_js_paths:
+        if os.path.exists(vis_js_path):
+            try:
+                with open(vis_js_path, "r", encoding="utf-8") as f:
+                    vis_js_content = f.read()
+                logger.info(f"已加载本地 vis-network: {vis_js_path}")
+                break
+            except Exception as e:
+                logger.warning(f"读取 vis-network 失败: {e}")
+
+    if not vis_js_content:
+        logger.warning("未找到本地 vis-network，模板将使用空 JS（离线可能无法渲染）")
+
+    # 渲染模板
+    try:
+        html_content = render_template(
+            "flow_visualization.html",
+            {
+                "GENERATE_TIME": datetime.now().strftime("%Y年%m月%d日 %H:%M:%S"),
+                "NODE_COUNT": len(nodes),
+                "EDGE_COUNT": len(edges),
+                "CORE_PERSON_COUNT": len(core_persons),
+                "CORE_PERSON_NAMES": ", ".join(core_persons),
+                "HIGH_RISK_COUNT": len(income_results.get("high_risk", [])),
+                "MEDIUM_RISK_COUNT": len(income_results.get("medium_risk", [])),
+                "LOAN_PAIR_COUNT": len(loan_results.get("loan_pairs", [])),
+                "NO_REPAY_COUNT": len(loan_results.get("no_repayment_loans", [])),
+                "CORE_EDGE_COUNT": edge_stats["core"],
+                "COMPANY_EDGE_COUNT": edge_stats["company"],
+                "OTHER_EDGE_COUNT": edge_stats["other"],
+                "NODES_JSON": nodes_json,
+                "EDGES_JSON": edges_json,
+                "VIS_JS_CONTENT": vis_js_content,  # 新增：内联 vis-network JS
+            },
+        )
+    except FileNotFoundError:
+        # 如果模板文件不存在，使用内置简化版
+        logger.warning("模板文件不存在，使用内置简化版")
+        html_content = _generate_fallback_html(nodes_json, edges_json, core_persons)
+
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    logger.info(f"  HTML可视化已生成: {html_path}")
+    return html_path
+
+
+# 噪音过滤关键词（用于图谱节点过滤）
+NOISE_KEYWORDS = [
+    "理财",
+    "基金",
+    "资产管理",
+    "增利",
+    "存管",
+    "清算",
+    "头寸",
+    "备付",
+    "代销",
+    "保证金",
+    "划转",
+    "过渡",
+    "暂挂",
+    "待处理",
+    "结息",
+    "EB",
+    "专户",
+    "款项",
+    "内部",
+    "碧乐活",
+    "瑞赢",
+    "睿赢",
+]
+
+
+def _is_noise_node(name: str) -> bool:
+    """
+    检查节点名称是否包含噪音关键词。
+
+    Args:
+        name: 节点名称
+
+    Returns:
+        如果包含噪音关键词返回True
+    """
+    return any(kw in name for kw in NOISE_KEYWORDS)
+
+
+def _add_core_person_nodes(
+    nodes: List[Dict], node_set: set, core_persons: List[str]
+) -> None:
+    """
+    添加核心人员节点到节点列表。
+
+    Args:
+        nodes: 节点列表
+        node_set: 节点集合（用于去重）
+        core_persons: 核心人员列表
+    """
+    for person in core_persons:
+        nodes.append({"id": person, "label": person, "group": "core", "size": 35})
+        node_set.add(person)
+
+
+def _add_company_nodes(
+    nodes: List[Dict], node_set: set, involved_companies: List[str]
+) -> None:
+    """
+    添加涉案公司节点到节点列表。
+
+    Args:
+        nodes: 节点列表
+        node_set: 节点集合（用于去重）
+        involved_companies: 涉案公司列表
+    """
+    for company in involved_companies:
+        if company not in node_set:
+            display_name = company[:8] + "..." if len(company) > 10 else company
+            nodes.append(
+                {
+                    "id": company,
+                    "label": f"🏢 {display_name}",
+                    "group": "involved_company",
+                    "size": 40,
+                }
+            )
+            node_set.add(company)
+
+
+def _classify_edge_type(
+    u: str, v: str, core_persons: List[str], involved_companies: List[str]
+) -> str:
+    """
+    根据节点类型分类边的类型。
+
+    Args:
+        u: 源节点
+        v: 目标节点
+        core_persons: 核心人员列表
+        involved_companies: 涉案公司列表
+
+    Returns:
+        边类型: 'core', 'company_inner', 'company', 'other'
+    """
+    u_core = u in core_persons
+    v_core = v in core_persons
+    u_company = u in involved_companies
+    v_company = v in involved_companies
+
+    if u_core and v_core:
+        return "core"
+    elif u_company and v_company:
+        return "company_inner"
+    elif u_company or v_company:
+        return "company"
+    else:
+        return "other"
+
+
+def _is_core_interaction(
+    u: str, v: str, core_persons: List[str], involved_companies: List[str]
+) -> bool:
+    """
+    判断是否为关键实体间的交互（人员-人员、人员-公司、公司-公司）。
+
+    Args:
+        u: 源节点
+        v: 目标节点
+        core_persons: 核心人员列表
+        involved_companies: 涉案公司列表
+
+    Returns:
+        如果是关键实体间交互返回True
+    """
+    u_core = u in core_persons
+    v_core = v in core_persons
+    u_company = u in involved_companies
+    v_company = v in involved_companies
+    return (u_core or u_company) and (v_core or v_company)
+
+
+def _filter_and_classify_edges(
+    flow_stats: Dict, core_persons: List[str], involved_companies: List[str]
+) -> List[Tuple[Tuple[str, str], Dict, str]]:
+    """
+    筛选并分类边数据。
+
+    过滤噪音节点，根据金额阈值筛选非核心交互，
+    并按实体类型分类边。
+
+    Args:
+        flow_stats: 资金流向统计
+        core_persons: 核心人员列表
+        involved_companies: 涉案公司列表
+
+    Returns:
+        分类后的边数据列表: [((from, to), stats, edge_type), ...]
+    """
+    all_sorted_flows = sorted(flow_stats.items(), key=lambda x: -x[1]["total"])
+    edge_data = []
+
+    for (u, v), stats in all_sorted_flows:
+        # 过滤噪音节点
+        if _is_noise_node(u) or _is_noise_node(v):
+            continue
+
+        # 关键实体间的交互不限制金额
+        if not _is_core_interaction(u, v, core_persons, involved_companies):
+            if stats["total"] < config.DISPLAY_AMOUNT_THRESHOLD:
+                continue
+
+        edge_type = _classify_edge_type(u, v, core_persons, involved_companies)
+        edge_data.append(((u, v), stats, edge_type))
+
+    return edge_data
+
+
+def _limit_edges_by_type(
+    edge_data: List[Tuple[Tuple[str, str], Dict, str]],
+) -> Tuple[List, Dict]:
+    """
+    按边类型限制边数量。
+
+    核心人员间、涉案公司间的交易全部保留，
+    其他类型按金额排名限制数量。
+
+    Args:
+        edge_data: 边数据列表
+
+    Returns:
+        (final_edges, edge_stats)
+    """
+    # 核心人员间、涉案公司间的交易全部保留
+    core_edges = [e for e in edge_data if e[2] == "core"]
+    company_inner_edges = [e for e in edge_data if e[2] == "company_inner"]
+
+    # 其他交易按金额排名限制数量
+    company_edges = [e for e in edge_data if e[2] == "company"][:30]
+    other_edges = [e for e in edge_data if e[2] == "other"][:30]
+
+    final_edges = core_edges + company_inner_edges + company_edges + other_edges
+
+    edge_stats = {
+        "core": len(core_edges),
+        "company": len(company_inner_edges) + len(company_edges),
+        "other": len(other_edges),
+    }
+
+    return final_edges, edge_stats
+
+
+def _create_node_for_edge(node: str, node_set: set) -> Dict:
+    """
+    为边创建新节点（如果节点不存在）。
+
+    Args:
+        node: 节点名称
+        node_set: 现有节点集合
+
+    Returns:
+        节点字典
+    """
+    is_company = "公司" in node or "有限" in node
+    label = node[:6] + "..." if len(node) > 8 else node
+    group = "company" if is_company else "other"
+    size = 25 if is_company else 18
+
+    return {"id": node, "label": label, "group": group, "size": size}
+
+
+def _create_edge_dict(from_node: str, to_node: str, stats: Dict) -> Dict:
+    """
+    创建边字典。
+
+    Args:
+        from_node: 源节点
+        to_node: 目标节点
+        stats: 统计信息
+
+    Returns:
+        边字典
+    """
+    amount_wan = stats["total"] / 10000
+    return {
+        "from": from_node,
+        "to": to_node,
+        "value": amount_wan,
+        "title": f"{from_node} → {to_node}\n金额: {amount_wan:.1f}万元 ({stats['count']}笔)",
+    }
+
+
+def _prepare_graph_data(
+    flow_stats: Dict, core_persons: List[str], involved_companies: List[str]
+) -> Tuple[List[Dict], List[Dict], Dict]:
+    """
+    准备图形数据（节点和边）。
+
+    将资金流向统计数据转换为可视化所需的节点和边格式。
+    包含以下处理步骤：
+    1. 添加核心人员和涉案公司节点
+    2. 筛选和分类边（过滤噪音节点，按金额阈值筛选）
+    3. 限制边数量（保留所有核心交互，其他按金额排名）
+    4. 为边创建新节点（对手方节点）
+
+    Args:
+        flow_stats: 资金流向统计 { (from, to): {'count': n, 'total': amount} }
+        core_persons: 核心人员列表
+        involved_companies: 涉案公司列表
+
+    Returns:
+        (nodes, edges, edge_stats)
+        - nodes: 节点列表
+        - edges: 边列表
+        - edge_stats: 边统计信息 {'core': n, 'company': n, 'other': n}
+    """
+    nodes = []
+    edges = []
+    node_set = set()
+
+    # 1. 添加核心人员节点
+    _add_core_person_nodes(nodes, node_set, core_persons)
+
+    # 2. 添加涉案公司节点
+    _add_company_nodes(nodes, node_set, involved_companies)
+
+    # 3. 筛选并分类边
+    edge_data = _filter_and_classify_edges(flow_stats, core_persons, involved_companies)
+
+    # 4. 限制边数量
+    final_edges, edge_stats = _limit_edges_by_type(edge_data)
+
+    # 5. 添加边和新节点
+    for (from_node, to_node), stats, edge_type in final_edges:
+        # 为不存在的节点创建新节点
+        for node in [from_node, to_node]:
+            if node not in node_set:
+                nodes.append(_create_node_for_edge(node, node_set))
+                node_set.add(node)
+
+        # 创建边
+        edges.append(_create_edge_dict(from_node, to_node, stats))
+
+    return nodes, edges, edge_stats
+
+
+def _generate_fallback_html(
+    nodes_json: str, edges_json: str, core_persons: List[str]
+) -> str:
+    """生成备用HTML（当模板文件不存在时使用）- 使用本地 vis-network，支持离线"""
+    # 尝试读取本地 vis-network.min.js
+    vis_js_paths = [
+        os.path.join(
+            str(RESOURCE_ROOT),
+            "dashboard/node_modules/vis-network/standalone/umd/vis-network.min.js",
+        ),
+        os.path.join(
+            str(RESOURCE_ROOT),
+            "node_modules/vis-network/standalone/umd/vis-network.min.js",
+        ),
+    ]
+
+    vis_js_content = None
+    for vis_js_path in vis_js_paths:
+        if os.path.exists(vis_js_path):
+            try:
+                with open(vis_js_path, "r", encoding="utf-8") as f:
+                    vis_js_content = f.read()
+                logger.info(f"已加载本地 vis-network: {vis_js_path}")
+                break
+            except Exception as e:
+                logger.warning(f"读取 vis-network 失败: {e}")
+
+    if not vis_js_content:
+        logger.error("无法找到本地 vis-network.min.js，图谱将无法渲染")
+        return """<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>资金流向 - 错误</title>
+<style>body{font-family:Microsoft YaHei;background:#1a1a2e;color:#fff;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}
+.error{text-align:center;}.error h1{color:#ff6b6b;}.error p{color:#888;}</style>
+</head><body>
+<div class="error">
+<h1>⚠️ 图谱渲染失败</h1>
+<p>未找到 vis-network 库文件，请确保已安装前端依赖：</p>
+<code style="color:#00d2ff;">cd dashboard && npm install</code>
+</div>
+</body></html>"""
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>资金流向</title>
+<script>{vis_js_content}</script>
+<style>body{{margin:0;padding:0;background:#1a1a2e;}}#network{{width:100vw;height:100vh;}}</style>
+</head><body>
+<div id="network"></div>
+<script>
+var nodes = new vis.DataSet({nodes_json});
+var edges = new vis.DataSet({edges_json});
+var network = new vis.Network(document.getElementById('network'), 
+    {{nodes:nodes,edges:edges}}, {{physics:{{stabilization:{{iterations:200}}}}}});
+</script>
+</body></html>"""
+
+
+# 资金流向统计的列名映射（支持中英文）
+FLOW_STATS_COLUMN_MAP = {
+    "counterparty": ["counterparty", "交易对手", "对手方", "对方户名"],
+    "description": ["description", "摘要", "交易摘要", "备注", "附言"],
+    "income": ["income", "收入(元)", "收入", "贷方金额"],
+    "expense": ["expense", "支出(元)", "支出", "借方金额"],
+}
+
+
+def _has_column_in_df(df: pd.DataFrame, columns_list: List[str]) -> bool:
+    """
+    检查DataFrame是否包含指定列名列表中的任意一列。
+
+    使用集合操作优化性能，时间复杂度为O(n+m)。
+
+    Args:
+        df: DataFrame对象
+        columns_list: 列名候选列表
+
+    Returns:
+        如果存在任意一列返回True
+    """
+    return not set(columns_list).isdisjoint(df.columns)
+
+
+def _get_column_value_from_row(row: pd.Series, columns_list: List[str]) -> Any:
+    """
+    从行数据中获取列值，支持多种列名格式。
+
+    按顺序尝试columns_list中的列名，返回第一个存在的列的值。
+
+    Args:
+        row: 行数据
+        columns_list: 列名候选列表
+
+    Returns:
+        列值，未找到返回空字符串
+    """
+    for col_name in columns_list:
+        if col_name in row.index:
+            return row.get(col_name, "")
+    return ""
+
+
+def _parse_transaction_amount(value: Any) -> float:
+    """
+    解析交易金额值。
+
+    处理各种格式（字符串、数值、None等），解析失败返回0。
+
+    Args:
+        value: 金额值
+
+    Returns:
+        解析后的金额
+    """
+    if value is None or str(value) == "nan":
+        return 0.0
+
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _normalize_entity_name_for_flow(entity_name: str) -> str:
+    """
+    规范化实体名称，用于资金流向图的节点标识。
+
+    移除文件扩展名、路径和特定后缀。
+
+    Args:
+        entity_name: 原始实体名称
+
+    Returns:
+        规范化后的名称
+    """
+    base_name = os.path.basename(entity_name)
+    return base_name.replace("_合并流水", "").replace(".xlsx", "")
+
+
+def _record_money_flow(
+    flow_stats: Dict, source: str, target: str, amount: float
+) -> None:
+    """
+    记录单笔资金流向。
+
+    Args:
+        flow_stats: 资金流向统计字典
+        source: 源节点
+        target: 目标节点
+        amount: 金额
+    """
+    flow_stats[(source, target)]["count"] += 1
+    flow_stats[(source, target)]["total"] += amount
+
+
+def _process_transaction_row(
+    row: pd.Series, source_node: str, flow_stats: Dict
+) -> None:
+    """
+    处理单条交易记录，提取并记录资金流向。
+
+    Args:
+        row: 交易行数据
+        source_node: 源节点名称（本人）
+        flow_stats: 资金流向统计字典
+    """
+    # 获取对手方
+    counterparty = str(
+        _get_column_value_from_row(row, FLOW_STATS_COLUMN_MAP["counterparty"])
+    )
+    if not counterparty or counterparty == "nan":
+        return
+    description = str(
+        _get_column_value_from_row(row, FLOW_STATS_COLUMN_MAP["description"])
+    )
+    if should_skip_payment_platform_counterparty(counterparty, description):
+        return
+
+    # 获取收入金额
+    income_val = _get_column_value_from_row(row, FLOW_STATS_COLUMN_MAP["income"])
+    income = _parse_transaction_amount(income_val)
+
+    # 获取支出金额
+    expense_val = _get_column_value_from_row(row, FLOW_STATS_COLUMN_MAP["expense"])
+    expense = _parse_transaction_amount(expense_val)
+
+    # 记录资金流向
+    if income > 0:
+        # 收入：对手方 -> 本人
+        _record_money_flow(flow_stats, counterparty, source_node, income)
+
+    if expense > 0:
+        # 支出：本人 -> 对手方
+        _record_money_flow(flow_stats, source_node, counterparty, expense)
+
+
+def _calculate_flow_stats(
+    all_transactions: Dict[str, pd.DataFrame], core_persons: List[str]
+) -> Dict:
+    """
+    计算资金流向统计（支持中英文列名）。
+
+    遍历所有实体的交易数据，统计每个方向的资金流向（金额和笔数）。
+    支持多种列名格式（中英文），适应不同数据源。
+
+    处理流程：
+    1. 检查DataFrame是否包含必要的对手方列
+    2. 规范化实体名称作为节点标识
+    3. 遍历每笔交易，提取收入和支出金额
+    4. 记录资金流向（对手方<->本人）
+
+    Args:
+        all_transactions: 所有交易数据 {entity_name: DataFrame}
+        core_persons: 核心人员列表
+
+    Returns:
+        资金流向统计字典 {(from_node, to_node): {'count': n, 'total': amount}}
+    """
+    flow_stats = defaultdict(lambda: {"count": 0, "total": 0})
+
+    for entity_name, df in all_transactions.items():
+        if df.empty:
+            continue
+
+        # 检查是否有对手方列
+        if not _has_column_in_df(df, FLOW_STATS_COLUMN_MAP["counterparty"]):
+            logger.debug(f"跳过 {entity_name}: 无对手方列")
+            continue
+
+        # 规范化源节点名称
+        source_node = _normalize_entity_name_for_flow(entity_name)
+
+        # 处理每笔交易
+        for _, row in df.iterrows():
+            _process_transaction_row(row, source_node, flow_stats)
+
+    return dict(flow_stats)
+
+
+def _safe_node_id(name: str) -> str:
+    """生成安全的Mermaid节点ID"""
+    # 移除特殊字符，只保留字母、数字、中文
+    import re
+
+    safe_id = re.sub(r"[^\w\u4e00-\u9fa5]", "_", str(name))
+    # 确保不以数字开头
+    if safe_id and safe_id[0].isdigit():
+        safe_id = "N_" + safe_id
+    return safe_id or "unknown"

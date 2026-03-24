@@ -624,6 +624,7 @@ class ApiService {
             inputDirectory: string;
             outputDirectory: string;
             projectRoot: string;
+            deliveryMode: boolean;
         };
         error?: string;
     }> {

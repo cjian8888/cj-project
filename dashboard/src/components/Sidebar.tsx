@@ -38,6 +38,7 @@ export function Sidebar() {
         updateAnalysisModules,
         startAnalysis,
         stopAnalysis,
+        addLog,
         setActiveTab,
         toggleSidebar,
         clearCache,
@@ -72,10 +73,14 @@ export function Sidebar() {
                     await syncDataSources({ outputDirectory: result.path });
                 }
             } else if (result.error) {
-                console.log('选择目录:', result.error);
+                const time = new Date().toLocaleTimeString();
+                addLog({ time, level: 'WARN', msg: `选择${type === 'input' ? '输入' : '输出'}目录失败: ${result.error}` });
             }
         } catch (error) {
             console.error('选择目录失败:', error);
+            const time = new Date().toLocaleTimeString();
+            const errorMsg = error instanceof Error ? error.message : '未知错误';
+            addLog({ time, level: 'ERROR', msg: `选择${type === 'input' ? '输入' : '输出'}目录失败: ${errorMsg}` });
         }
     };
 

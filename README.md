@@ -4,7 +4,13 @@
 >
 > 当前交付形态：`Windows 单机离线 one-folder 包`
 >
-> 启动方式：Windows 交付环境双击 `start_fpas.cmd` 或 `start_fpas_silent.vbs`；源码环境运行 `python api_server.py`
+> 启动方式：Windows 交付环境双击 `start_fpas.cmd` 或 `start_fpas_silent.vbs`；程序会自动拉起后端，并优先使用系统默认浏览器；若默认浏览器不适配前端，会改用本机可用的 Chrome / Edge / Firefox / Chromium / Brave 打开 `http://127.0.0.1:8000/dashboard/`；如需一键停止当前交付包的后端服务和受控浏览器实例，双击 `stop_fpas.cmd`；源码环境运行 `python api_server.py`
+>
+> Win7 + 内网用户：先安装交付包根目录 `win7-prerequisites/` 里的 4 个补丁和 Win7 Chrome；如果系统自带浏览器无法挂载前端，请把该 Chrome 设为默认浏览器后再启动
+>
+> 交付包文档：根目录同时附带浏览器可直接打开的 `README.html`
+>
+> `2026-03-24` 交付补丁：Win7 交付态已补上“目录打开”兼容修复，以及 `stop_fpas.cmd` 对受控浏览器/后端的强制回收修复；在使用随包受控浏览器的前提下，停止后应可直接删除整个交付目录
 >
 > 原始数据准备：把所有轮次的协查原始文件按查询原样放在同一个根目录，不必改名、不必重组；银行、微信、支付宝、财付通及其他协查数据都放进去，然后在前端把该目录选为“输入目录”
 >
@@ -32,7 +38,11 @@
 
 ### 第一次使用前先确认
 
-- 如果你使用交付包，直接双击 `start_fpas.cmd` 或 `start_fpas_silent.vbs` 即可，不需要额外安装 Python
+- 如果你使用交付包，直接双击 `start_fpas.cmd` 或 `start_fpas_silent.vbs` 即可；它会自动拉起后端，并优先使用系统默认浏览器；若默认浏览器不适配前端，会改用本机可用的 Chrome / Edge / Firefox / Chromium / Brave 打开 `http://127.0.0.1:8000/dashboard/`
+- 交付根目录同时附带 `README.html`，可直接用浏览器查看排版版使用说明
+- 如需一键停止当前交付包启动的后端服务和关联启动窗口，请双击 `stop_fpas.cmd`；该脚本会优先结束本交付包的后端进程和受控浏览器守护进程，并强制回收受控浏览器实例；在使用受控浏览器时，停止后应可直接删除整个交付目录；如果最终回退到了系统默认打开方式，则无法保证自动关闭你手工打开或系统复用的浏览器窗口
+- 如果目标机是 `Windows 7` 且处于内网，请先进入交付根目录 `win7-prerequisites/`，先装 4 个补丁，再装随包附带的 Win7 Chrome；如果系统自带浏览器打不开前端或页面异常，请把该 Chrome 设为默认浏览器后再启动
+- 如不想改系统默认浏览器，也可以在启动前设置环境变量 `FPAS_BROWSER_EXE=浏览器完整路径`，显式指定兼容浏览器
 - 如果你使用源码运行，才需要本机具备 `Python 3.9+`
 - 原始协查数据可以放在任意目录，`data/` 只是默认示例目录，不是强制要求
 - 正式访问入口固定为 `http://127.0.0.1:8000/dashboard/`
@@ -44,23 +54,31 @@
 
 硬门槛：
 
-- 操作系统至少为 `Windows 7 SP1`
-- 目标机必须已安装 `KB2533623`
-- 目标机必须已具备 Universal CRT：满足其一即可
-- 已安装 `KB2999226`
-- 或系统目录存在 `C:\Windows\System32\ucrtbase.dll`
-- 目标机必须有一款可用的现代浏览器；仅有 `IE11` 不视为满足前端运行条件
+- 操作系统至少为 `Windows 7 SP1 x64`
+- 交付包根目录 `win7-prerequisites/` 内置了这套最小前置文件，Win7 + 内网用户必须先装完再运行程序
+- 必装补丁 1：`Windows6.1-KB4490628-x64.msu`
+- 必装补丁 2：`Windows6.1-KB4474419-v3-x64.msu`
+- 必装补丁 3：`Windows6.1-KB2533623-x64.msu`
+- 必装补丁 4：`Windows6.1-KB2999226-x64.msu`
+- 必装浏览器：`109.0.5414.120-64Bit-ChromeStandaloneSetup64.exe`
+- 如果系统自带浏览器无法正常挂载前端、打开 `/dashboard/` 空白或脚本异常，请将上面的 Chrome 设置为系统默认浏览器后再启动
 - 交付包内置 Python 运行时的位数必须与目标系统位数一致；当前已验证链路为 `Windows 7 SP1 x64 + Python 3.8.10 x64 portable-runtime bundle`
 
-强烈建议但不作为唯一放行门槛：
+安装顺序建议：
 
-- 安装 `KB4490628` 与 `KB4474419`，补齐 Win7 后续更新和 SHA-2 签名支持
-- 安装 `KB3125574` 这类 Win7 汇总更新，减少历史运行库和组件缺口
-- 先在一台 `Windows 7 SP1` 虚拟机做冷启动验收，再把同一批产物送入封闭目标机
+- 先装 `Windows6.1-KB4490628-x64.msu`
+- 再装 `Windows6.1-KB4474419-v3-x64.msu`
+- 再装 `Windows6.1-KB2533623-x64.msu`
+- 再装 `Windows6.1-KB2999226-x64.msu`
+- 最后安装 `109.0.5414.120-64Bit-ChromeStandaloneSetup64.exe`
+- 全部装完后，再双击 `start_fpas.cmd` 或 `start_fpas_silent.vbs`
+- 如需停止本交付包，双击 `stop_fpas.cmd`
 
 最小核对命令：
 
 ```bat
+wmic qfe | findstr 4490628
+wmic qfe | findstr 4474419
 wmic qfe | findstr 2533623
 wmic qfe | findstr 2999226
 dir C:\Windows\System32\ucrtbase.dll
@@ -132,8 +150,9 @@ http://127.0.0.1:8000/dashboard/
 
 - 这是正式访问入口
 - 交付环境下也应以这个地址为准
-- Windows one-folder 交付包双击 `start_fpas.cmd` 或 `start_fpas_silent.vbs` 后，会默认自动打开系统默认浏览器并进入这个地址
+- Windows one-folder 交付包双击 `start_fpas.cmd` 或 `start_fpas_silent.vbs` 后，会优先自动打开系统默认浏览器；若默认浏览器不适配前端，会回退到本机可用的兼容浏览器并进入这个地址
 - 如果需要关闭自动打开浏览器，可在启动前设置环境变量 `FPAS_AUTO_OPEN_BROWSER=0`
+- 如果需要显式指定兼容浏览器，可在启动前设置环境变量 `FPAS_BROWSER_EXE=浏览器完整路径`
 - 前端开发服务器 `5173` 只用于调试，不是正式交付入口
 
 #### 3. 选择目录并开始分析

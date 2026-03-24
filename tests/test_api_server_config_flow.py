@@ -4151,6 +4151,139 @@ def test_resolve_open_folder_path_rejects_old_output_after_sync_switch(tmp_path)
     assert resolved_new == str(new_analysis_results_dir.resolve())
 
 
+def test_get_windows_explorer_executable_prefers_absolute_system_path(monkeypatch):
+    monkeypatch.setenv("WINDIR", r"D:\Win")
+    monkeypatch.setenv("SystemRoot", r"D:\Windows")
+    monkeypatch.setattr(
+        api_server.os.path,
+        "exists",
+        lambda path: path == r"D:\Win\explorer.exe",
+    )
+
+    explorer_path = api_server._get_windows_explorer_executable()
+
+    assert explorer_path == r"D:\Win\explorer.exe"
+
+
+def test_open_folder_in_windows_prefers_shell_explore(monkeypatch):
+    folder_path = r"C:\cases\analysis_results"
+    expected_path = api_server.os.path.realpath(api_server.os.path.abspath(folder_path))
+    calls = []
+
+    monkeypatch.setattr(
+        api_server,
+        "_shell_execute_windows",
+        lambda file_path, **kwargs: calls.append((file_path, kwargs)),
+    )
+    monkeypatch.setattr(
+        api_server.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not launch subprocess")),
+    )
+
+    api_server._open_folder_in_windows(folder_path)
+
+    assert calls == [
+        (
+            expected_path,
+            {
+                "verb": "explore",
+                "working_dir": api_server.os.path.dirname(expected_path),
+            },
+        )
+    ]
+
+
+def test_open_folder_in_windows_falls_back_to_absolute_explorer_after_shell_failure(monkeypatch):
+    folder_path = r"C:\cases\analysis_results"
+    expected_path = api_server.os.path.realpath(api_server.os.path.abspath(folder_path))
+    explorer_path = r"C:\Windows\explorer.exe"
+    shell_calls = []
+
+    monkeypatch.setattr(
+        api_server,
+        "_get_windows_explorer_executable",
+        lambda: explorer_path,
+    )
+
+    def fake_shell_execute(file_path, **kwargs):
+        shell_calls.append((file_path, kwargs))
+        if file_path == expected_path:
+            raise OSError("shell verb failed")
+        return None
+
+    monkeypatch.setattr(api_server, "_shell_execute_windows", fake_shell_execute)
+    monkeypatch.setattr(
+        api_server.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not launch subprocess")),
+    )
+
+    api_server._open_folder_in_windows(folder_path)
+
+    assert shell_calls == [
+        (
+            expected_path,
+            {
+                "verb": "explore",
+                "working_dir": api_server.os.path.dirname(expected_path),
+            },
+        ),
+        (
+            expected_path,
+            {
+                "verb": "open",
+                "working_dir": api_server.os.path.dirname(expected_path),
+            },
+        ),
+        (
+            explorer_path,
+            {
+                "parameters": f'"{expected_path}"',
+                "working_dir": api_server.os.path.dirname(explorer_path),
+            },
+        ),
+    ]
+
+
+def test_open_folder_in_windows_falls_back_to_cmd_start(monkeypatch):
+    folder_path = r"C:\cases\analysis_results"
+    expected_path = api_server.os.path.realpath(api_server.os.path.abspath(folder_path))
+    explorer_path = r"C:\Windows\explorer.exe"
+    commands = []
+
+    monkeypatch.setattr(
+        api_server,
+        "_get_windows_explorer_executable",
+        lambda: explorer_path,
+    )
+    monkeypatch.setattr(
+        api_server,
+        "_get_windows_cmd_executable",
+        lambda: r"C:\Windows\System32\cmd.exe",
+    )
+    monkeypatch.setattr(
+        api_server,
+        "_shell_execute_windows",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("shell execute failed")),
+    )
+
+    def fake_popen(cmd, *args, **kwargs):
+        commands.append(cmd)
+        if len(commands) == 1:
+            raise OSError("explorer failed")
+        return SimpleNamespace()
+
+    monkeypatch.setattr(api_server.subprocess, "Popen", fake_popen)
+
+    api_server._open_folder_in_windows(folder_path)
+
+    assert commands == [
+        [explorer_path, expected_path],
+        [r"C:\Windows\System32\cmd.exe", "/c", "start", "", expected_path],
+    ]
+
+
 def test_collect_family_assets_for_summary_deduplicates_properties_and_vehicles():
     profiles = {
         "张三": {

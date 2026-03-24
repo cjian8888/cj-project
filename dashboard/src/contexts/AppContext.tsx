@@ -213,6 +213,7 @@ export function AppProvider({ children }: AppProviderProps) {
     const [data, setData] = useState<DataState>(defaultData);
     const [logs, setLogs] = useState<LogEntry[]>(initialLogs);
     const [ui, setUI] = useState<UIState>(defaultUI);
+    const deliveryModeRef = useRef(false);
     const completeHandledRef = useRef(false);
     const semanticNavigationRequestRef = useRef(0);
     const pendingLogsRef = useRef<LogEntry[]>([]);
@@ -231,12 +232,14 @@ export function AppProvider({ children }: AppProviderProps) {
                 dataSources: { ...prev.dataSources, ...dataSources },
             };
             
-            // 持久化到 localStorage
-            if (dataSources.inputDirectory) {
-                localStorage.setItem(STORAGE_KEYS.INPUT_DIR, dataSources.inputDirectory);
-            }
-            if (dataSources.outputDirectory) {
-                localStorage.setItem(STORAGE_KEYS.OUTPUT_DIR, dataSources.outputDirectory);
+            // 交付态不复用浏览器本地路径，避免不同机器/不同包目录互相污染
+            if (!deliveryModeRef.current) {
+                if (dataSources.inputDirectory) {
+                    localStorage.setItem(STORAGE_KEYS.INPUT_DIR, dataSources.inputDirectory);
+                }
+                if (dataSources.outputDirectory) {
+                    localStorage.setItem(STORAGE_KEYS.OUTPUT_DIR, dataSources.outputDirectory);
+                }
             }
             
             return newConfig;
@@ -834,6 +837,48 @@ export function AppProvider({ children }: AppProviderProps) {
 
         const bootstrap = async () => {
             try {
+                const defaultPathResult = await api.getDefaultPaths();
+                const deliveryMode = Boolean(defaultPathResult.success && defaultPathResult.data?.deliveryMode);
+                deliveryModeRef.current = deliveryMode;
+
+                const defaultPaths = defaultPathResult.success && defaultPathResult.data
+                    ? {
+                        inputDirectory: defaultPathResult.data.inputDirectory,
+                        outputDirectory: defaultPathResult.data.outputDirectory,
+                    }
+                    : {
+                        inputDirectory: defaultConfig.dataSources.inputDirectory,
+                        outputDirectory: defaultConfig.dataSources.outputDirectory,
+                    };
+
+                if (deliveryMode) {
+                    localStorage.removeItem(STORAGE_KEYS.INPUT_DIR);
+                    localStorage.removeItem(STORAGE_KEYS.OUTPUT_DIR);
+
+                    const activePathResult = await api.syncActivePaths(defaultPaths);
+                    if (activePathResult.success && activePathResult.data) {
+                        const activePaths = {
+                            inputDirectory: activePathResult.data.inputDirectory,
+                            outputDirectory: activePathResult.data.outputDirectory,
+                        };
+
+                        setConfig(prev => ({
+                            ...prev,
+                            dataSources: activePaths,
+                        }));
+                        addLog({
+                            time: new Date().toLocaleTimeString(),
+                            level: 'INFO',
+                            msg: `交付态已重置为包内默认路径: 输入=${activePaths.inputDirectory}, 输出=${activePaths.outputDirectory}`,
+                        });
+
+                        if (!disposed) {
+                            await initializeFromBackend();
+                        }
+                        return;
+                    }
+                }
+
                 const savedInputDir = localStorage.getItem(STORAGE_KEYS.INPUT_DIR);
                 const savedOutputDir = localStorage.getItem(STORAGE_KEYS.OUTPUT_DIR);
 
@@ -883,13 +928,7 @@ export function AppProvider({ children }: AppProviderProps) {
                     return;
                 }
 
-                const result = await api.getDefaultPaths();
-                if (result.success && result.data) {
-                    const defaultPaths = {
-                        inputDirectory: result.data.inputDirectory,
-                        outputDirectory: result.data.outputDirectory,
-                    };
-
+                if (defaultPathResult.success && defaultPathResult.data) {
                     setConfig(prev => ({
                         ...prev,
                         dataSources: defaultPaths,
@@ -897,7 +936,7 @@ export function AppProvider({ children }: AppProviderProps) {
                     addLog({
                         time: new Date().toLocaleTimeString(),
                         level: 'INFO',
-                        msg: `已加载默认路径: 输入=${result.data.inputDirectory}, 输出=${result.data.outputDirectory}`,
+                        msg: `已加载默认路径: 输入=${defaultPaths.inputDirectory}, 输出=${defaultPaths.outputDirectory}`,
                     });
 
                     if (!disposed) {
