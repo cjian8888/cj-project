@@ -4407,3 +4407,79 @@ def test_serialize_for_json_converts_nested_sets():
         "A002",
     ]
     assert result["profiles"]["朱明"]["wealth_management"]["tags"] == ["x", "y"]
+
+
+def test_augment_graph_cache_with_wallet_data_preserves_existing_wallet_counterparties():
+    graph_cache = {
+        "nodes": [
+            {"id": "张三", "label": "张三", "group": "core"},
+            {"id": "某对手", "label": "某对手", "group": "wallet_counterparty"},
+        ],
+        "edges": [
+            {"from": "张三", "to": "某对手", "type": "wallet", "value": 0.5},
+        ],
+        "walletReport": {
+            "wallet_alerts": [
+                {
+                    "person": "张三",
+                    "counterparty": "某对手",
+                    "amount": 100.0,
+                    "date": "2026-03-24",
+                    "description": "夜间异常收款",
+                    "risk_level": "medium",
+                    "alert_type": "night_income",
+                    "risk_reason": "夜间高频",
+                }
+            ],
+            "wallet_counterparties": [
+                {
+                    "person": "张三",
+                    "counterparty": "某对手",
+                    "platforms": ["支付宝"],
+                    "amount": 100.0,
+                    "count": 2,
+                }
+            ],
+        },
+    }
+    wallet_data = {
+        "subjects": [
+            {
+                "subjectName": "张三",
+                "matchedToCore": True,
+                "platforms": {
+                    "alipay": {
+                        "incomeTotalYuan": 100.0,
+                        "expenseTotalYuan": 0.0,
+                        "topCounterparties": [
+                            {"name": "某对手", "totalAmountYuan": 100.0, "count": 2}
+                        ],
+                    }
+                },
+            }
+        ],
+        "alerts": [
+            {
+                "person": "张三",
+                "counterparty": "某对手",
+                "amount": 100.0,
+                "date": "2026-03-24",
+                "description": "夜间异常收款",
+                "risk_level": "medium",
+                "alert_type": "night_income",
+                "risk_reason": "夜间高频",
+            }
+        ],
+    }
+
+    result = api_server._augment_graph_cache_with_wallet_data(
+        graph_cache,
+        wallet_data,
+        core_persons=["张三"],
+        companies=[],
+    )
+
+    wallet_report = result["walletReport"]
+    assert len(wallet_report["wallet_counterparties"]) == 1
+    assert wallet_report["wallet_counterparties"][0]["counterparty"] == "某对手"
+    assert len(wallet_report["wallet_alerts"]) == 1

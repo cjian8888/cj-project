@@ -3884,6 +3884,57 @@ def _augment_graph_cache_with_wallet_data(
     companies: List[str],
 ) -> Dict[str, Any]:
     """把电子钱包补充边增量并入图谱缓存。"""
+    def _merge_wallet_report(
+        existing_report: Optional[Dict[str, Any]],
+        new_report: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        existing = existing_report if isinstance(existing_report, dict) else {}
+        current = new_report if isinstance(new_report, dict) else {}
+
+        def _dedupe_records(
+            records: List[Dict[str, Any]],
+            key_builder,
+        ) -> List[Dict[str, Any]]:
+            seen = set()
+            merged_records: List[Dict[str, Any]] = []
+            for item in records:
+                if not isinstance(item, dict):
+                    continue
+                key = key_builder(item)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged_records.append(item)
+            return merged_records
+
+        merged_alerts = _dedupe_records(
+            list(existing.get("wallet_alerts", []) or [])
+            + list(current.get("wallet_alerts", []) or []),
+            lambda item: (
+                str(item.get("person") or ""),
+                str(item.get("counterparty") or ""),
+                str(item.get("date") or ""),
+                str(item.get("alert_type") or ""),
+                str(item.get("description") or ""),
+                str(item.get("amount") or ""),
+            ),
+        )
+        merged_counterparties = _dedupe_records(
+            list(existing.get("wallet_counterparties", []) or [])
+            + list(current.get("wallet_counterparties", []) or []),
+            lambda item: (
+                str(item.get("person") or ""),
+                str(item.get("counterparty") or ""),
+                tuple(str(platform) for platform in list(item.get("platforms", []) or [])),
+                str(item.get("amount") or ""),
+                str(item.get("count") or ""),
+            ),
+        )
+        return {
+            "wallet_alerts": merged_alerts[:30],
+            "wallet_counterparties": merged_counterparties[:20],
+        }
+
     base = dict(graph_cache or {})
     nodes = list(base.get("nodes", []) or [])
     edges = list(base.get("edges", []) or [])
@@ -3917,7 +3968,7 @@ def _augment_graph_cache_with_wallet_data(
 
     base["nodes"] = nodes
     base["edges"] = edges
-    wallet_report = additions.get("report", {})
+    wallet_report = _merge_wallet_report(base.get("walletReport", {}), additions.get("report", {}))
     if wallet_report:
         base["walletReport"] = wallet_report
     return base
