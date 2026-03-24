@@ -453,7 +453,7 @@ function OverviewTab() {
                     profile?.realExpense ?? summary?.real_expense ?? 0
                 );
                 const cashTotal = profile?.cashTotal || 0;
-                const cashTxCount = ((profile as any)?.cashTransactions || []).length;
+                const cashTxCount = Number((profile as any)?.cashTransactionCount ?? (((profile as any)?.cashTransactions || []).length));
                 const netFlow = income - expense;
                 const total = income + expense;
                 const cashRatio = total > 0 ? (cashTotal / total) * 100 : 0;
@@ -520,7 +520,7 @@ function OverviewTab() {
                 const income = profile?.totalIncome || 0;
                 const expense = profile?.totalExpense || 0;
                 const cashTotal = profile?.cashTotal || 0;
-                const cashTxCount = ((profile as any)?.cashTransactions || []).length;
+                const cashTxCount = Number((profile as any)?.cashTransactionCount ?? (((profile as any)?.cashTransactions || []).length));
                 const netFlow = income - expense;
                 const total = income + expense;
                 const cashRatio = total > 0 ? (cashTotal / total) * 100 : 0;

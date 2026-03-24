@@ -85,7 +85,7 @@ def humanize_report_text(value: Any) -> str:
     if not text:
         return ""
 
-    def _replace(match: re.Match[str]) -> str:
+    def _replace(match: re.Match) -> str:
         date_text = match.group("date")
         time_text = match.group("time")
         return date_text if time_text == "00:00:00" else f"{date_text} {time_text}"

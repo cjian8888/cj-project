@@ -5994,6 +5994,115 @@ async def get_results():
         raise HTTPException(status_code=500, detail=f"获取结果失败: {str(e)}")
 
 
+def _build_dashboard_results_payload() -> Dict[str, Any]:
+    """为 Dashboard 构造轻量完成态载荷，避免前端恢复时读取超大对象。"""
+    _sync_analysis_state_with_active_output()
+
+    if analysis_state.status != "completed" or not analysis_state.results:
+        raise HTTPException(status_code=400, detail="分析尚未完成且缓存无效")
+
+    results_data = serialize_for_json(_normalize_results_contract(analysis_state.results))
+    results_data = to_camel_case(results_data)
+    results_data = serialize_for_json(results_data)
+
+    if not isinstance(results_data, dict):
+        raise HTTPException(status_code=500, detail="分析结果格式无效")
+
+    allowed_keys = {
+        "persons",
+        "companies",
+        "profiles",
+        "suspicions",
+        "analysisResults",
+        "walletData",
+    }
+    compact_payload = {
+        key: value for key, value in dict(results_data).items() if key in allowed_keys
+    }
+
+    profiles_payload = compact_payload.get("profiles")
+    if isinstance(profiles_payload, dict):
+        compact_profiles = {}
+        keep_keys = {
+            "entityName",
+            "entityId",
+            "totalIncome",
+            "totalExpense",
+            "realIncome",
+            "realExpense",
+            "transactionCount",
+            "cashTotal",
+            "thirdPartyTotal",
+            "wealthTotal",
+            "wealthTransactionCount",
+            "maxTransaction",
+            "salaryRatio",
+            "hasData",
+            "companySpecific",
+            "companyRegistration",
+            "salaryEnhancedAnalysis",
+            "realSalaryAnalysis",
+            "financeRiskAnalysis",
+            "incomeExpenseMatchAnalysis",
+            "personalFundFeatureAnalysis",
+        }
+        for entity_name, profile_value in profiles_payload.items():
+            if not isinstance(profile_value, dict):
+                compact_profiles[entity_name] = profile_value
+                continue
+
+            cash_transaction_count = 0
+            raw_cash_transactions = profile_value.get("cashTransactions")
+            if isinstance(raw_cash_transactions, list):
+                cash_transaction_count = len(raw_cash_transactions)
+
+            profile_compact = {
+                key: value
+                for key, value in profile_value.items()
+                if key in keep_keys
+            }
+            profile_compact["cashTransactionCount"] = cash_transaction_count
+
+            compact_profiles[entity_name] = profile_compact
+
+        compact_payload["profiles"] = compact_profiles
+
+    if isinstance(compact_payload.get("suspicions"), dict):
+        compact_payload["suspicions"] = _normalize_serialized_suspicions_payload(
+            compact_payload["suspicions"]
+        )
+
+    results_dir = _get_active_results_dir()
+    report_package = _load_report_package_for_manifest(results_dir)
+    compact_payload["reportPackage"] = (
+        serialize_for_json(report_package) if report_package else None
+    )
+
+    return compact_payload
+
+
+@app.get("/api/results/dashboard")
+async def get_dashboard_results():
+    """获取 Dashboard 完成态恢复载荷，剔除 Win7 易卡顿的超大字段。"""
+    from fastapi.responses import Response
+    import json
+
+    try:
+        response_body = json.dumps(
+            {
+                "message": "Dashboard 结果获取成功",
+                "data": _build_dashboard_results_payload(),
+            },
+            ensure_ascii=False,
+        )
+        return Response(content=response_body, media_type="application/json")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.getLogger(__name__).exception(f"获取 Dashboard 结果失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取 Dashboard 结果失败: {str(e)}")
+
+
 @app.get("/api/reports/legacy")
 async def get_reports():
     """获取报告列表（递归扫描所有子目录）"""

@@ -508,6 +508,13 @@ class ApiService {
     }
 
     /**
+     * 获取供 Dashboard 恢复完成态使用的轻量结果
+     */
+    async getDashboardResults(): Promise<{ message: string; data: AnalysisResults | null }> {
+        return this.request('/api/results/dashboard');
+    }
+
+    /**
      * 获取最近一次分析的历史日志，用于恢复日志控制台
      */
     async getAnalysisLogHistory(limit: number = 200): Promise<AnalysisLogHistoryResponse> {

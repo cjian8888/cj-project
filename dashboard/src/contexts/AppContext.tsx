@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
+import { createContext, startTransition, useContext, useState, useCallback, useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 import type {
     AppState,
@@ -21,6 +21,9 @@ const STORAGE_KEYS = {
     INPUT_DIR: 'fpas_input_directory',
     OUTPUT_DIR: 'fpas_output_directory',
 } as const;
+
+const MAX_VISIBLE_LOGS = 120;
+const LOG_FLUSH_MS = 120;
 
 // ==================== Default Values ====================
 
@@ -212,6 +215,8 @@ export function AppProvider({ children }: AppProviderProps) {
     const [ui, setUI] = useState<UIState>(defaultUI);
     const completeHandledRef = useRef(false);
     const semanticNavigationRequestRef = useRef(0);
+    const pendingLogsRef = useRef<LogEntry[]>([]);
+    const logFlushTimerRef = useRef<number | null>(null);
 
     // ==================== Config Actions ====================
 
@@ -254,21 +259,64 @@ export function AppProvider({ children }: AppProviderProps) {
 
     // ==================== Analysis Actions ====================
 
+    const flushPendingLogs = useCallback(() => {
+        if (logFlushTimerRef.current !== null) {
+            window.clearTimeout(logFlushTimerRef.current);
+            logFlushTimerRef.current = null;
+        }
+        if (pendingLogsRef.current.length === 0) {
+            return;
+        }
+
+        const nextBatch = pendingLogsRef.current;
+        pendingLogsRef.current = [];
+
+        startTransition(() => {
+            setLogs(prev => {
+                const merged = [...prev, ...nextBatch];
+                return merged.length > MAX_VISIBLE_LOGS
+                    ? merged.slice(-MAX_VISIBLE_LOGS)
+                    : merged;
+            });
+        });
+    }, []);
+
+    const scheduleLogFlush = useCallback(() => {
+        if (logFlushTimerRef.current !== null) {
+            return;
+        }
+        logFlushTimerRef.current = window.setTimeout(() => {
+            flushPendingLogs();
+        }, LOG_FLUSH_MS);
+    }, [flushPendingLogs]);
+
+    const resetPendingLogs = useCallback(() => {
+        if (logFlushTimerRef.current !== null) {
+            window.clearTimeout(logFlushTimerRef.current);
+            logFlushTimerRef.current = null;
+        }
+        pendingLogsRef.current = [];
+    }, []);
+
     const addLog = useCallback((log: LogEntry) => {
         const normalizedLog: LogEntry = {
             time: String(log.time || new Date().toLocaleTimeString()),
             level: normalizeLogLevel((log as { level?: string }).level || 'INFO'),
             msg: String(log.msg || ''),
         };
-        setLogs(prev => {
-            const newLogs = [...prev, normalizedLog];
-            // Keep only last 200 logs
-            if (newLogs.length > 200) {
-                return newLogs.slice(-200);
-            }
-            return newLogs;
-        });
-    }, []);
+        pendingLogsRef.current.push(normalizedLog);
+        if (pendingLogsRef.current.length >= 8) {
+            flushPendingLogs();
+            return;
+        }
+        scheduleLogFlush();
+    }, [flushPendingLogs, scheduleLogFlush]);
+
+    useEffect(() => {
+        return () => {
+            resetPendingLogs();
+        };
+    }, [resetPendingLogs]);
 
     const buildSafeDataState = useCallback((backendData: any): DataState => {
         const safeSuspicions: SuspicionResult = {
@@ -376,20 +424,21 @@ export function AppProvider({ children }: AppProviderProps) {
                 : [];
 
             if (historicalLogs.length > 0) {
-                setLogs(historicalLogs);
+                resetPendingLogs();
+                setLogs(historicalLogs.slice(-MAX_VISIBLE_LOGS));
                 return true;
             }
         } catch (error) {
             console.warn('恢复历史日志失败:', error);
         }
         return false;
-    }, []);
+    }, [resetPendingLogs]);
 
     const finalizeCompletedAnalysis = useCallback(async (
         options: { currentPhase: string; preserveLastRunTime?: boolean; endTime?: string | null }
     ) => {
         try {
-            const result = await api.getResults();
+            const result = await api.getDashboardResults();
             if (!result.data) {
                 throw new Error('分析结果为空');
             }
@@ -436,7 +485,7 @@ export function AppProvider({ children }: AppProviderProps) {
             if (status.status === 'completed') {
                 addLog({ time: timeStr, level: 'INFO', msg: '检测到后端缓存，正在恢复数据...' });
 
-                const result = await api.getResults();
+                const result = await api.getDashboardResults();
                 if (result.data) {
                     const backendData = result.data as any;
                     applyCompletedData(backendData, {
@@ -764,11 +813,12 @@ export function AppProvider({ children }: AppProviderProps) {
     // ==================== Log Actions ====================
 
     const clearLogs = useCallback(() => {
+        resetPendingLogs();
         setLogs([]);
         const now = new Date();
         const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
         setLogs([{ time: timeStr, level: 'INFO', msg: '日志已清除' }]);
-    }, []);
+    }, [resetPendingLogs]);
 
     // ==================== 初始化：检查后端缓存数据 ====================
 
@@ -810,6 +860,29 @@ export function AppProvider({ children }: AppProviderProps) {
                     return;
                 }
 
+                const activePathResult = await api.syncActivePaths({});
+                if (activePathResult.success && activePathResult.data) {
+                    const activePaths = {
+                        inputDirectory: activePathResult.data.inputDirectory,
+                        outputDirectory: activePathResult.data.outputDirectory,
+                    };
+
+                    setConfig(prev => ({
+                        ...prev,
+                        dataSources: activePaths,
+                    }));
+                    addLog({
+                        time: new Date().toLocaleTimeString(),
+                        level: 'INFO',
+                        msg: `已加载活动路径: 输入=${activePaths.inputDirectory}, 输出=${activePaths.outputDirectory}`,
+                    });
+
+                    if (!disposed) {
+                        await initializeFromBackend();
+                    }
+                    return;
+                }
+
                 const result = await api.getDefaultPaths();
                 if (result.success && result.data) {
                     const defaultPaths = {
@@ -828,7 +901,6 @@ export function AppProvider({ children }: AppProviderProps) {
                     });
 
                     if (!disposed) {
-                        await api.syncActivePaths(defaultPaths);
                         await initializeFromBackend();
                     }
                     return;

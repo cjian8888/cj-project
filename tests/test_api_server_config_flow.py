@@ -1736,6 +1736,89 @@ def test_get_results_refreshes_report_package_when_semantic_artifact_missing(
     assert payload["data"]["reportPackage"]["priority_board"][0]["entity_name"] == "李四"
 
 
+def test_get_dashboard_results_omits_heavy_runtime_fields(tmp_path):
+    output_dir = tmp_path / "output"
+    results_dir = output_dir / "analysis_results" / "qa"
+    results_dir.mkdir(parents=True)
+    (results_dir / "report_package.json").write_text(
+        json.dumps(
+            {
+                "main_report_view": {
+                    "summary_narrative": "统一语义层共归集1项重点问题。",
+                    "issue_count": 1,
+                },
+                "priority_board": [
+                    {
+                        "entity_name": "张三",
+                        "priority_score": 90.0,
+                        "risk_level": "high",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    previous_state = {
+        "status": api_server.analysis_state.status,
+        "progress": api_server.analysis_state.progress,
+        "phase": api_server.analysis_state.phase,
+        "start_time": api_server.analysis_state.start_time,
+        "end_time": api_server.analysis_state.end_time,
+        "results": api_server.analysis_state.results,
+        "error": api_server.analysis_state.error,
+    }
+    previous_config = dict(api_server._current_config)
+    previous_sync = api_server._sync_analysis_state_with_active_output
+
+    api_server.analysis_state.status = "completed"
+    api_server.analysis_state.progress = 100
+    api_server.analysis_state.phase = "已从缓存恢复"
+    api_server.analysis_state.results = {
+        "persons": ["张三"],
+        "companies": ["测试科技有限公司"],
+        "profiles": {"张三": {"display_name": "张三", "vehicles": []}},
+        "suspicions": {"directTransfers": []},
+        "analysisResults": {"aggregation": {"summary": {"高风险实体数": 1}}},
+        "graphData": {"nodes": [{"id": "张三"}], "edges": []},
+        "walletData": {"alerts": []},
+        "externalData": {"p1": {"vehicle_data": {"张三": [{"plate_number": "沪A12345"}]}}},
+        "runtimeLogPaths": {"run": str(output_dir / "analysis_logs" / "latest.log")},
+        "_profiles_raw": {"张三": {"raw": True}},
+    }
+
+    try:
+        api_server._current_config.clear()
+        api_server._current_config["outputDirectory"] = str(output_dir)
+        api_server._sync_analysis_state_with_active_output = lambda force_reload=False: True
+
+        response = asyncio.run(api_server.get_dashboard_results())
+        payload = json.loads(response.body.decode("utf-8"))["data"]
+    finally:
+        api_server.analysis_state.status = previous_state["status"]
+        api_server.analysis_state.progress = previous_state["progress"]
+        api_server.analysis_state.phase = previous_state["phase"]
+        api_server.analysis_state.start_time = previous_state["start_time"]
+        api_server.analysis_state.end_time = previous_state["end_time"]
+        api_server.analysis_state.results = previous_state["results"]
+        api_server.analysis_state.error = previous_state["error"]
+        api_server._sync_analysis_state_with_active_output = previous_sync
+        api_server._current_config.clear()
+        api_server._current_config.update(previous_config)
+
+    assert payload["persons"] == ["张三"]
+    assert payload["companies"] == ["测试科技有限公司"]
+    assert payload["walletData"]["alerts"] == []
+    assert payload["analysisResults"]["aggregation"]["summary"]["高风险实体数"] == 1
+    assert payload["reportPackage"]["main_report_view"]["issue_count"] == 1
+    assert payload["reportPackage"]["priority_board"][0]["entity_name"] == "张三"
+    assert "graphData" not in payload
+    assert "externalData" not in payload
+    assert "runtimeLogPaths" not in payload
+    assert "_profiles_raw" not in payload
+
+
 def test_load_report_package_for_manifest_refreshes_stale_qa_guard_version(
     tmp_path, monkeypatch
 ):

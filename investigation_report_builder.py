@@ -488,8 +488,9 @@ class InvestigationReportBuilder:
             self._external_tax_data_cache = {}
 
         # 【2026-03-03 新增】加载风险等级阈值配置
+        risk_thresholds_path = CONFIG_DIR / "risk_thresholds.yaml"
         try:
-            with open('config/risk_thresholds.yaml', 'r', encoding='utf-8') as f:
+            with open(risk_thresholds_path, 'r', encoding='utf-8') as f:
                 risk_config = yaml.safe_load(f)
                 self._risk_thresholds = risk_config.get('risk_level_thresholds', {})
                 logger.info(f"风险等级阈值配置加载成功: {self._risk_thresholds}")
@@ -518,7 +519,7 @@ class InvestigationReportBuilder:
         self._companies = self._extract_companies()
         # 【2026-03-03 新增】加载风险等级阈值配置
         try:
-            with open('config/risk_thresholds.yaml', 'r', encoding='utf-8') as f:
+            with open(risk_thresholds_path, 'r', encoding='utf-8') as f:
                 risk_config = yaml.safe_load(f)
                 self._risk_thresholds = risk_config.get('risk_level_thresholds', {})
                 logger.info(f"风险等级阈值配置加载成功: {self._risk_thresholds}")
