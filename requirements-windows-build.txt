@@ -1,3 +1,5 @@
 # Win7 目标构建机请固定使用 Python 3.8.x，并使用 PyInstaller 5.x。
 # PyInstaller 6.x 官方运行时要求已提升到 Windows 8+，不适合作为 Win7 交付基线。
+# cryptography 46.x 在 Win7 上会因 _rust 扩展加载失败导致打包产物启动即崩。
+cryptography==39.0.2
 pyinstaller==5.13.2

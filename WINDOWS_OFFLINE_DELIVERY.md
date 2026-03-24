@@ -1,157 +1,116 @@
 # Windows 离线交付基线
 
-更新时间：2026-03-22
+更新时间：2026-03-23
 
 ## 当前结论
 
-这个项目的最终交付目标已经固定为：
+这个项目面向 `Windows 7 SP1+` 的最终交付结论已经收敛为：
 
-- 目标平台：`Windows7+`
+- 目标平台：`Windows 7 SP1+`
 - 运行方式：单机、离线
 - 交付形式：`one-folder` 离线包
-- 前后端形态：后端进程直接承载前端生产构建产物，不再依赖 `Vite dev server`
+- 默认交付模式：`portable-runtime`
+- 默认启动入口：`dist/fpas-offline/start_fpas.cmd`
+- 可选静默入口：`dist/fpas-offline/start_fpas_silent.vbs`
+- 访问地址：`http://127.0.0.1:8000/dashboard/`
 
-现阶段宿主机是 mac，因此这台机器只能完成“交付前准备”和“仓库预检”，不能直接产出最终 Windows 包。
+`PyInstaller one-folder exe` 这条链路在 Win7 实机验证中仍会出现启动期 `MemoryError`，因此不再作为 Win7 默认交付方案。它现在只保留为可选调试路径，不再是主交付形态。
+
+## 为什么改成 portable-runtime
+
+截至 `2026-03-23` 的 Win7 实测结果：
+
+- 源码态：`python api_server.py` 可在 Win7 上稳定启动，并监听 `0.0.0.0:8000`
+- portable-runtime 包：`start_fpas.cmd` 拉起后，Win7 上 `/dashboard/` 返回 `200`
+- PyInstaller 冻结包：即使已回退 `cryptography`、关闭归档压缩并持续瘦身启动链，Win7 上 `fpas.exe` 仍会在启动期触发 `MemoryError`
+
+这说明问题已经不是“补一个 DLL”或“再调一个 hook”就能稳定解决，而是 Win7 对大体量冻结进程的容忍度不够。继续把整套应用强行冻成单体 `exe`，风险高于收益。
+
+因此，当前主交付方案改为：
+
+- 复制完整应用源码和前端生产产物
+- 复制 Windows Python 3.8 运行时
+- 把当前虚拟环境的 `site-packages` 合并进包内运行时
+- 用 `start_fpas.cmd` 调用包内 `runtime/python/python.exe api_server.py`
+
+目标机仍然不需要额外安装 Python。
 
 ## 当前已经固化到代码里的约束
 
-1. Windows 打包统一入口为 `build_windows_package.py`
-2. 打包脚本已提供 `--preflight` 模式，用于在 mac / Linux 上先做交付前检查
-3. 打包脚本正式构建时会拒绝非 Windows 平台
-4. 目标是 `Windows7+` 时，正式构建机会强制要求 `Python 3.8.x`
-5. `requirements-windows-build.txt` 已固定 `PyInstaller==5.13.2`
-6. `fpas_windows.spec` 已纳入以下关键运行资源：
-   - `README.md`
-   - `docs/assets/`
-   - `config/`
-   - `knowledge/`
-   - `report_config/`
-   - `templates/`
-   - `dashboard/dist/`
-   - `vis-network.min.js`
+1. Windows 打包统一入口仍是 `build_windows_package.py`
+2. 默认构建模式改为 `portable-runtime`
+3. `build_windows_package.py --bundle-mode pyinstaller` 仅保留为兼容调试路径
+4. 打包脚本正式构建时仍要求 `Windows + Python 3.8.x`
+5. 前端生产构建仍由后端 `/dashboard/` 承载，不依赖 `Vite dev server`
+6. 交付包会生成以下入口文件：
+   - `start_fpas.cmd`
+   - `start_fpas_silent.vbs`
+7. 启动失败诊断日志默认落在交付根目录：
+   - `dist/fpas-offline/startup_fatal.log`
 
-## 为什么 Win7 目标要收紧到 Python 3.8 + PyInstaller 5.13.2
+## Win7 最小环境支持清单
 
-- Python 官方当前文档已明确：如果需要 `Windows 7` 支持，应安装 `Python 3.8`
-- PyInstaller 官方 6.x 的运行时基线已提升到 `Windows 8+`
-- 因此，当前这条交付链如果仍使用 `PyInstaller 6.x`，就和 `Windows7+` 目标直接冲突
+必须满足：
 
-这不是偏好问题，而是目标平台和打包工具链的硬约束。
+- 操作系统：`Windows 7 SP1`
+- 补丁：`KB2533623`
+- Universal CRT：满足其一即可
+  - `KB2999226`
+  - 或 `C:\Windows\System32\ucrtbase.dll` 已存在
+- 浏览器：必须有一款可用的现代浏览器；仅 `IE11` 不视为满足前端运行条件
+- 位数：交付包内置运行时位数必须与目标系统位数一致
 
-## 在 mac 上现在能完成什么
+强烈建议安装：
 
-下面这些事情，当前都可以在 mac 上先做完：
+- `KB4490628`
+- `KB4474419`
 
-1. 代码级预检
+最小核对命令：
 
-```bash
-python3 build_windows_package.py --preflight
+```bat
+wmic qfe | findstr 2533623
+wmic qfe | findstr 2999226
+dir C:\Windows\System32\ucrtbase.dll
 ```
 
-2. 前端生产构建验证
+## 当前已验证通过的 Win7 构建/验收机
 
-```bash
-cd dashboard
-npm run build
-```
+截至 `2026-03-23`，下面这台 Win7 虚拟机已完成真实验收：
 
-3. 回归测试
+- 虚拟机：`Win7-SP1-FPAS`
+- 系统：`Windows 7 Professional SP1 x64`
+- Python：`3.8.10 x64`
+- 打包模式：`portable-runtime`
 
-```bash
-python3 -m pytest tests/test_build_windows_package.py -q
-python3 -m pytest tests/test_paths.py -q
-```
+已验证通过的事实：
 
-4. 后端语法检查
+- `build_windows_package.py` 默认构建成功
+- 生成目录：`dist/fpas-offline`
+- 包内存在：
+  - `start_fpas.cmd`
+  - `start_fpas_silent.vbs`
+  - `runtime/python/python.exe`
+- 在 Win7 上通过任务计划调用 `start_fpas.cmd` 后：
+  - `0.0.0.0:8000` 进入 `LISTENING`
+  - `GET http://127.0.0.1:8000/dashboard/` 返回 `200`
 
-```bash
-python3 -m py_compile api_server.py build_windows_package.py
-```
+## Windows 侧推荐构建步骤
 
-5. 打包资源审计
-
-- 检查 `fpas_windows.spec` 是否已带上文档、模板、知识库和前端生产产物
-- 检查 `/docs/readme` 依赖的 `README.md` 与 `docs/assets/` 是否可被打包
-- 检查路径管理是否仍走 `paths.py`，避免硬编码绝对路径
-
-## 在 mac 上现在做不了什么
-
-下面这些事情，必须放到 Windows 构建机上完成：
-
-1. 产出真正的 Windows `one-folder` 包
-2. 验证 exe 在 `Windows7+` 上是否能直接运行
-3. 验证 UCRT / VC 运行库缺失时的行为
-4. 生成最终可复现的 Windows 离线依赖锁定清单
-5. 在近似空白 Windows 机器上做最终交付验收
-
-## 推荐的 Windows 构建机基线
-
-为了尽量贴近最终目标，建议准备一台专用构建机，至少满足：
-
-- 操作系统：Windows 7 SP1 或更高版本
-- Python：`3.8.x`
-- Node.js：能完成当前 `dashboard/` 前端生产构建的稳定版本
-- 构建方式：本地离线或局域网内预置 wheel / npm 缓存，不依赖公网安装
-
-如果构建机高于 Windows 7，也必须以 `Python 3.8.x + PyInstaller 5.13.2` 为基线，并在最终成品上回到 `Windows7+` 实机验证。
-
-## 当前已验证通过的构建机
-
-截至 `2026-03-22`，下面这台 Windows 构建机已经把“真实重编译 exe”链路跑通：
-
-- 主机名：`UTM-WIN11`
-- 操作系统：`Windows 11 x64`
-- 仓库路径：`C:\Build\cj-project`
-- 虚拟环境：`C:\Build\cj-project\.venv38`
-- Python：`3.8.10`
-- Node.js：`20.19.0`
-- npm：`10.8.2`
-- PyInstaller：`5.13.2`
-
-已实测通过的命令链：
-
-```bash
-cd C:\Build\cj-project
-C:\Python38\python.exe -m venv .venv38
-.venv38\Scripts\python.exe -m pip install -r requirements.txt -r requirements-windows-build.txt
-cd dashboard
-npm install
-npm run build
-cd ..
-.venv38\Scripts\python.exe build_windows_package.py
-```
-
-已实测结果：
-
-- 成功生成 `dist/fpas-offline\fpas.exe`
-- 后台启动 `fpas.exe` 后，`http://127.0.0.1:8000/dashboard/` 返回 `200`
-- 打包产物包含 `dashboard`、`config`、`knowledge`、`templates`、`docs`、`README.md`
-
-## 建议的 Windows 侧最终构建步骤
-
-### 1. 建立专用虚拟环境
+### 1. 建立 Python 3.8 虚拟环境
 
 ```bash
 python -m venv .venv38
 .venv38\Scripts\activate
 ```
 
-### 2. 安装运行依赖和打包依赖
+### 2. 安装运行依赖和构建依赖
 
 ```bash
 python -m pip install -r requirements.txt
 python -m pip install -r requirements-windows-build.txt
 ```
 
-### 3. 固化本次真正使用的依赖版本
-
-```bash
-python -m pip freeze > requirements-windows-lock.txt
-```
-
-这一步很重要。`requirements.txt` 目前主要是下限约束，不是最终可复现锁文件。仓库根目录现在已经补入一份从真实 Windows 3.8 构建机导出的 [`requirements-windows-lock.txt`](requirements-windows-lock.txt)，后续只要 Windows 打包依赖有变化，就必须在同类构建机上重新刷新它。
-
-### 4. 构建前端
+### 3. 构建前端
 
 ```bash
 cd dashboard
@@ -160,31 +119,68 @@ npm run build
 cd ..
 ```
 
-### 5. 产出 one-folder 包
+### 4. 产出 Win7 交付包
 
 ```bash
 python build_windows_package.py
 ```
 
-默认体验说明：
+默认会输出：
 
-- 双击 `dist/fpas-offline/fpas.exe` 后，程序会自动拉起本机默认浏览器并打开 `http://127.0.0.1:8000/dashboard/`
-- 如果需要关闭这一行为，可在启动前设置环境变量 `FPAS_AUTO_OPEN_BROWSER=0`
+- `dist/fpas-offline/start_fpas.cmd`
+- `dist/fpas-offline/start_fpas_silent.vbs`
+- `dist/fpas-offline/runtime/python/`
 
-## 当前剩余未闭环项
+### 5. 目标机启动方式
 
-截至现在，mac 侧已经不再是这条链路的阻塞点；真正剩下的边界是：
+首选：
 
-- 还没有在真实 `Windows7+` 目标机上做最终运行验收
-- 还没有在更接近空白环境的 Windows 机器上验证运行库缺失时的表现
-- 后续如果 `requirements.txt`、`dashboard/package-lock.json` 或 `build_windows_package.py` 再改动，必须回到这台 Windows 构建机重新跑一轮完整打包
+```text
+双击 start_fpas.cmd
+```
 
-## 对后续代理或开发者的要求
+如果希望隐藏控制台窗口：
 
-如果后续还有人继续接手这条链路，必须先接受以下原则：
+```text
+双击 start_fpas_silent.vbs
+```
 
-1. 不要在 mac 上误以为自己已经“打完 Windows 包”
+启动成功后应能访问：
+
+```text
+http://127.0.0.1:8000/dashboard/
+```
+
+如果启动失败，先看：
+
+```text
+dist/fpas-offline/startup_fatal.log
+```
+
+## 在 mac 上现在能完成什么
+
+mac / Linux 侧当前仍然只能做交付前准备，不能产出最终 Win7 包：
+
+1. `python3 build_windows_package.py --preflight`
+2. `cd dashboard && npm run build`
+3. 回归测试
+4. 语法检查
+5. 打包资源审计
+
+真正的 Win7 交付包，必须回到 `Windows + Python 3.8.x` 构建机完成。
+
+## 剩余边界
+
+当前仍未闭环的只剩这些：
+
+- 还没有在你那台最终封闭网络的物理 Win7 机器上做最终验收
+- 还没有把新的 `portable-runtime` 交付说明同步到所有历史文档和发包流程里
+- `PyInstaller` 路径虽然保留，但不应再被当作 Win7 正式交付入口
+
+## 对后续开发者的要求
+
+1. 不要再把 `fpas.exe` 当成 Win7 默认交付入口
 2. 不要把 `npm run dev` 当成最终交付方式
-3. 不要再把新的静态资源、模板或文档漏出 `fpas_windows.spec`
-4. 不要使用高于 `Python 3.8.x + PyInstaller 5.13.2` 的构建基线去宣称兼容 `Windows7+`
-5. 交付前一定要拿最终 exe 回到真实 Windows 环境做验收
+3. 新增静态资源、模板、知识库或配置目录时，要同时纳入 portable bundle 复制清单
+4. 不要使用高于 `Python 3.8.x` 的运行时去宣称兼容 `Windows 7`
+5. Win7 交付前必须再次在真实 Win7 环境执行 `start_fpas.cmd` 验收

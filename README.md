@@ -4,7 +4,7 @@
 >
 > 当前交付形态：`Windows 单机离线 one-folder 包`
 >
-> 启动方式：Windows 交付环境双击 `fpas.exe`；源码环境运行 `python api_server.py`
+> 启动方式：Windows 交付环境双击 `start_fpas.cmd` 或 `start_fpas_silent.vbs`；源码环境运行 `python api_server.py`
 >
 > 原始数据准备：把所有轮次的协查原始文件按查询原样放在同一个根目录，不必改名、不必重组；银行、微信、支付宝、财付通及其他协查数据都放进去，然后在前端把该目录选为“输入目录”
 >
@@ -32,17 +32,51 @@
 
 ### 第一次使用前先确认
 
-- 如果你使用交付包，直接双击 `fpas.exe` 即可，不需要额外安装 Python
+- 如果你使用交付包，直接双击 `start_fpas.cmd` 或 `start_fpas_silent.vbs` 即可，不需要额外安装 Python
 - 如果你使用源码运行，才需要本机具备 `Python 3.9+`
 - 原始协查数据可以放在任意目录，`data/` 只是默认示例目录，不是强制要求
 - 正式访问入口固定为 `http://127.0.0.1:8000/dashboard/`
 - 如需重跑全量分析，应接受当前选中输出目录下的分析产物会被刷新
 
+### Windows 7 交付包最小环境支持清单
+
+如果目标机是 `Windows 7`，不要只看“能不能双击启动脚本”，而要先确认这台机器满足下面这组最小运行基线。
+
+硬门槛：
+
+- 操作系统至少为 `Windows 7 SP1`
+- 目标机必须已安装 `KB2533623`
+- 目标机必须已具备 Universal CRT：满足其一即可
+- 已安装 `KB2999226`
+- 或系统目录存在 `C:\Windows\System32\ucrtbase.dll`
+- 目标机必须有一款可用的现代浏览器；仅有 `IE11` 不视为满足前端运行条件
+- 交付包内置 Python 运行时的位数必须与目标系统位数一致；当前已验证链路为 `Windows 7 SP1 x64 + Python 3.8.10 x64 portable-runtime bundle`
+
+强烈建议但不作为唯一放行门槛：
+
+- 安装 `KB4490628` 与 `KB4474419`，补齐 Win7 后续更新和 SHA-2 签名支持
+- 安装 `KB3125574` 这类 Win7 汇总更新，减少历史运行库和组件缺口
+- 先在一台 `Windows 7 SP1` 虚拟机做冷启动验收，再把同一批产物送入封闭目标机
+
+最小核对命令：
+
+```bat
+wmic qfe | findstr 2533623
+wmic qfe | findstr 2999226
+dir C:\Windows\System32\ucrtbase.dll
+```
+
+验收时还应额外确认：
+
+- 可以访问 `http://127.0.0.1:8000/dashboard/`
+- 双击 `start_fpas.cmd` 后，如果没有拉起界面，不要立刻重复送包，先检查交付根目录下是否生成 `startup_fatal.log`
+- 当前前端生产包基于 `Vite 7 + React 19`，默认按现代浏览器能力交付；如果目标机只有旧版 IE，请先补齐浏览器条件，再进行正式验收
+
 ### 最短上手路径
 
 第一次使用时，按这条最短路径就够了：
 
-`按原样放好协查数据 -> 启动 fpas.exe / api_server.py -> 打开 dashboard -> 选输入/输出目录 -> 开始分析 -> 看 HTML 报告 -> 必要时回看 cleaned_data`
+`按原样放好协查数据 -> 启动 start_fpas.cmd / api_server.py -> 打开 dashboard -> 选输入/输出目录 -> 开始分析 -> 看 HTML 报告 -> 必要时回看 cleaned_data`
 
 ### 第一次启动怎么做
 
@@ -79,7 +113,7 @@
 交付使用优先按下面方式启动：
 
 ```text
-双击 fpas.exe
+双击 start_fpas.cmd
 ```
 
 如果你在源码环境下运行，才使用：
@@ -98,7 +132,7 @@ http://127.0.0.1:8000/dashboard/
 
 - 这是正式访问入口
 - 交付环境下也应以这个地址为准
-- Windows one-folder 交付包双击 `fpas.exe` 后，会默认自动打开系统默认浏览器并进入这个地址
+- Windows one-folder 交付包双击 `start_fpas.cmd` 或 `start_fpas_silent.vbs` 后，会默认自动打开系统默认浏览器并进入这个地址
 - 如果需要关闭自动打开浏览器，可在启动前设置环境变量 `FPAS_AUTO_OPEN_BROWSER=0`
 - 前端开发服务器 `5173` 只用于调试，不是正式交付入口
 

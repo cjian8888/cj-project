@@ -3797,11 +3797,15 @@ def test_run_analysis_refactored_e2e_preserves_plugin_outputs_and_cache_restore(
             "analyze_behavioral_patterns",
             lambda *args, **kwargs: {},
         )
-        monkeypatch.setattr(api_server.report_generator, "generate_excel_workbook", _fake_generate_excel_workbook)
         monkeypatch.setattr(
-            api_server.wallet_report_builder,
-            "generate_wallet_artifacts",
-            lambda *args, **kwargs: {},
+            api_server,
+            "_load_report_generator",
+            lambda: SimpleNamespace(generate_excel_workbook=_fake_generate_excel_workbook),
+        )
+        monkeypatch.setattr(
+            api_server,
+            "_load_wallet_report_builder",
+            lambda: SimpleNamespace(generate_wallet_artifacts=lambda *args, **kwargs: {}),
         )
         monkeypatch.setattr(
             api_server.flow_visualizer,

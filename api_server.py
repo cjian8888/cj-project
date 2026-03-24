@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import sys
 import warnings
 import os
@@ -26,16 +27,73 @@ import shutil
 import logging
 import math
 import subprocess
+import traceback
+import importlib
 from html import escape as html_escape
 from pathlib import Path
 from datetime import datetime, timedelta, date
 from typing import Dict, List, Optional, Any
 from contextlib import asynccontextmanager
+from functools import lru_cache
 import threading
 import queue
 import pandas as pd
 import time
 from urllib.parse import quote
+
+
+_STARTUP_FATAL_LOG_NAME = "startup_fatal.log"
+_startup_fault_log_handle = None
+
+
+def _startup_diagnostics_root() -> Path:
+    env_override = os.environ.get("FPAS_STARTUP_DIAGNOSTICS_ROOT", "").strip()
+    if env_override:
+        return Path(env_override).expanduser().resolve()
+    target = getattr(sys, "executable", "") or __file__
+    return Path(target).resolve().parent
+
+
+def _append_startup_diagnostics(message: str) -> None:
+    try:
+        log_path = _startup_diagnostics_root() / _STARTUP_FATAL_LOG_NAME
+        with open(log_path, "a", encoding="utf-8") as handle:
+            handle.write(message)
+            if not message.endswith("\n"):
+                handle.write("\n")
+    except OSError:
+        pass
+
+
+def _install_startup_diagnostics() -> None:
+    global _startup_fault_log_handle
+    log_path = _startup_diagnostics_root() / _STARTUP_FATAL_LOG_NAME
+
+    try:
+        _startup_fault_log_handle = open(log_path, "a", encoding="utf-8")
+        _startup_fault_log_handle.write(
+            "\n=== startup probe "
+            f"{datetime.now().isoformat()} pid={os.getpid()} "
+            f"frozen={getattr(sys, 'frozen', False)} "
+            f"executable={getattr(sys, 'executable', '')} ===\n"
+        )
+        _startup_fault_log_handle.flush()
+        faulthandler.enable(_startup_fault_log_handle, all_threads=True)
+    except OSError:
+        _startup_fault_log_handle = None
+
+    def _startup_excepthook(exc_type, exc_value, exc_tb):
+        formatted = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        _append_startup_diagnostics(
+            "\n=== fatal startup exception "
+            f"{datetime.now().isoformat()} ===\n{formatted}\n"
+        )
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _startup_excepthook
+
+
+_install_startup_diagnostics()
 
 from fastapi import (
     FastAPI,
@@ -69,78 +127,190 @@ project_dir = str(APP_ROOT)
 if project_dir not in sys.path:
     sys.path.insert(0, project_dir)
 
-import file_categorizer
-import data_cleaner
-import data_extractor
-import financial_profiler
-import suspicion_detector
-import report_generator
-import family_analyzer
-import asset_analyzer
-import data_validator
-import fund_penetration
-import related_party_analyzer
-import multi_source_correlator
-import loan_analyzer
-import income_analyzer
-import salary_analyzer
-import flow_visualizer
-import ml_analyzer
-from real_salary_income_analyzer import RealSalaryIncomeAnalyzer
-from professional_finance_analyzer import FinancialProductAnalyzer
-from income_expense_match_analyzer import IncomeExpenseMatchAnalyzer
-from personal_fund_feature_analyzer import PersonalFundFeatureAnalyzer
+
+@lru_cache(maxsize=1)
+def _load_report_generator():
+    # Win7 打包态在服务启动阶段导入 openpyxl 容易触发 MemoryError。
+    return importlib.import_module("report_generator")
+
+
+@lru_cache(maxsize=1)
+def _load_data_extractor():
+    # PDF 线索提取链会加载 pdfplumber/pdfminer，按需导入避免阻塞 Win7 启动。
+    return importlib.import_module("data_extractor")
+
+
+@lru_cache(maxsize=1)
+def _load_asset_extractor():
+    # 房产提取链同样依赖 pdfplumber，不能放在 Win7 冻结包启动路径上。
+    return importlib.import_module("asset_extractor")
+
+
+@lru_cache(maxsize=1)
+def _load_wallet_report_builder():
+    # 电子钱包 Excel 产物链路同样依赖 openpyxl，按需加载避免阻塞启动。
+    return importlib.import_module("wallet_report_builder")
+
+
+@lru_cache(maxsize=1)
+def _load_investigation_report_builder_module():
+    # 完整报告构建器模块体量很大，不应阻塞 Win7 服务冷启动。
+    return importlib.import_module("investigation_report_builder")
+
+
+def InvestigationReportBuilder(*args, **kwargs):
+    return _load_investigation_report_builder_module().InvestigationReportBuilder(
+        *args, **kwargs
+    )
+
+
+def load_investigation_report_builder(*args, **kwargs):
+    return _load_investigation_report_builder_module().load_investigation_report_builder(
+        *args, **kwargs
+    )
+
+
+@lru_cache(maxsize=1)
+def _load_primary_targets_service_module():
+    return importlib.import_module("report_config.primary_targets_service")
+
+
+def PrimaryTargetsService(*args, **kwargs):
+    return _load_primary_targets_service_module().PrimaryTargetsService(*args, **kwargs)
+
+
+@lru_cache(maxsize=1)
+def _load_specialized_reports_module():
+    return importlib.import_module("specialized_reports")
+
+
+def SpecializedReportGenerator(*args, **kwargs):
+    return _load_specialized_reports_module().SpecializedReportGenerator(
+        *args, **kwargs
+    )
+
+
+@lru_cache(maxsize=1)
+def _load_suspicion_engine_module():
+    return importlib.import_module("suspicion_engine")
+
+
+def SuspicionEngine(*args, **kwargs):
+    return _load_suspicion_engine_module().SuspicionEngine(*args, **kwargs)
+
+
+@lru_cache(maxsize=1)
+def _load_report_quality_guard_module():
+    return importlib.import_module("report_quality_guard")
+
+
+def _get_report_qa_guard_version() -> str:
+    return _load_report_quality_guard_module().REPORT_QA_GUARD_VERSION
+
+
+@lru_cache(maxsize=1)
+def _load_report_text_formatter_module():
+    return importlib.import_module("report_text_formatter")
+
+
+def format_report_qa_check_display(*args, **kwargs):
+    return _load_report_text_formatter_module().format_report_qa_check_display(
+        *args, **kwargs
+    )
+
+
+class _LazyModuleProxy:
+    def __init__(self, module_name: str):
+        object.__setattr__(self, "_module_name", module_name)
+        object.__setattr__(self, "_module", None)
+
+    def _load(self):
+        module = object.__getattribute__(self, "_module")
+        if module is None:
+            module = importlib.import_module(object.__getattribute__(self, "_module_name"))
+            object.__setattr__(self, "_module", module)
+        return module
+
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+
+    def __setattr__(self, name, value):
+        setattr(self._load(), name, value)
+
+    def __dir__(self):
+        return sorted(set(super().__dir__()) | set(dir(self._load())))
+
+
+def _lazy_module(module_name: str):
+    return _LazyModuleProxy(module_name)
+
+
+def _lazy_constructor(module_name: str, attr_name: str):
+    def _factory(*args, **kwargs):
+        target = getattr(importlib.import_module(module_name), attr_name)
+        return target(*args, **kwargs)
+
+    return _factory
+
+
+file_categorizer = _lazy_module("file_categorizer")
+data_cleaner = _lazy_module("data_cleaner")
+financial_profiler = _lazy_module("financial_profiler")
+suspicion_detector = _lazy_module("suspicion_detector")
+family_analyzer = _lazy_module("family_analyzer")
+asset_analyzer = _lazy_module("asset_analyzer")
+data_validator = _lazy_module("data_validator")
+fund_penetration = _lazy_module("fund_penetration")
+related_party_analyzer = _lazy_module("related_party_analyzer")
+multi_source_correlator = _lazy_module("multi_source_correlator")
+loan_analyzer = _lazy_module("loan_analyzer")
+income_analyzer = _lazy_module("income_analyzer")
+salary_analyzer = _lazy_module("salary_analyzer")
+flow_visualizer = _lazy_module("flow_visualizer")
+ml_analyzer = _lazy_module("ml_analyzer")
+time_series_analyzer = _lazy_module("time_series_analyzer")
+clue_aggregator = _lazy_module("clue_aggregator")
+behavioral_profiler = _lazy_module("behavioral_profiler")
+api_validators = _lazy_module("api_validators")
+logging_config = _lazy_module("logging_config")
+pboc_account_extractor = _lazy_module("pboc_account_extractor")
+aml_analyzer = _lazy_module("aml_analyzer")
+company_info_extractor = _lazy_module("company_info_extractor")
+credit_report_extractor = _lazy_module("credit_report_extractor")
+bank_account_info_extractor = _lazy_module("bank_account_info_extractor")
+tax_info_extractor = _lazy_module("tax_info_extractor")
+vehicle_extractor = _lazy_module("vehicle_extractor")
+wealth_product_extractor = _lazy_module("wealth_product_extractor")
+securities_extractor = _lazy_module("securities_extractor")
+insurance_extractor = _lazy_module("insurance_extractor")
+immigration_extractor = _lazy_module("immigration_extractor")
+hotel_extractor = _lazy_module("hotel_extractor")
+cohabitation_extractor = _lazy_module("cohabitation_extractor")
+railway_extractor = _lazy_module("railway_extractor")
+flight_extractor = _lazy_module("flight_extractor")
+wallet_data_extractor = _lazy_module("wallet_data_extractor")
+wallet_risk_analyzer = _lazy_module("wallet_risk_analyzer")
+family_assets_helper = _lazy_module("family_assets_helper")
+family_finance = _lazy_module("family_finance")
+
+RealSalaryIncomeAnalyzer = _lazy_constructor(
+    "real_salary_income_analyzer", "RealSalaryIncomeAnalyzer"
+)
+FinancialProductAnalyzer = _lazy_constructor(
+    "professional_finance_analyzer", "FinancialProductAnalyzer"
+)
+IncomeExpenseMatchAnalyzer = _lazy_constructor(
+    "income_expense_match_analyzer", "IncomeExpenseMatchAnalyzer"
+)
+PersonalFundFeatureAnalyzer = _lazy_constructor(
+    "personal_fund_feature_analyzer", "PersonalFundFeatureAnalyzer"
+)
 
 # 导入缓存管理器
 from cache_manager import CacheManager
-import time_series_analyzer
-import clue_aggregator
-import behavioral_profiler
-import api_validators
-import logging_config
-
-# 导入外部数据提取器 (18个)
-import pboc_account_extractor
-import aml_analyzer
-import company_info_extractor
-import credit_report_extractor
-import bank_account_info_extractor
-import tax_info_extractor
-import vehicle_extractor
-import wealth_product_extractor
-import securities_extractor
-import asset_extractor
-import insurance_extractor
-import immigration_extractor
-import hotel_extractor
-import cohabitation_extractor
-import railway_extractor
-import flight_extractor
-import wallet_data_extractor
-import wallet_risk_analyzer
-import wallet_report_builder
-
-# 导入辅助模块
-import family_assets_helper
-import family_finance
-
-from specialized_reports import SpecializedReportGenerator
-import family_assets_helper
-import family_finance
 
 # 导入键名映射层
 from adapters.key_mapper import to_camel_case
-
-# 导入报告构建器（v3.0 新架构）
-from investigation_report_builder import (
-    InvestigationReportBuilder,
-    load_investigation_report_builder,
-)
-from report_quality_guard import REPORT_QA_GUARD_VERSION
-from report_text_formatter import format_report_qa_check_display
-from report_config.primary_targets_service import PrimaryTargetsService
-from specialized_reports import SpecializedReportGenerator
-from suspicion_engine import SuspicionEngine
 
 # ==================== Windows asyncio 兼容性修复 ====================
 if sys.platform == "win32":
@@ -4141,7 +4311,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         broadcast_log("INFO", "▶ Phase 3: 提取关联线索...")
 
         phase3_start = time.time()
-        clue_persons, clue_companies = data_extractor.extract_all_clues(data_dir)
+        clue_persons, clue_companies = _load_data_extractor().extract_all_clues(data_dir)
         all_persons = list(set(persons + clue_persons))
         all_companies = list(set(companies + clue_companies))
 
@@ -4290,7 +4460,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
 
         # P1.4: 自然资源部精准查询
         try:
-            precise_property_data = asset_extractor.extract_precise_property_info(
+            precise_property_data = _load_asset_extractor().extract_precise_property_info(
                 data_dir
             )
             external_data["p1"]["precise_property_data"] = precise_property_data
@@ -5373,7 +5543,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
                         report_package_for_excel = json.load(handle)
                 except (OSError, ValueError, TypeError) as exc:
                     logger.warning(f"  ✗ 读取 report_package 供 Excel 对齐失败: {exc}")
-            excel_path = report_generator.generate_excel_workbook(
+            excel_path = _load_report_generator().generate_excel_workbook(
                 profiles=profiles,
                 suspicions=suspicions,
                 output_path=os.path.join(
@@ -5397,7 +5567,7 @@ def run_analysis_refactored(analysis_config: AnalysisConfig):
         # 8.5 生成专项txt报告
         try:
             logger.info("  8.5 开始生成电子钱包专项产物...")
-            wallet_output_files = wallet_report_builder.generate_wallet_artifacts(
+            wallet_output_files = _load_wallet_report_builder().generate_wallet_artifacts(
                 output_dirs["analysis_results"],
                 external_data.get("wallet", {}),
                 wallet_artifact_bundle.get("artifacts", {}),
@@ -6475,7 +6645,7 @@ def _report_package_requires_refresh(results_dir: str, payload: Dict[str, Any]) 
     stored_guard_version = str(
         qa_meta.get("qa_guard_version") or artifact_meta.get("qa_guard_version") or ""
     ).strip()
-    if stored_guard_version != REPORT_QA_GUARD_VERSION:
+    if stored_guard_version != _get_report_qa_guard_version():
         return True
 
     dossier_explanation_fields = (

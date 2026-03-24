@@ -7,6 +7,67 @@
 
 ---
 
+## [v4.6.1] - 2026-03-23
+
+### 🪟 Win7 交付链路收敛
+
+#### Win7 默认交付形态切换为 portable-runtime (`build_windows_package.py` + `README.md` + `WINDOWS_OFFLINE_DELIVERY.md`)
+- **变更**: Windows 离线包默认构建模式从单体 `fpas.exe` 调整为 `portable-runtime`。
+- **新增**:
+  - 交付根目录生成 `start_fpas.cmd`
+  - 交付根目录生成 `start_fpas_silent.vbs`
+  - 交付包内置 `runtime/python/` 运行时并直接启动 `api_server.py`
+- **保留**: `PyInstaller` 模式未删除，但仅保留为兼容调试路径，不再作为 Win7 正式交付入口。
+- **影响**: Win7 目标机不再依赖单体冻结 exe 冷启动，降低启动期内存崩溃风险。
+
+#### Win7 启动期诊断与瘦身 (`api_server.py`)
+- **问题**: Win7 打包态此前在启动阶段缺少足够证据，且顶层导入链过重，难以判断究竟是 DLL、归档解包还是模块注册导致退出。
+- **修复**:
+  - 新增 `startup_fatal.log` 启动期诊断输出
+  - 支持 `FPAS_STARTUP_DIAGNOSTICS_ROOT` 覆盖诊断日志落点
+  - 接入 `faulthandler` 与启动异常 `excepthook`
+  - 将报表、PDF 提取、钱包报告、线索抽取等重模块改为按需延迟导入
+- **影响**: Win7 启动失败时可以直接在交付根目录取证，同时显著降低冷启动导入压力。
+
+#### Win7 依赖与兼容性收紧 (`requirements*.txt` + `financial_profiler.py` + `fpas_windows.spec`)
+- **修复**:
+  - `cryptography` 在 Windows 构建链固定回 `39.0.2`，避开 Win7 上 `_rust` 扩展加载失败
+  - 补入 `websockets` 运行依赖，避免交付包缺失 WebSocket 栈
+  - `fpas_windows.spec` 改为 `noarchive=True`，减轻冻结包归档解压压力
+  - `financial_profiler.py` 对 `groupby(..., include_groups=False)` 增加 pandas 2.0.x 兼容回退
+- **影响**: 与当前 `Windows 7 SP1 + Python 3.8.x` 交付目标保持一致，减少低版本运行时直接崩溃风险。
+
+### ✅ 验证与测试
+
+#### 自动化测试补强 (`tests/test_build_windows_package.py` + `tests/test_windows_py38_compat.py` + `tests/test_api_server_config_flow.py`)
+- **新增覆盖**:
+  - portable-runtime 源码/资源复制清单
+  - Win7 依赖锁定与 `cryptography==39.0.2`
+  - `start_fpas.cmd` / `start_fpas_silent.vbs` 生成逻辑
+  - `api_server.py` 启动期诊断与延迟导入约束
+  - API 配置流测试对延迟导入替身的兼容性
+- **结果**: 本地回归已通过，未发现新增测试失败。
+
+#### Win7 虚拟机阶段性验收
+- **已确认**:
+  - Win7 SP1 虚拟机可启动并可远程执行命令
+  - `portable-runtime` 包在 Win7 上能拉起服务
+  - `GET /dashboard/` 已返回 `200`
+- **未闭环**:
+  - 尚未在 Win7 打包态完成你提供的 `D:\测试用例\812\测试（公开）` 真实数据全流程复现
+
+### 📌 待办
+
+- 在 Win7 `portable-runtime` 交付包上，用 `D:\测试用例\812\测试（公开）` 完成真实数据重跑
+- 针对以下现象做逐项复现与取证：
+  - 前端日志面板卡顿或明显落后于后端滚动日志
+  - 分析完成后数据概览迟迟不加载
+  - 审计报告归集配置中公司列表不显示
+  - 打包态运行时出现“回退到老版本”类提示
+- 在最终封闭网络的物理 Win7 机器上，再做一轮冷启动和真实数据验收
+- 如果后续仍保留 `PyInstaller` 调试路径，需明确它不是 Win7 正式发包入口，避免再次误用
+
+
 ## [v4.6.0] - 2026-03-21
 
 ### 📘 交付文档与版本统一

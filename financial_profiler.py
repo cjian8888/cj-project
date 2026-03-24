@@ -1080,7 +1080,16 @@ def _identify_salary_by_frequency(income_df: pd.DataFrame) -> pd.DataFrame:
             else float("inf")
         )
 
-    cv_series = process_df.groupby("counterparty").apply(calc_cv, include_groups=False)
+    # pandas<2.1 不支持 include_groups；Windows7 交付链当前锁在 pandas 2.0.x，
+    # 这里必须保留兼容回退，避免打包态画像阶段整批失败。
+    try:
+        cv_series = process_df.groupby("counterparty").apply(
+            calc_cv, include_groups=False
+        )
+    except TypeError as exc:
+        if "include_groups" not in str(exc):
+            raise
+        cv_series = process_df.groupby("counterparty").apply(calc_cv)
     group_stats = group_stats.merge(
         cv_series.rename("cv"), left_on="counterparty", right_index=True, how="left"
     )
