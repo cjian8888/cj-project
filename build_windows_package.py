@@ -10,9 +10,10 @@ import importlib.util
 import re
 import subprocess
 import sys
+import sysconfig
 import shutil
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -57,6 +58,21 @@ VIS_NETWORK_JS = (
 TARGET_WINDOWS_PYTHON = (3, 8)
 PINNED_PYINSTALLER_VERSION = "5.13.2"
 REQUIRED_RUNTIME_MODULES = ("websockets",)
+PORTABLE_BUNDLE_AUDIT_MODULES = (
+    "api_server",
+    "yaml",
+    "pandas",
+    "openpyxl",
+    "pdfplumber",
+    "neo4j",
+    "jinja2",
+    "pydantic",
+    "uvicorn",
+    "uvicorn.protocols.websockets.websockets_impl",
+)
+PORTABLE_BUNDLE_VERSION_PINS: Dict[str, str] = {
+    "cryptography": "39.0.2",
+}
 LAZY_RUNTIME_MODULES = [
     "aml_analyzer",
     "asset_analyzer",
@@ -1052,6 +1068,12 @@ def _copytree(src: Path, dst: Path, ignore=None) -> None:
     shutil.copytree(src, dst, ignore=ignore)
 
 
+def _merge_tree(src: Path, dst: Path, ignore=None) -> None:
+    if not src.exists():
+        return
+    shutil.copytree(src, dst, dirs_exist_ok=True, ignore=ignore)
+
+
 def _portable_tree_ignore(_dir_path: str, names: List[str]) -> set[str]:
     return {
         name for name in names if name == "__pycache__" or name.endswith((".pyc", ".pyo"))
@@ -1321,6 +1343,9 @@ def _copy_portable_source_tree(project_root: Path, target_root: Path) -> None:
 def _copy_portable_python_runtime(target_runtime_dir: Path) -> None:
     base_runtime = Path(sys.base_prefix).resolve()
     venv_prefix = Path(sys.prefix).resolve()
+    stdlib_dir = Path(sysconfig.get_path("stdlib")).resolve()
+    platstdlib_text = sysconfig.get_path("platstdlib") or str(stdlib_dir)
+    platstdlib_dir = Path(platstdlib_text).resolve()
     if not base_runtime.exists():
         raise SystemExit(f"找不到当前解释器基座目录: {base_runtime}")
 
@@ -1340,15 +1365,50 @@ def _copy_portable_python_runtime(target_runtime_dir: Path) -> None:
 
     _copytree(base_runtime, target_runtime_dir, ignore=_runtime_ignore)
 
+    stdlib_targets = []
+    for candidate in (stdlib_dir, platstdlib_dir):
+        if candidate.exists() and candidate not in stdlib_targets:
+            stdlib_targets.append(candidate)
+
+    for stdlib_source in stdlib_targets:
+        if stdlib_source.name.lower() == "lib":
+            _merge_tree(
+                stdlib_source,
+                target_runtime_dir / "Lib",
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+            )
+
+    python_zip_name = f"python{sys.version_info[0]}{sys.version_info[1]}.zip"
+    zip_candidates = []
+    for candidate in (
+        Path(sys.executable).resolve().parent / python_zip_name,
+        base_runtime / python_zip_name,
+        venv_prefix / python_zip_name,
+        stdlib_dir.parent / python_zip_name,
+        platstdlib_dir.parent / python_zip_name,
+    ):
+        if candidate.exists() and candidate not in zip_candidates:
+            zip_candidates.append(candidate)
+
+    for zip_source in zip_candidates:
+        _copy_file(zip_source, target_runtime_dir / zip_source.name)
+
     if venv_prefix != base_runtime:
         venv_site_packages = venv_prefix / "Lib" / "site-packages"
         if venv_site_packages.exists():
-            shutil.copytree(
+            _merge_tree(
                 venv_site_packages,
                 target_runtime_dir / "Lib" / "site-packages",
-                dirs_exist_ok=True,
                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
             )
+
+    has_stdlib_dir = (target_runtime_dir / "Lib" / "encodings").exists()
+    has_stdlib_zip = (target_runtime_dir / python_zip_name).exists()
+    if not has_stdlib_dir and not has_stdlib_zip:
+        raise SystemExit(
+            "portable runtime 缺少标准库启动件，至少需要 Lib/encodings 或 "
+            f"{python_zip_name}；请在带完整标准库的 Windows Python 3.8 环境中重新打包。"
+        )
 
 
 def _remove_portable_bundle_caches(target_root: Path) -> None:
@@ -1366,6 +1426,107 @@ def _remove_portable_bundle_caches(target_root: Path) -> None:
     )
     for cache_dir in cache_dirs:
         shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def _get_portable_bundle_audit_relpaths() -> List[str]:
+    relpaths = [
+        Path("runtime") / "python" / "python.exe",
+        Path("dashboard") / "dist" / "index.html",
+        Path("config") / "risk_thresholds.yaml",
+        Path("config") / "report_phrases.yaml",
+        Path("report_config") / "rules.yaml",
+        Path("templates") / "report_v3" / "base.html",
+        Path("knowledge") / "suspicion_rules.yaml",
+        Path("start_fpas.cmd"),
+        Path("stop_fpas.cmd"),
+        Path("launch_browser_helper.py"),
+        Path("stop_fpas_helper.py"),
+    ]
+    relpaths.extend(
+        Path(WIN7_PREREQUISITE_DIR_NAME) / filename
+        for filename in sorted(WIN7_PREREQUISITE_CANDIDATES)
+    )
+    return [path.as_posix() for path in relpaths]
+
+
+def _get_portable_bundle_audit_modules() -> List[str]:
+    ordered_modules = list(REQUIRED_RUNTIME_MODULES) + list(PORTABLE_BUNDLE_AUDIT_MODULES)
+    return list(dict.fromkeys(ordered_modules))
+
+
+def _render_portable_bundle_audit_script() -> str:
+    required_files = _get_portable_bundle_audit_relpaths()
+    required_modules = _get_portable_bundle_audit_modules()
+    version_pins = dict(PORTABLE_BUNDLE_VERSION_PINS)
+    return f"""import importlib
+import importlib.metadata
+import json
+import sys
+from pathlib import Path
+
+bundle_root = Path.cwd()
+sys.path.insert(0, str(bundle_root))
+required_files = {required_files!r}
+required_modules = {required_modules!r}
+version_pins = {version_pins!r}
+
+missing_files = [rel for rel in required_files if not (bundle_root / Path(rel)).exists()]
+import_errors = {{}}
+for module_name in required_modules:
+    try:
+        importlib.import_module(module_name)
+    except Exception as exc:
+        import_errors[module_name] = f"{{type(exc).__name__}}: {{exc}}"
+
+version_errors = {{}}
+for dist_name, expected_version in version_pins.items():
+    try:
+        actual_version = importlib.metadata.version(dist_name)
+    except Exception as exc:
+        version_errors[dist_name] = f"missing ({{type(exc).__name__}}: {{exc}})"
+        continue
+    if actual_version != expected_version:
+        version_errors[dist_name] = (
+            f"expected {{expected_version}}, got {{actual_version}}"
+        )
+
+if missing_files or import_errors or version_errors:
+    print(
+        json.dumps(
+            {{
+                "missing_files": missing_files,
+                "import_errors": import_errors,
+                "version_errors": version_errors,
+            }},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    raise SystemExit(1)
+
+print(json.dumps({{"ok": True, "python": sys.version.split()[0]}}, ensure_ascii=False))
+"""
+
+
+def _audit_portable_runtime_bundle(target_root: Path) -> None:
+    runtime_python = target_root / "runtime" / "python" / "python.exe"
+    if not runtime_python.exists():
+        raise SystemExit(f"portable bundle 缺少内置 Python: {runtime_python}")
+
+    result = subprocess.run(
+        [str(runtime_python), "-c", _render_portable_bundle_audit_script()],
+        cwd=str(target_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    stdout_text = str(result.stdout or "").strip()
+    stderr_text = str(result.stderr or "").strip()
+    if result.returncode != 0:
+        details = stdout_text or stderr_text or "无额外输出"
+        raise SystemExit(f"portable bundle 运行时审计失败:\n{details}")
+    if stdout_text:
+        print(f"[build] portable bundle audit ok: {stdout_text}")
 
 
 def _write_portable_launchers(target_root: Path) -> None:
@@ -1405,6 +1566,7 @@ def build_portable_runtime_bundle() -> None:
     _write_packaged_readme_html(PROJECT_ROOT, DIST_DIR)
     _copy_win7_prerequisites(DIST_DIR)
     _remove_portable_bundle_caches(DIST_DIR)
+    _audit_portable_runtime_bundle(DIST_DIR)
 
 
 def _required_preflight_paths(project_root: Optional[Path] = None) -> List[Path]:

@@ -1,6 +1,6 @@
 # Windows 离线交付基线
 
-更新时间：2026-03-23
+更新时间：2026-03-26
 
 ## 当前结论
 
@@ -12,6 +12,7 @@
 - 默认交付模式：`portable-runtime`
 - 默认启动入口：`dist/fpas-offline/start_fpas.cmd`
 - 可选静默入口：`dist/fpas-offline/start_fpas_silent.vbs`
+- 默认交付包不提供业务 `fpas.exe` 入口
 - 访问地址：`http://127.0.0.1:8000/dashboard/`
 
 `PyInstaller one-folder exe` 这条链路在 Win7 实机验证中仍会出现启动期 `MemoryError`，因此不再作为 Win7 默认交付方案。它现在只保留为可选调试路径，不再是主交付形态。
@@ -32,6 +33,7 @@
 - 复制 Windows Python 3.8 运行时
 - 把当前虚拟环境的 `site-packages` 合并进包内运行时
 - 用 `start_fpas.cmd` 调用包内 `runtime/python/python.exe api_server.py`
+- 当前默认交付包根目录没有业务 `fpas.exe`
 
 目标机仍然不需要额外安装 Python。
 
@@ -45,7 +47,8 @@
 6. 交付包会生成以下入口文件：
    - `start_fpas.cmd`
    - `start_fpas_silent.vbs`
-7. 启动失败诊断日志默认落在交付根目录：
+7. Win7 默认交付路径不生成业务 `fpas.exe`，`fpas.exe` 仅存在于 `--bundle-mode pyinstaller` 的兼容调试构建
+8. 启动失败诊断日志默认落在交付根目录：
    - `dist/fpas-offline/startup_fatal.log`
 
 ## Win7 最小环境支持清单
@@ -90,6 +93,7 @@ dir C:\Windows\System32\ucrtbase.dll
   - `start_fpas.cmd`
   - `start_fpas_silent.vbs`
   - `runtime/python/python.exe`
+- 包内默认不存在业务 `fpas.exe`
 - 在 Win7 上通过任务计划调用 `start_fpas.cmd` 后：
   - `0.0.0.0:8000` 进入 `LISTENING`
   - `GET http://127.0.0.1:8000/dashboard/` 返回 `200`
@@ -132,6 +136,8 @@ python build_windows_package.py
 - `dist/fpas-offline/runtime/python/`
 
 ### 5. 目标机启动方式
+
+当前默认交付包不提供业务 `fpas.exe` 入口。
 
 首选：
 

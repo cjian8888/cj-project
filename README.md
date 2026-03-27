@@ -4,7 +4,9 @@
 >
 > 当前交付形态：`Windows 单机离线 one-folder 包`
 >
-> 启动方式：Windows 交付环境双击 `start_fpas.cmd` 或 `start_fpas_silent.vbs`；程序会自动拉起后端，并优先使用系统默认浏览器；若默认浏览器不适配前端，会改用本机可用的 Chrome / Edge / Firefox / Chromium / Brave 打开 `http://127.0.0.1:8000/dashboard/`；如需一键停止当前交付包的后端服务和受控浏览器实例，双击 `stop_fpas.cmd`；源码环境运行 `python api_server.py`
+> 启动方式：当前默认交付包不是执行 `fpas.exe`；交付根目录没有业务 `exe` 入口。请双击 `start_fpas.cmd`，或在需要隐藏控制台时双击 `start_fpas_silent.vbs`；这两个入口都会调用包内 `runtime/python/python.exe` 启动后端；如需一键停止当前交付包的后端服务和受控浏览器实例，双击 `stop_fpas.cmd`
+>
+> 浏览器打开：如未设置 `FPAS_BROWSER_EXE`，程序会先尝试系统默认浏览器；若默认浏览器不适配前端，会改用本机可用的 Chrome / Edge / Firefox / Chromium / Brave 打开 `http://127.0.0.1:8000/dashboard/`；源码环境才运行 `python api_server.py`
 >
 > Win7 + 内网用户：先安装交付包根目录 `win7-prerequisites/` 里的 4 个补丁和 Win7 Chrome；如果系统自带浏览器无法挂载前端，请把该 Chrome 设为默认浏览器后再启动
 >
@@ -38,12 +40,14 @@
 
 ### 第一次使用前先确认
 
-- 如果你使用交付包，直接双击 `start_fpas.cmd` 或 `start_fpas_silent.vbs` 即可；它会自动拉起后端，并优先使用系统默认浏览器；若默认浏览器不适配前端，会改用本机可用的 Chrome / Edge / Firefox / Chromium / Brave 打开 `http://127.0.0.1:8000/dashboard/`
+- 当前默认交付包不是双击 `fpas.exe`；交付根目录没有业务 `exe` 入口。正式入口是 `start_fpas.cmd`，静默入口是 `start_fpas_silent.vbs`
+- 上述两个入口都会调用包内 `runtime/python/python.exe` 启动后端，目标机不需要额外安装 Python
+- 如未设置 `FPAS_BROWSER_EXE`，程序会先尝试系统默认浏览器；若默认浏览器不适配前端，会改用本机可用的 Chrome / Edge / Firefox / Chromium / Brave 打开 `http://127.0.0.1:8000/dashboard/`
 - 交付根目录同时附带 `README.html`，可直接用浏览器查看排版版使用说明
 - 如需一键停止当前交付包启动的后端服务和关联启动窗口，请双击 `stop_fpas.cmd`；该脚本会优先结束本交付包的后端进程和受控浏览器守护进程，并强制回收受控浏览器实例；在使用受控浏览器时，停止后应可直接删除整个交付目录；如果最终回退到了系统默认打开方式，则无法保证自动关闭你手工打开或系统复用的浏览器窗口
 - 如果目标机是 `Windows 7` 且处于内网，请先进入交付根目录 `win7-prerequisites/`，先装 4 个补丁，再装随包附带的 Win7 Chrome；如果系统自带浏览器打不开前端或页面异常，请把该 Chrome 设为默认浏览器后再启动
 - 如不想改系统默认浏览器，也可以在启动前设置环境变量 `FPAS_BROWSER_EXE=浏览器完整路径`，显式指定兼容浏览器
-- 如果你使用源码运行，才需要本机具备 `Python 3.9+`
+- 只有源码运行才需要本机具备 `Python 3.9+`
 - 原始协查数据可以放在任意目录，`data/` 只是默认示例目录，不是强制要求
 - 正式访问入口固定为 `http://127.0.0.1:8000/dashboard/`
 - 如需重跑全量分析，应接受当前选中输出目录下的分析产物会被刷新
@@ -94,7 +98,9 @@ dir C:\Windows\System32\ucrtbase.dll
 
 第一次使用时，按这条最短路径就够了：
 
-`按原样放好协查数据 -> 启动 start_fpas.cmd / api_server.py -> 打开 dashboard -> 选输入/输出目录 -> 开始分析 -> 看 HTML 报告 -> 必要时回看 cleaned_data`
+`按原样放好协查数据 -> 双击 start_fpas.cmd -> 等待或打开 http://127.0.0.1:8000/dashboard/ -> 选输入/输出目录 -> 开始分析 -> 看 HTML 报告 -> 必要时回看 cleaned_data`
+
+`python api_server.py` 仅属于源码调试环境，不是当前默认交付包的运行方式。
 
 ### 第一次启动怎么做
 
@@ -128,10 +134,16 @@ dir C:\Windows\System32\ucrtbase.dll
 
 #### 2. 启动系统
 
-交付使用优先按下面方式启动：
+交付使用优先按下面方式启动。当前默认包不提供业务 `fpas.exe` 入口：
 
 ```text
 双击 start_fpas.cmd
+```
+
+如需隐藏控制台窗口，可改为：
+
+```text
+双击 start_fpas_silent.vbs
 ```
 
 如果你在源码环境下运行，才使用：
@@ -150,7 +162,9 @@ http://127.0.0.1:8000/dashboard/
 
 - 这是正式访问入口
 - 交付环境下也应以这个地址为准
-- Windows one-folder 交付包双击 `start_fpas.cmd` 或 `start_fpas_silent.vbs` 后，会优先自动打开系统默认浏览器；若默认浏览器不适配前端，会回退到本机可用的兼容浏览器并进入这个地址
+- 当前 `portable-runtime` 交付包的默认入口不是 `fpas.exe`，而是 `start_fpas.cmd` / `start_fpas_silent.vbs`
+- 这两个启动器会调用包内 `runtime/python/python.exe`，不会依赖目标机额外安装 Python
+- 如果未设置 `FPAS_BROWSER_EXE`，启动器会先尝试系统默认浏览器；若默认浏览器不适配前端，会回退到本机可用的兼容浏览器并进入这个地址
 - 如果需要关闭自动打开浏览器，可在启动前设置环境变量 `FPAS_AUTO_OPEN_BROWSER=0`
 - 如果需要显式指定兼容浏览器，可在启动前设置环境变量 `FPAS_BROWSER_EXE=浏览器完整路径`
 - 前端开发服务器 `5173` 只用于调试，不是正式交付入口

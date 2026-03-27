@@ -2037,7 +2037,32 @@ def _normalize_directory_path(path: Optional[str], fallback: str) -> str:
     """标准化目录路径，空值回退到默认目录。"""
     candidate = str(path).strip() if path is not None else ""
     resolved = candidate or fallback
-    return os.path.abspath(os.path.expanduser(resolved))
+    return os.path.realpath(os.path.abspath(os.path.expanduser(resolved)))
+
+
+def _resolve_existing_directory_hint(path: Optional[str], fallback: str) -> str:
+    """将目录 hint 收敛到最近存在的目录，避免 Win7 目录选择器吃到失效路径。"""
+    candidates = [path, fallback, str(APP_ROOT), os.path.expanduser("~")]
+    visited_roots = set()
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        normalized = _normalize_directory_path(candidate, str(APP_ROOT))
+        current = normalized
+        if os.path.isfile(current):
+            current = os.path.dirname(current)
+
+        while current and current not in visited_roots:
+            visited_roots.add(current)
+            if os.path.isdir(current):
+                return current
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+
+    return _normalize_directory_path(fallback, str(APP_ROOT))
 
 
 def _set_active_paths(
@@ -6357,7 +6382,11 @@ async def get_results():
 
 def _build_dashboard_results_payload() -> Dict[str, Any]:
     """为 Dashboard 构造轻量完成态载荷，避免前端恢复时读取超大对象。"""
-    _sync_analysis_state_with_active_output()
+    target_output_dir = _get_active_output_dir()
+    if _has_valid_disk_cache(target_output_dir):
+        _sync_analysis_state_with_active_output(force_reload=True)
+    else:
+        _sync_analysis_state_with_active_output()
 
     if analysis_state.status != "completed" or not analysis_state.results:
         raise HTTPException(status_code=400, detail="分析尚未完成且缓存无效")
@@ -6384,8 +6413,9 @@ def _build_dashboard_results_payload() -> Dict[str, Any]:
     profiles_payload = compact_payload.get("profiles")
     if isinstance(profiles_payload, dict):
         compact_profiles = {}
-        keep_keys = {
+        scalar_keep_keys = {
             "entityName",
+            "entity_id",
             "entityId",
             "totalIncome",
             "totalExpense",
@@ -6398,40 +6428,332 @@ def _build_dashboard_results_payload() -> Dict[str, Any]:
             "wealthTransactionCount",
             "maxTransaction",
             "salaryRatio",
+            "has_data",
             "hasData",
-            "companySpecific",
-            "companyRegistration",
-            "salaryEnhancedAnalysis",
-            "realSalaryAnalysis",
-            "financeRiskAnalysis",
-            "incomeExpenseMatchAnalysis",
-            "personalFundFeatureAnalysis",
         }
         for entity_name, profile_value in profiles_payload.items():
             if not isinstance(profile_value, dict):
                 compact_profiles[entity_name] = profile_value
                 continue
 
-            cash_transaction_count = 0
-            raw_cash_transactions = profile_value.get("cashTransactions")
-            if isinstance(raw_cash_transactions, list):
-                cash_transaction_count = len(raw_cash_transactions)
-
             profile_compact = {
                 key: value
                 for key, value in profile_value.items()
-                if key in keep_keys
+                if key in scalar_keep_keys
             }
-            profile_compact["cashTransactionCount"] = cash_transaction_count
+
+            summary_payload = profile_value.get("summary")
+            if isinstance(summary_payload, dict) and summary_payload:
+                profile_compact["summary"] = summary_payload
+
+            raw_cash_transactions = profile_value.get("cashTransactions")
+            if isinstance(raw_cash_transactions, list):
+                profile_compact["cashTransactions"] = raw_cash_transactions
+                profile_compact["cashTransactionCount"] = len(raw_cash_transactions)
+            else:
+                profile_compact["cashTransactionCount"] = 0
+
+            bank_accounts = profile_value.get("bank_accounts")
+            if not isinstance(bank_accounts, list):
+                bank_accounts = profile_value.get("bankAccounts")
+            if isinstance(bank_accounts, list) and bank_accounts:
+                profile_compact["bank_accounts"] = bank_accounts
+
+            wealth_products = profile_value.get("wealth_products")
+            if not isinstance(wealth_products, list):
+                wealth_products = profile_value.get("wealthProducts")
+            if isinstance(wealth_products, list) and wealth_products:
+                profile_compact["wealth_products"] = wealth_products
+
+            fund_flow = profile_value.get("fund_flow")
+            if not isinstance(fund_flow, dict):
+                fund_flow = profile_value.get("fundFlow")
+            if isinstance(fund_flow, dict) and fund_flow:
+                compact_fund_flow = {}
+                for key in (
+                    "cash_income",
+                    "cash_expense",
+                    "third_party_income",
+                    "third_party_expense",
+                    "cashIncome",
+                    "cashExpense",
+                    "thirdPartyIncome",
+                    "thirdPartyExpense",
+                ):
+                    if key in fund_flow:
+                        compact_fund_flow[key] = fund_flow[key]
+                if compact_fund_flow:
+                    profile_compact["fund_flow"] = compact_fund_flow
+
+            wealth_management = profile_value.get("wealth_management")
+            if not isinstance(wealth_management, dict):
+                wealth_management = profile_value.get("wealthManagement")
+            if isinstance(wealth_management, dict) and wealth_management:
+                compact_wealth_management = {}
+                for key in (
+                    "wealth_purchase",
+                    "wealth_redemption",
+                    "wealth_income",
+                    "total_transactions",
+                    "wealthPurchase",
+                    "wealthRedemption",
+                    "wealthIncome",
+                    "totalTransactions",
+                ):
+                    if key in wealth_management:
+                        compact_wealth_management[key] = wealth_management[key]
+                if compact_wealth_management:
+                    profile_compact["wealth_management"] = compact_wealth_management
 
             compact_profiles[entity_name] = profile_compact
 
         compact_payload["profiles"] = compact_profiles
 
     if isinstance(compact_payload.get("suspicions"), dict):
+        source_suspicions = compact_payload["suspicions"]
+        compact_suspicions: Dict[str, Any] = {}
+        list_field_keep_keys = {
+            "directTransfers": {
+                "from",
+                "to",
+                "amount",
+                "date",
+                "description",
+                "bank",
+                "sourceFile",
+                "sourceRowIndex",
+                "transactionId",
+                "direction",
+                "riskLevel",
+                "evidenceRefs",
+            },
+            "cashCollisions": {
+                "person1",
+                "person2",
+                "time1",
+                "amount1",
+                "amount2",
+                "timeDiff",
+                "riskReason",
+                "riskLevel",
+                "withdrawalSourceFile",
+                "withdrawalRowIndex",
+                "withdrawalBank",
+                "depositBank",
+            },
+            "cashTimingPatterns": {
+                "time1",
+                "person1",
+                "person2",
+                "amount1",
+                "amount2",
+                "timeDiff",
+                "riskReason",
+                "riskLevel",
+                "description",
+            },
+            "timeSeriesAlerts": {
+                "name",
+                "person",
+                "entity",
+                "counterparty",
+                "date",
+                "timestamp",
+                "amount",
+                "description",
+                "alertType",
+                "alert_type",
+                "riskLevel",
+                "risk_level",
+                "riskReason",
+                "risk_reason",
+                "anomalyType",
+                "anomaly_type",
+            },
+            "walletAlerts": {
+                "person",
+                "counterparty",
+                "amount",
+                "date",
+                "description",
+                "riskLevel",
+                "riskReason",
+                "alertType",
+                "riskScore",
+                "confidence",
+                "ruleCode",
+                "evidenceSummary",
+            },
+            "amlAlerts": {
+                "name",
+                "personId",
+                "person_id",
+                "alertType",
+                "alert_type",
+                "paymentAccountCount",
+                "payment_account_count",
+                "paymentTransactionCount",
+                "payment_transaction_count",
+                "suspiciousTransactionCount",
+                "suspicious_transaction_count",
+                "largeTransactionCount",
+                "large_transaction_count",
+                "source",
+                "riskLevel",
+                "riskReason",
+            },
+            "creditAlerts": {
+                "name",
+                "alertType",
+                "alert_type",
+                "count",
+                "source",
+                "riskLevel",
+                "riskReason",
+            },
+        }
+
+        for field_name, keep_keys in list_field_keep_keys.items():
+            field_value = source_suspicions.get(field_name)
+            if isinstance(field_value, list):
+                compact_suspicions[field_name] = [
+                    {
+                        key: value
+                        for key, value in item.items()
+                        if key in keep_keys
+                    }
+                    if isinstance(item, dict)
+                    else item
+                    for item in field_value
+                ]
+
+        holiday_transactions = source_suspicions.get("holidayTransactions")
+        if isinstance(holiday_transactions, dict):
+            compact_suspicions["holidayTransactions"] = {
+                entity_name: [
+                    {
+                        key: value
+                        for key, value in record.items()
+                        if key
+                        in {
+                            "date",
+                            "direction",
+                            "counterparty",
+                            "amount",
+                            "riskReason",
+                            "description",
+                            "holidayName",
+                            "riskLevel",
+                        }
+                    }
+                    if isinstance(record, dict)
+                    else record
+                    for record in records
+                ]
+                for entity_name, records in holiday_transactions.items()
+                if isinstance(records, list)
+            }
+
         compact_payload["suspicions"] = _normalize_serialized_suspicions_payload(
-            compact_payload["suspicions"]
+            compact_suspicions
         )
+
+    analysis_results_payload = compact_payload.get("analysisResults")
+    if isinstance(analysis_results_payload, dict):
+        compact_analysis_results: Dict[str, Any] = {}
+
+        for section_name in ("loan", "income"):
+            section_value = analysis_results_payload.get(section_name)
+            if not isinstance(section_value, dict):
+                continue
+            compact_section = {
+                "summary": section_value.get("summary", {})
+                if isinstance(section_value.get("summary"), dict)
+                else {},
+                "details": section_value.get("details", [])
+                if isinstance(section_value.get("details"), list)
+                else [],
+            }
+            compact_analysis_results[section_name] = compact_section
+
+        aggregation_value = analysis_results_payload.get("aggregation")
+        if isinstance(aggregation_value, dict):
+            ranked_entities = aggregation_value.get("rankedEntities")
+            if not isinstance(ranked_entities, list):
+                ranked_entities = aggregation_value.get("ranked_entities")
+
+            evidence_packs = aggregation_value.get("evidencePacks")
+            if not isinstance(evidence_packs, dict):
+                evidence_packs = aggregation_value.get("evidence_packs")
+
+            compact_evidence_packs = {}
+            if isinstance(evidence_packs, dict):
+                for entity_name, pack in evidence_packs.items():
+                    if not isinstance(pack, dict):
+                        compact_evidence_packs[entity_name] = pack
+                        continue
+                    compact_evidence_packs[entity_name] = {
+                        key: value
+                        for key, value in pack.items()
+                        if key
+                        in {
+                            "summary",
+                            "risk_level",
+                            "risk_confidence",
+                            "top_evidence_score",
+                            "high_priority_clue_count",
+                            "aggregation_explainability",
+                            "riskLevel",
+                            "riskConfidence",
+                            "topEvidenceScore",
+                            "highPriorityClueCount",
+                            "aggregationExplainability",
+                        }
+                    }
+
+            compact_ranked_entities = []
+            if isinstance(ranked_entities, list):
+                for entity in ranked_entities:
+                    if not isinstance(entity, dict):
+                        compact_ranked_entities.append(entity)
+                        continue
+                    compact_ranked_entities.append(
+                        {
+                            key: value
+                            for key, value in entity.items()
+                            if key
+                            in {
+                                "name",
+                                "entity",
+                                "entityType",
+                                "entity_type",
+                                "summary",
+                                "riskLevel",
+                                "risk_level",
+                                "riskScore",
+                                "risk_score",
+                                "score",
+                                "riskConfidence",
+                                "risk_confidence",
+                                "topEvidenceScore",
+                                "top_evidence_score",
+                                "highPriorityClueCount",
+                                "high_priority_clue_count",
+                                "aggregationExplainability",
+                                "aggregation_explainability",
+                            }
+                        }
+                    )
+
+            compact_analysis_results["aggregation"] = {
+                "summary": aggregation_value.get("summary", {})
+                if isinstance(aggregation_value.get("summary"), dict)
+                else {},
+                "rankedEntities": compact_ranked_entities,
+                "evidencePacks": compact_evidence_packs,
+            }
+
+        compact_payload["analysisResults"] = compact_analysis_results
 
     results_dir = _get_active_results_dir()
     report_package = _load_report_package_for_manifest(results_dir)
@@ -6715,10 +7037,9 @@ async def select_directory(request: DirectorySelectRequest):
     try:
         if system == "Darwin":  # macOS
             # 使用 AppleScript 弹出访达选择文件夹
-            initial_dir = (
-                request.current_path
-                if request.current_path and os.path.exists(request.current_path)
-                else os.path.expanduser("~")
+            initial_dir = _resolve_existing_directory_hint(
+                request.current_path,
+                os.path.expanduser("~"),
             )
 
             # AppleScript 代码
@@ -6751,13 +7072,10 @@ async def select_directory(request: DirectorySelectRequest):
                     if request.type == "input"
                     else _get_active_output_dir()
                 )
-                initial_dir = (
-                    request.current_path
-                    if request.current_path and os.path.exists(request.current_path)
-                    else fallback_dir
+                initial_dir = _resolve_existing_directory_hint(
+                    request.current_path,
+                    fallback_dir,
                 )
-                if not initial_dir or not os.path.exists(initial_dir):
-                    initial_dir = str(APP_ROOT)
 
                 title = "选择" + (
                     "输入目录 (data)"

@@ -855,7 +855,7 @@ export function AppProvider({ children }: AppProviderProps) {
                     localStorage.removeItem(STORAGE_KEYS.INPUT_DIR);
                     localStorage.removeItem(STORAGE_KEYS.OUTPUT_DIR);
 
-                    const activePathResult = await api.syncActivePaths(defaultPaths);
+                    const activePathResult = await api.syncActivePaths({});
                     if (activePathResult.success && activePathResult.data) {
                         const activePaths = {
                             inputDirectory: activePathResult.data.inputDirectory,
@@ -869,7 +869,30 @@ export function AppProvider({ children }: AppProviderProps) {
                         addLog({
                             time: new Date().toLocaleTimeString(),
                             level: 'INFO',
-                            msg: `交付态已重置为包内默认路径: 输入=${activePaths.inputDirectory}, 输出=${activePaths.outputDirectory}`,
+                            msg: `交付态已加载后端活动路径: 输入=${activePaths.inputDirectory}, 输出=${activePaths.outputDirectory}`,
+                        });
+
+                        if (!disposed) {
+                            await initializeFromBackend();
+                        }
+                        return;
+                    }
+
+                    const fallbackPathResult = await api.syncActivePaths(defaultPaths);
+                    if (fallbackPathResult.success && fallbackPathResult.data) {
+                        const fallbackPaths = {
+                            inputDirectory: fallbackPathResult.data.inputDirectory,
+                            outputDirectory: fallbackPathResult.data.outputDirectory,
+                        };
+
+                        setConfig(prev => ({
+                            ...prev,
+                            dataSources: fallbackPaths,
+                        }));
+                        addLog({
+                            time: new Date().toLocaleTimeString(),
+                            level: 'INFO',
+                            msg: `交付态未发现可恢复的活动路径，已回退包内默认路径: 输入=${fallbackPaths.inputDirectory}, 输出=${fallbackPaths.outputDirectory}`,
                         });
 
                         if (!disposed) {

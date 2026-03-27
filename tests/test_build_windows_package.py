@@ -249,6 +249,7 @@ def test_copy_portable_python_runtime_only_ignores_tools_at_runtime_root(monkeyp
     target_runtime = sandbox / "dist-runtime"
     shutil.rmtree(sandbox, ignore_errors=True)
     (base_runtime / "Lib" / "site-packages" / "pandas" / "core").mkdir(parents=True)
+    (target_runtime / "Lib" / "encodings").mkdir(parents=True)
 
     monkeypatch.setattr(build_windows_package.sys, "base_prefix", str(base_runtime))
     monkeypatch.setattr(build_windows_package.sys, "prefix", str(base_runtime))
@@ -324,3 +325,98 @@ def test_remove_portable_bundle_caches_removes_python_cache_artifacts():
         assert (sandbox / "pkg" / "module.py").exists()
     finally:
         shutil.rmtree(sandbox, ignore_errors=True)
+
+
+def test_portable_bundle_audit_manifest_covers_win7_runtime_risks():
+    relpaths = build_windows_package._get_portable_bundle_audit_relpaths()
+    modules = build_windows_package._get_portable_bundle_audit_modules()
+    version_pins = build_windows_package.PORTABLE_BUNDLE_VERSION_PINS
+
+    assert "runtime/python/python.exe" in relpaths
+    assert "dashboard/dist/index.html" in relpaths
+    assert "config/risk_thresholds.yaml" in relpaths
+    assert "config/report_phrases.yaml" in relpaths
+    assert "report_config/rules.yaml" in relpaths
+    assert "templates/report_v3/base.html" in relpaths
+    assert "knowledge/suspicion_rules.yaml" in relpaths
+    assert "win7-prerequisites/Windows6.1-KB4490628-x64.msu" in relpaths
+    assert "win7-prerequisites/109.0.5414.120-64Bit-ChromeStandaloneSetup64.exe" in relpaths
+    assert "websockets" in modules
+    assert "api_server" in modules
+    assert "uvicorn.protocols.websockets.websockets_impl" in modules
+    assert version_pins["cryptography"] == "39.0.2"
+
+
+def test_audit_portable_runtime_bundle_uses_packaged_python(monkeypatch, tmp_path):
+    bundle_root = tmp_path / "bundle"
+    runtime_python = bundle_root / "runtime" / "python" / "python.exe"
+    runtime_python.parent.mkdir(parents=True)
+    runtime_python.write_text("", encoding="utf-8")
+    recorded = {}
+
+    def fake_run(cmd, cwd=None, capture_output=None, text=None, check=None):
+        recorded["cmd"] = cmd
+        recorded["cwd"] = cwd
+        recorded["capture_output"] = capture_output
+        recorded["text"] = text
+        recorded["check"] = check
+        return SimpleNamespace(returncode=0, stdout='{"ok": true}', stderr="")
+
+    monkeypatch.setattr(build_windows_package.subprocess, "run", fake_run)
+
+    build_windows_package._audit_portable_runtime_bundle(bundle_root)
+
+    assert recorded["cmd"][0] == str(runtime_python)
+    assert recorded["cmd"][1] == "-c"
+    assert "cryptography" in recorded["cmd"][2]
+    assert recorded["cwd"] == str(bundle_root)
+    assert recorded["capture_output"] is True
+    assert recorded["text"] is True
+    assert recorded["check"] is False
+
+
+def test_build_portable_runtime_bundle_runs_runtime_audit(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        build_windows_package, "_reset_directory", lambda path: calls.append(("reset", path))
+    )
+    monkeypatch.setattr(
+        build_windows_package,
+        "_copy_portable_source_tree",
+        lambda root, dst: calls.append(("copy_source", root, dst)),
+    )
+    monkeypatch.setattr(
+        build_windows_package,
+        "_copy_portable_python_runtime",
+        lambda path: calls.append(("copy_runtime", path)),
+    )
+    monkeypatch.setattr(
+        build_windows_package,
+        "_write_portable_launchers",
+        lambda path: calls.append(("launchers", path)),
+    )
+    monkeypatch.setattr(
+        build_windows_package,
+        "_write_packaged_readme_html",
+        lambda root, dst: calls.append(("readme", root, dst)),
+    )
+    monkeypatch.setattr(
+        build_windows_package,
+        "_copy_win7_prerequisites",
+        lambda path: calls.append(("prereq", path)),
+    )
+    monkeypatch.setattr(
+        build_windows_package,
+        "_remove_portable_bundle_caches",
+        lambda path: calls.append(("cleanup", path)),
+    )
+    monkeypatch.setattr(
+        build_windows_package,
+        "_audit_portable_runtime_bundle",
+        lambda path: calls.append(("audit", path)),
+    )
+
+    build_windows_package.build_portable_runtime_bundle()
+
+    assert calls[-1] == ("audit", build_windows_package.DIST_DIR)

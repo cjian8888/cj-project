@@ -9,6 +9,35 @@
 
 ## [Unreleased] - 2026-03-24
 
+### 🪟 Win7 交付包结果恢复与整包复核闭环 (2026-03-27)
+
+#### 交付态结果恢复修复 (`dashboard/src/contexts/AppContext.tsx` + `dashboard/src/components/TabContent.tsx`)
+- **问题**: Win7 交付态完成分析后，后端结果与缓存文件已生成，但前端偶发回退到默认 `output` 路径，导致数据概览页无法恢复本轮结果；同时当 `profiles` 为空时，结果页会被误判为空态。
+- **修复**:
+  - 交付态启动优先调用后端 `syncActivePaths({})` 恢复当前活动输入/输出目录，仅在无法恢复时才回退到包内默认路径。
+  - 结果页将“分析已完成”和“是否存在画像数据”拆分判定，避免 `profiles` 为空时把整页错误渲染为未分析状态。
+- **影响**: Win7 交付包在分析完成后可按当前输出目录正确恢复结果，避免再次出现“分析完成但前端不加载结果”。
+
+#### 交付文档与启动入口纠偏 (`README.md` + `WINDOWS_OFFLINE_DELIVERY.md` + `build_windows_package.py`)
+- **问题**: 交付文档对独立运行包启动方式描述不够准确，容易误导为直接执行 `fpas.exe`。
+- **修复**:
+  - 明确离线包正式入口是 `start_fpas.cmd`，静默入口是 `start_fpas_silent.vbs`。
+  - 保持打包脚本输出的交付 README/HTML 与当前交付形态一致。
+- **影响**: 交付说明与实际运行形态保持一致，降低现场误用启动入口的风险。
+
+#### Win11 clean rebuild + Win7 全量验证 (`build_windows_package.py` + `tests/test_build_windows_package.py` + `tests/test_api_server_config_flow.py`)
+- **新增闭环**:
+  - 在 Win11 构建机清理旧构建状态后，重新执行 `build_windows_package.py`，成功产出新的 `dist/fpas-offline`。
+  - 打包阶段再次通过 portable bundle 运行时审计，确认关键文件、关键模块和版本锁定完整。
+  - 将新包复制到 Win7，仅保留桌面原始输入目录 `CB`，以 `Desktop/output` 完成一轮真实全量分析。
+  - Win7 实测确认：
+    - 分析状态 `completed`
+    - `analysis_cache` 下 `profiles.json`、`derived_data.json`、`suspicions.json`、`metadata.json` 全部生成
+    - `cleaned_data` 与 `analysis_results` 正常生成
+    - `/api/open-folder` 对个人清洗数据、公司清洗数据、分析结果目录全部返回成功
+    - `/api/results` 与 `/api/results/dashboard` 均可返回有效结果
+- **影响**: 当前 GitHub 中的 `dist/fpas-offline` 对应本次已验证通过的一键运行包，可作为新的交付基线。
+
 ### 🪟 Win7 交付补丁闭环
 
 #### 目录打开兼容修复 (`api_server.py` + `tests/test_api_server_config_flow.py`)

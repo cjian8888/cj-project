@@ -421,13 +421,13 @@ function OverviewTab() {
         });
     }, [auditNavigation]);
 
-    // 从真实数据生成趋势图数据（如果分析未完成，使用空数组）
-    const hasRealData = analysis.status === 'completed' && Object.keys(data.profiles).length > 0;
+    const hasCompletedAnalysis = analysis.status === 'completed';
+    const hasProfileData = hasCompletedAnalysis && Object.keys(data.profiles).length > 0;
 
     // 分离个人和公司
     // 增强版个人画像数据（审计仪表板用）
     const personProfiles = useMemo(() => {
-        if (!hasRealData) return [];
+        if (!hasProfileData) return [];
 
         // 获取每个人员的异常收入数量
         const personAnomalyCount: { [key: string]: number } = {};
@@ -510,10 +510,10 @@ function OverviewTab() {
                 };
             })
             .sort((a, b) => b.total - a.total);
-    }, [hasRealData, data.profiles, data.persons, data.analysisResults]);
+    }, [hasProfileData, data.profiles, data.persons, data.analysisResults]);
 
     const companyProfiles = useMemo(() => {
-        if (!hasRealData) return [];
+        if (!hasProfileData) return [];
         return Object.entries(data.profiles)
             .filter(([name]) => data.companies.includes(name))
             .map(([name, profile]) => {
@@ -551,7 +551,7 @@ function OverviewTab() {
                 };
             })
             .sort((a, b) => b.total - a.total);
-    }, [hasRealData, data.profiles, data.companies]);
+    }, [hasProfileData, data.profiles, data.companies]);
 
     // 当前显示的流量数据
     const currentFlowData = entityType === 'person' ? personProfiles : companyProfiles;
@@ -889,7 +889,7 @@ function OverviewTab() {
     // 🆕 审计发现类型分布 - 按借贷分析和收入分析的分类显示
     const auditFindingsDistribution = useMemo(() => {
         const emptyStateColor = ui.theme === 'light' ? '#dbe4f0' : '#334155';
-        if (!hasRealData) {
+        if (!hasCompletedAnalysis) {
             return [{ name: '等待分析', value: 1, color: emptyStateColor, percent: 100, placeholder: true }];
         }
 
@@ -962,7 +962,7 @@ function OverviewTab() {
             ...c,
             percent: Math.round((c.value / total) * 100)
         }));
-    }, [hasRealData, incomeDetailsData, loanDetailsData, ui.theme]);
+    }, [hasCompletedAnalysis, incomeDetailsData, loanDetailsData, ui.theme]);
 
     const chartStrokeColor = ui.theme === 'light' ? '#ffffff' : '#0f172a';
     const chartTooltipStyle = ui.theme === 'light'
@@ -2419,7 +2419,7 @@ function OverviewTab() {
 
 
             {/* 🆕 智能审计导航区域 - 重新设计 */}
-            {hasRealData && (
+            {hasCompletedAnalysis && (
                 <div className="lg:col-span-3 space-y-4">
                     {/* 第一部分：初步研判提示 */}
                     <div className="card bg-gradient-to-r from-blue-500/10 via-indigo-500/5 to-purple-500/10 border border-blue-500/20">
@@ -2664,7 +2664,7 @@ function OverviewTab() {
                         <p className="text-xs theme-text-dim">点击查看详情</p>
                     </div>
                 </div>
-                {hasRealData ? (
+                {hasCompletedAnalysis ? (
                     <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
                         {auditMetrics.map((metric, idx) => (
                             <div
@@ -2695,7 +2695,11 @@ function OverviewTab() {
                                 {entityType === 'person' ? '个人资金流量' : '企业资金流量'}
                             </h3>
                             <p className="text-xs theme-text-dim">
-                                {hasRealData ? `共 ${entityType === 'person' ? personProfiles.length : companyProfiles.length} 位，按流水总额排序` : '等待分析数据'}
+                                {hasProfileData
+                                    ? `共 ${entityType === 'person' ? personProfiles.length : companyProfiles.length} 位，按流水总额排序`
+                                    : hasCompletedAnalysis
+                                        ? '本轮分析未生成资金画像'
+                                        : '等待分析数据'}
                             </p>
                         </div>
                     </div>
@@ -2726,7 +2730,7 @@ function OverviewTab() {
 
                 {/* 审计仪表板卡片列表 */}
                 <div className="space-y-3 max-h-[420px] overflow-y-auto scrollbar-thin scrollbar-thumb-gray-700 scrollbar-track-transparent pr-1">
-                    {hasRealData && currentFlowData.length > 0 ? (
+                    {hasProfileData && currentFlowData.length > 0 ? (
                         <>
                             {entityType === 'person' ? (
                                 // 个人审计卡片（增强版）
@@ -3004,7 +3008,12 @@ function OverviewTab() {
                             )}
                         </>
                     ) : (
-                        <EmptyState type="data" message={`完成分析后查看${entityType === 'person' ? '个人' : '企业'}资金画像`} />
+                        <EmptyState
+                            type="data"
+                            message={hasCompletedAnalysis
+                                ? `本轮分析未生成${entityType === 'person' ? '个人' : '企业'}资金画像`
+                                : `完成分析后查看${entityType === 'person' ? '个人' : '企业'}资金画像`}
+                        />
                     )}
                 </div>
             </div>
@@ -3060,7 +3069,7 @@ function OverviewTab() {
                                 <span className="theme-text-secondary">{item.name}</span>
                             </div>
                             <span className="font-medium theme-text">
-                                {item.placeholder ? (hasRealData ? '无异常' : '待分析') : `${item.percent || item.value}%`}
+                                {item.placeholder ? (hasCompletedAnalysis ? '无异常' : '待分析') : `${item.percent || item.value}%`}
                             </span>
                         </div>
                     ))}

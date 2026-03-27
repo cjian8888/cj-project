@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import pathlib
+import platform
 import sys
 from datetime import datetime
 from types import SimpleNamespace
@@ -1778,9 +1779,55 @@ def test_get_dashboard_results_omits_heavy_runtime_fields(tmp_path):
     api_server.analysis_state.results = {
         "persons": ["张三"],
         "companies": ["测试科技有限公司"],
-        "profiles": {"张三": {"display_name": "张三", "vehicles": []}},
-        "suspicions": {"directTransfers": []},
-        "analysisResults": {"aggregation": {"summary": {"高风险实体数": 1}}},
+        "profiles": {
+            "张三": {
+                "entityName": "张三",
+                "totalIncome": 200000,
+                "totalExpense": 100000,
+                "transactionCount": 6,
+                "summary": {"total_income": 200000, "total_expense": 100000},
+                "cashTransactions": [{"amount": 5000, "date": "2026-03-20"}],
+                "fund_flow": {
+                    "cash_income": 5000,
+                    "cash_expense": 0,
+                    "third_party_income": 9000,
+                    "third_party_transactions": [{"amount": 9000, "counterparty": "李四"}],
+                },
+                "wealth_management": {
+                    "wealth_purchase": 10000,
+                    "wealth_redemption": 5000,
+                    "wealth_purchase_transactions": [{"amount": 10000}],
+                },
+                "bank_accounts": [{"account_number": "6222"}],
+                "wealth_products": [{"product_name": "理财A"}],
+            }
+        },
+        "suspicions": {
+            "directTransfers": [{"from": "张三", "to": "测试科技有限公司", "amount": 80000}],
+            "fixedFrequency": {"张三": [{"amount": 1000}]},
+        },
+        "analysisResults": {
+            "aggregation": {
+                "summary": {"高风险实体数": 1},
+                "rankedEntities": [
+                    {
+                        "name": "张三",
+                        "riskScore": 88.0,
+                        "riskLevel": "high",
+                        "aggregationExplainability": {"top_clues": [{"description": "直接往来"}]},
+                    }
+                ],
+                "evidencePacks": {
+                    "张三": {
+                        "summary": "存在直接往来",
+                        "aggregation_explainability": {"top_clues": [{"description": "直接往来"}]},
+                        "evidence": [{"huge": True}],
+                    }
+                },
+            },
+            "largeTransactions": [{"amount": 300000}],
+            "behavioral": {"timeline": [1, 2, 3]},
+        },
         "graphData": {"nodes": [{"id": "张三"}], "edges": []},
         "walletData": {"alerts": []},
         "externalData": {"p1": {"vehicle_data": {"张三": [{"plate_number": "沪A12345"}]}}},
@@ -1811,12 +1858,99 @@ def test_get_dashboard_results_omits_heavy_runtime_fields(tmp_path):
     assert payload["companies"] == ["测试科技有限公司"]
     assert payload["walletData"]["alerts"] == []
     assert payload["analysisResults"]["aggregation"]["summary"]["高风险实体数"] == 1
+    assert payload["analysisResults"]["aggregation"]["rankedEntities"][0]["name"] == "张三"
+    assert payload["analysisResults"]["aggregation"]["evidencePacks"]["张三"]["summary"] == "存在直接往来"
+    assert "evidence" not in payload["analysisResults"]["aggregation"]["evidencePacks"]["张三"]
+    assert "largeTransactions" not in payload["analysisResults"]
+    assert "behavioral" not in payload["analysisResults"]
+    assert "fixedFrequency" not in payload["suspicions"]
+    assert payload["profiles"]["张三"]["fund_flow"]["third_party_income"] == 9000
+    assert "third_party_transactions" not in payload["profiles"]["张三"]["fund_flow"]
+    assert payload["profiles"]["张三"]["wealth_management"]["wealth_purchase"] == 10000
+    assert "wealth_purchase_transactions" not in payload["profiles"]["张三"]["wealth_management"]
+    assert payload["profiles"]["张三"]["cashTransactionCount"] == 1
     assert payload["reportPackage"]["main_report_view"]["issue_count"] == 1
     assert payload["reportPackage"]["priority_board"][0]["entity_name"] == "张三"
     assert "graphData" not in payload
     assert "externalData" not in payload
     assert "runtimeLogPaths" not in payload
     assert "_profiles_raw" not in payload
+
+
+def test_get_dashboard_results_prefers_disk_cache_when_memory_profiles_are_stale(tmp_path):
+    output_dir = tmp_path / "output"
+    cache_dir = output_dir / "analysis_cache"
+    cache_dir.mkdir(parents=True)
+
+    CacheManager(str(cache_dir)).save_results(
+        {
+            "persons": ["张三"],
+            "companies": [],
+            "profiles": {
+                "张三": {
+                    "entityName": "张三",
+                    "totalIncome": 200000,
+                    "totalExpense": 80000,
+                    "transactionCount": 12,
+                    "summary": {
+                        "total_income": 200000,
+                        "total_expense": 80000,
+                    },
+                }
+            },
+            "suspicions": {"directTransfers": []},
+            "analysisResults": {"aggregation": {"summary": {"高风险实体数": 1}}},
+            "graphData": {},
+            "walletData": {"alerts": []},
+            "runtimeLogPaths": {},
+        }
+    )
+
+    previous_state = {
+        "status": api_server.analysis_state.status,
+        "progress": api_server.analysis_state.progress,
+        "phase": api_server.analysis_state.phase,
+        "start_time": api_server.analysis_state.start_time,
+        "end_time": api_server.analysis_state.end_time,
+        "results": api_server.analysis_state.results,
+        "error": api_server.analysis_state.error,
+    }
+    previous_config = dict(api_server._current_config)
+
+    api_server.analysis_state.status = "completed"
+    api_server.analysis_state.progress = 100
+    api_server.analysis_state.phase = "分析完成"
+    api_server.analysis_state.results = {
+        "persons": ["张三"],
+        "companies": [],
+        "profiles": {},
+        "suspicions": {"directTransfers": []},
+        "analysisResults": {"aggregation": {"summary": {"高风险实体数": 0}}},
+        "graphData": {},
+        "walletData": {"alerts": []},
+    }
+
+    try:
+        api_server._current_config.clear()
+        api_server._current_config["outputDirectory"] = str(output_dir)
+
+        response = asyncio.run(api_server.get_dashboard_results())
+        payload = json.loads(response.body.decode("utf-8"))["data"]
+        restored_results = api_server.analysis_state.results
+    finally:
+        api_server.analysis_state.status = previous_state["status"]
+        api_server.analysis_state.progress = previous_state["progress"]
+        api_server.analysis_state.phase = previous_state["phase"]
+        api_server.analysis_state.start_time = previous_state["start_time"]
+        api_server.analysis_state.end_time = previous_state["end_time"]
+        api_server.analysis_state.results = previous_state["results"]
+        api_server.analysis_state.error = previous_state["error"]
+        api_server._current_config.clear()
+        api_server._current_config.update(previous_config)
+
+    assert payload["profiles"]["张三"]["totalIncome"] == 200000
+    assert payload["analysisResults"]["aggregation"]["summary"]["高风险实体数"] == 1
+    assert restored_results["profiles"]["张三"]["totalIncome"] == 200000
 
 
 def test_load_report_package_for_manifest_refreshes_stale_qa_guard_version(
@@ -4240,7 +4374,7 @@ def test_open_folder_in_windows_falls_back_to_absolute_explorer_after_shell_fail
             explorer_path,
             {
                 "parameters": f'"{expected_path}"',
-                "working_dir": api_server.os.path.dirname(explorer_path),
+                "working_dir": api_server.os.path.dirname(explorer_path) or None,
             },
         ),
     ]
@@ -4282,6 +4416,87 @@ def test_open_folder_in_windows_falls_back_to_cmd_start(monkeypatch):
         [explorer_path, expected_path],
         [r"C:\Windows\System32\cmd.exe", "/c", "start", "", expected_path],
     ]
+
+
+def test_normalize_directory_path_uses_realpath(tmp_path):
+    real_dir = tmp_path / "real-output"
+    link_dir = tmp_path / "link-output"
+    real_dir.mkdir()
+    link_dir.symlink_to(real_dir, target_is_directory=True)
+
+    normalized = api_server._normalize_directory_path(str(link_dir), str(tmp_path))
+
+    assert normalized == str(real_dir.resolve())
+
+
+def test_resolve_existing_directory_hint_falls_back_to_existing_parent(tmp_path):
+    existing_parent = tmp_path / "reports"
+    existing_parent.mkdir()
+    missing_child = existing_parent / "daily" / "2026-03-25"
+    fallback_dir = tmp_path / "fallback"
+    fallback_dir.mkdir()
+
+    resolved = api_server._resolve_existing_directory_hint(
+        str(missing_child),
+        str(fallback_dir),
+    )
+
+    assert resolved == str(existing_parent.resolve())
+
+
+def test_resolve_existing_directory_hint_uses_file_parent(tmp_path):
+    existing_parent = tmp_path / "exports"
+    existing_parent.mkdir()
+    selected_file = existing_parent / "result.xlsx"
+    selected_file.write_text("ok", encoding="utf-8")
+    fallback_dir = tmp_path / "fallback"
+    fallback_dir.mkdir()
+
+    resolved = api_server._resolve_existing_directory_hint(
+        str(selected_file),
+        str(fallback_dir),
+    )
+
+    assert resolved == str(existing_parent.resolve())
+
+
+def test_select_directory_windows_prefers_existing_parent_for_stale_path(monkeypatch, tmp_path):
+    current_parent = tmp_path / "analysis_results"
+    current_parent.mkdir()
+    stale_path = current_parent / "missing" / "nested"
+    fallback_dir = tmp_path / "fallback-output"
+    fallback_dir.mkdir()
+    captured = {}
+
+    monkeypatch.setattr(platform, "system", lambda: "Windows")
+    monkeypatch.setattr(api_server, "_get_active_output_dir", lambda: str(fallback_dir))
+
+    def fake_native_selector(_title, initial_dir):
+        captured["initial_dir"] = initial_dir
+        return ""
+
+    monkeypatch.setattr(
+        api_server,
+        "_select_directory_windows_native",
+        fake_native_selector,
+    )
+    monkeypatch.setattr(
+        api_server,
+        "_select_directory_windows_tk",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not hit tkinter fallback")),
+    )
+
+    result = asyncio.run(
+        api_server.select_directory(
+            api_server.DirectorySelectRequest(
+                type="output",
+                current_path=str(stale_path),
+            )
+        )
+    )
+
+    assert result == {"success": False, "error": "用户取消了选择"}
+    assert captured["initial_dir"] == str(current_parent.resolve())
 
 
 def test_collect_family_assets_for_summary_deduplicates_properties_and_vehicles():
