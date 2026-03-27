@@ -78,6 +78,10 @@ jobs:
           EOF
 
           if gh release view "${tag_name}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "${tag_name}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${title}" \
+              --notes-file "${notes_file}"
             gh release upload "${tag_name}" "${asset_name}" "${checksum_name}" --clobber --repo "${GITHUB_REPOSITORY}"
           else
             gh release create "${tag_name}" "${asset_name}" "${checksum_name}" \
