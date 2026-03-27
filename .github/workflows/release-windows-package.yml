@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "要创建或更新的 Release Tag，例如 v4.6.0"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -20,13 +26,20 @@ jobs:
         run: |
           set -euo pipefail
           test -d "dist/fpas-offline"
-          test -f "dist/fpas-offline/fpas.exe"
+          test -f "dist/fpas-offline/start_fpas.cmd"
+          test -f "dist/fpas-offline/start_fpas_silent.vbs"
+          test -f "dist/fpas-offline/runtime/python/python.exe"
+          test -f "dist/fpas-offline/dashboard/dist/index.html"
 
       - name: Build ZIP release asset
         id: package
         run: |
           set -euo pipefail
-          tag_name="${GITHUB_REF_NAME}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag_name="${{ inputs.tag_name }}"
+          else
+            tag_name="${GITHUB_REF_NAME}"
+          fi
           asset_name="fpas-offline-${tag_name}-win-x64.zip"
           checksum_name="${asset_name}.sha256"
           cd dist
@@ -41,7 +54,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag_name="${GITHUB_REF_NAME}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag_name="${{ inputs.tag_name }}"
+          else
+            tag_name="${GITHUB_REF_NAME}"
+          fi
           asset_name="${{ steps.package.outputs.asset_name }}"
           checksum_name="${{ steps.package.outputs.checksum_name }}"
           title="FPAS ${tag_name}"
@@ -51,11 +68,12 @@ jobs:
 
           使用方式：
           1. 下载并解压 ZIP。
-          2. 双击 `fpas.exe` 启动程序。
-          3. 程序会自动打开默认浏览器访问 `http://127.0.0.1:8000/dashboard/`。
+          2. 双击 `start_fpas.cmd` 启动程序。
+          3. 如需隐藏控制台，可改为双击 `start_fpas_silent.vbs`。
+          4. 程序会自动打开默认浏览器访问 `http://127.0.0.1:8000/dashboard/`。
 
           本次附件包含：
-          - Windows one-folder ZIP 包
+          - Windows portable-runtime one-folder ZIP 包
           - 对应 SHA256 校验文件
           EOF
 
