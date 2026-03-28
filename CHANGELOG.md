@@ -9,6 +9,24 @@
 
 ## [Unreleased] - 2026-03-24
 
+### 🏷️ 版本口径与交付文档同步 (2026-03-28)
+
+#### 对外交付版本统一到 `v4.6.1` (`README.md` + `dashboard/src/constants/appVersion.ts` + `dashboard/package*.json`)
+- **问题**: `CHANGELOG` 已存在 `v4.6.1` 版本语义，但 README、前端展示版本和前端包版本仍残留 `v4.6.0`，造成仓库当前状态与对外表述不一致。
+- **修复**:
+  - 根 README 的“当前版本”统一更新为 `v4.6.1`
+  - 前端展示版本常量更新为 `v4.6.1`
+  - `dashboard/package.json` 与 `dashboard/package-lock.json` 版本同步到 `4.6.1`
+- **影响**: 源码仓库中的当前版本表述与现行交付语义保持一致，避免再次出现“版本号落后于实际交付”的混乱状态。
+
+#### 交付包文档与前端产物同步 (`dist/fpas-offline/README.md` + `dist/fpas-offline/README.html` + `dist/fpas-offline/dashboard/dist`)
+- **问题**: 交付包副本中的 README / README.html 与前端打包产物仍携带旧版本口径，和源码仓库已经分叉。
+- **修复**:
+  - 用最新根 README 覆盖交付包 README，并重新生成 `README.html`
+  - 重新构建前端生产包，并同步更新交付包内 `dashboard/dist`
+  - 清理交付包内过期的前端 JS 资产，只保留当前构建结果
+- **影响**: 仓库中的 one-folder 交付副本与源码当前文档、前端显示版本保持一致，可直接作为后续发布与验收基线。
+
 ### 🪟 Win7 交付包结果恢复与整包复核闭环 (2026-03-27)
 
 #### 交付态结果恢复修复 (`dashboard/src/contexts/AppContext.tsx` + `dashboard/src/components/TabContent.tsx`)
