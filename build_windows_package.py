@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import html
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -1508,7 +1509,31 @@ def _copy_win7_prerequisites(target_root: Path) -> None:
         _copy_file(source, target_dir / filename)
     if missing:
         missing_text = ", ".join(missing)
-        raise SystemExit(f"缺少 Win7 前置安装文件，无法继续打包：{missing_text}")
+        # CI环境（如GitHub Actions）中跳过Win7补丁，不报错
+        if os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true":
+            print(f"[build] 警告：缺少 Win7 前置安装文件（CI环境跳过）：{missing_text}")
+            # 创建一个说明文件
+            readme_path = target_dir / "README.txt"
+            readme_content = """Win7 Prerequisites
+==================
+
+以下文件需要在打包前准备好：
+
+1. Windows6.1-KB4490628-x64.msu  (9.2MB)
+2. Windows6.1-KB4474419-v3-x64.msu  (54MB)
+3. Windows6.1-KB2533623-x64.msu  (2.3MB)
+4. Windows6.1-KB2999226-x64.msu  (1MB)
+5. 109.0.5414.120-64Bit-ChromeStandaloneSetup64.exe  (89MB)
+
+在本地Windows机器上打包时，将这些文件放在以下任一位置：
+- 项目根目录的 win7-patches/ 文件夹
+- 用户桌面的 win7-patches/ 文件夹
+
+总大小约155MB，不适合提交到git仓库。
+"""
+            readme_path.write_text(readme_content, encoding="utf-8")
+        else:
+            raise SystemExit(f"缺少 Win7 前置安装文件，无法继续打包：{missing_text}")
 
 
 def _copy_portable_root_files(project_root: Path, target_root: Path) -> None:
