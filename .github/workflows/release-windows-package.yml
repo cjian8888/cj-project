@@ -52,7 +52,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '20'
+        env:
+          ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
       - name: Build frontend
         run: |
@@ -63,10 +65,12 @@ jobs:
 
       - name: Build Windows package
         run: |
-          python build_windows_package.py --preflight || echo "Preflight check done"
-          python build_windows_package.py
+          python --version
+          chcp 65001
+          set PYTHONIOENCODING=utf-8
+          python build_windows_package.py --preflight 2>&1 || echo "Preflight check done"
+          python build_windows_package.py 2>&1
         shell: cmd
-        continue-on-error: true
 
       - name: Check dist directory
         run: |
