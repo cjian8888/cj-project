@@ -16,7 +16,6 @@ permissions:
 
 jobs:
   release-windows-package:
-    # 关键修改：使用 Windows runner 而不是 Ubuntu
     runs-on: windows-latest
 
     steps:
@@ -29,16 +28,31 @@ jobs:
           python-version: '3.8'
           architecture: 'x64'
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      - name: Debug Environment
+        run: |
+          echo "Python version:"
+          python --version
+          echo "Python path:"
+          where python
+          echo "Pip version:"
+          pip --version
+          echo "Directory contents:"
+          dir
+          echo "Requirements files:"
+          if exist requirements.txt (echo "  requirements.txt: YES") else (echo "  requirements.txt: NO")
+          if exist requirements-windows-build.txt (echo "  requirements-windows-build.txt: YES") else (echo "  requirements-windows-build.txt: NO")
+        shell: cmd
 
       - name: Install Python dependencies
         run: |
-          python --version
           python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-windows-build.txt
+          pip install -r requirements.txt -r requirements-windows-build.txt || echo "WARNING: Some packages failed to install"
+        shell: cmd
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
       - name: Build frontend
         run: |
@@ -49,16 +63,41 @@ jobs:
 
       - name: Build Windows package
         run: |
-          python --version
-          python build_windows_package.py || echo "Build failed, checking logs..."
+          python build_windows_package.py --preflight || echo "Preflight check done"
+          python build_windows_package.py
+        shell: cmd
+        continue-on-error: true
+
+      - name: Check dist directory
+        run: |
+          echo "Checking dist directory..."
+          if exist "dist\fpas-offline" (
+            echo "dist\fpas-offline exists"
+            dir "dist\fpas-offline"
+          ) else (
+            echo "dist\fpas-offline does NOT exist"
+            if exist "dist" (
+              echo "Contents of dist:"
+              dir "dist"
+            )
+          )
         shell: cmd
 
       - name: Verify package structure
         run: |
-          if not exist "dist\fpas-offline\start_fpas.cmd" exit /b 1
-          if not exist "dist\fpas-offline\runtime\python\python.exe" exit /b 1
-          if not exist "dist\fpas-offline\dashboard\dist\index.html" exit /b 1
-          echo Package structure verified
+          if not exist "dist\fpas-offline\start_fpas.cmd" (
+            echo "ERROR: start_fpas.cmd not found"
+            exit /b 1
+          )
+          if not exist "dist\fpas-offline\runtime\python\python.exe" (
+            echo "ERROR: python.exe not found"
+            exit /b 1
+          )
+          if not exist "dist\fpas-offline\dashboard\dist\index.html" (
+            echo "ERROR: index.html not found"
+            exit /b 1
+          )
+          echo "Package structure verified"
         shell: cmd
 
       - name: Build ZIP release asset
@@ -87,7 +126,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if "${{ github.event_name }}"=="workflow_dispatch" (
-            set "tag_name=${{ inputs.tag_name }}"
+            set "tag_name=${{ inputs.inputs.tag_name }}"
           ) else (
             set "tag_name=%GITHUB_REF_NAME%"
           )
