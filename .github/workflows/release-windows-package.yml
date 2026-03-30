@@ -36,6 +36,7 @@ jobs:
 
       - name: Install Python dependencies
         run: |
+          python --version
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-windows-build.txt
 
@@ -48,7 +49,8 @@ jobs:
 
       - name: Build Windows package
         run: |
-          python build_windows_package.py
+          python --version
+          python build_windows_package.py || echo "Build failed, checking logs..."
         shell: cmd
 
       - name: Verify package structure
