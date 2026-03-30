@@ -133,37 +133,83 @@ WIN7_PREREQUISITE_CANDIDATES = {
     "Windows6.1-KB4490628-x64.msu": [
         PROJECT_ROOT / "win7-patches" / "Windows6.1-KB4490628-x64.msu",
         Path.home() / "Desktop" / "win7-patches" / "Windows6.1-KB4490628-x64.msu",
-        Path.home() / "OneDrive" / "Desktop" / "win7-patches" / "Windows6.1-KB4490628-x64.msu",
-        PROJECT_ROOT / ".tmp_win7_bootstrap" / "patches-min" / "Windows6.1-KB4490628-x64.msu",
+        Path.home()
+        / "OneDrive"
+        / "Desktop"
+        / "win7-patches"
+        / "Windows6.1-KB4490628-x64.msu",
+        PROJECT_ROOT
+        / ".tmp_win7_bootstrap"
+        / "patches-min"
+        / "Windows6.1-KB4490628-x64.msu",
         PROJECT_ROOT / ".tmp_ssh_bootstrap" / "serve" / "Windows6.1-KB4490628-x64.msu",
     ],
     "Windows6.1-KB4474419-v3-x64.msu": [
         PROJECT_ROOT / "win7-patches" / "Windows6.1-KB4474419-v3-x64.msu",
         Path.home() / "Desktop" / "win7-patches" / "Windows6.1-KB4474419-v3-x64.msu",
-        Path.home() / "OneDrive" / "Desktop" / "win7-patches" / "Windows6.1-KB4474419-v3-x64.msu",
-        PROJECT_ROOT / ".tmp_win7_bootstrap" / "patches-min" / "Windows6.1-KB4474419-v3-x64.msu",
-        PROJECT_ROOT / ".tmp_ssh_bootstrap" / "serve" / "Windows6.1-KB4474419-v3-x64.msu",
+        Path.home()
+        / "OneDrive"
+        / "Desktop"
+        / "win7-patches"
+        / "Windows6.1-KB4474419-v3-x64.msu",
+        PROJECT_ROOT
+        / ".tmp_win7_bootstrap"
+        / "patches-min"
+        / "Windows6.1-KB4474419-v3-x64.msu",
+        PROJECT_ROOT
+        / ".tmp_ssh_bootstrap"
+        / "serve"
+        / "Windows6.1-KB4474419-v3-x64.msu",
     ],
     "Windows6.1-KB2533623-x64.msu": [
         PROJECT_ROOT / "win7-patches" / "Windows6.1-KB2533623-x64.msu",
         Path.home() / "Desktop" / "win7-patches" / "Windows6.1-KB2533623-x64.msu",
-        Path.home() / "OneDrive" / "Desktop" / "win7-patches" / "Windows6.1-KB2533623-x64.msu",
-        PROJECT_ROOT / ".tmp_win7_bootstrap" / "patches-min" / "Windows6.1-KB2533623-x64.msu",
-        PROJECT_ROOT / ".tmp_win7_bootstrap" / "patches" / "Windows6.1-KB2533623-x64.msu",
+        Path.home()
+        / "OneDrive"
+        / "Desktop"
+        / "win7-patches"
+        / "Windows6.1-KB2533623-x64.msu",
+        PROJECT_ROOT
+        / ".tmp_win7_bootstrap"
+        / "patches-min"
+        / "Windows6.1-KB2533623-x64.msu",
+        PROJECT_ROOT
+        / ".tmp_win7_bootstrap"
+        / "patches"
+        / "Windows6.1-KB2533623-x64.msu",
         PROJECT_ROOT / ".tmp_ssh_bootstrap" / "serve" / "Windows6.1-KB2533623-x64.msu",
     ],
     "Windows6.1-KB2999226-x64.msu": [
         PROJECT_ROOT / "win7-patches" / "Windows6.1-KB2999226-x64.msu",
         Path.home() / "Desktop" / "win7-patches" / "Windows6.1-KB2999226-x64.msu",
-        Path.home() / "OneDrive" / "Desktop" / "win7-patches" / "Windows6.1-KB2999226-x64.msu",
-        PROJECT_ROOT / ".tmp_win7_bootstrap" / "patches-min" / "Windows6.1-KB2999226-x64.msu",
-        PROJECT_ROOT / ".tmp_win7_bootstrap" / "patches" / "Windows6.1-KB2999226-x64.msu",
+        Path.home()
+        / "OneDrive"
+        / "Desktop"
+        / "win7-patches"
+        / "Windows6.1-KB2999226-x64.msu",
+        PROJECT_ROOT
+        / ".tmp_win7_bootstrap"
+        / "patches-min"
+        / "Windows6.1-KB2999226-x64.msu",
+        PROJECT_ROOT
+        / ".tmp_win7_bootstrap"
+        / "patches"
+        / "Windows6.1-KB2999226-x64.msu",
         PROJECT_ROOT / ".tmp_ssh_bootstrap" / "serve" / "Windows6.1-KB2999226-x64.msu",
     ],
     "109.0.5414.120-64Bit-ChromeStandaloneSetup64.exe": [
-        PROJECT_ROOT / "win7-patches" / "109.0.5414.120-64Bit-ChromeStandaloneSetup64.exe",
-        Path.home() / "Desktop" / "win7-patches" / "109.0.5414.120-64Bit-ChromeStandaloneSetup64.exe",
-        Path.home() / "OneDrive" / "Desktop" / "win7-patches" / "109.0.5414.120-64Bit-ChromeStandaloneSetup64.exe",
+        PROJECT_ROOT
+        / "win7-patches"
+        / "109.0.5414.120-64Bit-ChromeStandaloneSetup64.exe",
+        Path.home()
+        / "Desktop"
+        / "win7-patches"
+        / "109.0.5414.120-64Bit-ChromeStandaloneSetup64.exe",
+        Path.home()
+        / "OneDrive"
+        / "Desktop"
+        / "win7-patches"
+        / "109.0.5414.120-64Bit-ChromeStandaloneSetup64.exe",
         Path.home() / "Downloads" / "109.0.5414.120-64Bit-ChromeStandaloneSetup64.exe",
     ],
 }
@@ -183,9 +229,7 @@ def _resolve_npm_command() -> List[str]:
         resolved = shutil.which(candidate)
         if resolved:
             return [resolved]
-    raise SystemExit(
-        "未检测到 npm，可先确认 Node.js 已安装且 npm 已加入 PATH。"
-    )
+    raise SystemExit("未检测到 npm，可先确认 Node.js 已安装且 npm 已加入 PATH。")
 
 
 def _python_version_text() -> str:
@@ -234,10 +278,14 @@ def get_pyinstaller_hiddenimports() -> List[str]:
     ]
 
 
-def get_portable_source_dirs(project_root: Optional[Path] = None) -> List[Tuple[str, str]]:
+def get_portable_source_dirs(
+    project_root: Optional[Path] = None,
+) -> List[Tuple[str, str]]:
     """返回 portable runtime bundle 需要复制的目录映射。"""
     root = project_root or PROJECT_ROOT
-    return [(str(root / rel_path), rel_path.as_posix()) for rel_path in PORTABLE_SOURCE_DIRS]
+    return [
+        (str(root / rel_path), rel_path.as_posix()) for rel_path in PORTABLE_SOURCE_DIRS
+    ]
 
 
 def render_portable_start_cmd() -> str:
@@ -268,14 +316,16 @@ def render_portable_start_cmd() -> str:
         'set "FPAS_STARTUP_DIAGNOSTICS_ROOT=%FPAS_ROOT%"',
         'set "PYTHONPATH=%FPAS_ROOT%"',
         'set "PATH=%FPAS_ROOT%\\runtime\\python;%FPAS_ROOT%\\runtime\\python\\DLLs;%FPAS_ROOT%\\runtime\\python\\Scripts;%PATH%"',
-        'start "" /b "%FPAS_PYTHON%" "%FPAS_ROOT%\\launch_browser_helper.py"',
+        # 关键修复：传递所有必要的环境变量给浏览器助手
+        'if not defined FPAS_PORT set "FPAS_PORT=8000"',
+        'start "" /b cmd /c "set FPAS_ROOT=%FPAS_ROOT% && set FPAS_RUN_DIR=%FPAS_RUN_DIR% && set FPAS_SERVER_PID_FILE=%FPAS_SERVER_PID_FILE% && set FPAS_BROWSER_PID_FILE=%FPAS_BROWSER_PID_FILE% && set FPAS_BROWSER_PROFILE_DIR=%FPAS_BROWSER_PROFILE_DIR% && set FPAS_STOPPING_FLAG=%FPAS_STOPPING_FLAG% && set FPAS_DELIVERY_MODE=%FPAS_DELIVERY_MODE% && set FPAS_AUTO_OPEN_BROWSER=%FPAS_AUTO_OPEN_BROWSER% && set FPAS_PORT=%FPAS_PORT% && set FPAS_STARTUP_DIAGNOSTICS_ROOT=%FPAS_STARTUP_DIAGNOSTICS_ROOT% && set PYTHONPATH=%PYTHONPATH% && set PATH=%PATH% && "%FPAS_PYTHON%" "%FPAS_ROOT%\\launch_browser_helper.py""',
         '"%FPAS_PYTHON%" "%FPAS_ROOT%\\api_server.py"',
         'set "EXIT_CODE=%ERRORLEVEL%"',
         'del /f /q "%FPAS_SERVER_PID_FILE%" >nul 2>nul',
         'del /f /q "%FPAS_BROWSER_PID_FILE%" >nul 2>nul',
         'if exist "%FPAS_STOPPING_FLAG%" (',
         'del /f /q "%FPAS_STOPPING_FLAG%" >nul 2>nul',
-        ') else (',
+        ") else (",
         'if not "%EXIT_CODE%"=="0" (',
         "echo.",
         "echo [FPAS] 服务异常退出，退出码=%EXIT_CODE%",
@@ -432,7 +482,7 @@ def _resolve_default_browser_executable() -> str | None:
     for hive, subkey in registry_candidates:
         try:
             with winreg.OpenKey(hive, subkey) as key:
-                command, _ = winreg.QueryValueEx(key, None)
+                command, _ = winreg.QueryValueEx(key, "")  # type: ignore[arg-type]
         except OSError:
             continue
         executable = _extract_executable(command)
@@ -594,32 +644,84 @@ def _launch_managed_browser(browser_exe: str, url: str, profile_dir: Path) -> tu
     else:
         shutil.rmtree(profile_dir, ignore_errors=True)
         profile_dir.mkdir(parents=True, exist_ok=True)
+        # Win7兼容: 使用 --no-first-run 和 --no-default-browser-check 避免启动问题
         args.extend(
             [
                 f"--user-data-dir={profile_dir}",
                 "--new-window",
-                f"--app={url}",
+                "--no-first-run",
+                "--no-default-browser-check",
+                url,
             ]
         )
 
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    process = subprocess.Popen(args, creationflags=creationflags)
-    job_handle = _create_kill_on_close_job()
-    if job_handle and not _assign_process_to_job(job_handle, int(process.pid)):
-        _close_handle(job_handle)
-        job_handle = None
-    return int(process.pid), process, job_handle
+    try:
+        # Win7兼容: 不使用CREATE_NO_WINDOW，让浏览器正常显示
+        creationflags = 0
+        process = subprocess.Popen(args, creationflags=creationflags)
+        job_handle = _create_kill_on_close_job()
+        if job_handle and not _assign_process_to_job(job_handle, int(process.pid)):
+            _close_handle(job_handle)
+            job_handle = None
+        return int(process.pid), process, job_handle
+    except Exception as e:
+        # 记录启动失败
+        try:
+            root = Path(__file__).resolve().parent
+            log_path = root / "run" / "browser_launch_error.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Failed to launch {browser_exe}: {e}\\n")
+                f.write(f"  Args: {args}\\n")
+        except:
+            pass
+        return None, None, None
 
 
 def _open_url_fallback(url: str, browser_exe: str | None = None) -> None:
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    """Win7/Win11兼容的回退打开方式"""
+    # Win7兼容: 不使用CREATE_NO_WINDOW
+    creationflags = 0
+    
     if browser_exe and os.path.exists(browser_exe):
         try:
             subprocess.Popen([browser_exe, url], creationflags=creationflags)
             return
-        except Exception:
+        except Exception as e:
+            # 记录错误
+            try:
+                root = Path(__file__).resolve().parent
+                log_path = root / "run" / "browser_launch_error.log"
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Fallback browser failed: {e}\\n")
+            except:
+                pass
+    
+    # 使用系统默认方式打开
+    try:
+        subprocess.Popen(["cmd", "/c", "start", "", url], creationflags=creationflags)
+    except Exception as e:
+        try:
+            root = Path(__file__).resolve().parent
+            log_path = root / "run" / "browser_launch_error.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] System start command failed: {e}\\n")
+        except:
             pass
-    subprocess.Popen(["cmd", "/c", "start", "", url], creationflags=creationflags)
+
+
+def _log_debug(message: str) -> None:
+    """记录调试日志"""
+    try:
+        root = Path(__file__).resolve().parent
+        log_path = root / "run" / "browser_launch_debug.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\\n")
+    except:
+        pass
 
 
 def main() -> int:
@@ -631,38 +733,57 @@ def main() -> int:
     dashboard_url = f"http://127.0.0.1:{port}/dashboard/"
     auto_open_browser = str(os.environ.get("FPAS_AUTO_OPEN_BROWSER", "1") or "1").strip().lower()
 
+    _log_debug(f"Browser helper started")
+    _log_debug(f"PORT={port}, AUTO_OPEN={auto_open_browser}")
+    _log_debug(f"URL={dashboard_url}")
+
     if auto_open_browser in {"0", "false", "no", "off"}:
+        _log_debug("Auto open disabled, exiting")
         return 0
 
-    for _ in range(60):
+    # 等待服务器启动
+    _log_debug("Waiting for server to start...")
+    for i in range(60):
         try:
             import urllib.request
 
             with urllib.request.urlopen(dashboard_url, timeout=2) as response:
                 if response.getcode() == 200:
+                    _log_debug(f"Server ready after {i+1} attempts")
                     break
-        except Exception:
+        except Exception as e:
+            if i == 0 or i == 30:  # 只在开始和中间记录一次
+                _log_debug(f"Server not ready yet (attempt {i+1}): {e}")
             time.sleep(0.5)
     else:
+        _log_debug("Server failed to start within timeout")
         return 0
+
+    # 获取浏览器候选列表
+    candidates = _iter_browser_candidates()
+    _log_debug(f"Found {len(candidates)} browser candidates: {candidates}")
 
     browser_pid = None
     fallback_browser_exe = None
-    for browser_exe in _iter_browser_candidates():
+    for browser_exe in candidates:
         if fallback_browser_exe is None:
             fallback_browser_exe = browser_exe
+        _log_debug(f"Trying browser: {browser_exe}")
         try:
             browser_pid, process, job_handle = _launch_managed_browser(
                 browser_exe,
                 dashboard_url,
                 browser_profile_dir,
             )
-        except Exception:
+            _log_debug(f"Launch result: pid={browser_pid}, process={process is not None}, job={job_handle is not None}")
+        except Exception as e:
+            _log_debug(f"Launch exception: {e}")
             browser_pid = None
             process = None
             job_handle = None
         if browser_pid:
             if process is not None and job_handle is not None:
+                _log_debug(f"Using managed browser with job object")
                 return _guard_managed_browser(
                     process,
                     job_handle,
@@ -671,6 +792,7 @@ def main() -> int:
                     browser_profile_dir,
                     stopping_flag,
                 )
+            _log_debug(f"Browser launched without job object, writing pid file")
             browser_pid_file.parent.mkdir(parents=True, exist_ok=True)
             browser_pid_file.write_text(
                 f"{browser_pid}\\n{_normalize_path(browser_exe)}\\n{_normalize_path(str(browser_profile_dir))}\\n",
@@ -678,6 +800,7 @@ def main() -> int:
             )
             return 0
 
+    _log_debug(f"All managed browsers failed, using fallback")
     _open_url_fallback(dashboard_url, fallback_browser_exe)
     return 0
 
@@ -875,24 +998,51 @@ def _iter_wmic_process_rows():
 
 
 def _collect_managed_browser_pids(browser_image_hint: str, browser_profile_hint: str) -> set[int]:
+    """收集受控浏览器进程PID，支持多种检测方式"""
     normalized_image_hint = _normalize_path(browser_image_hint) if browser_image_hint else ""
     normalized_profile_hint = _normalize_command_text(browser_profile_hint)
     browser_pids: set[int] = set()
 
-    for row in _iter_wmic_process_rows():
-        executable_path = str(row.get("executable_path", "") or "").strip()
-        if not executable_path:
-            continue
-        normalized_executable_path = _normalize_path(executable_path)
-        if normalized_image_hint and normalized_executable_path != normalized_image_hint:
-            continue
+    # 方法1: 使用WMIC查询
+    try:
+        for row in _iter_wmic_process_rows():
+            executable_path = str(row.get("executable_path", "") or "").strip()
+            if not executable_path:
+                continue
+            normalized_executable_path = _normalize_path(executable_path)
 
-        command_line = str(row.get("command_line", "") or "")
-        normalized_command_line = _normalize_command_text(command_line)
-        if normalized_profile_hint and normalized_profile_hint not in normalized_command_line:
-            continue
+            # 检查可执行文件路径匹配
+            image_match = False
+            if normalized_image_hint:
+                image_match = normalized_executable_path == normalized_image_hint
+            else:
+                # 如果没有指定image_hint，匹配常见浏览器
+                exe_lower = normalized_executable_path.lower()
+                image_match = any(x in exe_lower for x in ["chrome", "msedge", "firefox", "brave", "chromium"])
 
-        browser_pids.add(int(row["pid"]))
+            if not image_match:
+                continue
+
+            # 检查命令行参数匹配
+            command_line = str(row.get("command_line", "") or "")
+            normalized_command_line = _normalize_command_text(command_line)
+            if normalized_profile_hint and normalized_profile_hint not in normalized_command_line:
+                continue
+
+            browser_pids.add(int(row["pid"]))
+    except Exception as e:
+        print(f"[FPAS] WMIC查询浏览器进程失败: {e}")
+
+    # 方法2: 使用Toolhelp32遍历进程（备用方案）
+    if not browser_pids and normalized_image_hint:
+        try:
+            for proc in _iter_processes():
+                pid = proc["pid"]
+                image_path = _query_process_image_path(pid)
+                if image_path and _normalize_path(image_path) == normalized_image_hint:
+                    browser_pids.add(pid)
+        except Exception as e:
+            print(f"[FPAS] Toolhelp32查询浏览器进程失败: {e}")
 
     return browser_pids
 
@@ -902,7 +1052,7 @@ def _kill_pid_set(pids: set[int], label: str) -> None:
     if not remaining_pids:
         return
 
-    for _ in range(5):
+    for attempt in range(10):  # 增加重试次数到10次
         active_pids = []
         for pid in sorted(remaining_pids):
             if _query_process_image_path(pid):
@@ -910,9 +1060,23 @@ def _kill_pid_set(pids: set[int], label: str) -> None:
         if not active_pids:
             return
         for pid in active_pids:
-            print(f"[FPAS] 正在结束{label} PID={pid}")
+            print(f"[FPAS] 正在结束{label} PID={pid} (attempt {attempt + 1})")
             _kill_pid(pid)
-        time.sleep(0.8)
+            # Win7兼容: 尝试使用taskkill /IM按名称杀进程
+            if label == "受控浏览器":
+                try:
+                    image_path = _query_process_image_path(pid)
+                    if image_path:
+                        exe_name = Path(image_path).name
+                        subprocess.run(
+                            ["taskkill", "/IM", exe_name, "/T", "/F"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            check=False,
+                        )
+                except:
+                    pass
+        time.sleep(1.0 if attempt < 5 else 2.0)  # 前5次等1秒，后5次等2秒
         remaining_pids = set(active_pids)
 
 
@@ -1010,6 +1174,10 @@ def main() -> int:
                 normalized_image_path = _normalize_path(current_image_path)
                 if not browser_image_hint or normalized_image_path == browser_image_hint:
                     browser_pids.add(browser_pid)
+            else:
+                # Win7兼容: 即使无法查询进程路径，也尝试杀死记录的PID
+                print(f"[FPAS] 无法查询浏览器进程 {browser_pid} 的路径，将尝试强制结束")
+                browser_pids.add(browser_pid)
 
     if not python_pids and not browser_pids and not cmd_pids:
         print("[FPAS] 未发现当前交付包的运行中后端进程")
@@ -1022,6 +1190,20 @@ def main() -> int:
     browser_pids.discard(self_pid)
     _kill_pid_set(browser_pids, "受控浏览器")
     _kill_pid_set(cmd_pids, "关联启动窗口")
+
+    # 最后手段：尝试按名称杀死所有相关浏览器进程
+    if browser_image_hint:
+        try:
+            exe_name = Path(browser_image_hint).name
+            print(f"[FPAS] 最后手段：尝试按名称杀死 {exe_name}")
+            subprocess.run(
+                ["taskkill", "/IM", exe_name, "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except Exception as e:
+            print(f"[FPAS] 按名称杀死浏览器进程失败: {e}")
 
     if server_pid_file.exists():
         try:
@@ -1076,13 +1258,17 @@ def _merge_tree(src: Path, dst: Path, ignore=None) -> None:
 
 def _portable_tree_ignore(_dir_path: str, names: List[str]) -> set[str]:
     return {
-        name for name in names if name == "__pycache__" or name.endswith((".pyc", ".pyo"))
+        name
+        for name in names
+        if name == "__pycache__" or name.endswith((".pyc", ".pyo"))
     }
 
 
 def _render_markdown_inline(text: str) -> str:
     rendered = html.escape(text, quote=False)
-    rendered = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r'<img alt="\1" src="\2" />', rendered)
+    rendered = re.sub(
+        r"!\[([^\]]*)\]\(([^)]+)\)", r'<img alt="\1" src="\2" />', rendered
+    )
     rendered = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', rendered)
     rendered = re.sub(r"`([^`]+)`", r"<code>\1</code>", rendered)
     rendered = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", rendered)
@@ -1124,7 +1310,9 @@ def render_readme_html(markdown_text: str, title: str = "FPAS README") -> str:
     def flush_blockquote() -> None:
         nonlocal in_blockquote, blockquote_lines
         if in_blockquote:
-            body = "<br/>".join(_render_markdown_inline(line) for line in blockquote_lines)
+            body = "<br/>".join(
+                _render_markdown_inline(line) for line in blockquote_lines
+            )
             parts.append(f"<blockquote><p>{body}</p></blockquote>")
             in_blockquote = False
             blockquote_lines = []
@@ -1180,7 +1368,9 @@ def render_readme_html(markdown_text: str, title: str = "FPAS README") -> str:
             flush_ul()
             flush_ol()
             level = len(heading_match.group(1))
-            parts.append(f"<h{level}>{_render_markdown_inline(heading_match.group(2))}</h{level}>")
+            parts.append(
+                f"<h{level}>{_render_markdown_inline(heading_match.group(2))}</h{level}>"
+            )
             continue
 
         ul_match = re.match(r"^[-*]\s+(.*)$", stripped)
@@ -1290,8 +1480,12 @@ def render_readme_html(markdown_text: str, title: str = "FPAS README") -> str:
 
 def _write_packaged_readme_html(project_root: Path, target_root: Path) -> None:
     source_path = project_root / "README.md"
-    html_text = render_readme_html(source_path.read_text(encoding="utf-8"), title="FPAS README")
-    with open(target_root / "README.html", "w", encoding="utf-8", newline="\n") as handle:
+    html_text = render_readme_html(
+        source_path.read_text(encoding="utf-8"), title="FPAS README"
+    )
+    with open(
+        target_root / "README.html", "w", encoding="utf-8", newline="\n"
+    ) as handle:
         handle.write(html_text)
 
 
@@ -1351,7 +1545,9 @@ def _copy_portable_python_runtime(target_runtime_dir: Path) -> None:
 
     def _runtime_ignore(dir_path: str, names: List[str]) -> set[str]:
         ignored = {
-            name for name in names if name == "__pycache__" or name.endswith((".pyc", ".pyo"))
+            name
+            for name in names
+            if name == "__pycache__" or name.endswith((".pyc", ".pyo"))
         }
         current_dir = Path(dir_path).resolve()
         if current_dir == base_runtime:
@@ -1359,7 +1555,10 @@ def _copy_portable_python_runtime(target_runtime_dir: Path) -> None:
                 name
                 for name in names
                 if name.casefold()
-                in {candidate.casefold() for candidate in PORTABLE_RUNTIME_TOP_LEVEL_SKIP_NAMES}
+                in {
+                    candidate.casefold()
+                    for candidate in PORTABLE_RUNTIME_TOP_LEVEL_SKIP_NAMES
+                }
             )
         return ignored
 
@@ -1412,6 +1611,8 @@ def _copy_portable_python_runtime(target_runtime_dir: Path) -> None:
 
 
 def _remove_portable_bundle_caches(target_root: Path) -> None:
+    """清理打包过程中的运行时缓存和临时文件。"""
+    # 1. 清理 Python 字节码缓存文件
     for suffix in ("*.pyc", "*.pyo"):
         for file_path in list(target_root.rglob(suffix)):
             try:
@@ -1419,6 +1620,7 @@ def _remove_portable_bundle_caches(target_root: Path) -> None:
             except OSError:
                 pass
 
+    # 2. 清理 __pycache__ 目录
     cache_dirs = sorted(
         (path for path in target_root.rglob("__pycache__") if path.is_dir()),
         key=lambda path: len(path.parts),
@@ -1426,6 +1628,54 @@ def _remove_portable_bundle_caches(target_root: Path) -> None:
     )
     for cache_dir in cache_dirs:
         shutil.rmtree(cache_dir, ignore_errors=True)
+
+    # 3. 清理运行时生成的浏览器配置文件 (重要: 可能占用200MB+)
+    browser_profile_dir = target_root / "run" / "browser-profile"
+    if browser_profile_dir.exists():
+        print(f"[build] 清理浏览器配置文件: {browser_profile_dir}")
+        shutil.rmtree(browser_profile_dir, ignore_errors=True)
+
+    # 4. 清理运行时日志文件
+    log_files = [
+        target_root / "audit_system.log",
+        target_root / "startup_fatal.log",
+    ]
+    run_dir = target_root / "run"
+    if run_dir.exists():
+        log_files.extend(run_dir.glob("*.log"))
+        log_files.extend(run_dir.glob("*.pid"))
+        log_files.extend(run_dir.glob("*.flag"))
+
+    for log_file in log_files:
+        try:
+            if log_file.exists():
+                log_file.unlink()
+        except OSError:
+            pass
+
+    # 5. 清理临时文件
+    for suffix in ("*.tmp", ".DS_Store", "Thumbs.db"):
+        for file_path in list(target_root.rglob(suffix)):
+            try:
+                if file_path.is_file():
+                    file_path.unlink()
+                elif file_path.is_dir():
+                    shutil.rmtree(file_path, ignore_errors=True)
+            except OSError:
+                pass
+
+    # 6. 清理运行时目录中的其他临时数据
+    if run_dir.exists():
+        # 保留 run 目录本身，但清理其中的内容（除了 .gitkeep 等标记文件）
+        for item in run_dir.iterdir():
+            try:
+                if item.is_file() and item.name not in (".gitkeep", ".gitignore"):
+                    item.unlink()
+                elif item.is_dir() and item.name != "browser-profile":
+                    # 保留其他子目录（如果有的话）
+                    pass
+            except OSError:
+                pass
 
 
 def _get_portable_bundle_audit_relpaths() -> List[str]:
@@ -1450,7 +1700,9 @@ def _get_portable_bundle_audit_relpaths() -> List[str]:
 
 
 def _get_portable_bundle_audit_modules() -> List[str]:
-    ordered_modules = list(REQUIRED_RUNTIME_MODULES) + list(PORTABLE_BUNDLE_AUDIT_MODULES)
+    ordered_modules = list(REQUIRED_RUNTIME_MODULES) + list(
+        PORTABLE_BUNDLE_AUDIT_MODULES
+    )
     return list(dict.fromkeys(ordered_modules))
 
 
@@ -1530,7 +1782,9 @@ def _audit_portable_runtime_bundle(target_root: Path) -> None:
 
 
 def _write_portable_launchers(target_root: Path) -> None:
-    with open(target_root / "start_fpas.cmd", "w", encoding="utf-8", newline="\r\n") as handle:
+    with open(
+        target_root / "start_fpas.cmd", "w", encoding="utf-8", newline="\r\n"
+    ) as handle:
         handle.write(render_portable_start_cmd())
     with open(
         target_root / "start_fpas_silent.vbs",
@@ -1546,7 +1800,9 @@ def _write_portable_launchers(target_root: Path) -> None:
         newline="\n",
     ) as handle:
         handle.write(render_portable_launch_browser_helper_py())
-    with open(target_root / "stop_fpas.cmd", "w", encoding="utf-8", newline="\r\n") as handle:
+    with open(
+        target_root / "stop_fpas.cmd", "w", encoding="utf-8", newline="\r\n"
+    ) as handle:
         handle.write(render_portable_stop_cmd())
     with open(
         target_root / "stop_fpas_helper.py",
@@ -1618,7 +1874,9 @@ def run_preflight() -> None:
         raise SystemExit("预检失败，请先补齐资源后再继续。")
 
     print("[preflight] 运行时资源检查通过")
-    print("[preflight] README、docs/assets、模板、知识库、前端构建源文件和 spec 均已存在")
+    print(
+        "[preflight] README、docs/assets、模板、知识库、前端构建源文件和 spec 均已存在"
+    )
 
     if sys.platform != "win32":
         print(
@@ -1676,7 +1934,9 @@ def ensure_pyinstaller() -> None:
 def ensure_required_runtime_modules() -> None:
     """确认 Windows 包关键运行时模块已安装，避免产出功能残缺的 exe。"""
     missing = [
-        module for module in REQUIRED_RUNTIME_MODULES if importlib.util.find_spec(module) is None
+        module
+        for module in REQUIRED_RUNTIME_MODULES
+        if importlib.util.find_spec(module) is None
     ]
     if missing:
         raise SystemExit(

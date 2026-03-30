@@ -1,6 +1,6 @@
 {
   "name": "fpas-dashboard",
-  "version": "4.6.1",
+  "version": "4.6.2",
   "description": "资金穿透审计系统 - 专业级金融监控 Dashboard",
   "private": true,
   "type": "module",

@@ -115,7 +115,13 @@ def _kill_pid(pid: int) -> None:
 def _iter_wmic_process_rows():
     try:
         result = subprocess.run(
-            ["wmic", "process", "get", "ProcessId,ExecutablePath,CommandLine", "/format:csv"],
+            [
+                "wmic",
+                "process",
+                "get",
+                "ProcessId,ExecutablePath,CommandLine",
+                "/format:csv",
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -147,25 +153,62 @@ def _iter_wmic_process_rows():
     return rows
 
 
-def _collect_managed_browser_pids(browser_image_hint: str, browser_profile_hint: str) -> set[int]:
-    normalized_image_hint = _normalize_path(browser_image_hint) if browser_image_hint else ""
+def _collect_managed_browser_pids(
+    browser_image_hint: str, browser_profile_hint: str
+) -> set[int]:
+    """收集受控浏览器进程PID，支持多种检测方式"""
+    normalized_image_hint = (
+        _normalize_path(browser_image_hint) if browser_image_hint else ""
+    )
     normalized_profile_hint = _normalize_command_text(browser_profile_hint)
     browser_pids: set[int] = set()
 
-    for row in _iter_wmic_process_rows():
-        executable_path = str(row.get("executable_path", "") or "").strip()
-        if not executable_path:
-            continue
-        normalized_executable_path = _normalize_path(executable_path)
-        if normalized_image_hint and normalized_executable_path != normalized_image_hint:
-            continue
+    # 方法1: 使用WMIC查询
+    try:
+        for row in _iter_wmic_process_rows():
+            executable_path = str(row.get("executable_path", "") or "").strip()
+            if not executable_path:
+                continue
+            normalized_executable_path = _normalize_path(executable_path)
 
-        command_line = str(row.get("command_line", "") or "")
-        normalized_command_line = _normalize_command_text(command_line)
-        if normalized_profile_hint and normalized_profile_hint not in normalized_command_line:
-            continue
+            # 检查可执行文件路径匹配
+            image_match = False
+            if normalized_image_hint:
+                image_match = normalized_executable_path == normalized_image_hint
+            else:
+                # 如果没有指定image_hint，匹配常见浏览器
+                exe_lower = normalized_executable_path.lower()
+                image_match = any(
+                    x in exe_lower
+                    for x in ["chrome", "msedge", "firefox", "brave", "chromium"]
+                )
 
-        browser_pids.add(int(row["pid"]))
+            if not image_match:
+                continue
+
+            # 检查命令行参数匹配
+            command_line = str(row.get("command_line", "") or "")
+            normalized_command_line = _normalize_command_text(command_line)
+            if (
+                normalized_profile_hint
+                and normalized_profile_hint not in normalized_command_line
+            ):
+                continue
+
+            browser_pids.add(int(row["pid"]))
+    except Exception as e:
+        print(f"[FPAS] WMIC查询浏览器进程失败: {e}")
+
+    # 方法2: 使用Toolhelp32遍历进程（备用方案）
+    if not browser_pids and normalized_image_hint:
+        try:
+            for proc in _iter_processes():
+                pid = proc["pid"]
+                image_path = _query_process_image_path(pid)
+                if image_path and _normalize_path(image_path) == normalized_image_hint:
+                    browser_pids.add(pid)
+        except Exception as e:
+            print(f"[FPAS] Toolhelp32查询浏览器进程失败: {e}")
 
     return browser_pids
 
@@ -175,7 +218,7 @@ def _kill_pid_set(pids: set[int], label: str) -> None:
     if not remaining_pids:
         return
 
-    for _ in range(5):
+    for attempt in range(10):  # 增加重试次数到10次
         active_pids = []
         for pid in sorted(remaining_pids):
             if _query_process_image_path(pid):
@@ -183,13 +226,29 @@ def _kill_pid_set(pids: set[int], label: str) -> None:
         if not active_pids:
             return
         for pid in active_pids:
-            print(f"[FPAS] 正在结束{label} PID={pid}")
+            print(f"[FPAS] 正在结束{label} PID={pid} (attempt {attempt + 1})")
             _kill_pid(pid)
-        time.sleep(0.8)
+            # Win7兼容: 尝试使用taskkill /IM按名称杀进程
+            if label == "受控浏览器":
+                try:
+                    image_path = _query_process_image_path(pid)
+                    if image_path:
+                        exe_name = Path(image_path).name
+                        subprocess.run(
+                            ["taskkill", "/IM", exe_name, "/T", "/F"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            check=False,
+                        )
+                except:
+                    pass
+        time.sleep(1.0 if attempt < 5 else 2.0)  # 前5次等1秒，后5次等2秒
         remaining_pids = set(active_pids)
 
 
-def _remove_tree_with_retries(path: Path, attempts: int = 10, sleep_s: float = 0.5) -> bool:
+def _remove_tree_with_retries(
+    path: Path, attempts: int = 10, sleep_s: float = 0.5
+) -> bool:
     if not path.exists():
         return True
     for _ in range(max(attempts, 1)):
@@ -250,7 +309,11 @@ def main() -> int:
     browser_profile_hint = _normalize_path(str(browser_profile_dir))
     if browser_pid_file.exists():
         try:
-            browser_lines = [line.strip() for line in browser_pid_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+            browser_lines = [
+                line.strip()
+                for line in browser_pid_file.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
         except OSError:
             browser_lines = []
         if len(browser_lines) >= 5 and browser_lines[4] == "managed-job":
@@ -281,8 +344,15 @@ def main() -> int:
             current_image_path = _query_process_image_path(browser_pid)
             if current_image_path:
                 normalized_image_path = _normalize_path(current_image_path)
-                if not browser_image_hint or normalized_image_path == browser_image_hint:
+                if (
+                    not browser_image_hint
+                    or normalized_image_path == browser_image_hint
+                ):
                     browser_pids.add(browser_pid)
+            else:
+                # Win7兼容: 即使无法查询进程路径，也尝试杀死记录的PID
+                print(f"[FPAS] 无法查询浏览器进程 {browser_pid} 的路径，将尝试强制结束")
+                browser_pids.add(browser_pid)
 
     if not python_pids and not browser_pids and not cmd_pids:
         print("[FPAS] 未发现当前交付包的运行中后端进程")
@@ -291,10 +361,26 @@ def main() -> int:
     _kill_pid_set(python_pids, "后端进程")
     time.sleep(1.0)
     if browser_image_hint or browser_profile_hint:
-        browser_pids.update(_collect_managed_browser_pids(browser_image_hint, browser_profile_hint))
+        browser_pids.update(
+            _collect_managed_browser_pids(browser_image_hint, browser_profile_hint)
+        )
     browser_pids.discard(self_pid)
     _kill_pid_set(browser_pids, "受控浏览器")
     _kill_pid_set(cmd_pids, "关联启动窗口")
+
+    # 最后手段：尝试按名称杀死所有相关浏览器进程
+    if browser_image_hint:
+        try:
+            exe_name = Path(browser_image_hint).name
+            print(f"[FPAS] 最后手段：尝试按名称杀死 {exe_name}")
+            subprocess.run(
+                ["taskkill", "/IM", exe_name, "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except Exception as e:
+            print(f"[FPAS] 按名称杀死浏览器进程失败: {e}")
 
     if server_pid_file.exists():
         try:

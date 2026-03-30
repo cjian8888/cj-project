@@ -16,76 +16,100 @@ permissions:
 
 jobs:
   release-windows-package:
-    runs-on: ubuntu-latest
+    # 关键修改：使用 Windows runner 而不是 Ubuntu
+    runs-on: windows-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Verify tracked Windows package exists
+      - name: Setup Python 3.8
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.8'
+          architecture: 'x64'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Python dependencies
         run: |
-          set -euo pipefail
-          test -d "dist/fpas-offline"
-          test -f "dist/fpas-offline/start_fpas.cmd"
-          test -f "dist/fpas-offline/start_fpas_silent.vbs"
-          test -f "dist/fpas-offline/runtime/python/python.exe"
-          test -f "dist/fpas-offline/dashboard/dist/index.html"
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-windows-build.txt
+
+      - name: Build frontend
+        run: |
+          cd dashboard
+          npm install
+          npm run build
+        shell: cmd
+
+      - name: Build Windows package
+        run: |
+          python build_windows_package.py
+        shell: cmd
+
+      - name: Verify package structure
+        run: |
+          if not exist "dist\fpas-offline\start_fpas.cmd" exit /b 1
+          if not exist "dist\fpas-offline\runtime\python\python.exe" exit /b 1
+          if not exist "dist\fpas-offline\dashboard\dist\index.html" exit /b 1
+          echo Package structure verified
+        shell: cmd
 
       - name: Build ZIP release asset
         id: package
         run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tag_name="${{ inputs.tag_name }}"
-          else
-            tag_name="${GITHUB_REF_NAME}"
-          fi
-          asset_name="fpas-offline-${tag_name}-win-x64.zip"
-          checksum_name="${asset_name}.sha256"
+          if "${{ github.event_name }}"=="workflow_dispatch" (
+            set "tag_name=${{ inputs.tag_name }}"
+          ) else (
+            set "tag_name=%GITHUB_REF_NAME%"
+          )
+          set "asset_name=fpas-offline-%tag_name%-win-x64.zip"
+          set "checksum_name=%asset_name%.sha256"
+          
           cd dist
-          zip -r "../${asset_name}" "fpas-offline"
+          7z a -r "..\%asset_name%" "fpas-offline"
           cd ..
-          sha256sum "${asset_name}" > "${checksum_name}"
-          echo "asset_name=${asset_name}" >> "${GITHUB_OUTPUT}"
-          echo "checksum_name=${checksum_name}" >> "${GITHUB_OUTPUT}"
+          
+          certutil -hashfile "%asset_name%" SHA256 | findstr /v "CertUtil" > "%checksum_name%"
+          
+          echo asset_name=%asset_name%>> %GITHUB_OUTPUT%
+          echo checksum_name=%checksum_name%>> %GITHUB_OUTPUT%
+        shell: cmd
 
       - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tag_name="${{ inputs.tag_name }}"
-          else
-            tag_name="${GITHUB_REF_NAME}"
-          fi
-          asset_name="${{ steps.package.outputs.asset_name }}"
-          checksum_name="${{ steps.package.outputs.checksum_name }}"
-          title="FPAS ${tag_name}"
-          notes_file="$(mktemp)"
-          cat > "${notes_file}" <<'EOF'
-          Windows 单机离线 one-folder 交付包。
-
-          使用方式：
-          1. 下载并解压 ZIP。
-          2. 双击 `start_fpas.cmd` 启动程序。
-          3. 如需隐藏控制台，可改为双击 `start_fpas_silent.vbs`。
-          4. 程序会自动打开默认浏览器访问 `http://127.0.0.1:8000/dashboard/`。
-
-          本次附件包含：
-          - Windows portable-runtime one-folder ZIP 包
-          - 对应 SHA256 校验文件
-          EOF
-
-          if gh release view "${tag_name}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release edit "${tag_name}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "${title}" \
-              --notes-file "${notes_file}"
-            gh release upload "${tag_name}" "${asset_name}" "${checksum_name}" --clobber --repo "${GITHUB_REPOSITORY}"
-          else
-            gh release create "${tag_name}" "${asset_name}" "${checksum_name}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "${title}" \
-              --notes-file "${notes_file}"
-          fi
+          if "${{ github.event_name }}"=="workflow_dispatch" (
+            set "tag_name=${{ inputs.tag_name }}"
+          ) else (
+            set "tag_name=%GITHUB_REF_NAME%"
+          )
+          set "asset_name=${{ steps.package.outputs.asset_name }}"
+          set "checksum_name=${{ steps.package.outputs.checksum_name }}"
+          set "title=FPAS %tag_name%"
+          
+          echo Windows 单机离线 one-folder 交付包。> release_notes.txt
+          echo.>> release_notes.txt
+          echo 使用方式：>> release_notes.txt
+          echo 1. 下载并解压 ZIP。>> release_notes.txt
+          echo 2. 双击 `start_fpas.cmd` 启动程序。>> release_notes.txt
+          echo 3. 如需隐藏控制台，可改为双击 `start_fpas_silent.vbs`。>> release_notes.txt
+          echo 4. 程序会自动打开默认浏览器访问 `http://127.0.0.1:8000/dashboard/`。>> release_notes.txt
+          echo.>> release_notes.txt
+          echo 本次附件包含：>> release_notes.txt
+          echo - Windows portable-runtime one-folder ZIP 包>> release_notes.txt
+          echo - 对应 SHA256 校验文件>> release_notes.txt
+          
+          gh release view "%tag_name%" --repo "%GITHUB_REPOSITORY%" >nul 2>&1
+          if %errorlevel%==0 (
+            gh release edit "%tag_name%" --repo "%GITHUB_REPOSITORY%" --title "%title%" --notes-file release_notes.txt
+            gh release upload "%tag_name%" "%asset_name%" "%checksum_name%" --clobber --repo "%GITHUB_REPOSITORY%"
+          ) else (
+            gh release create "%tag_name%" "%asset_name%" "%checksum_name%" --repo "%GITHUB_REPOSITORY%" --title "%title%" --notes-file release_notes.txt
+          )
+        shell: cmd
