@@ -1717,10 +1717,12 @@ def _get_portable_bundle_audit_relpaths() -> List[str]:
         Path("launch_browser_helper.py"),
         Path("stop_fpas_helper.py"),
     ]
-    relpaths.extend(
-        Path(WIN7_PREREQUISITE_DIR_NAME) / filename
-        for filename in sorted(WIN7_PREREQUISITE_CANDIDATES)
-    )
+    # CI环境中跳过Win7补丁文件检查（这些文件太大，不适合提交到git）
+    if os.environ.get("CI") != "true" and os.environ.get("GITHUB_ACTIONS") != "true":
+        relpaths.extend(
+            Path(WIN7_PREREQUISITE_DIR_NAME) / filename
+            for filename in sorted(WIN7_PREREQUISITE_CANDIDATES)
+        )
     return [path.as_posix() for path in relpaths]
 
 
@@ -1795,6 +1797,8 @@ def _audit_portable_runtime_bundle(target_root: Path) -> None:
         cwd=str(target_root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     stdout_text = str(result.stdout or "").strip()
